@@ -1,0 +1,103 @@
+name: "Reusable Branch Deploy"
+
+on:
+  workflow_call:
+    secrets:
+      DIGITAL_OCEAN_SSH_KEY:
+        required: true
+    inputs:
+      droplet_username:
+        required: true
+        type: string
+      container_name:
+        required: true
+        type: string
+      registry_name:
+        required: true
+        type: string
+      prod_host:
+        required: true
+        type: string
+      staging_host:
+        required: true
+        type: string
+
+permissions:
+  pull-requests: write
+  deployments: write
+  contents: write
+  checks: read
+  statuses: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: github/branch-deploy@v9.9.1
+        id: branch-deploy
+        with:
+          trigger: ".deploy"
+          environment: "test"
+          environment_targets: "test,prod,staging"
+
+      - name: Checkout PR
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.branch-deploy.outputs.ref }}
+
+      - name: Create SSH key
+        run: |
+          mkdir -p ~/.ssh/
+          echo "$SSH_PRIVATE_KEY" > ~/.ssh/private.key
+          chmod 600 ~/.ssh/private.key
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.DIGITAL_OCEAN_SSH_KEY }}
+
+      - name: Set deploy environment variables
+        if: ${{ steps.branch-deploy.outputs.continue == 'true' }}
+        run: |
+          case "${{ steps.branch-deploy.outputs.environment }}" in
+            prod)
+              echo "HOST=${{ inputs.prod_host }}" >> "$GITHUB_ENV"
+              ;;
+            staging)
+              echo "HOST=${{ inputs.staging_host }}" >> "$GITHUB_ENV"
+              ;;
+            *)
+              echo "Unknown environment"
+              exit 1
+              ;;
+          esac
+
+      - name: Deploy
+        if: ${{ steps.branch-deploy.outputs.continue == 'true' }}
+        run: |
+          ssh-keyscan -H "$HOST" >> ~/.ssh/known_hosts
+          ssh -i ~/.ssh/private.key "${{ inputs.droplet_username }}@$HOST" "docker pull ${{ inputs.registry_name }}/${{ inputs.container_name }}:latest"
+          ssh -i ~/.ssh/private.key "${{ inputs.droplet_username }}@$HOST" "deploy $BRANCH"
+        env:
+          BRANCH: ${{ steps.branch-deploy.outputs.ref }}
+
+      - name: Wait for server healthcheck
+        if: ${{ steps.branch-deploy.outputs.continue == 'true' }}
+        run: |
+          timeout=30
+          interval=2
+          elapsed=0
+          url="https://$HOST/healthcheck/"
+
+          until curl --fail --silent $url; do
+            if [ $elapsed -ge $timeout ]; then
+              echo "Healthcheck timed out after $timeout seconds"
+              exit 1
+            fi
+            echo "Waiting for healthcheck ($elapsed/$timeout)..."
+            sleep $interval
+            elapsed=$((elapsed + interval))
+          done
+          echo "Server is healthy."
+
+      - name: Run migrations
+        if: ${{ steps.branch-deploy.outputs.continue == 'true' }}
+        run: |
+          ssh -i ~/.ssh/private.key "${{ inputs.droplet_username }}@$HOST" "shell server run python manage.py migrate"
