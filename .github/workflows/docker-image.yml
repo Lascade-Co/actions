@@ -1,0 +1,55 @@
+name: "Docker Build and Push"
+
+on:
+  workflow_call:
+    inputs:
+      container_name:
+        required: true
+        type: string
+      registry_name:
+        required: true
+        type: string
+      build_context:
+        required: false
+        type: string
+        default: "."
+      dockerfile_path:
+        required: false
+        type: string
+        default: "Dockerfile"
+    secrets:
+      DIGITALOCEAN_ACCESS_TOKEN:
+        required: true
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: ${{ inputs.build_context }}
+          file: ${{ inputs.dockerfile_path }}
+          load: true
+          tags: |
+            ${{ inputs.registry_name }}/${{ inputs.container_name }}:${{ github.sha }}
+            ${{ inputs.registry_name }}/${{ inputs.container_name }}:latest
+
+      - name: Install doctl
+        uses: digitalocean/action-doctl@v2
+        with:
+          token: ${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }}
+
+      - name: Log in to DigitalOcean Container Registry
+        run: doctl registry login --expiry-seconds 600
+
+      - name: Push image to DigitalOcean Container Registry
+        run: |
+          docker push ${{ inputs.registry_name }}/${{ inputs.container_name }}:${{ github.sha }}
+          docker push ${{ inputs.registry_name }}/${{ inputs.container_name }}:latest
