@@ -1,4 +1,4 @@
-name: "Reusable Branch Deploy"
+name: "Branch Deploy"
 
 on:
   workflow_call:
