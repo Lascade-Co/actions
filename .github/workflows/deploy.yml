@@ -70,12 +70,19 @@ jobs:
               ;;
           esac
 
-      - name: Deploy
+      - name: Add SSH key to known hosts
         if: ${{ steps.branch-deploy.outputs.continue == 'true' }}
         run: |
           ssh-keyscan -H "$HOST" >> ~/.ssh/known_hosts
+
+      - name: Pull latest image
+        if: ${{ steps.branch-deploy.outputs.continue == 'true' }}
+        run: |
           ssh -i ~/.ssh/private.key "${{ inputs.droplet_username }}@$HOST" "docker pull ${{ inputs.registry_name }}/${{ inputs.container_name }}:latest"
-          ssh -i ~/.ssh/private.key "${{ inputs.droplet_username }}@$HOST" "deploy $BRANCH"
+
+      - name: Deploy
+        if: ${{ steps.branch-deploy.outputs.continue == 'true' }}
+        run: ssh -i ~/.ssh/private.key "${{ inputs.droplet_username }}@$HOST" "deploy $BRANCH"
         env:
           BRANCH: ${{ steps.branch-deploy.outputs.ref }}
 
