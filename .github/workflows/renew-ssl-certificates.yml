@@ -1,6 +1,36 @@
 name: Renew SSL Certificates
 
 on:
+  workflow_call:
+    inputs:
+      environment:
+        description: "Environment to renew certificates for"
+        required: false
+        default: "all"
+        type: string
+      staging_host:
+        description: "Staging host domain"
+        required: true
+        type: string
+      prod_host:  
+        description: "Production host domain"
+        required: true
+        type: string
+      droplet_username:
+        description: "Droplet SSH username"
+        required: true
+        type: string
+      container_name:
+        description: "Container name"
+        required: false
+        type: string
+      registry_name:
+        description: "Registry name"
+        required: false
+        type: string
+    secrets:
+      DIGITAL_OCEAN_SSH_KEY:
+        required: true
   schedule:
     # Run monthly (first day of month at 2:30 AM)
     - cron: "30 2 1 * *"
@@ -48,28 +78,45 @@ jobs:
       - name: Set environment variables
         id: set-env
         run: |
-          # Set host values from inputs
-          echo "STAGING_HOST=${{ github.event.inputs.staging_host }}" >> $GITHUB_ENV
-          echo "PRODUCTION_HOST=${{ github.event.inputs.prod_host }}" >> $GITHUB_ENV
-          echo "DROPLET_USERNAME=${{ github.event.inputs.droplet_username }}" >> $GITHUB_ENV
-          
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            case "${{ github.event.inputs.environment }}" in
-              prod|production)
-                echo "run_production=true" >> $GITHUB_OUTPUT
-                ;;
-              staging)
-                echo "run_staging=true" >> $GITHUB_OUTPUT
-                ;;
-              all)
-                echo "run_staging=true" >> $GITHUB_OUTPUT
-                echo "run_production=true" >> $GITHUB_OUTPUT
-                ;;
-            esac
+          # Set host values based on whether this is called from another workflow or run directly
+          if [[ "${{ github.event_name }}" == "workflow_call" ]]; then
+            echo "STAGING_HOST=${{ inputs.staging_host }}" >> $GITHUB_ENV
+            echo "PRODUCTION_HOST=${{ inputs.prod_host }}" >> $GITHUB_ENV
+            echo "DROPLET_USERNAME=${{ inputs.droplet_username }}" >> $GITHUB_ENV
+            
+            # Set environment based on input
+            if [[ "${{ inputs.environment }}" == "production" ]]; then
+              echo "run_production=true" >> $GITHUB_OUTPUT
+            elif [[ "${{ inputs.environment }}" == "staging" ]]; then
+              echo "run_staging=true" >> $GITHUB_OUTPUT
+            else
+              echo "run_staging=true" >> $GITHUB_OUTPUT
+              echo "run_production=true" >> $GITHUB_OUTPUT
+            fi
           else
-            # For scheduled runs, run on both environments
-            echo "run_staging=true" >> $GITHUB_OUTPUT
-            echo "run_production=true" >> $GITHUB_OUTPUT
+            # For direct runs (workflow_dispatch or schedule)
+            if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+              echo "STAGING_HOST=${{ github.event.inputs.staging_host }}" >> $GITHUB_ENV
+              echo "PRODUCTION_HOST=${{ github.event.inputs.prod_host }}" >> $GITHUB_ENV
+              echo "DROPLET_USERNAME=${{ github.event.inputs.droplet_username }}" >> $GITHUB_ENV
+              
+              case "${{ github.event.inputs.environment }}" in
+                prod|production)
+                  echo "run_production=true" >> $GITHUB_OUTPUT
+                  ;;
+                staging)
+                  echo "run_staging=true" >> $GITHUB_OUTPUT
+                  ;;
+                all)
+                  echo "run_staging=true" >> $GITHUB_OUTPUT
+                  echo "run_production=true" >> $GITHUB_OUTPUT
+                  ;;
+              esac
+            else
+              # For scheduled runs, run on both environments
+              echo "run_staging=true" >> $GITHUB_OUTPUT
+              echo "run_production=true" >> $GITHUB_OUTPUT
+            fi
           fi
 
       - name: Add staging host to known hosts
