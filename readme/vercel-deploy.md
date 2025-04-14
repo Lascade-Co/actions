@@ -4,8 +4,6 @@
 
 This project includes a GitHub Actions workflow that automatically deploys your application based on branch merges or pull request comments:
 
-- Merging to the `staging` branch triggers a deployment to the development environment
-- Merging to the `production` branch triggers a deployment to the production environment
 - Commenting `.deploy to dev` on a pull request triggers a deployment to the development environment
 - Commenting `.deploy to prod` on a pull request triggers a deployment to the production environment
 

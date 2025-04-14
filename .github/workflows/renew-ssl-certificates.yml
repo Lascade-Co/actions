@@ -1,0 +1,134 @@
+name: Renew SSL Certificates
+
+on:
+  schedule:
+    # Run monthly (first day of month at 2:30 AM)
+    - cron: "30 2 1 * *"
+  workflow_dispatch: # Allow manual triggering
+    inputs:
+      environment:
+        description: "Environment to renew certificates for"
+        required: true
+        default: "all"
+        type: choice
+        options:
+          - all
+          - staging
+          - production
+      staging_host:
+        description: "Staging host domain"
+        required: true
+        type: string
+      prod_host:  
+        description: "Production host domain"
+        required: true
+        type: string
+      droplet_username:
+        description: "Droplet SSH username"
+        required: true
+        type: string
+
+jobs:
+  renew-certificates:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: "recursive"
+
+      - name: Create SSH key
+        run: |
+          mkdir -p ~/.ssh/
+          echo "$SSH_PRIVATE_KEY" > ~/.ssh/private.key
+          chmod 600 ~/.ssh/private.key
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.DIGITAL_OCEAN_SSH_KEY }}
+
+      - name: Set environment variables
+        id: set-env
+        run: |
+          # Set host values from inputs
+          echo "STAGING_HOST=${{ github.event.inputs.staging_host }}" >> $GITHUB_ENV
+          echo "PRODUCTION_HOST=${{ github.event.inputs.prod_host }}" >> $GITHUB_ENV
+          echo "DROPLET_USERNAME=${{ github.event.inputs.droplet_username }}" >> $GITHUB_ENV
+          
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            case "${{ github.event.inputs.environment }}" in
+              prod|production)
+                echo "run_production=true" >> $GITHUB_OUTPUT
+                ;;
+              staging)
+                echo "run_staging=true" >> $GITHUB_OUTPUT
+                ;;
+              all)
+                echo "run_staging=true" >> $GITHUB_OUTPUT
+                echo "run_production=true" >> $GITHUB_OUTPUT
+                ;;
+            esac
+          else
+            # For scheduled runs, run on both environments
+            echo "run_staging=true" >> $GITHUB_OUTPUT
+            echo "run_production=true" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Add staging host to known hosts
+        if: ${{ steps.set-env.outputs.run_staging == 'true' }}
+        run: ssh-keyscan -H "$STAGING_HOST" >> ~/.ssh/known_hosts
+
+      - name: Add production host to known hosts
+        if: ${{ steps.set-env.outputs.run_production == 'true' }}
+        run: |
+          ssh-keyscan -H "$PRODUCTION_HOST" >> ~/.ssh/known_hosts || echo "Warning: Could not resolve production host"
+
+      - name: Renew SSL Certificates (Staging)
+        if: ${{ steps.set-env.outputs.run_staging == 'true' }}
+        run: |
+          echo "Renewing SSL certificates on staging..."
+          ssh -i ~/.ssh/private.key $DROPLET_USERNAME@$STAGING_HOST "shell nginx run certbot --non-interactive --agree-tos --renew-by-default"
+          echo "Certificate renewal completed on staging"
+
+      - name: Renew SSL Certificates (Production)
+        if: ${{ steps.set-env.outputs.run_production == 'true' }}
+        run: |
+          echo "Renewing SSL certificates on production..."
+          ssh -i ~/.ssh/private.key $DROPLET_USERNAME@$PRODUCTION_HOST "shell nginx run certbot --non-interactive --agree-tos --renew-by-default"
+          echo "Certificate renewal completed on production"
+
+      - name: Reload Nginx (Staging)
+        if: ${{ steps.set-env.outputs.run_staging == 'true' }}
+        run: |
+          echo "Reloading Nginx on staging..."
+          ssh -i ~/.ssh/private.key $DROPLET_USERNAME@$STAGING_HOST "shell nginx run nginx -s reload"
+
+      - name: Reload Nginx (Production)
+        if: ${{ steps.set-env.outputs.run_production == 'true' }}
+        run: |
+          echo "Reloading Nginx on production..."
+          ssh -i ~/.ssh/private.key $DROPLET_USERNAME@$PRODUCTION_HOST "shell nginx run nginx -s reload"
+
+      - name: Notify on Success
+        if: success()
+        uses: actions/github-script@v6
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: 'SSL Certificate Renewal Successful',
+              body: 'The scheduled SSL certificate renewal completed successfully.'
+            })
+
+      - name: Notify on Failure
+        if: failure()
+        uses: actions/github-script@v6
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: 'SSL Certificate Renewal Failed',
+              body: 'The scheduled SSL certificate renewal failed. Please check the logs for more details.'
+            })
