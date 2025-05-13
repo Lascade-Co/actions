@@ -21,6 +21,9 @@ on:
       staging_host:
         required: true
         type: string
+      pull_only_hosts:
+        required: false
+        type: string
 
 permissions:
   pull-requests: write
@@ -79,6 +82,14 @@ jobs:
         if: ${{ steps.branch-deploy.outputs.continue == 'true' }}
         run: |
           ssh -i ~/.ssh/private.key "${{ inputs.droplet_username }}@$HOST" "docker pull ${{ inputs.registry_name }}/${{ inputs.container_name }}:latest"
+
+      - name: Pull only hosts
+        if: ${{ steps.branch-deploy.outputs.continue == 'true' }}
+        run: |
+          IFS=',' read -ra HOSTS <<< "${{ inputs.pull_only_hosts }}"
+          for host in "${HOSTS[@]}"; do
+            ssh -i ~/.ssh/private.key "${{ inputs.droplet_username }}@$host.$HOST" "deploy $BRANCH --pull-only"
+          done
 
       - name: Deploy
         if: ${{ steps.branch-deploy.outputs.continue == 'true' }}
