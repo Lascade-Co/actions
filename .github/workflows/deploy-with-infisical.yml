@@ -75,8 +75,7 @@ jobs:
           while IFS='=' read -r name value; do
             case "$name" in
               # Exclude GitHub runner/system variables
-              GITHUB_*|RUNNER_*|ACTIONS_*|CI|NODE_*|INPUT_*|STATE_*|STEP_*|
-              PWD|HOME|PATH|SHLVL|OLDPWD|SHELL|_|DEBIAN_*|UBUNTU_*|VCPKG_*|XDG_*|LANG|LC_*)
+              GITHUB_*|RUNNER_*|ACTIONS_*|CI|NODE_*|INPUT_*|STATE_*|STEP_*|PWD|HOME|PATH|SHLVL|OLDPWD|SHELL|_|DEBIAN_*|UBUNTU_*|VCPKG_*|XDG_*|LANG|LC_*)
                 continue
                 ;;
               # Exclude sensitive auth/material not meant for the droplet
