@@ -2,25 +2,6 @@ name: "Branch Deploy with Infisical"
 
 on:
   workflow_call:
-    secrets:
-      DIGITAL_OCEAN_SSH_KEY:
-        required: true
-      INFISICAL_TOKEN:
-        required: true
-      INFISICAL_CLIENT_ID:
-        required: true
-      INFISICAL_CLIENT_SECRET:
-        required: true
-    inputs:
-      infisical_project_id:
-        required: true
-        type: string
-      infisical_domain:
-        required: true
-        type: string
-      infisical_project_slug:
-        required: true
-        type: string
 
 permissions:
   pull-requests: write
@@ -31,16 +12,20 @@ permissions:
 
 jobs:
   deploy:
-    if: ${{ github.event.issue.pull_request }} # only run on pull request comments
     runs-on: ubuntu-latest
     steps:
-      # Execute IssueOps branch deployment logic
       - uses: github/branch-deploy@v9.9.1
         id: branch-deploy
         with:
           trigger: ".deploy"
-          environment: "test" # default environment
-          environment_targets: "test,prod,staging" # comma separated list of environments
+          environment: "test"
+          environment_targets: "test,prod,staging"
+
+      - name: Checkout PR
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.branch-deploy.outputs.ref }}
+          submodules: "recursive"
       
       # Import secrets from Infisical
       - name: Import secrets from Infisical
@@ -51,72 +36,71 @@ jobs:
           client-id: ${{ secrets.INFISICAL_CLIENT_ID }}
           client-secret: ${{ secrets.INFISICAL_CLIENT_SECRET }}
           # Project / environment
-          project-slug: ${{ inputs.infisical_project_slug }}
+          project-slug: ${{ secrets.INFISICAL_PROJECT_SLUG }}
           env-slug: ${{ steps.branch-deploy.outputs.environment }}
           # Self-hosted domain
-          domain: ${{ inputs.infisical_domain }}
+          domain: ${{ secrets.INFISICAL_DOMAIN }}
           # Export as environment variables for subsequent steps (default)
           export-type: env
-
-      # Checkout your project's repository based on the ref provided by the branch-deploy step
-      - name: Checkout PR
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ steps.branch-deploy.outputs.ref }}
 
       - name: Create SSH key
         run: |
           mkdir -p ~/.ssh/
           echo "$SSH_PRIVATE_KEY" > ~/.ssh/private.key
           chmod 600 ~/.ssh/private.key
-        shell: bash
         env:
           SSH_PRIVATE_KEY: ${{ secrets.DIGITAL_OCEAN_SSH_KEY }}
 
-      - name: Set deploy environment variables
+      - name: Set deploy host variables
         if: ${{ steps.branch-deploy.outputs.continue == 'true' }}
-        run: |
-          case "${{ steps.branch-deploy.outputs.environment }}" in
-            prod)
-              echo "HOST=$HOST" >> "$GITHUB_ENV"
-              echo "DROPLET_USERNAME=$DROPLET_USERNAME" >> "$GITHUB_ENV"
-              ;;
-            staging)
-              echo "HOST=$HOST" >> "$GITHUB_ENV"
-              echo "DROPLET_USERNAME=$DROPLET_USERNAME" >> "$GITHUB_ENV"
-              ;;
-            *)
-              echo "Unknown environment"
-              exit 1
-              ;;
-          esac
-        env:
-          HOST: ${{ env.HOST }}
-          DROPLET_USERNAME: ${{ env.DROPLET_USERNAME }}
-      
+        run: echo "HOST=${{ env.HOST }}" >> "$GITHUB_ENV"
+
       - name: Add SSH key to known hosts
         if: ${{ steps.branch-deploy.outputs.continue == 'true' }}
         run: |
           ssh-keyscan -H "$HOST" >> ~/.ssh/known_hosts
-      
+
       - name: Pull latest image
         if: ${{ steps.branch-deploy.outputs.continue == 'true' }}
         run: |
-          ssh -i ~/.ssh/private.key "$DROPLET_USERNAME@$HOST" "docker pull $REGISTRY_NAME/$CONTAINER_NAME:latest"
-        env:
-          REGISTRY_NAME: ${{ env.REGISTRY_NAME }}
-          CONTAINER_NAME: ${{ env.CONTAINER_NAME }}
-          
+          ssh -i ~/.ssh/private.key "${{ secrets.DROPLET_USERNAME }}@$HOST" "docker pull ${{ secrets.REGISTRY_NAME }}/${{ secrets.CONTAINER_NAME }}:latest"
+
+      - name: Prepare remote env vars
+        if: ${{ steps.branch-deploy.outputs.continue == 'true' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Build env_string from current environment, excluding runner/system/internal vars
+          env_string=""
+          while IFS='=' read -r name value; do
+            case "$name" in
+              # Exclude GitHub runner/system variables
+              GITHUB_*|RUNNER_*|ACTIONS_*|CI|NODE_*|INPUT_*|STATE_*|STEP_*|
+              PWD|HOME|PATH|SHLVL|OLDPWD|SHELL|_|DEBIAN_*|UBUNTU_*|VCPKG_*|XDG_*|LANG|LC_*)
+                continue
+                ;;
+              # Exclude sensitive auth/material not meant for the droplet
+              SSH_PRIVATE_KEY|INFISICAL_CLIENT_ID|INFISICAL_CLIENT_SECRET|INFISICAL_*)
+                continue
+                ;;
+              # Avoid recursive inclusion
+              REMOTE_ENV_VARS)
+                continue
+                ;;
+              *)
+                env_string+="${name}=$(printf %q "$value") "
+                ;;
+            esac
+          done < <(env)
+
+          echo "REMOTE_ENV_VARS=$env_string" >> "$GITHUB_ENV"
+
       - name: Deploy
         if: ${{ steps.branch-deploy.outputs.continue == 'true' }}
-        run: ssh -i ~/.ssh/private.key "$DROPLET_USERNAME@$HOST" "deploy --ref=$BRANCH --infisical_project_id=$PROJECT_ID --infisical_env=$ENV --infisical_domain=$DOMAIN --infisical_token=$TOKEN"
+        run: ssh -i ~/.ssh/private.key "${{ secrets.DROPLET_USERNAME }}@$HOST" "${REMOTE_ENV_VARS} deploy $BRANCH"
         env:
           BRANCH: ${{ steps.branch-deploy.outputs.ref }}
-          PROJECT_ID: ${{ inputs.infisical_project_id }}
-          ENV: ${{ steps.branch-deploy.outputs.environment }}
-          DOMAIN: ${{ inputs.infisical_domain }}
-          TOKEN: ${{ secrets.INFISICAL_TOKEN }}
-          
+
       - name: Wait for server healthcheck
         if: ${{ steps.branch-deploy.outputs.continue == 'true' }}
         run: |
@@ -135,8 +119,8 @@ jobs:
             elapsed=$((elapsed + interval))
           done
           echo "Server is healthy."
-          
+
       - name: Run migrations
         if: ${{ steps.branch-deploy.outputs.continue == 'true' }}
         run: |
-          ssh -i ~/.ssh/private.key "$DROPLET_USERNAME@$HOST" "shell server run python manage.py migrate"
+          ssh -i ~/.ssh/private.key "${{ secrets.DROPLET_USERNAME }}@$HOST" "shell server run python manage.py migrate"
