@@ -1,0 +1,129 @@
+name: Central Build Debug APK
+
+on:
+  repository_dispatch:
+    types: [build-debug-apk]
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+concurrency:
+  group: build-debug-apk-${{ github.event.client_payload.repo }}-${{ github.event.client_payload.pr || github.event.client_payload.branch }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Mint GitHub App token (scoped to target repo)
+        id: app-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ vars.CI_APP_ID }}
+          private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
+          owner: Lascade-Co
+          repositories: ${{ github.event.client_payload.repo }}
+
+      - name: Decide ref to checkout (PR HEAD or named branch)
+        id: ref
+        run: |
+          PR="${{ github.event.client_payload.pr }}"
+          BR="${{ github.event.client_payload.branch }}"
+          if [ -n "$PR" ] && [ "$PR" != "null" ]; then
+            echo "ref=refs/pull/${PR}/head" >> $GITHUB_OUTPUT
+          elif [ -n "$BR" ]; then
+            echo "ref=refs/heads/${BR}" >> $GITHUB_OUTPUT
+          else
+            echo "No PR or branch in payload" >&2
+            exit 1
+          fi
+
+      - name: Checkout target repo at PR HEAD/branch
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.event.client_payload.repo }}
+          ref: ${{ steps.ref.outputs.ref }}
+          token: ${{ steps.app-token.outputs.token }}
+          fetch-depth: 0
+        # PR HEAD via refs/pull/<PR>/head (not the merge ref). :contentReference[oaicite:5]{index=5}
+
+      # === Infisical: export local.properties file ===
+      - name: Fetch local.properties from Infisical
+        uses: Infisical/secrets-action@v1.0.9
+        with:
+          method: universal
+          client-id: ${{ secrets.INFISICAL_CLIENT_ID }}
+          client-secret: ${{ secrets.INFISICAL_CLIENT_SECRET }}
+          project-slug: ${{ github.event.client_payload.staging_project_slug }}
+          env-slug: "staging"
+          domain: ${{ secrets.INFISICAL_DOMAIN }}
+          secret-path: /Local-Properties
+          export-type: file
+          file-output-path: local.properties  # relative path (no leading slash)
+        # export-type=file writes a .env-like file to path; we’re putting plain key=value lines used by Gradle. :contentReference[oaicite:6]{index=6}
+
+      - name: Clean local.properties
+        run: sed -i -e "s/'//g" local.properties
+
+      # === Infisical: export keystore secrets to env ===
+      - name: Fetch keystore secrets from Infisical as env
+        uses: Infisical/secrets-action@v1.0.9
+        with:
+          method: universal
+          client-id: ${{ secrets.INFISICAL_CLIENT_ID }}
+          client-secret: ${{ secrets.INFISICAL_CLIENT_SECRET }}
+          project-slug: ${{ github.event.client_payload.staging_project_slug }}
+          env-slug: "staging"
+          domain: ${{ secrets.INFISICAL_DOMAIN }}
+          export-type: env  # default, but set explicitly
+        # Sets STAGING_KEYSTORE_* as environment variables for subsequent steps. :contentReference[oaicite:7]{index=7}
+
+      - name: Decode JKS keystore
+        run: echo "${{ env.STAGING_KEYSTORE_BASE64 }}" | base64 --decode > app/keystore-debug.jks
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: gradle
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          cache-read-only: false
+
+      - name: Make gradlew executable
+        run: chmod +x gradlew
+
+      - name: Build Debug APK
+        run: ./gradlew --no-daemon assembleDebug
+        env:
+          KEYSTORE_PASSWORD_DEBUG: ${{ env.STAGING_KEYSTORE_PASSWORD }}
+          KEY_ALIAS_DEBUG: ${{ env.STAGING_KEY_ALIAS }}
+          KEY_PASSWORD_DEBUG: ${{ env.STAGING_KEY_PASSWORD }}
+
+      - name: Create Debug Release in source repo
+        id: create_release
+        uses: softprops/action-gh-release@v2
+        with:
+          repository: ${{ github.event.client_payload.repo }}
+          token: ${{ steps.app-token.outputs.token }}
+          tag_name: ${{ github.event.client_payload.pr && format('debug-pr-{0}-{1}', github.event.client_payload.pr, github.run_number) || format('debug-branch-{0}-{1}', github.event.client_payload.branch, github.run_number) }}
+          name: ${{ github.event.client_payload.title || 'Debug APK' }}
+          prerelease: true
+          overwrite: true
+          files: app/build/outputs/apk/debug/app-debug.apk
+        # action-gh-release supports cross-repo via repository+token. :contentReference[oaicite:8]{index=8}
+
+      - name: Comment on PR with debug APK link
+        if: ${{ github.event.client_payload.pr && github.event.client_payload.pr != '' && github.event.client_payload.pr != 'null' }}
+        uses: peter-evans/create-or-update-comment@v4
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+          repository: ${{ github.event.client_payload.repo }}
+          issue-number: ${{ github.event.client_payload.pr }}
+          body: |
+            A debug APK build for this PR is available: ${{ steps.create_release.outputs.url }}
