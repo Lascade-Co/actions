@@ -61,7 +61,7 @@ jobs:
           method: universal
           client-id: ${{ secrets.INFISICAL_CLIENT_ID }}
           client-secret: ${{ secrets.INFISICAL_CLIENT_SECRET }}
-          project-slug: ${{ github.event.client_payload.prod_project_slug }}
+          project-slug: ${{ github.event.client_payload.project_slug }}
           env-slug: "prod"
           domain: ${{ secrets.INFISICAL_DOMAIN }}
           secret-path: /Local-Properties
@@ -77,7 +77,7 @@ jobs:
           method: universal
           client-id: ${{ secrets.INFISICAL_CLIENT_ID }}
           client-secret: ${{ secrets.INFISICAL_CLIENT_SECRET }}
-          project-slug: ${{ github.event.client_payload.prod_project_slug }}
+          project-slug: ${{ github.event.client_payload.project_slug }}
           env-slug: "prod"
           domain: ${{ secrets.INFISICAL_DOMAIN }}
           secret-path: /Build
@@ -148,7 +148,7 @@ jobs:
           method: universal
           client-id: ${{ secrets.INFISICAL_CLIENT_ID }}
           client-secret: ${{ secrets.INFISICAL_CLIENT_SECRET }}
-          project-slug: ${{ github.event.client_payload.prod_project_slug }}
+          project-slug: ${{ github.event.client_payload.project_slug }}
           env-slug: "prod"
           domain: ${{ secrets.INFISICAL_DOMAIN }}
           secret-path: /Local-Properties
@@ -164,7 +164,7 @@ jobs:
           method: universal
           client-id: ${{ secrets.INFISICAL_CLIENT_ID }}
           client-secret: ${{ secrets.INFISICAL_CLIENT_SECRET }}
-          project-slug: ${{ github.event.client_payload.prod_project_slug }}
+          project-slug: ${{ github.event.client_payload.project_slug }}
           env-slug: "prod"
           domain: ${{ secrets.INFISICAL_DOMAIN }}
           secret-path: /Build
