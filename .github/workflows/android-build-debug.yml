@@ -77,11 +77,12 @@ jobs:
           project-slug: ${{ github.event.client_payload.staging_project_slug }}
           env-slug: "staging"
           domain: ${{ secrets.INFISICAL_DOMAIN }}
+          secret-path: '/build'
           export-type: env  # default, but set explicitly
         # Sets STAGING_KEYSTORE_* as environment variables for subsequent steps. :contentReference[oaicite:7]{index=7}
 
       - name: Decode JKS keystore
-        run: echo "${{ env.STAGING_KEYSTORE_BASE64 }}" | base64 --decode > app/keystore-debug.jks
+        run: echo "${{ env.KEYSTORE_BASE64 }}" | base64 --decode > app/keystore-debug.jks
 
       - name: Set up JDK 21
         uses: actions/setup-java@v4
@@ -101,9 +102,9 @@ jobs:
       - name: Build Debug APK
         run: ./gradlew --no-daemon assembleDebug
         env:
-          KEYSTORE_PASSWORD_DEBUG: ${{ env.STAGING_KEYSTORE_PASSWORD }}
-          KEY_ALIAS_DEBUG: ${{ env.STAGING_KEY_ALIAS }}
-          KEY_PASSWORD_DEBUG: ${{ env.STAGING_KEY_PASSWORD }}
+          KEYSTORE_PASSWORD_DEBUG: ${{ env.KEYSTORE_PASSWORD }}
+          KEY_ALIAS_DEBUG: ${{ env.KEY_ALIAS }}
+          KEY_PASSWORD_DEBUG: ${{ env.KEY_PASSWORD }}
 
       - name: Create Debug Release in source repo
         id: create_release
