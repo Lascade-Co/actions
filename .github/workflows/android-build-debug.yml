@@ -17,14 +17,23 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - name: Mint GitHub App token (scoped to target repo)
+      - name: Extract owner/repo
+        id: repo
+        shell: bash
+        run: |
+          FULL="${{ github.event.client_payload.repo }}"   # e.g. Lascade-Co/travel-animator-android
+          echo "owner=${FULL%%/*}" >> "$GITHUB_OUTPUT"     # Lascade-Co
+          echo "name=${FULL#*/}"   >> "$GITHUB_OUTPUT"     # travel-animator-android
+
+      # Mint a GitHub App token scoped to that one repo
+      - name: Mint GitHub App token
         id: app-token
         uses: actions/create-github-app-token@v2
         with:
-          app-id: ${{ secrets.CI_APP_ID }}
+          app-id: ${{ vars.CI_APP_ID }}
           private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
-          owner: Lascade-Co
-          repositories: ${{ github.event.client_payload.repo }}
+          owner: ${{ steps.repo.outputs.owner }}
+          repositories: ${{ steps.repo.outputs.name }}
 
       - name: Decide ref to checkout (PR HEAD or named branch)
         id: ref
