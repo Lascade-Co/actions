@@ -70,7 +70,7 @@ jobs:
           domain: ${{ secrets.INFISICAL_DOMAIN }}
           secret-path: /Local-Properties
           export-type: file
-          file-output-path: local.properties
+          file-output-path: /local.properties
 
       - name: Clean local.properties
         run: sed -i -e "s/'//g" local.properties
