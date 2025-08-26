@@ -61,8 +61,7 @@ jobs:
           domain: ${{ secrets.INFISICAL_DOMAIN }}
           secret-path: /Local-Properties
           export-type: file
-          file-output-path: local.properties  # relative path (no leading slash)
-        # export-type=file writes a .env-like file to path; we’re putting plain key=value lines used by Gradle. :contentReference[oaicite:6]{index=6}
+          file-output-path: local.properties
 
       - name: Clean local.properties
         run: sed -i -e "s/'//g" local.properties
@@ -77,9 +76,8 @@ jobs:
           project-slug: ${{ github.event.client_payload.staging_project_slug }}
           env-slug: "staging"
           domain: ${{ secrets.INFISICAL_DOMAIN }}
-          secret-path: '/build'
+          secret-path: /Build
           export-type: env  # default, but set explicitly
-        # Sets STAGING_KEYSTORE_* as environment variables for subsequent steps. :contentReference[oaicite:7]{index=7}
 
       - name: Decode JKS keystore
         run: echo "${{ env.KEYSTORE_BASE64 }}" | base64 --decode > app/keystore-debug.jks
