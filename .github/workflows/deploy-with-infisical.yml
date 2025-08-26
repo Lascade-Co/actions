@@ -40,8 +40,9 @@ jobs:
           env-slug: ${{ steps.branch-deploy.outputs.environment }}
           # Self-hosted domain
           domain: ${{ secrets.INFISICAL_DOMAIN }}
-          # Export as environment variables for subsequent steps (default)
-          export-type: env
+          # Export to a .env file in the workspace
+          export-type: file
+          file-output-path: .env
 
       - name: Create SSH key
         run: |
@@ -51,9 +52,21 @@ jobs:
         env:
           SSH_PRIVATE_KEY: ${{ secrets.DIGITAL_OCEAN_SSH_KEY }}
 
-      - name: Set deploy host variables
+      - name: Set deploy host from .env
         if: ${{ steps.branch-deploy.outputs.continue == 'true' }}
-        run: echo "HOST=${{ env.HOST }}" >> "$GITHUB_ENV"
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ ! -f .env ]; then
+            echo ".env not found; ensure Infisical export succeeded" >&2
+            exit 1
+          fi
+          HOST_VALUE=$(grep -E '^HOST=' .env | tail -n 1 | cut -d'=' -f2-)
+          if [ -z "${HOST_VALUE}" ]; then
+            echo "HOST not found in .env" >&2
+            exit 1
+          fi
+          echo "HOST=${HOST_VALUE}" >> "$GITHUB_ENV"
 
       - name: Add SSH key to known hosts
         if: ${{ steps.branch-deploy.outputs.continue == 'true' }}
@@ -65,38 +78,23 @@ jobs:
         run: |
           ssh -i ~/.ssh/private.key "${{ secrets.DROPLET_USERNAME }}@$HOST" "docker pull ${{ secrets.REGISTRY_NAME }}/${{ secrets.CONTAINER_NAME }}:latest"
 
-      - name: Prepare remote env vars
+      - name: Resolve project folder on droplet
         if: ${{ steps.branch-deploy.outputs.continue == 'true' }}
+        id: project-folder
         shell: bash
         run: |
           set -euo pipefail
-          # Build env_string from current environment, excluding runner/system/internal vars
-          env_string=""
-          while IFS='=' read -r name value; do
-            case "$name" in
-              # Exclude GitHub runner/system variables
-              GITHUB_*|RUNNER_*|ACTIONS_*|CI|NODE_*|INPUT_*|STATE_*|STEP_*|PWD|HOME|PATH|SHLVL|OLDPWD|SHELL|_|DEBIAN_*|UBUNTU_*|VCPKG_*|XDG_*|LANG|LC_*)
-                continue
-                ;;
-              # Exclude sensitive auth/material not meant for the droplet
-              SSH_PRIVATE_KEY|INFISICAL_CLIENT_ID|INFISICAL_CLIENT_SECRET|INFISICAL_*)
-                continue
-                ;;
-              # Avoid recursive inclusion
-              REMOTE_ENV_VARS)
-                continue
-                ;;
-              *)
-                env_string+="${name}=$(printf %q "$value") "
-                ;;
-            esac
-          done < <(env)
+          PROJECT_FOLDER=$(ssh -i ~/.ssh/private.key "${{ secrets.DROPLET_USERNAME }}@$HOST" 'if [ -f /opt/project_folder ]; then cat /opt/project_folder; else echo "Project folder not set, using current directory" >&2; pwd; fi')
+          echo "project_folder=$PROJECT_FOLDER" >> "$GITHUB_OUTPUT"
 
-          echo "REMOTE_ENV_VARS=$env_string" >> "$GITHUB_ENV"
+      - name: Copy .env to droplet project folder
+        if: ${{ steps.branch-deploy.outputs.continue == 'true' }}
+        run: |
+          scp -i ~/.ssh/private.key "$GITHUB_WORKSPACE/.env" "${{ secrets.DROPLET_USERNAME }}@$HOST:${{ steps.project-folder.outputs.project_folder }}/.env"
 
       - name: Deploy
         if: ${{ steps.branch-deploy.outputs.continue == 'true' }}
-        run: ssh -i ~/.ssh/private.key "${{ secrets.DROPLET_USERNAME }}@$HOST" "${REMOTE_ENV_VARS} deploy $BRANCH"
+        run: ssh -i ~/.ssh/private.key "${{ secrets.DROPLET_USERNAME }}@$HOST" "deploy $BRANCH"
         env:
           BRANCH: ${{ steps.branch-deploy.outputs.ref }}
 
