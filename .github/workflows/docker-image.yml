@@ -1,33 +1,50 @@
 name: "Docker Build and Push"
 
 on:
-  workflow_call:
-    inputs:
-      container_name:
-        required: true
-        type: string
-      registry_name:
-        required: true
-        type: string
-      build_context:
-        required: false
-        type: string
-        default: "."
-      dockerfile_path:
-        required: false
-        type: string
-        default: "Dockerfile"
-    secrets:
-      DIGITALOCEAN_ACCESS_TOKEN:
-        required: true
+  repository_dispatch:
+    types: [docker-build]
 
 jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      owner: ${{ steps.repo.outputs.owner }}
+      name: ${{ steps.repo.outputs.name }}
+      branch: ${{ steps.branch.outputs.branch }}
+    steps:
+      - name: Extract owner/repo
+        id: repo
+        run: |
+          FULL="${{ github.event.client_payload.repo }}"
+          echo "owner=${FULL%%/*}" >> "$GITHUB_OUTPUT"
+          echo "name=${FULL#*/}"   >> "$GITHUB_OUTPUT"
+
+      - name: Resolve branch
+        id: branch
+        run: |
+          BR="${{ github.event.client_payload.branch }}"
+          echo "branch=${BR:-main}" >> "$GITHUB_OUTPUT"
+
   build-and-push:
+    needs: prepare
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout code
+      - name: Mint GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.CI_APP_ID }}
+          private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
+          owner: ${{ needs.prepare.outputs.owner }}
+          repositories: ${{ needs.prepare.outputs.name }}
+
+      - name: Checkout target repo @ branch
         uses: actions/checkout@v4
         with:
+          repository: ${{ github.event.client_payload.repo }}
+          ref: refs/heads/${{ needs.prepare.outputs.branch }}
+          token: ${{ steps.app-token.outputs.token }}
+          fetch-depth: 0
           submodules: "recursive"
 
       - name: Set up Docker Buildx
@@ -36,12 +53,12 @@ jobs:
       - name: Build Docker image
         uses: docker/build-push-action@v5
         with:
-          context: ${{ inputs.build_context }}
-          file: ${{ inputs.dockerfile_path }}
+          context: ${{ github.event.client_payload.build_context || '.' }}
+          file: ${{ github.event.client_payload.dockerfile_path || 'Dockerfile' }}
           load: true
           tags: |
-            ${{ inputs.registry_name }}/${{ inputs.container_name }}:${{ github.sha }}
-            ${{ inputs.registry_name }}/${{ inputs.container_name }}:latest
+            ${{ secrets.REGISTRY }}/${{ github.event.client_payload.container_name }}:${{ github.sha }}
+            ${{ secrets.REGISTRY }}/${{ github.event.client_payload.container_name }}:latest
 
       - name: Install doctl
         uses: digitalocean/action-doctl@v2
@@ -53,5 +70,5 @@ jobs:
 
       - name: Push image to DigitalOcean Container Registry
         run: |
-          docker push ${{ inputs.registry_name }}/${{ inputs.container_name }}:${{ github.sha }}
-          docker push ${{ inputs.registry_name }}/${{ inputs.container_name }}:latest
+          docker push ${{ secrets.REGISTRY }}/${{ github.event.client_payload.container_name }}:${{ github.sha }}
+          docker push ${{ secrets.REGISTRY }}/${{ github.event.client_payload.container_name }}:latest
