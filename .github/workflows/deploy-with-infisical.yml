@@ -26,7 +26,7 @@ jobs:
         with:
           ref: ${{ steps.branch-deploy.outputs.ref }}
           submodules: "recursive"
-      
+
       # Import secrets from Infisical
       - name: Import secrets from Infisical
         uses: Infisical/secrets-action@v1.0.9
@@ -61,22 +61,32 @@ jobs:
             echo ".env not found; ensure Infisical export succeeded" >&2
             exit 1
           fi
-          cat $GITHUB_WORKSPACE/.env
           # Read HOST and sanitize: trim whitespace/CR and strip surrounding single/double quotes
-          RAW_HOST=$(grep -E '^HOST=' "$GITHUB_WORKSPACE/.env" | tail -n 1 | cut -d'=' -f2-)
-          RAW_HOST=${RAW_HOST%$'\r'}
-          RAW_HOST=$(echo "$RAW_HOST" | sed -e 's/^\s*//' -e 's/\s*$//')
-          # strip surrounding quotes if present
-          case "$RAW_HOST" in
-            \"*\") RAW_HOST=${RAW_HOST#\"}; RAW_HOST=${RAW_HOST%\"} ;;
-            "'*'") RAW_HOST=${RAW_HOST#\'}; RAW_HOST=${RAW_HOST%\'} ;;
-          esac
-          HOST_VALUE="$RAW_HOST"
+          HOST_VALUE=$(grep -E '^HOST=' "$GITHUB_WORKSPACE/.env" | tail -n 1 | cut -d'=' -f2- | tr -d '\r' \
+            | sed -E 's/^\s+//; s/\s+$//; s/^"(.*)"$/\1/; s/^\'(.*)\'$/\1/')
           if [ -z "${HOST_VALUE}" ]; then
             echo "HOST not found in .env" >&2
             exit 1
           fi
           echo "HOST=${HOST_VALUE}" >> "$GITHUB_ENV"
+
+      - name: Resolve host IP
+        if: ${{ steps.branch-deploy.outputs.continue == 'true' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Sanitize HOST again at runtime to guard against quotes/whitespace
+          CLEAN_HOST=$(echo "$HOST" | tr -d '\r' | sed -E 's/^\s+//; s/\s+$//; s/^"(.*)"$/\1/; s/^\'(.*)\'$/\1/')
+          echo "Using CLEAN_HOST=$CLEAN_HOST"
+          IP=$(getent hosts "$CLEAN_HOST" | awk '{print $1}' || true)
+          if [ -n "$IP" ]; then
+            echo "Resolved $CLEAN_HOST to $IP"
+            echo "HOST_IP=$IP" >> "$GITHUB_ENV"
+            echo "HOST=$CLEAN_HOST" >> "$GITHUB_ENV"
+          else
+            echo "Could not resolve $CLEAN_HOST; will proceed without HOST_IP (using hostname)" >&2
+            echo "HOST=$CLEAN_HOST" >> "$GITHUB_ENV"
+          fi
 
       - name: Add SSH key to known hosts
         if: ${{ steps.branch-deploy.outputs.continue == 'true' }}
