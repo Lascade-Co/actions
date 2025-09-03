@@ -42,7 +42,7 @@ jobs:
           domain: ${{ secrets.INFISICAL_DOMAIN }}
           # Export to a .env file in the workspace
           export-type: file
-          file-output-path: ./.env
+          file-output-path: /.env
 
       - name: Create SSH key
         run: |
