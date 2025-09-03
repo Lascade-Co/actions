@@ -42,7 +42,7 @@ jobs:
           domain: ${{ secrets.INFISICAL_DOMAIN }}
           # Export to a .env file in the workspace
           export-type: file
-          file-output-path: .env
+          file-output-path: ${{ github.workspace }}/.env
 
       - name: Create SSH key
         run: |
@@ -57,11 +57,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if [ ! -f .env ]; then
+          if [ ! -f "$GITHUB_WORKSPACE/.env" ]; then
             echo ".env not found; ensure Infisical export succeeded" >&2
             exit 1
           fi
-          HOST_VALUE=$(grep -E '^HOST=' .env | tail -n 1 | cut -d'=' -f2-)
+          HOST_VALUE=$(grep -E '^HOST=' "$GITHUB_WORKSPACE/.env" | tail -n 1 | cut -d'=' -f2-)
           if [ -z "${HOST_VALUE}" ]; then
             echo "HOST not found in .env" >&2
             exit 1
