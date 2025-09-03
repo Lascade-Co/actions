@@ -44,6 +44,25 @@ jobs:
           export-type: file
           file-output-path: .env
 
+      - name: Normalize .env location
+        run: |
+          set -euo pipefail
+          PARENT_ENV_PATH="$(dirname "$GITHUB_WORKSPACE")/$(basename "$GITHUB_WORKSPACE").env"
+          if [ -f "$PARENT_ENV_PATH" ]; then
+            echo "Found env at $PARENT_ENV_PATH; moving to $GITHUB_WORKSPACE/.env"
+            mv "$PARENT_ENV_PATH" "$GITHUB_WORKSPACE/.env"
+          fi
+          if [ -f "$GITHUB_WORKSPACE/.env" ]; then
+            echo ".env is at $GITHUB_WORKSPACE/.env"
+          else
+            echo ".env still not found after normalization attempt" >&2
+          fi
+          if [ -f "$GITHUB_WORKSPACE/.env" ]; then
+            echo ".env is at $GITHUB_WORKSPACE/.env"
+          else
+            echo ".env still not found after normalization attempt" >&2
+          fi
+
       - name: Create SSH key
         run: |
           mkdir -p ~/.ssh/
