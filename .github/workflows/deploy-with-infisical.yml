@@ -42,26 +42,7 @@ jobs:
           domain: ${{ secrets.INFISICAL_DOMAIN }}
           # Export to a .env file in the workspace
           export-type: file
-          file-output-path: .env
-
-      - name: Normalize .env location
-        run: |
-          set -euo pipefail
-          PARENT_ENV_PATH="$(dirname "$GITHUB_WORKSPACE")/$(basename "$GITHUB_WORKSPACE").env"
-          if [ -f "$PARENT_ENV_PATH" ]; then
-            echo "Found env at $PARENT_ENV_PATH; moving to $GITHUB_WORKSPACE/.env"
-            mv "$PARENT_ENV_PATH" "$GITHUB_WORKSPACE/.env"
-          fi
-          if [ -f "$GITHUB_WORKSPACE/.env" ]; then
-            echo ".env is at $GITHUB_WORKSPACE/.env"
-          else
-            echo ".env still not found after normalization attempt" >&2
-          fi
-          if [ -f "$GITHUB_WORKSPACE/.env" ]; then
-            echo ".env is at $GITHUB_WORKSPACE/.env"
-          else
-            echo ".env still not found after normalization attempt" >&2
-          fi
+          file-output-path: ./.env
 
       - name: Create SSH key
         run: |
@@ -86,13 +67,6 @@ jobs:
             exit 1
           fi
           echo "HOST=${HOST_VALUE}" >> "$GITHUB_ENV"
-
-      - name: Check DNS
-        run: |
-          set -e
-          echo "HOST=$HOST"
-          dig +short "$HOST" || true
-          nslookup "$HOST" || true
 
       - name: Add SSH key to known hosts
         if: ${{ steps.branch-deploy.outputs.continue == 'true' }}
