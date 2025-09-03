@@ -52,7 +52,7 @@ jobs:
         env:
           SSH_PRIVATE_KEY: ${{ secrets.DIGITAL_OCEAN_SSH_KEY }}
 
-      - name: Set deploy host from .env
+      - name: Load HOST from .env
         if: ${{ steps.branch-deploy.outputs.continue == 'true' }}
         shell: bash
         run: |
@@ -61,32 +61,11 @@ jobs:
             echo ".env not found; ensure Infisical export succeeded" >&2
             exit 1
           fi
-          # Read HOST and sanitize: trim whitespace/CR and strip surrounding single/double quotes
-          HOST_VALUE=$(grep -E '^HOST=' "$GITHUB_WORKSPACE/.env" | tail -n 1 | cut -d'=' -f2- | tr -d '\r' \
-            | sed -E 's/^\s+//; s/\s+$//; s/^"(.*)"$/\1/; s/^\'(.*)\'$/\1/')
-          if [ -z "${HOST_VALUE}" ]; then
-            echo "HOST not found in .env" >&2
-            exit 1
-          fi
-          echo "HOST=${HOST_VALUE}" >> "$GITHUB_ENV"
-
-      - name: Resolve host IP
-        if: ${{ steps.branch-deploy.outputs.continue == 'true' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          # Sanitize HOST again at runtime to guard against quotes/whitespace
-          CLEAN_HOST=$(echo "$HOST" | tr -d '\r' | sed -E 's/^\s+//; s/\s+$//; s/^"(.*)"$/\1/; s/^\'(.*)\'$/\1/')
-          echo "Using CLEAN_HOST=$CLEAN_HOST"
-          IP=$(getent hosts "$CLEAN_HOST" | awk '{print $1}' || true)
-          if [ -n "$IP" ]; then
-            echo "Resolved $CLEAN_HOST to $IP"
-            echo "HOST_IP=$IP" >> "$GITHUB_ENV"
-            echo "HOST=$CLEAN_HOST" >> "$GITHUB_ENV"
-          else
-            echo "Could not resolve $CLEAN_HOST; will proceed without HOST_IP (using hostname)" >&2
-            echo "HOST=$CLEAN_HOST" >> "$GITHUB_ENV"
-          fi
+          set -a
+          . "$GITHUB_WORKSPACE/.env"
+          set +a
+          # persist HOST (and any others you need) to the job env
+          echo "HOST=$HOST" >> "$GITHUB_ENV"
 
       - name: Add SSH key to known hosts
         if: ${{ steps.branch-deploy.outputs.continue == 'true' }}
