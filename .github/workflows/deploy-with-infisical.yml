@@ -61,6 +61,7 @@ jobs:
             echo ".env not found; ensure Infisical export succeeded" >&2
             exit 1
           fi
+          cat .env
           # Read HOST and sanitize: trim whitespace/CR and strip surrounding single/double quotes
           RAW_HOST=$(grep -E '^HOST=' "$GITHUB_WORKSPACE/.env" | tail -n 1 | cut -d'=' -f2-)
           RAW_HOST=${RAW_HOST%$'\r'}
