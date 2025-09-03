@@ -42,7 +42,7 @@ jobs:
           domain: ${{ secrets.INFISICAL_DOMAIN }}
           # Export to a .env file in the workspace
           export-type: file
-          file-output-path: ${{ github.workspace }}/.env
+          file-output-path: .env
 
       - name: Create SSH key
         run: |
@@ -56,6 +56,7 @@ jobs:
         if: ${{ steps.branch-deploy.outputs.continue == 'true' }}
         shell: bash
         run: |
+          ls -la "$GITHUB_WORKSPACE" | sed -n '1,50p'
           set -euo pipefail
           if [ ! -f "$GITHUB_WORKSPACE/.env" ]; then
             echo ".env not found; ensure Infisical export succeeded" >&2
