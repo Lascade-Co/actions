@@ -55,7 +55,7 @@ jobs:
       - name: Load HOST from .env
         if: ${{ steps.branch-deploy.outputs.continue == 'true' }}
         shell: bash
-        run: grep -E '^HOST=' "$GITHUB_WORKSPACE/.env" >> "$GITHUB_ENV"
+        run: grep -E '^HOST=' "$GITHUB_WORKSPACE/.env" | tr -d "'" | tr -d '"' >> "$GITHUB_ENV"
 
       - name: Add SSH key to known hosts
         if: ${{ steps.branch-deploy.outputs.continue == 'true' }}
