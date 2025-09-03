@@ -75,7 +75,6 @@ jobs:
         if: ${{ steps.branch-deploy.outputs.continue == 'true' }}
         shell: bash
         run: |
-          ls -la "$GITHUB_WORKSPACE" | sed -n '1,50p'
           set -euo pipefail
           if [ ! -f "$GITHUB_WORKSPACE/.env" ]; then
             echo ".env not found; ensure Infisical export succeeded" >&2
@@ -87,6 +86,13 @@ jobs:
             exit 1
           fi
           echo "HOST=${HOST_VALUE}" >> "$GITHUB_ENV"
+
+      - name: Check DNS
+        run: |
+          set -e
+          echo "HOST=$HOST"
+          dig +short "$HOST" || true
+          nslookup "$HOST" || true
 
       - name: Add SSH key to known hosts
         if: ${{ steps.branch-deploy.outputs.continue == 'true' }}
