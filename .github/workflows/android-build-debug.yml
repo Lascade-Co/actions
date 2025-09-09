@@ -35,6 +35,18 @@ jobs:
           owner: ${{ steps.repo.outputs.owner }}
           repositories: ${{ steps.repo.outputs.name }}
 
+      - name: Comment on PR About Action Status
+        uses: peter-evans/create-or-update-comment@v4
+        id: status
+        with:
+          edit-mode: 'replace'
+          token: ${{ steps.app-token.outputs.token }}
+          repository: ${{ github.event.client_payload.repo }}
+          issue-number: ${{ github.event.client_payload.pr }}
+          body: |
+            🏗️Build started. 
+            Watch progress [here](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
+
       - name: Decide ref to checkout (PR HEAD or named branch)
         id: ref
         run: |
@@ -133,5 +145,20 @@ jobs:
           token: ${{ steps.app-token.outputs.token }}
           repository: ${{ github.event.client_payload.repo }}
           issue-number: ${{ github.event.client_payload.pr }}
+          comment-id: ${{ steps.status.outputs.comment-id }}
+          edit-mode: 'replace'
+          body: "✅ Debug APK is ready: [Download](${{ steps.create_release.outputs.url }})"
+
+          # ---------- Failure comment ----------
+      - name: Comment on PR if build failed
+        if: ${{ failure() && github.event.client_payload.pr && github.event.client_payload.pr != '' && github.event.client_payload.pr != 'null' }}
+        uses: peter-evans/create-or-update-comment@v4
+        with:
+          comment-id: ${{ steps.status.outputs.comment-id }}
+          token: ${{ steps.app-token.outputs.token }}
+          repository: ${{ github.event.client_payload.repo }}
+          issue-number: ${{ github.event.client_payload.pr }}
+          edit-mode: 'replace'
           body: |
-            A debug APK build for this PR is available: ${{ steps.create_release.outputs.url }}
+            ❌ Build failed.
+            [Check logs](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
