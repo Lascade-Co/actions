@@ -20,6 +20,7 @@ jobs:
           trigger: ".deploy"
           environment: "test"
           environment_targets: "test,prod,staging"
+          param_separator: "|"
 
       - name: Checkout PR
         uses: actions/checkout@v4
