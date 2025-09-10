@@ -109,3 +109,30 @@ jobs:
         if: ${{ steps.branch-deploy.outputs.continue == 'true' }}
         run: |
           ssh -i ~/.ssh/private.key "${{ secrets.DROPLET_USERNAME }}@$HOST" "shell server run python manage.py migrate"
+
+      - name: Decide restart targets
+        if: ${{ steps.branch-deploy.outputs.continue == 'true' }}
+        id: decide
+        shell: bash
+        run: |
+          set -euo pipefail
+          body="${{ steps.branch-deploy.outputs.comment_body }}"
+          if echo "$body" | grep -qi '\bserver\b'; then
+            echo "server=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "server=false" >> "$GITHUB_OUTPUT"
+          fi
+          if echo "$body" | grep -qi '\bcelery\b'; then
+            echo "celery=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "celery=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Restart server
+        if: ${{ steps.branch-deploy.outputs.continue == 'true' && steps.decide.outputs.server == 'true' }}
+        run: ssh -i ~/.ssh/private.key "${{ secrets.DROPLET_USERNAME }}@$HOST" "shell server restart"
+
+      - name: Restart celery
+        if: ${{ steps.branch-deploy.outputs.continue == 'true' && steps.decide.outputs.celery == 'true' }}
+        run: ssh -i ~/.ssh/private.key "${{ secrets.DROPLET_USERNAME }}@$HOST" "shell celery restart"
+
