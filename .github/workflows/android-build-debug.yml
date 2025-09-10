@@ -35,6 +35,42 @@ jobs:
           owner: ${{ steps.repo.outputs.owner }}
           repositories: ${{ steps.repo.outputs.name }}
 
+      - name: Purge previous comments from this workflow
+        if: ${{ github.event.client_payload.pr && github.event.client_payload.pr != '' && github.event.client_payload.pr != 'null' }}
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ steps.app-token.outputs.token }}
+          script: |
+            const [owner, repo] = "${{ github.event.client_payload.repo }}".split("/");
+            const issue_number = Number("${{ github.event.client_payload.pr }}");
+            const marker = "<!-- central-build-debug -->";
+            const comments = await github.paginate(
+              github.rest.issues.listComments,
+              { owner, repo, issue_number, per_page: 100 }
+            );
+            let deleted = 0;
+            for (const c of comments) {
+              if ((c.body || "").includes(marker)) {
+                await github.rest.issues.deleteComment({ owner, repo, comment_id: c.id });
+                deleted++;
+              }
+            }
+            core.info(`Deleted ${deleted} prior central-build-debug comments`);
+
+
+      - name: Comment on PR About Action Status
+        uses: peter-evans/create-or-update-comment@v4
+        id: status
+        with:
+          edit-mode: 'replace'
+          token: ${{ steps.app-token.outputs.token }}
+          repository: ${{ github.event.client_payload.repo }}
+          issue-number: ${{ github.event.client_payload.pr }}
+          body: |
+            <!-- central-build-debug -->
+            🏗️ Build started.
+            Watch progress [here](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
+
       - name: Decide ref to checkout (PR HEAD or named branch)
         id: ref
         run: |
@@ -122,16 +158,34 @@ jobs:
           tag_name: ${{ github.event.client_payload.pr && format('debug-pr-{0}-{1}', github.event.client_payload.pr, github.run_number) || format('debug-branch-{0}-{1}', github.event.client_payload.branch, github.run_number) }}
           name: ${{ github.event.client_payload.title || 'Debug APK' }}
           prerelease: true
-          overwrite: true
           files: app/build/outputs/apk/debug/app-debug.apk
         # action-gh-release supports cross-repo via repository+token. :contentReference[oaicite:8]{index=8}
 
       - name: Comment on PR with debug APK link
-        if: ${{ github.event.client_payload.pr && github.event.client_payload.pr != '' && github.event.client_payload.pr != 'null' }}
         uses: peter-evans/create-or-update-comment@v4
         with:
           token: ${{ steps.app-token.outputs.token }}
           repository: ${{ github.event.client_payload.repo }}
           issue-number: ${{ github.event.client_payload.pr }}
+          comment-id: ${{ steps.status.outputs.comment-id }}
+          edit-mode: 'replace'
           body: |
-            A debug APK build for this PR is available: ${{ steps.create_release.outputs.url }}
+            <!-- central-build-debug -->
+            ✅ Debug APK is ready: [Download](${{ steps.create_release.outputs.url }})
+            Workflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}    
+
+          # ---------- Failure comment ----------
+      - name: Comment on PR if build failed
+        if: ${{ failure() && github.event.client_payload.pr && github.event.client_payload.pr != '' && github.event.client_payload.pr != 'null' }}
+        uses: peter-evans/create-or-update-comment@v4
+        with:
+          comment-id: ${{ steps.status.outputs.comment-id }}
+          token: ${{ steps.app-token.outputs.token }}
+          repository: ${{ github.event.client_payload.repo }}
+          issue-number: ${{ github.event.client_payload.pr }}
+          edit-mode: 'replace'
+          body: |
+            <!-- central-build-debug -->
+            ❌ Build failed.
+            [Check logs](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
+      
