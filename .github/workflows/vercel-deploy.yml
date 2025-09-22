@@ -1,134 +1,21 @@
-name: Vercel Deployment
+# Copy this action to which ever repo you want to deploy and set secrets.lascade.com
+# to send over the CENTRAL_DISPATCH_TOKEN. I started of thinking about reusable workflows
+# but turns out that is an overkill when you only have a single step.
+
+name: Request Central Vercel Deployment
 
 on:
-  issue_comment:
-    types: [created]
-
-permissions:
-  pull-requests: write
-  deployments: write
-  contents: write
-  checks: read
-  statuses: read
+  push:
 
 jobs:
   deploy:
-    if: ${{ github.event.issue.pull_request && contains(github.event.comment.body, '.deploy') }}
     runs-on: ubuntu-latest
     steps:
-      - name: Branch Deploy
-        uses: github/branch-deploy@v9.9.1
-        id: branch-deploy
+      - name: Dispatch to central repo
+        uses: peter-evans/repository-dispatch@v3
         with:
-          trigger: ".deploy"
-          environment: "dev"
-          environment_targets: "dev,prod"
-          noop_trigger: ".noop"
-          stable_branch: "main"
-          skip_ci: true
-          required_contexts: ""
-          param_separator: "to"
-          reaction: "rocket"
-          
-      # Debug step to see what environment was detected
-      - name: Debug Environment
-        if: ${{ steps.branch-deploy.outputs.continue == 'true' }}
-        run: |
-          echo "Comment: ${{ github.event.comment.body }}"
-          echo "Detected environment from branch-deploy: ${{ steps.branch-deploy.outputs.environment }}"
-          echo "Detected environment target: ${{ steps.branch-deploy.outputs.environment_target }}"
-      
-      # Only continue if branch-deploy action decides to proceed
-      - name: Checkout repository
-        if: ${{ steps.branch-deploy.outputs.continue == 'true' }}
-        uses: actions/checkout@v3
-        with:
-          ref: ${{ steps.branch-deploy.outputs.ref }}
-
-      - name: Set up Node.js
-        if: ${{ steps.branch-deploy.outputs.continue == 'true' }}
-        uses: actions/setup-node@v3
-        with:
-          node-version: '18'
-
-      - name: Install dependencies
-        if: ${{ steps.branch-deploy.outputs.continue == 'true' }}
-        run: npm ci
-
-      - name: Install Vercel CLI
-        if: ${{ steps.branch-deploy.outputs.continue == 'true' }}
-        run: npm install -g vercel@latest
-
-      - name: Set environment variables
-        if: ${{ steps.branch-deploy.outputs.continue == 'true' }}
-        run: |
-          # Extract environment from comment directly to ensure accuracy
-          if [[ "${{ github.event.comment.body }}" == *"to prod"* ]]; then
-            echo "Using PRODUCTION environment"
-            echo "VERCEL_TOKEN=${{ secrets.VERCEL_PROD_TOKEN }}" >> $GITHUB_ENV
-            echo "DEPLOY_ENV=prod" >> $GITHUB_ENV
-          else
-            echo "Using DEVELOPMENT environment"
-            echo "VERCEL_TOKEN=${{ secrets.VERCEL_DEV_TOKEN }}" >> $GITHUB_ENV
-            echo "DEPLOY_ENV=dev" >> $GITHUB_ENV
-          fi
-
-      - name: Remove .vercel directory if exists
-        if: ${{ steps.branch-deploy.outputs.continue == 'true' }}
-        run: |
-          if [ -d ".vercel" ]; then
-            rm -rf .vercel
-          fi
-
-      - name: Deploy to Vercel
-        if: ${{ steps.branch-deploy.outputs.continue == 'true' }}
-        id: deploy
-        run: |
-          DEPLOY_URL=$(vercel deploy --prod --yes --token=${{ env.VERCEL_TOKEN }})
-          echo "DEPLOY_URL=$DEPLOY_URL" >> $GITHUB_ENV
-          echo "deploy_url=$DEPLOY_URL" >> $GITHUB_OUTPUT
-
-      - name: Comment on PR
-        if: ${{ steps.branch-deploy.outputs.continue == 'true' }}
-        uses: actions/github-script@v6
-        with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          script: |
-            const { issue: { number: issue_number }, repo: { owner, repo } } = context;
-            const environment = '${{ env.DEPLOY_ENV }}';
-            github.rest.issues.createComment({
-              issue_number,
-              owner,
-              repo,
-              body: `🚀 Deployed to: ${{ steps.deploy.outputs.deploy_url || env.DEPLOY_URL }} (Environment: ${environment})`
-            });
-
-      - name: Create deployment status
-        if: ${{ steps.branch-deploy.outputs.continue == 'true' }}
-        uses: actions/github-script@v6
-        with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          script: |
-            const ref = context.sha;
-            const environment = '${{ env.DEPLOY_ENV }}';
-            const url = '${{ steps.deploy.outputs.deploy_url || env.DEPLOY_URL }}';
-            
-            const deployment = await github.rest.repos.createDeployment({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              ref,
-              environment,
-              auto_merge: false,
-              required_contexts: [],
-              description: `Deployment to ${environment}`
-            });
-            
-            await github.rest.repos.createDeploymentStatus({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              deployment_id: deployment.data.id,
-              state: 'success',
-              environment_url: url,
-              log_url: url,
-              description: `Deployed to ${environment}`
-            });
+          token: ${{ secrets.CENTRAL_DISPATCH_TOKEN }}
+          repository: Lascade-Co/actions
+          event-type: vercel-commit
+          client-payload: >-
+            {"repo":${{ toJSON(github.repository) }}, "branch":${{ toJSON(github.head_ref) }} }
