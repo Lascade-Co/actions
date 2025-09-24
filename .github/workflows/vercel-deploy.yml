@@ -5,7 +5,8 @@
 name: Request Central Vercel Deployment
 
 on:
-  push:
+  workflow_dispatch:
+#  push: Uncomment this
 
 jobs:
   deploy:
