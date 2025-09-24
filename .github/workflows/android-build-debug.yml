@@ -149,6 +149,9 @@ jobs:
           KEY_ALIAS_DEBUG: ${{ env.KEY_ALIAS }}
           KEY_PASSWORD_DEBUG: ${{ env.KEY_PASSWORD }}
 
+      - name: Upload to Firebase App Distribution
+        run: ./gradlew --no-daemon appDistributionUploadDebug || echo "Failed to upload"
+
       - name: Create Debug Release in source repo
         id: create_release
         uses: softprops/action-gh-release@v2
