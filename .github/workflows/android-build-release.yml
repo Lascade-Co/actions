@@ -86,6 +86,9 @@ jobs:
       - name: Decode keystore
         run: echo "${{ env.KEYSTORE_BASE64 }}" | base64 --decode > app/keystore.jks
 
+      - name: Decode Google Service JSON
+        run: echo "${{ env.SERVICE_JSON_BASE64 }}" | base64 --decode > google-services.json
+
       - name: Set up JDK 21
         uses: actions/setup-java@v4
         with:
@@ -104,6 +107,9 @@ jobs:
 
       - name: Build bundleRelease (AAB)
         run: ./gradlew --no-daemon --configuration-cache bundleRelease
+
+      - name: Upload to Firebase App Distribution
+        run: ./gradlew --no-daemon appDistributionUploadRelease || echo "Failed to upload"
 
       - name: Zip native debug symbols if not pre-zipped
         if: ${{ hashFiles('app/release/native-debug-symbols.zip') == '' }}
