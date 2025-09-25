@@ -41,14 +41,17 @@ jobs:
           script: |
             const [owner, repo] = "${{ github.event.client_payload.repo }}".split("/");
             const issue_number = Number("${{ github.event.client_payload.pr }}");
-            const marker = "<!-- deploy-pr-${{ github.event.client_payload.env_slug }} -->";
+            const markers = [ 
+              "<!-- deploy-pr-${{ github.event.client_payload.env_slug }} -->",
+              "### Deployment"
+            ];
             const comments = await github.paginate(
               github.rest.issues.listComments,
               { owner, repo, issue_number, per_page: 100 }
             );
             let deleted = 0;
             for (const c of comments) {
-              if ((c.body || "").includes(marker)) {
+              if (markers.find((m) => (c.body || "").includes(m))) {
                 await github.rest.issues.deleteComment({ owner, repo, comment_id: c.id });
                 deleted++;
               }
