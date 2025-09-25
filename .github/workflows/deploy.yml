@@ -10,7 +10,6 @@ on:
 permissions:
   contents: write
   pull-requests: write
-  issues: write
 
 jobs:
   deploy:
@@ -83,6 +82,8 @@ jobs:
 
       - name: Create SSH Script
         run: echo "ssh -i ~/.ssh/private.key \"${{ secrets.DROPLET_USERNAME }}@$HOST\" $@" > s.sh
+        env:
+          HOST: ${{ steps.extract.outputs.host }}
 
       - name: Copy .env to droplet project folder
         shell: bash
@@ -137,12 +138,12 @@ jobs:
           fi
 
       - name: Restart server
-        if: ${{ steps.branch-deploy.outputs.continue == 'true' && steps.decide.outputs.server == 'true' }}
-        run: ssh -i ~/.ssh/private.key "${{ secrets.DROPLET_USERNAME }}@$HOST" "shell server restart"
+        if: ${{ steps.decide.outputs.server == 'true' }}
+        run: bash s.sh "shell server restart"
 
       - name: Restart celery
-        if: ${{ steps.branch-deploy.outputs.continue == 'true' && steps.decide.outputs.celery == 'true' }}
-        run: ssh -i ~/.ssh/private.key "${{ secrets.DROPLET_USERNAME }}@$HOST" "shell celery restart"
+        if: ${{ steps.decide.outputs.celery == 'true' }}
+        run: bash s.sh "shell celery restart"
 
       - name: Comment on PR With Success Status
         uses: peter-evans/create-or-update-comment@v4
