@@ -1,0 +1,42 @@
+name: "Branch Deploy Trigger"
+
+on:
+  workflow_call:
+    inputs:
+      project_slug:
+        required: true
+        type: string
+
+permissions:
+  pull-requests: write
+  deployments: write
+  contents: write
+  checks: read
+  statuses: read
+
+jobs:
+  trigger-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: github/branch-deploy@v9.9.1
+        id: branch-deploy
+        with:
+          environment: "test"
+          environment_targets: "test,prod,staging"
+
+      - name: Dispatch to central repo
+        if: ${{ steps.branch-deploy.outputs.continue == 'true' }}
+        uses: peter-evans/repository-dispatch@v3
+        with:
+          token: ${{ secrets.CENTRAL_DISPATCH_TOKEN }}
+          repository: Lascade-Co/actions
+          event-type: deploy-pr
+          client-payload: >-
+            {
+              "repo": ${{ toJSON(github.repository) }}, 
+              "branch": ${{ toJSON(github.head_ref) }},
+              "pr": ${{ toJSON(steps.branch-deploy.outputs.issue_number) }},
+              "env_slug": ${{ toJSON(steps.branch-deploy.outputs.environment) }},
+              "comment_body": ${{ toJSON(steps.branch-deploy.outputs.params) }}
+              "project_slug": ${{ toJSON(inputs.project_slug) }}
+            }
