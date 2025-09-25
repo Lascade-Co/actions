@@ -2,6 +2,9 @@ name: "Branch Deploy Trigger"
 
 on:
   workflow_call:
+    secrets:
+      central_dispatch_token:
+        required: true
     inputs:
       project_slug:
         required: true
@@ -28,7 +31,7 @@ jobs:
         if: ${{ steps.branch-deploy.outputs.continue == 'true' }}
         uses: peter-evans/repository-dispatch@v3
         with:
-          token: ${{ secrets.CENTRAL_DISPATCH_TOKEN }}
+          token: ${{ secrets.central_dispatch_token }}
           repository: Lascade-Co/actions
           event-type: deploy-pr
           client-payload: >-
