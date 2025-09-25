@@ -1,50 +1,51 @@
+# Required Parameters
+# repo, pr, project_slug, env_slug, branch, comment_body
+
 name: "Branch Deploy"
 
 on:
-  workflow_call:
-    secrets:
-      DIGITAL_OCEAN_SSH_KEY:
-        required: true
-    inputs:
-      droplet_username:
-        required: true
-        type: string
-      container_name:
-        required: true
-        type: string
-      registry_name:
-        required: true
-        type: string
-      prod_host:
-        required: true
-        type: string
-      staging_host:
-        required: true
-        type: string
+  repository_dispatch:
+    types: [deploy-pr]
 
 permissions:
-  pull-requests: write
-  deployments: write
   contents: write
-  checks: read
-  statuses: read
+  pull-requests: write
+  issues: write
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
     steps:
-      - uses: github/branch-deploy@v9.9.1
-        id: branch-deploy
-        with:
-          trigger: ".deploy"
-          environment: "test"
-          environment_targets: "test,prod,staging"
+      - name: Extract owner/repo
+        id: repo
+        shell: bash
+        run: |
+          FULL="${{ github.event.client_payload.repo }}"   # e.g. Lascade-Co/travel-animator-android
+          echo "owner=${FULL%%/*}" >> "$GITHUB_OUTPUT"     # Lascade-Co
+          echo "name=${FULL#*/}"   >> "$GITHUB_OUTPUT"     # travel-animator-android
 
-      - name: Checkout PR
-        uses: actions/checkout@v4
+      # Mint a GitHub App token scoped to that one repo
+      - name: Mint GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v2
         with:
-          ref: ${{ steps.branch-deploy.outputs.ref }}
-          submodules: "recursive"
+          app-id: ${{ secrets.CI_APP_ID }}
+          private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
+          owner: ${{ steps.repo.outputs.owner }}
+          repositories: ${{ steps.repo.outputs.name }}
+
+      - name: Comment on PR About Action Status
+        uses: peter-evans/create-or-update-comment@v4
+        id: status
+        with:
+          edit-mode: 'replace'
+          token: ${{ steps.app-token.outputs.token }}
+          repository: ${{ github.event.client_payload.repo }}
+          issue-number: ${{ github.event.client_payload.pr }}
+          body: |
+            <!-- central-build-debug -->
+            🏗️ Deploy started.
+            Watch progress [here](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
 
       - name: Create SSH key
         run: |
@@ -54,40 +55,48 @@ jobs:
         env:
           SSH_PRIVATE_KEY: ${{ secrets.DIGITAL_OCEAN_SSH_KEY }}
 
-      - name: Set deploy environment variables
-        if: ${{ steps.branch-deploy.outputs.continue == 'true' }}
+      # Import secrets from Infisical
+      - name: Import env secrets from Infisical
+        uses: Infisical/secrets-action@v1.0.9
+        with:
+          # Auth method: universal (client credentials)
+          method: universal
+          client-id: ${{ secrets.INFISICAL_CLIENT_ID }}
+          client-secret: ${{ secrets.INFISICAL_CLIENT_SECRET }}
+          # Project / environment
+          project-slug: ${{ github.event.client_payload.project_slug }}
+          env-slug: ${{ github.event.client_payload.env_slug }}
+          # Self-hosted domain
+          domain: ${{ secrets.INFISICAL_DOMAIN }}
+          # Export to a .env file in the workspace
+          export-type: file
+          file-output-path: /.env
+
+      - name: Extract Env
+        id: extract
         run: |
-          case "${{ steps.branch-deploy.outputs.environment }}" in
-            prod)
-              echo "HOST=${{ inputs.prod_host }}" >> "$GITHUB_ENV"
-              ;;
-            staging)
-              echo "HOST=${{ inputs.staging_host }}" >> "$GITHUB_ENV"
-              ;;
-            *)
-              echo "Unknown environment"
-              exit 1
-              ;;
-          esac
+          source .env
+          echo "host=$HOST" >> "$GITHUB_OUTPUT"
 
       - name: Add SSH key to known hosts
-        if: ${{ steps.branch-deploy.outputs.continue == 'true' }}
-        run: |
-          ssh-keyscan -H "$HOST" >> ~/.ssh/known_hosts
+        run: ssh-keyscan -H "${{ steps.extract.outputs.host }}" >> ~/.ssh/known_hosts
 
-      - name: Pull latest image
-        if: ${{ steps.branch-deploy.outputs.continue == 'true' }}
+      - name: Create SSH Script
+        run: echo "ssh -i ~/.ssh/private.key \"${{ secrets.DROPLET_USERNAME }}@$HOST\" $@" > s.sh
+
+      - name: Copy .env to droplet project folder
+        shell: bash
         run: |
-          ssh -i ~/.ssh/private.key "${{ inputs.droplet_username }}@$HOST" "docker pull ${{ inputs.registry_name }}/${{ inputs.container_name }}:latest"
+          set -euo pipefail
+          PROJECT_FOLDER=$(bash s.sh cat /opt/project_folder)
+          scp -i ~/.ssh/private.key .env "${{ secrets.DROPLET_USERNAME }}@$HOST:$PROJECT_FOLDER/.env"
+        env:
+          HOST: ${{ steps.extract.outputs.host }}
 
       - name: Deploy
-        if: ${{ steps.branch-deploy.outputs.continue == 'true' }}
-        run: ssh -i ~/.ssh/private.key "${{ inputs.droplet_username }}@$HOST" "deploy $BRANCH"
-        env:
-          BRANCH: ${{ steps.branch-deploy.outputs.ref }}
+        run: bash s.sh "deploy ${{ github.event.client_payload.branch }}"
 
       - name: Wait for server healthcheck
-        if: ${{ steps.branch-deploy.outputs.continue == 'true' }}
         run: |
           timeout=30
           interval=2
@@ -104,8 +113,60 @@ jobs:
             elapsed=$((elapsed + interval))
           done
           echo "Server is healthy."
+        env:
+          HOST: ${{ steps.extract.outputs.host }}
 
       - name: Run migrations
-        if: ${{ steps.branch-deploy.outputs.continue == 'true' }}
+        run: bash s.sh "shell server run python manage.py migrate"
+
+      - name: Decide restart targets
+        id: decide
+        shell: bash
         run: |
-          ssh -i ~/.ssh/private.key "${{ inputs.droplet_username }}@$HOST" "shell server run python manage.py migrate"
+          set -euo pipefail
+          body="${{ github.event.client_payload.comment_body }}"
+          if echo "$body" | grep -qi '\bserver\b'; then
+            echo "server=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "server=false" >> "$GITHUB_OUTPUT"
+          fi
+          if echo "$body" | grep -qi '\bcelery\b'; then
+            echo "celery=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "celery=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Restart server
+        if: ${{ steps.branch-deploy.outputs.continue == 'true' && steps.decide.outputs.server == 'true' }}
+        run: ssh -i ~/.ssh/private.key "${{ secrets.DROPLET_USERNAME }}@$HOST" "shell server restart"
+
+      - name: Restart celery
+        if: ${{ steps.branch-deploy.outputs.continue == 'true' && steps.decide.outputs.celery == 'true' }}
+        run: ssh -i ~/.ssh/private.key "${{ secrets.DROPLET_USERNAME }}@$HOST" "shell celery restart"
+
+      - name: Comment on PR With Success Status
+        uses: peter-evans/create-or-update-comment@v4
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+          repository: ${{ github.event.client_payload.repo }}
+          issue-number: ${{ github.event.client_payload.pr }}
+          comment-id: ${{ steps.status.outputs.comment-id }}
+          edit-mode: 'replace'
+          body: ✅ Branch Deployed to ${{ github.event.client_payload.env_slug }}
+
+      # ---------- Failure comment ----------
+      - name: Comment on PR if build failed
+        if: ${{ failure() && github.event.client_payload.pr && github.event.client_payload.pr != '' && github.event.client_payload.pr != 'null' }}
+        uses: peter-evans/create-or-update-comment@v4
+        with:
+          comment-id: ${{ steps.status.outputs.comment-id }}
+          token: ${{ steps.app-token.outputs.token }}
+          repository: ${{ github.event.client_payload.repo }}
+          issue-number: ${{ github.event.client_payload.pr }}
+          edit-mode: 'replace'
+          body: |
+            <!-- central-build-debug -->
+            ❌ Deploy failed for ${{ github.event.client_payload.env_slug }}
+            [Check logs](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
+
+
