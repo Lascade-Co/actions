@@ -108,12 +108,9 @@ jobs:
           HOST: ${{ steps.extract.outputs.host }}
 
       - name: Copy .env to droplet project folder
-        shell: bash
-        run: |
-          set -euo pipefail
-          PROJECT_FOLDER=$(bash s.sh cat /opt/project_folder)
-          scp -i ~/.ssh/private.key .env "ubuntu@$HOST:$PROJECT_FOLDER/.env"
+        run: scp -i ~/.ssh/private.key .env "ubuntu@$HOST:$PROJECT_FOLDER/.env"
         env:
+          $PROJECT_FOLDER: ${{ steps.repo.outputs.name }}
           HOST: ${{ steps.extract.outputs.host }}
 
       - name: Deploy
