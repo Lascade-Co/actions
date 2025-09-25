@@ -103,7 +103,7 @@ jobs:
         run: ssh-keyscan -H "${{ steps.extract.outputs.host }}" >> ~/.ssh/known_hosts
 
       - name: Create SSH Script
-        run: echo "ssh -i ~/.ssh/private.key \"${{ secrets.DROPLET_USERNAME }}@$HOST\" $@" > s.sh
+        run: echo "ssh -i ~/.ssh/private.key \"ubuntu@$HOST\" $@" > s.sh
         env:
           HOST: ${{ steps.extract.outputs.host }}
 
@@ -112,7 +112,7 @@ jobs:
         run: |
           set -euo pipefail
           PROJECT_FOLDER=$(bash s.sh cat /opt/project_folder)
-          scp -i ~/.ssh/private.key .env "${{ secrets.DROPLET_USERNAME }}@$HOST:$PROJECT_FOLDER/.env"
+          scp -i ~/.ssh/private.key .env "ubuntu@$HOST:$PROJECT_FOLDER/.env"
         env:
           HOST: ${{ steps.extract.outputs.host }}
 
