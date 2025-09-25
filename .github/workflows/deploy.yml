@@ -110,7 +110,7 @@ jobs:
       - name: Copy .env to droplet project folder
         run: scp -i ~/.ssh/private.key .env "ubuntu@$HOST:$PROJECT_FOLDER/.env"
         env:
-          $PROJECT_FOLDER: ${{ steps.repo.outputs.name }}
+          PROJECT_FOLDER: ${{ steps.repo.outputs.name }}
           HOST: ${{ steps.extract.outputs.host }}
 
       - name: Deploy
