@@ -161,7 +161,7 @@ jobs:
         with:
           repository: ${{ github.event.client_payload.repo }}
           token: ${{ steps.app-token.outputs.token }}
-          tag_name: ${{ github.event.client_payload.pr && format('debug-pr-{0}-{1}', github.event.client_payload.pr, github.run_number) || format('debug-branch-{0}-{1}', github.event.client_payload.branch, github.run_number) }}
+          tag_name: ${{ format('debug-pr-{0}', github.event.client_payload.pr) }}
           name: ${{ github.event.client_payload.title || 'Debug APK' }}
           prerelease: true
           files: app/build/outputs/apk/debug/app-debug.apk
