@@ -106,7 +106,9 @@ jobs:
         run: ssh-keyscan -H "${{ steps.extract.outputs.host }}" >> ~/.ssh/known_hosts
 
       - name: Create SSH Script
-        run: echo "ssh -i ~/.ssh/private.key \"ubuntu@$HOST\" $@" > s.sh
+        run: |
+          echo "ssh -i ~/.ssh/private.key \"ubuntu@$HOST\" $@" > s.sh
+          chmod +x s.sh
         env:
           HOST: ${{ steps.extract.outputs.host }}
 
@@ -117,7 +119,7 @@ jobs:
           HOST: ${{ steps.extract.outputs.host }}
 
       - name: Deploy
-        run: bash s.sh "deploy ${{ github.event.client_payload.branch }}"
+        run: ./s.sh "deploy ${{ github.event.client_payload.branch }}"
 
       - name: Wait for server healthcheck
         run: |
@@ -140,7 +142,7 @@ jobs:
           HOST: ${{ steps.extract.outputs.host }}
 
       - name: Run migrations
-        run: bash s.sh "shell server run python manage.py migrate"
+        run: ./s.sh "shell server run python manage.py migrate"
 
       - name: Decide restart targets
         id: decide
@@ -161,11 +163,11 @@ jobs:
 
       - name: Restart server
         if: ${{ steps.decide.outputs.server == 'true' }}
-        run: bash s.sh "shell server restart"
+        run: ./s.sh "shell server restart"
 
       - name: Restart celery
         if: ${{ steps.decide.outputs.celery == 'true' }}
-        run: bash s.sh "shell celery restart"
+        run: ./s.sh "shell celery restart"
 
       - name: Comment on PR With Success Status
         uses: peter-evans/create-or-update-comment@v4
