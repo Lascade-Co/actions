@@ -107,7 +107,7 @@ jobs:
 
       - name: Create SSH Script
         run: |
-          echo "ssh -i ~/.ssh/private.key \"ubuntu@$HOST\" $@" > s.sh
+          echo "ssh -i ~/.ssh/private.key \"ubuntu@$HOST\" \$@" > s.sh
           chmod +x s.sh
         env:
           HOST: ${{ steps.extract.outputs.host }}
