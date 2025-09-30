@@ -37,7 +37,7 @@ jobs:
           client-payload: >-
             {
               "repo": ${{ toJSON(github.repository) }}, 
-              "branch": ${{ toJSON(github.head_ref) }},
+              "branch": ${{ toJSON(steps.branch-deploy.outputs.ref) }},
               "pr": ${{ toJSON(steps.branch-deploy.outputs.issue_number) }},
               "env_slug": ${{ toJSON(steps.branch-deploy.outputs.environment) }},
               "comment_body": ${{ toJSON(steps.branch-deploy.outputs.params) }},
