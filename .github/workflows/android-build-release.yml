@@ -215,7 +215,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: ${{ github.event.client_payload.repo }}
-          ref: refs/heads/${{ needs.prepare.outputs.branch }}
+          ref: refs/heads/${{ github.event.client_payload.branch }}
           token: ${{ steps.app-token.outputs.token }}
           fetch-depth: 0
 
