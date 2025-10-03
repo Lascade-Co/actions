@@ -26,6 +26,7 @@ jobs:
         with:
           environment: "test"
           environment_targets: "test,prod,staging"
+          update_branch: 'disabled'
 
       - name: Dispatch to central repo
         if: ${{ steps.branch-deploy.outputs.continue == 'true' }}
