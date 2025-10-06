@@ -36,12 +36,6 @@ jobs:
       - name: Log in to DigitalOcean Container Registry
         run: doctl registry login --expiry-seconds 600
 
-      - name: Get registry name
-        id: registry
-        run: |
-          REGISTRY=$(doctl registry get --format Name --no-header)
-          echo "name=registry.digitalocean.com/${REGISTRY}" >> "$GITHUB_OUTPUT"
-
       - name: Build and push Docker image
         uses: docker/build-push-action@v5
         with:
@@ -49,5 +43,5 @@ jobs:
           file: ${{ github.event.client_payload.dockerfile_path || 'Dockerfile' }}
           push: true
           tags: |
-            ${{ steps.registry.outputs.name }}/${{ github.event.client_payload.container_name }}:${{ github.event.client_payload.sha }}
-            ${{ steps.registry.outputs.name }}/${{ github.event.client_payload.container_name }}:latest
+            ${{ secrets.REGISTRY }}/${{ github.event.client_payload.container_name }}:${{ github.event.client_payload.sha }}
+            ${{ secrets.REGISTRY }}/${{ github.event.client_payload.container_name }}:latest
