@@ -57,7 +57,7 @@ jobs:
           file: ${{ github.event.client_payload.dockerfile_path || 'Dockerfile' }}
           load: true
           tags: |
-            ${{ secrets.REGISTRY }}/${{ github.event.client_payload.container_name }}:${{ github.sha }}
+            ${{ secrets.REGISTRY }}/${{ github.event.client_payload.container_name }}:${{ github.event.client_payload.sha }}
             ${{ secrets.REGISTRY }}/${{ github.event.client_payload.container_name }}:latest
 
       - name: Install doctl
@@ -70,5 +70,5 @@ jobs:
 
       - name: Push image to DigitalOcean Container Registry
         run: |
-          docker push ${{ secrets.REGISTRY }}/${{ github.event.client_payload.container_name }}:${{ github.sha }}
+          docker push ${{ secrets.REGISTRY }}/${{ github.event.client_payload.container_name }}:${{ github.event.client_payload.sha }}
           docker push ${{ secrets.REGISTRY }}/${{ github.event.client_payload.container_name }}:latest
