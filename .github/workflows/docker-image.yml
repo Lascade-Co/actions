@@ -5,7 +5,28 @@ on:
     types: [docker-build]
 
 jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      owner: ${{ steps.repo.outputs.owner }}
+      name: ${{ steps.repo.outputs.name }}
+      branch: ${{ steps.branch.outputs.branch }}
+    steps:
+      - name: Extract owner/repo
+        id: repo
+        run: |
+          FULL="${{ github.event.client_payload.repo }}"
+          echo "owner=${FULL%%/*}" >> "$GITHUB_OUTPUT"
+          echo "name=${FULL#*/}"   >> "$GITHUB_OUTPUT"
+
+      - name: Resolve branch
+        id: branch
+        run: |
+          BR="${{ github.event.client_payload.branch }}"
+          echo "branch=${BR:-main}" >> "$GITHUB_OUTPUT"
+
   build-and-push:
+    needs: prepare
     runs-on: ubuntu-latest
     steps:
       - name: Mint GitHub App token
@@ -14,19 +35,30 @@ jobs:
         with:
           app-id: ${{ secrets.CI_APP_ID }}
           private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
-          owner: ${{ github.event.client_payload.repo }}
+          owner: ${{ needs.prepare.outputs.owner }}
+          repositories: ${{ needs.prepare.outputs.name }}
 
       - name: Checkout target repo @ branch
         uses: actions/checkout@v4
         with:
           repository: ${{ github.event.client_payload.repo }}
-          ref: ${{ github.event.client_payload.branch }}
+          ref: refs/heads/${{ needs.prepare.outputs.branch }}
           token: ${{ steps.app-token.outputs.token }}
           fetch-depth: 0
           submodules: "recursive"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
+
+      - name: Build Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: ${{ github.event.client_payload.build_context || '.' }}
+          file: ${{ github.event.client_payload.dockerfile_path || 'Dockerfile' }}
+          load: true
+          tags: |
+            ${{ secrets.REGISTRY }}/${{ github.event.client_payload.container_name }}:${{ github.event.client_payload.sha }}
+            ${{ secrets.REGISTRY }}/${{ github.event.client_payload.container_name }}:latest
 
       - name: Install doctl
         uses: digitalocean/action-doctl@v2
@@ -36,12 +68,7 @@ jobs:
       - name: Log in to DigitalOcean Container Registry
         run: doctl registry login --expiry-seconds 600
 
-      - name: Build and push Docker image
-        uses: docker/build-push-action@v5
-        with:
-          context: ${{ github.event.client_payload.build_context || '.' }}
-          file: ${{ github.event.client_payload.dockerfile_path || 'Dockerfile' }}
-          push: true
-          tags: |
-            ${{ secrets.REGISTRY }}/${{ github.event.client_payload.container_name }}:${{ github.event.client_payload.sha }}
-            ${{ secrets.REGISTRY }}/${{ github.event.client_payload.container_name }}:latest
+      - name: Push image to DigitalOcean Container Registry
+        run: |
+          docker push ${{ secrets.REGISTRY }}/${{ github.event.client_payload.container_name }}:${{ github.event.client_payload.sha }}
+          docker push ${{ secrets.REGISTRY }}/${{ github.event.client_payload.container_name }}:latest
