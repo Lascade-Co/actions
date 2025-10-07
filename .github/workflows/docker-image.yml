@@ -58,6 +58,8 @@ jobs:
         uses: docker/build-push-action@v5
         with:
           load: true
+          context: '.'
+          file: 'Dockerfile'
           tags: |
             ${{ secrets.REGISTRY }}/${{ github.event.client_payload.container_name }}:${{ steps.commit.outputs.sha }}
             ${{ secrets.REGISTRY }}/${{ github.event.client_payload.container_name }}:latest
