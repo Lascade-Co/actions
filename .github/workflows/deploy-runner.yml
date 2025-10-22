@@ -87,10 +87,9 @@ jobs:
         env:
           SSH_PRIVATE_KEY: ${{ secrets.DIGITAL_OCEAN_SSH_KEY }}
 
-      - name: Set up WireGuard Connection
-        uses: niklaskeerl/easy-wireguard-action@v2
+      - uses: rohittp0/wiregaurd@v1
         with:
-          WG_CONFIG_FILE: ${{ secrets.WG_CONFIG }}
+          config: ${{ secrets.WG_CONFIG_BASE64 }}
 
       # Import secrets from Infisical
       - name: Import env secrets from Infisical
