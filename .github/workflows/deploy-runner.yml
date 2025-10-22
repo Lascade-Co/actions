@@ -87,7 +87,7 @@ jobs:
         env:
           SSH_PRIVATE_KEY: ${{ secrets.DIGITAL_OCEAN_SSH_KEY }}
 
-      - uses: rohittp0/wiregaurd@v1
+      - uses: rohittp0/wiregaurd@v1.1
         with:
           config: ${{ secrets.WG_CONFIG_BASE64 }}
 
