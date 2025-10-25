@@ -49,10 +49,6 @@ jobs:
           token: ${{ steps.app-token.outputs.token }}
           fetch-depth: 0
 
-      - uses: rohittp0/wiregaurd@v2
-        with:
-          config: ${{ secrets.WG_CONFIG_BASE64 }}
-
       - name: Fetch local.properties from Infisical (prod)
         uses: Infisical/secrets-action@v1.0.9
         with:
@@ -145,10 +141,6 @@ jobs:
           ref: refs/heads/${{ github.event.client_payload.branch }}
           token: ${{ steps.app-token.outputs.token }}
           fetch-depth: 0
-
-      - uses: rohittp0/wiregaurd@v2
-        with:
-          config: ${{ secrets.WG_CONFIG_BASE64 }}
 
       - name: Fetch local.properties from Infisical (prod)
         uses: Infisical/secrets-action@v1.0.9

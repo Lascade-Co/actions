@@ -94,10 +94,6 @@ jobs:
           fetch-depth: 0
         # PR HEAD via refs/pull/<PR>/head (not the merge ref). :contentReference[oaicite:5]{index=5}
 
-      - uses: rohittp0/wiregaurd@v2
-        with:
-          config: ${{ secrets.WG_CONFIG_BASE64 }}
-
       # === Infisical: export local.properties file ===
       - name: Fetch local.properties from Infisical
         uses: Infisical/secrets-action@v1.0.9
