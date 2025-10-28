@@ -57,6 +57,7 @@ jobs:
           env-slug: ${{ steps.prepare.outputs.type }}
           # Self-hosted domain
           domain: ${{ secrets.INFISICAL_DOMAIN }}
+          secret-path: Build
 
       - name: Mint GitHub App token
         id: app-token
