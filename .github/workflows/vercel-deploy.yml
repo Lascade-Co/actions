@@ -1,4 +1,4 @@
-name: Vercel Deploy Commit
+name: Vercel Deploy
 
 on:
   repository_dispatch:
