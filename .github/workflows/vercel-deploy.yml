@@ -11,12 +11,6 @@ on:
       branch:
         description: "Branch to deploy (e.g. main)"
         required: true
-      vercel_project_id:
-        description: "(Optional) Vercel project ID"
-        required: false
-      vercel_org_id:
-        description: "(Optional) Vercel organization ID"
-        required: false
 
 permissions:
   contents: read
@@ -65,6 +59,6 @@ jobs:
         run: npm install -g vercel
 
       - name: Deploy to Vercel
-        run: vercel deploy --token $VERCEL_TOKEN
+        run: vercel deploy --token $VERCEL_TOKEN --yes
         env:
           VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
