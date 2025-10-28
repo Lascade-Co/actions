@@ -3,39 +3,68 @@ name: Vercel Deploy Commit
 on:
   repository_dispatch:
     types: [vercel-commit]
+  workflow_dispatch:
+    inputs:
+      repo:
+        description: "Target repository (e.g. user/repo)"
+        required: true
+      branch:
+        description: "Branch to deploy (e.g. main)"
+        required: true
+      vercel_project_id:
+        description: "(Optional) Vercel project ID"
+        required: false
+      vercel_org_id:
+        description: "(Optional) Vercel organization ID"
+        required: false
 
 permissions:
-  contents: write
-  pull-requests: write
-  issues: write
+  contents: read
 
 concurrency:
-  group: vercel-commit-${{ github.event.client_payload.repo }}-${{ github.event.client_payload.branch }}
+  group: vercel-commit-${{ github.event.client_payload.repo || github.event.inputs.repo }}-${{ github.event.client_payload.branch || github.event.inputs.branch }}
   cancel-in-progress: true
 
 jobs:
-  empty-commit:
+  vercel-deploy:
     runs-on: ubuntu-latest
     steps:
-      # Checkout the target repo at the requested branch using a PAT
-      - name: Checkout target repo
+      - name: Determine repo & branch
+        id: prepare
+        run: |
+          REPO="${{ github.event.client_payload.repo || github.event.inputs.repo }}"
+          BRANCH="${{ github.event.client_payload.branch || github.event.inputs.branch }}"
+          echo "repo=$REPO" >> "$GITHUB_OUTPUT"
+          echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
+          echo "owner=${REPO%%/*}" >> "$GITHUB_OUTPUT"
+          echo "name=${REPO#*/}" >> "$GITHUB_OUTPUT"
+
+      - name: Mint GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.CI_APP_ID }}
+          private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
+          owner: ${{ steps.prepare.outputs.owner }}
+          repositories: ${{ steps.prepare.outputs.name }}
+
+      - name: Checkout target repo @ branch
         uses: actions/checkout@v4
         with:
-          repository: ${{ github.event.client_payload.repo }}
-          ref: ${{ github.event.client_payload.branch }}
-          # PAT must have repo (or at least contents:write) on the target repo
-          token: ${{ secrets.VERCEL_PAT }}
+          repository: ${{ steps.prepare.outputs.repo }}
+          ref: ${{ steps.prepare.outputs.branch }}
+          token: ${{ steps.app-token.outputs.token }}
           fetch-depth: 0
 
-      - name: Configure git identity
-        run: |
-          git config user.name  "central-bot"
-          git config user.email "central-bot@users.noreply.github.com"
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
 
-      - name: Create empty commit
-        id: commit
-        shell: bash
-        run: |
-          set -euo pipefail
-          git commit --allow-empty -m "chore: vercel deploy"
-          git push origin HEAD:refs/heads/${{ github.event.client_payload.branch }}
+      - name: Install Vercel CLI
+        run: npm install -g vercel
+
+      - name: Deploy to Vercel
+        run: vercel deploy --token $VERCEL_TOKEN
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
