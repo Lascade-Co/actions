@@ -32,4 +32,8 @@ jobs:
           repository: Lascade-Co/actions
           event-type: vercel-commit
           client-payload: >-
-            {"repo":${{ toJSON(github.repository) }}, "branch":${{ toJSON(github.head_ref) }} }
+            {
+              "repo":${{ toJSON(github.repository) }}, 
+              "branch":${{ toJSON(github.head_ref) }},
+              "project_slug":"your project slug"
+            }

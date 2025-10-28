@@ -11,12 +11,15 @@ on:
       branch:
         description: "Branch to deploy (e.g. main)"
         required: true
+      project_slug:
+        description: "The inficial project slug"
+        required: true
 
 permissions:
   contents: read
 
 concurrency:
-  group: vercel-commit-${{ github.event.client_payload.repo || github.event.inputs.repo }}-${{ github.event.client_payload.branch || github.event.inputs.branch }}
+  group: vercel-commit-${{ github.event.client_payload.repo }}-${{ github.event.client_payload.branch }}
   cancel-in-progress: true
 
 jobs:
@@ -28,10 +31,32 @@ jobs:
         run: |
           REPO="${{ github.event.client_payload.repo || github.event.inputs.repo }}"
           BRANCH="${{ github.event.client_payload.branch || github.event.inputs.branch }}"
+          SLUG="${{ github.event.client_payload.project_slug || github.event.inputs.repo.project_slug }}"
+          
           echo "repo=$REPO" >> "$GITHUB_OUTPUT"
           echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
           echo "owner=${REPO%%/*}" >> "$GITHUB_OUTPUT"
           echo "name=${REPO#*/}" >> "$GITHUB_OUTPUT"
+          echo "project_slug=$SLUG" >> "$GITHUB_OUTPUT"
+          
+          if [[ "$BRANCH" == "main" || "$BRANCH" == "master" ]]; then
+            echo "type=prod" >> "$GITHUB_OUTPUT"
+          else
+            echo "type=staging" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Import env secrets from Infisical
+        uses: Infisical/secrets-action@v1.0.9
+        with:
+          # Auth method: universal (client credentials)
+          method: universal
+          client-id: ${{ secrets.INFISICAL_CLIENT_ID }}
+          client-secret: ${{ secrets.INFISICAL_CLIENT_SECRET }}
+          # Project / environment
+          project-slug: ${{ steps.prepare.outputs.project_slug }}
+          env-slug: ${{ steps.prepare.outputs.type }}
+          # Self-hosted domain
+          domain: ${{ secrets.INFISICAL_DOMAIN }}
 
       - name: Mint GitHub App token
         id: app-token
@@ -55,6 +80,11 @@ jobs:
           git config user.name  "Lascadesevices"
           git config user.email "services@lascade.com"
 
+      - name: Configure Vercel Project
+        run: |
+          mkdir .vercel
+          echo "${{ env.VERCEL_PROJECT_BASE64 }}" | base64 --decode > .vercel/project.json
+
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
@@ -72,9 +102,7 @@ jobs:
         env:
           VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
         run: |
-          BRANCH="${{ steps.prepare.outputs.branch }}"
-          echo "Deploying branch: $BRANCH"
-          if [[ "$BRANCH" == "main" || "$BRANCH" == "master" ]]; then
+          if [[ "${{ steps.prepare.outputs.type }}" == "prod" ]]; then
             echo "Production deploy"
             vercel deploy --token "$VERCEL_TOKEN" --prod --yes
           else
