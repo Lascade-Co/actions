@@ -48,16 +48,14 @@ jobs:
       - name: Import env secrets from Infisical
         uses: Infisical/secrets-action@v1.0.9
         with:
-          # Auth method: universal (client credentials)
           method: universal
           client-id: ${{ secrets.INFISICAL_CLIENT_ID }}
           client-secret: ${{ secrets.INFISICAL_CLIENT_SECRET }}
-          # Project / environment
           project-slug: ${{ steps.prepare.outputs.project_slug }}
           env-slug: ${{ steps.prepare.outputs.type }}
-          # Self-hosted domain
           domain: ${{ secrets.INFISICAL_DOMAIN }}
-          secret-path: Build
+          secret-path: /Build
+          export-type: env
 
       - name: Mint GitHub App token
         id: app-token
