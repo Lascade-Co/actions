@@ -1,0 +1,35 @@
+# Copy this action to which ever repo you want to deploy and set secrets.lascade.com
+# to send over the CENTRAL_DISPATCH_TOKEN. I started of thinking about reusable workflows
+# but turns out that is an overkill when you only have a single step.
+
+name: Request Central Vercel Deployment
+
+on:
+  workflow_dispatch:
+  # push: Uncomment this
+  # pull_request:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Determine branch name
+        id: vars
+        run: |
+          if [[ "${GITHUB_EVENT_NAME}" == "pull_request" ]]; then
+            echo "branch_name=${GITHUB_HEAD_REF}" >> $GITHUB_OUTPUT
+          elif [[ "${GITHUB_EVENT_NAME}" == "push" ]]; then
+            echo "branch_name=${GITHUB_REF_NAME}" >> $GITHUB_OUTPUT
+          else
+            # for workflow_dispatch, default to ref_name or manually provided input
+            echo "branch_name=${GITHUB_REF_NAME}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Dispatch to central repo
+        uses: peter-evans/repository-dispatch@v3
+        with:
+          token: ${{ secrets.CENTRAL_DISPATCH_TOKEN }}
+          repository: Lascade-Co/actions
+          event-type: vercel-commit
+          client-payload: >-
+            {"repo":${{ toJSON(github.repository) }}, "branch":${{ toJSON(github.head_ref) }} }

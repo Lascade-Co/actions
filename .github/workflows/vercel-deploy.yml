@@ -1,35 +1,70 @@
-# Copy this action to which ever repo you want to deploy and set secrets.lascade.com
-# to send over the CENTRAL_DISPATCH_TOKEN. I started of thinking about reusable workflows
-# but turns out that is an overkill when you only have a single step.
-
-name: Request Central Vercel Deployment
+name: Vercel Deploy Commit
 
 on:
+  repository_dispatch:
+    types: [vercel-commit]
   workflow_dispatch:
-  # push: Uncomment this
-  # pull_request:
+    inputs:
+      repo:
+        description: "Target repository (e.g. user/repo)"
+        required: true
+      branch:
+        description: "Branch to deploy (e.g. main)"
+        required: true
+      vercel_project_id:
+        description: "(Optional) Vercel project ID"
+        required: false
+      vercel_org_id:
+        description: "(Optional) Vercel organization ID"
+        required: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: vercel-commit-${{ github.event.client_payload.repo || github.event.inputs.repo }}-${{ github.event.client_payload.branch || github.event.inputs.branch }}
+  cancel-in-progress: true
 
 jobs:
-  deploy:
+  vercel-deploy:
     runs-on: ubuntu-latest
     steps:
-      - name: Determine branch name
-        id: vars
+      - name: Determine repo & branch
+        id: prepare
         run: |
-          if [[ "${GITHUB_EVENT_NAME}" == "pull_request" ]]; then
-            echo "branch_name=${GITHUB_HEAD_REF}" >> $GITHUB_OUTPUT
-          elif [[ "${GITHUB_EVENT_NAME}" == "push" ]]; then
-            echo "branch_name=${GITHUB_REF_NAME}" >> $GITHUB_OUTPUT
-          else
-            # for workflow_dispatch, default to ref_name or manually provided input
-            echo "branch_name=${GITHUB_REF_NAME}" >> $GITHUB_OUTPUT
-          fi
+          REPO="${{ github.event.client_payload.repo || github.event.inputs.repo }}"
+          BRANCH="${{ github.event.client_payload.branch || github.event.inputs.branch }}"
+          echo "repo=$REPO" >> "$GITHUB_OUTPUT"
+          echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
+          echo "owner=${REPO%%/*}" >> "$GITHUB_OUTPUT"
+          echo "name=${REPO#*/}" >> "$GITHUB_OUTPUT"
 
-      - name: Dispatch to central repo
-        uses: peter-evans/repository-dispatch@v3
+      - name: Mint GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v2
         with:
-          token: ${{ secrets.CENTRAL_DISPATCH_TOKEN }}
-          repository: Lascade-Co/actions
-          event-type: vercel-commit
-          client-payload: >-
-            {"repo":${{ toJSON(github.repository) }}, "branch":${{ toJSON(github.head_ref) }} }
+          app-id: ${{ secrets.CI_APP_ID }}
+          private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
+          owner: ${{ steps.prepare.outputs.owner }}
+          repositories: ${{ steps.prepare.outputs.name }}
+
+      - name: Checkout target repo @ branch
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ steps.prepare.outputs.repo }}
+          ref: ${{ steps.prepare.outputs.branch }}
+          token: ${{ steps.app-token.outputs.token }}
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Install Vercel CLI
+        run: npm install -g vercel
+
+      - name: Deploy to Vercel
+        run: vercel deploy --token $VERCEL_TOKEN
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
