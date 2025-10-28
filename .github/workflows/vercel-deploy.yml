@@ -69,6 +69,15 @@ jobs:
           git commit --allow-empty -m "chore: vercel deploy"
 
       - name: Deploy to Vercel
-        run: vercel deploy --token $VERCEL_TOKEN --yes
         env:
           VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+        run: |
+          BRANCH="${{ steps.prepare.outputs.branch }}"
+          echo "Deploying branch: $BRANCH"
+          if [[ "$BRANCH" == "main" || "$BRANCH" == "master" ]]; then
+            echo "Production deploy"
+            vercel deploy --token "$VERCEL_TOKEN" --prod --yes
+          else
+            echo "Preview deploy"
+            vercel deploy --token "$VERCEL_TOKEN" --yes
+          fi
