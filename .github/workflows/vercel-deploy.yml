@@ -31,7 +31,7 @@ jobs:
         run: |
           REPO="${{ github.event.client_payload.repo || github.event.inputs.repo }}"
           BRANCH="${{ github.event.client_payload.branch || github.event.inputs.branch }}"
-          SLUG="${{ github.event.client_payload.project_slug || github.event.inputs.repo.project_slug }}"
+          SLUG="${{ github.event.client_payload.project_slug || github.event.inputs.project_slug }}"
           
           echo "repo=$REPO" >> "$GITHUB_OUTPUT"
           echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
