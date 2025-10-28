@@ -42,6 +42,11 @@ jobs:
           owner: ${{ steps.prepare.outputs.owner }}
           repositories: ${{ steps.prepare.outputs.name }}
 
+      - name: Configure git identity
+        run: |
+          git config user.name  "Lascadesevices"
+          git config user.email "services@lascade.com"
+
       - name: Checkout target repo @ branch
         uses: actions/checkout@v4
         with:
@@ -57,6 +62,11 @@ jobs:
 
       - name: Install Vercel CLI
         run: npm install -g vercel
+
+      - name: Create empty commit
+        id: commit
+        run: |
+          git commit --allow-empty -m "chore: vercel deploy"
 
       - name: Deploy to Vercel
         run: vercel deploy --token $VERCEL_TOKEN --yes
