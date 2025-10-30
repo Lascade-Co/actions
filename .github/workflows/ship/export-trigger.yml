@@ -1,0 +1,38 @@
+name: "Ship Export Trigger"
+
+on:
+  # Allow other workflows to call this trigger and provide a token
+  workflow_call:
+    secrets:
+      central_dispatch_token:
+        required: true
+  # Manual runs
+  workflow_dispatch:
+  # Nightly schedule at 00:00 UTC
+  schedule:
+    - cron: "0 0 * * *"
+
+permissions:
+  contents: write
+
+jobs:
+  trigger-export:
+    runs-on: ubuntu-latest
+    concurrency:
+      group: ship-export-${{ matrix.environment }}
+      cancel-in-progress: true
+    strategy:
+      fail-fast: false
+      matrix:
+        environment: [staging, prod]
+    steps:
+      - name: Dispatch to central repo (Ship Export)
+        uses: peter-evans/repository-dispatch@v3
+        with:
+          token: ${{ secrets.central_dispatch_token || secrets.GITHUB_TOKEN }}
+          repository: Lascade-Co/actions
+          event-type: ship-export
+          client-payload: >-
+            {
+              "env_slug": ${{ toJSON(matrix.environment) }}
+            }
