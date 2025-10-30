@@ -1,0 +1,248 @@
+name: Export Ships Data
+
+on:
+  schedule:
+    # Run every 1 hours
+    - cron: "0 */1 * * *"
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Environment to run against"
+        required: true
+        default: "all"
+        type: choice
+        options:
+          - all
+          - staging
+          - production
+      batch_size:
+        description: "Batch size for processing records"
+        required: false
+        default: "1000"
+        type: string
+
+env:
+  SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+
+jobs:
+  set-env:
+    runs-on: ubuntu-latest
+    outputs:
+      run_staging: ${{ steps.set-env.outputs.run_staging }}
+      run_production: ${{ steps.set-env.outputs.run_production }}
+      batch_size: ${{ steps.set-env.outputs.batch_size }}
+    steps:
+      - name: Set environment variables
+        id: set-env
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            case "${{ github.event.inputs.environment }}" in
+              prod|production)
+                echo "run_production=true" >> $GITHUB_OUTPUT
+                echo "run_staging=false" >> $GITHUB_OUTPUT
+                ;;
+              staging)
+                echo "run_staging=true" >> $GITHUB_OUTPUT
+                echo "run_production=false" >> $GITHUB_OUTPUT
+                ;;
+              all)
+                echo "run_staging=true" >> $GITHUB_OUTPUT
+                echo "run_production=true" >> $GITHUB_OUTPUT
+                ;;
+            esac
+          else
+            # For scheduled runs, run on both environments
+            echo "run_staging=true" >> $GITHUB_OUTPUT
+            echo "run_production=true" >> $GITHUB_OUTPUT
+          fi
+          
+          # Set batch size
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" && "${{ github.event.inputs.batch_size }}" != "" ]]; then
+            echo "batch_size=${{ github.event.inputs.batch_size }}" >> $GITHUB_OUTPUT
+          else
+            echo "batch_size=1000" >> $GITHUB_OUTPUT
+          fi
+
+  export-staging:
+    needs: set-env
+    if: ${{ needs.set-env.outputs.run_staging == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: "recursive"
+
+      - name: Import env secrets from Infisical
+        uses: Infisical/secrets-action@v1.0.9
+        with:
+          method: universal
+          client-id: ${{ secrets.INFISICAL_CLIENT_ID }}
+          client-secret: ${{ secrets.INFISICAL_CLIENT_SECRET }}
+          project-slug: marine-ship-export
+          env-slug: staging
+          domain: ${{ secrets.INFISICAL_DOMAIN }}
+          export-type: file
+          file-output-path: /.env
+
+      - name: Extract SSH Key
+        id: extract-secrets
+        run: |
+          source .env
+          echo "SSH_PRIVATE_KEY=$DIGITAL_OCEAN_SSH_KEY" >> "$GITHUB_OUTPUT"
+
+      - name: Create SSH key
+        run: |
+          mkdir -p ~/.ssh/
+          echo "${{ steps.extract-secrets.outputs.SSH_PRIVATE_KEY }}" > ~/.ssh/private.key
+          chmod 600 ~/.ssh/private.key
+
+      - name: Add staging host to known hosts
+        run: ssh-keyscan -H "staging.ship.lascade.com" >> ~/.ssh/known_hosts
+
+      - name: Export Ships Data (Staging)
+        run: |
+          echo "Exporting ships data on staging..."
+          ssh -i ~/.ssh/private.key root@staging.ship.lascade.com "shell server run python manage.py export_data --type ships --batch-size ${{ needs.set-env.outputs.batch_size }}"
+          echo "Export completed on staging"
+
+  export-production:
+    needs: set-env
+    if: ${{ needs.set-env.outputs.run_production == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: "recursive"
+
+      - name: Import env secrets from Infisical
+        uses: Infisical/secrets-action@v1.0.9
+        with:
+          method: universal
+          client-id: ${{ secrets.INFISICAL_CLIENT_ID }}
+          client-secret: ${{ secrets.INFISICAL_CLIENT_SECRET }}
+          project-slug: marine-ship-export
+          env-slug: production
+          domain: ${{ secrets.INFISICAL_DOMAIN }}
+          export-type: file
+          file-output-path: /.env
+
+      - name: Extract SSH Key
+        id: extract-secrets
+        run: |
+          source .env
+          echo "SSH_PRIVATE_KEY=$DIGITAL_OCEAN_SSH_KEY" >> "$GITHUB_OUTPUT"
+
+      - name: Create SSH key
+        run: |
+          mkdir -p ~/.ssh/
+          echo "${{ steps.extract-secrets.outputs.SSH_PRIVATE_KEY }}" > ~/.ssh/private.key
+          chmod 600 ~/.ssh/private.key
+
+      - name: Add production host to known hosts
+        run: |
+          ssh-keyscan -H "ship.api.lascade.com" >> ~/.ssh/known_hosts || echo "Warning: Could not resolve production host"
+
+      - name: Export Ships Data (Production)
+        run: |
+          echo "Exporting ships data on production..."
+          ssh -i ~/.ssh/private.key root@ship.api.lascade.com "shell server run python manage.py export_data --type ships --batch-size ${{ needs.set-env.outputs.batch_size }}"
+          echo "Export completed on production"
+
+  notify-slack-on-failure:
+    needs: [export-staging, export-production]
+    if: ${{ always() && (needs.export-staging.result == 'failure' || needs.export-production.result == 'failure') }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Import env secrets from Infisical
+        uses: Infisical/secrets-action@v1.0.9
+        with:
+          method: universal
+          client-id: ${{ secrets.INFISICAL_CLIENT_ID }}
+          client-secret: ${{ secrets.INFISICAL_CLIENT_SECRET }}
+          project-slug: marine-ship-export
+          env-slug: production
+          domain: ${{ secrets.INFISICAL_DOMAIN }}
+          export-type: file
+          file-output-path: /.env
+
+      - name: Extract Slack Webhook
+        id: extract-slack
+        run: |
+          source .env
+          echo "SLACK_WEBHOOK_URL=$SLACK_WEBHOOK_URL" >> "$GITHUB_OUTPUT"
+
+      - name: Determine failed environments
+        id: determine-failures
+        run: |
+          FAILED_ENVS=""
+          if [[ "${{ needs.export-staging.result }}" == "failure" ]]; then
+            FAILED_ENVS="Staging"
+          fi
+          
+          if [[ "${{ needs.export-production.result }}" == "failure" ]]; then
+            if [[ -n "$FAILED_ENVS" ]]; then
+              FAILED_ENVS="$FAILED_ENVS and Production"
+            else
+              FAILED_ENVS="Production"
+            fi
+          fi
+          
+          echo "failed_envs=$FAILED_ENVS" >> $GITHUB_OUTPUT
+          
+          # Get current timestamp
+          TIMESTAMP=$(date -u +"%Y-%m-%d %H:%M:%S UTC")
+          echo "timestamp=$TIMESTAMP" >> $GITHUB_OUTPUT
+
+      - name: Send Slack notification
+        uses: slackapi/slack-github-action@v1.25.0
+        with:
+          payload: |
+            {
+              "blocks": [
+                {
+                  "type": "header",
+                  "text": {
+                    "type": "plain_text",
+                    "text": "🚨 Export Ships Data Workflow Failed",
+                    "emoji": true
+                  }
+                },
+                {
+                  "type": "section",
+                  "fields": [
+                    {
+                      "type": "mrkdwn",
+                      "text": "*Environment:*\n${{ steps.determine-failures.outputs.failed_envs }}"
+                    },
+                    {
+                      "type": "mrkdwn",
+                      "text": "*Time:*\n${{ steps.determine-failures.outputs.timestamp }}"
+                    }
+                  ]
+                },
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "*Workflow:*\n<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Workflow Run>"
+                  }
+                },
+                {
+                  "type": "divider"
+                },
+                {
+                  "type": "context",
+                  "elements": [
+                    {
+                      "type": "mrkdwn",
+                      "text": "Run ID: ${{ github.run_id }} | Triggered by: ${{ github.event_name }} | Repo: ${{ github.repository }}"
+                    }
+                  ]
+                }
+              ]
+            }
+        env:
+          SLACK_WEBHOOK_TYPE: INCOMING_WEBHOOK
+          SLACK_WEBHOOK_URL: ${{ steps.extract-slack.outputs.SLACK_WEBHOOK_URL }}
