@@ -3,17 +3,6 @@ name: Vercel Deploy
 on:
   repository_dispatch:
     types: [vercel-commit]
-  workflow_dispatch:
-    inputs:
-      repo:
-        description: "Target repository (e.g. user/repo)"
-        required: true
-      branch:
-        description: "Branch to deploy (e.g. main)"
-        required: true
-      project_slug:
-        description: "The inficial project slug"
-        required: true
 
 permissions:
   contents: read
@@ -29,9 +18,9 @@ jobs:
       - name: Determine repo & branch
         id: prepare
         run: |
-          REPO="${{ github.event.client_payload.repo || github.event.inputs.repo }}"
-          BRANCH="${{ github.event.client_payload.branch || github.event.inputs.branch }}"
-          SLUG="${{ github.event.client_payload.project_slug || github.event.inputs.project_slug }}"
+          REPO="${{ github.event.client_payload.repo }}"
+          BRANCH="${{ github.event.client_payload.branch }}"
+          SLUG="${{ github.event.client_payload.project_slug }}"
           
           echo "repo=$REPO" >> "$GITHUB_OUTPUT"
           echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
