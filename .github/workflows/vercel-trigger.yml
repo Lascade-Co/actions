@@ -5,25 +5,20 @@
 name: Request Central Vercel Deployment
 
 on:
-  workflow_dispatch:
-  # push: Uncomment this
-  # pull_request:
+  # Uncomment this
+#  push:
+
+permissions:
+  pull-requests: read
+  contents: read
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
     steps:
-      - name: Determine branch name
-        id: vars
-        run: |
-          if [[ "${GITHUB_EVENT_NAME}" == "pull_request" ]]; then
-            echo "branch_name=${GITHUB_HEAD_REF}" >> $GITHUB_OUTPUT
-          elif [[ "${GITHUB_EVENT_NAME}" == "push" ]]; then
-            echo "branch_name=${GITHUB_REF_NAME}" >> $GITHUB_OUTPUT
-          else
-            # for workflow_dispatch, default to ref_name or manually provided input
-            echo "branch_name=${GITHUB_REF_NAME}" >> $GITHUB_OUTPUT
-          fi
+      - name: Find open PR for this branch
+        id: pr
+        uses: jwalton/gh-find-current-pr@v1
 
       - name: Dispatch to central repo
         uses: peter-evans/repository-dispatch@v3
@@ -34,6 +29,7 @@ jobs:
           client-payload: >-
             {
               "repo":${{ toJSON(github.repository) }}, 
-              "branch":${{ toJSON(github.head_ref) }},
+              "branch":${{ toJSON(github.ref_name) }},
+              "pr_number":${{ toJSON(steps.pr.outputs.number) }},
               "project_slug":"your project slug"
             }

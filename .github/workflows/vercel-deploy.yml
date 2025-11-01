@@ -91,7 +91,7 @@ jobs:
           
           if [[ "${{ steps.prepare.outputs.type }}" == "prod" ]]; then
             echo "Production deploy"
-            $env_flag="--prod"
+            env_flag="--prod"
           fi
           
           URL=$(vercel deploy --token "$VERCEL_TOKEN" $env_flag --prebuilt --yes)
