@@ -29,6 +29,7 @@ jobs:
           
           if [[ "$BRANCH" == "main" || "$BRANCH" == "master" ]]; then
             echo "type=prod" >> "$GITHUB_OUTPUT"
+            echo "build_flag=--prod" >> "$GITHUB_OUTPUT"
           else
             echo "type=staging" >> "$GITHUB_OUTPUT"
           fi
@@ -80,7 +81,7 @@ jobs:
         run: npm install -g vercel
 
       - name: Build project
-        run: vercel build --token "$VERCEL_TOKEN" --yes
+        run: vercel build --token "$VERCEL_TOKEN" ${{ steps.prepare.outputs.build_flag }} --yes
         env:
           VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
 
@@ -89,14 +90,7 @@ jobs:
         env:
           VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
         run: |
-          env_flag=""
-          
-          if [[ "${{ steps.prepare.outputs.type }}" == "prod" ]]; then
-            echo "Production deploy"
-            env_flag="--prod"
-          fi
-          
-          URL=$(vercel deploy --token "$VERCEL_TOKEN" $env_flag --prebuilt --yes)
+          URL=$(vercel deploy --token "$VERCEL_TOKEN" ${{ steps.prepare.outputs.build_flag }} --prebuilt --yes)
           echo "deploy_url=$URL" >> "$GITHUB_OUTPUT"
 
       - name: Comment on PR (if applicable)
