@@ -80,7 +80,7 @@ jobs:
         run: npm install -g vercel
 
       - name: Build project
-        run: vercel build
+        run: vercel build --yes
 
       - name: Deploy to Vercel
         id: deploy
