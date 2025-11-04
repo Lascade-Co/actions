@@ -87,10 +87,6 @@ jobs:
         env:
           SSH_PRIVATE_KEY: ${{ secrets.DIGITAL_OCEAN_SSH_KEY }}
 
-      - uses: rohittp0/wiregaurd@v2
-        with:
-          config: ${{ secrets.WG_CONFIG_BASE64 }}
-
       # Import secrets from Infisical
       - name: Import env secrets from Infisical
         uses: Infisical/secrets-action@v1.0.9
@@ -115,6 +111,11 @@ jobs:
           IP=$(osh "ubuntu@${HOST}" --ip)
           echo "host=$HOST" >> "$GITHUB_OUTPUT"
           echo "ip=$IP" >> "$GITHUB_OUTPUT"
+
+      - uses: rohittp0/wiregaurd@v3
+        with:
+          config: ${{ secrets.WG_CONFIG_BASE64 }}
+          ips: "${{ steps.extract.outputs.ip }}"
 
       - name: Add SSH key to known hosts
         run: ssh-keyscan -H "${{ steps.extract.outputs.ip }}" >> ~/.ssh/known_hosts
