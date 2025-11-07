@@ -156,6 +156,9 @@ jobs:
         env:
           HOST: ${{ steps.extract.outputs.host }}
 
+      - name: Collect Static
+        run: ./s.sh "shell server run python manage.py collectstatic --no-input"
+
       - name: Run migrations
         run: ./s.sh "shell server run python manage.py migrate"
 
