@@ -152,98 +152,18 @@ jobs:
         env:
           HOST: ${{ steps.extract.outputs.host }}
 
-      - name: Discover Docker Configuration
-        id: docker-config
-        run: |
-          set -euo pipefail
-
-          echo "Discovering Docker configuration..."
-
-          # Get the running container info (look for Django/web container)
-          CONTAINER_INFO=$(./s.sh "docker ps --filter 'name=server' --format '{{.Image}} {{.Names}} {{.Networks}}' | head -1")
-
-          if [ -z "$CONTAINER_INFO" ]; then
-            # Try alternative container names
-            CONTAINER_INFO=$(./s.sh "docker ps --filter 'name=web' --format '{{.Image}} {{.Names}} {{.Networks}}' | head -1")
-          fi
-
-          if [ -z "$CONTAINER_INFO" ]; then
-            # Try without filter, get first running container
-            CONTAINER_INFO=$(./s.sh "docker ps --format '{{.Image}} {{.Names}} {{.Networks}}' | head -1")
-          fi
-
-          if [ -z "$CONTAINER_INFO" ]; then
-            echo "No running containers found"
-            exit 1
-          fi
-
-          echo "Found container: $CONTAINER_INFO"
-
-          # Extract image, name, and network
-          IMAGE=$(echo $CONTAINER_INFO | awk '{print $1}')
-          NAME=$(echo $CONTAINER_INFO | awk '{print $2}')
-          NETWORK=$(echo $CONTAINER_INFO | awk '{print $3}')
-
-          echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
-          echo "name=$NAME" >> "$GITHUB_OUTPUT"
-          echo "network=$NETWORK" >> "$GITHUB_OUTPUT"
-
-          # Get volume mounts from the container
-          VOLUMES=$(./s.sh "docker inspect $NAME --format '{{range .Mounts}} -v {{.Source}}:{{.Destination}}{{if not .RW}}:ro{{end}}{{end}}'")
-          echo "volumes=$VOLUMES" >> "$GITHUB_OUTPUT"
-
       - name: Run Collect Static in Docker Container
         run: |
           set -euo pipefail
-
-          echo "Running collectstatic in temporary Docker container..."
-
-          # Build the docker run command with proper volume mounts
-          # Using --network host since the container network is not attachable
-          # Also setting working directory and using the container's entrypoint
-          CMD="docker run --rm \
-            --user root \
-            --network host \
-            -w /usr/src/app \
-            --entrypoint python \
-            -v /home/ubuntu/${{ steps.repo.outputs.name }}/.env:/app/.env:ro"
-
-          # Add volumes if any
-          if [ -n "${{ steps.docker-config.outputs.volumes }}" ]; then
-            CMD="$CMD ${{ steps.docker-config.outputs.volumes }}"
-          fi
-
-          # Add the image and command
-          CMD="$CMD ${{ steps.docker-config.outputs.image }} manage.py collectstatic --no-input"
-
-          echo "Executing: $CMD"
-          ./s.sh "$CMD"
+          echo "Running collectstatic in the running Docker container..."
+          ./s.sh "shell server run bash -c 'chown -R django:django /usr/src/app/staticfiles && chmod -R 755 /usr/src/app/staticfiles'"
+          ./s.sh "shell server run python manage.py collectstatic --no-input"
 
       - name: Run Migrations in Docker Container
         run: |
           set -euo pipefail
-
-          echo "Running migrations in temporary Docker container..."
-
-          # Build the docker run command with proper volume mounts
-          # Using --network host since the container network is not attachable
-          # Also setting working directory and using the container's entrypoint
-          CMD="docker run --rm \
-            --network host \
-            -w /usr/src/app \
-            --entrypoint python \
-            -v /home/ubuntu/${{ steps.repo.outputs.name }}/.env:/app/.env:ro"
-
-          # Add volumes if any
-          if [ -n "${{ steps.docker-config.outputs.volumes }}" ]; then
-            CMD="$CMD ${{ steps.docker-config.outputs.volumes }}"
-          fi
-
-          # Add the image and command
-          CMD="$CMD ${{ steps.docker-config.outputs.image }} manage.py migrate"
-
-          echo "Executing: $CMD"
-          ./s.sh "$CMD"
+          echo "Running migrations in the running Docker container..."
+          ./s.sh "shell server run python manage.py migrate"
 
       - name: Decide restart targets
         id: decide
