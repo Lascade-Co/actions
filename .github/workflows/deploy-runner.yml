@@ -62,7 +62,7 @@ jobs:
         uses: peter-evans/create-or-update-comment@v4
         id: status
         with:
-          edit-mode: 'replace'
+          edit-mode: "replace"
           token: ${{ steps.app-token.outputs.token }}
           repository: ${{ github.event.client_payload.repo }}
           issue-number: ${{ github.event.client_payload.pr }}
@@ -87,20 +87,15 @@ jobs:
         env:
           SSH_PRIVATE_KEY: ${{ secrets.DIGITAL_OCEAN_SSH_KEY }}
 
-      # Import secrets from Infisical
       - name: Import env secrets from Infisical
         uses: Infisical/secrets-action@v1.0.9
         with:
-          # Auth method: universal (client credentials)
           method: universal
           client-id: ${{ secrets.INFISICAL_CLIENT_ID }}
           client-secret: ${{ secrets.INFISICAL_CLIENT_SECRET }}
-          # Project / environment
           project-slug: ${{ github.event.client_payload.project_slug }}
           env-slug: ${{ github.event.client_payload.env_slug }}
-          # Self-hosted domain
           domain: ${{ secrets.INFISICAL_DOMAIN }}
-          # Export to a .env file in the workspace
           export-type: file
           file-output-path: /.env
 
@@ -112,7 +107,8 @@ jobs:
           echo "host=$HOST" >> "$GITHUB_OUTPUT"
           echo "ip=$IP" >> "$GITHUB_OUTPUT"
 
-      - uses: rohittp0/wiregaurd@v3
+      - name: Wireguard
+        uses: rohittp0/wiregaurd@v3
         with:
           config: ${{ secrets.WG_CONFIG_BASE64 }}
           ips: "${{ steps.extract.outputs.ip }}"
@@ -156,11 +152,13 @@ jobs:
         env:
           HOST: ${{ steps.extract.outputs.host }}
 
-      - name: Collect Static
-        run: ./s.sh "shell server run python manage.py collectstatic --no-input"
-
-      - name: Run migrations
-        run: ./s.sh "shell server run python manage.py migrate"
+      - name: Run Django Operations in Docker
+        uses: ./.github/actions/docker-django-ops
+        with:
+          host: ${{ steps.extract.outputs.host }}
+          project_folder: ${{ steps.repo.outputs.name }}
+          ssh_script: "./s.sh"
+          operations: "collectstatic,migrate"
 
       - name: Decide restart targets
         id: decide
@@ -194,7 +192,7 @@ jobs:
           repository: ${{ github.event.client_payload.repo }}
           issue-number: ${{ github.event.client_payload.pr }}
           comment-id: ${{ steps.status.outputs.comment-id }}
-          edit-mode: 'replace'
+          edit-mode: "replace"
           body: |
             <!-- deploy-pr-${{ github.event.client_payload.env_slug }} -->
             ✅ Branch Deployed to ${{ github.event.client_payload.env_slug }}
@@ -208,10 +206,8 @@ jobs:
           token: ${{ steps.app-token.outputs.token }}
           repository: ${{ github.event.client_payload.repo }}
           issue-number: ${{ github.event.client_payload.pr }}
-          edit-mode: 'replace'
+          edit-mode: "replace"
           body: |
             <!-- deploy-pr-${{ github.event.client_payload.env_slug }} -->
             ❌ Deploy failed for ${{ github.event.client_payload.env_slug }}
             [Check logs](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
-
-
