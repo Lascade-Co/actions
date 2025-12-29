@@ -17,17 +17,18 @@ inputs:
 runs:
   using: "composite"
   steps:
-    - name: Create SSH Script
+    - name: Verify SSH Script
       shell: bash
       run: |
-        # Create the SSH script if it doesn't exist
-        if [ ! -f "s.sh" ]; then
-          echo "Creating SSH script..."
-          # Extract HOST from the ssh_script path or use a default approach
-          # The ssh_script input should be something like "./s.sh" with HOST set in env
-          echo "ssh -i ~/.ssh/private.key \"ubuntu@$HOST\" \$@" > s.sh
-          chmod +x s.sh
+        # Check if SSH script exists
+        if [ ! -f "$SSH_SCRIPT" ]; then
+          echo "Error: SSH script not found at $SSH_SCRIPT"
+          echo "This action expects the SSH script to be created by the calling workflow"
+          exit 1
         fi
+        echo "SSH script found at $SSH_SCRIPT"
+      env:
+        SSH_SCRIPT: ${{ inputs.ssh_script }}
 
     - name: Discover Docker Configuration
       id: docker-config
@@ -68,11 +69,11 @@ runs:
         echo "network=$NETWORK" >> "$GITHUB_OUTPUT"
 
         # Get volume mounts from the container
-        VOLUMES=$($SSH_SCRIPT "docker inspect $NAME --format '{{range .Mounts}}{{if not .RW}}{{.Source}}:{{.Destination}}:ro {{else}}{{.Source}}:{{.Destination}} {{end}}{{end}}'")
+        VOLUMES=$($SSH_SCRIPT "docker inspect $NAME --format '{{range .Mounts}} -v {{.Source}}:{{.Destination}}{{if not .RW}}:ro{{end}}{{end}}'")
         echo "volumes=$VOLUMES" >> "$GITHUB_OUTPUT"
 
         # Get environment file path
-        ENV_FILE="$HOST:$PROJECT_FOLDER/.env"
+        ENV_FILE="/home/ubuntu/$PROJECT_FOLDER/.env"
         echo "env_file=$ENV_FILE" >> "$GITHUB_OUTPUT"
       env:
         HOST: ${{ inputs.host }}
@@ -95,7 +96,7 @@ runs:
 
         # Add volumes if any
         if [ -n "${{ steps.docker-config.outputs.volumes }}" ]; then
-          CMD="$CMD -v ${{ steps.docker-config.outputs.volumes }}"
+          CMD="$CMD ${{ steps.docker-config.outputs.volumes }}"
         fi
 
         # Add the image and command
@@ -121,7 +122,7 @@ runs:
 
         # Add volumes if any
         if [ -n "${{ steps.docker-config.outputs.volumes }}" ]; then
-          CMD="$CMD -v ${{ steps.docker-config.outputs.volumes }}"
+          CMD="$CMD ${{ steps.docker-config.outputs.volumes }}"
         fi
 
         # Add the image and command

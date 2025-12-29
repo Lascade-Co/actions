@@ -155,7 +155,7 @@ jobs:
       - name: Run Django Operations in Docker
         uses: Lascade-Co/actions/.github/actions/docker-django-ops@main
         with:
-          host: ${{ steps.extract.outputs.host }}
+          host: ${{ steps.extract.outputs.ip }}
           project_folder: ${{ steps.repo.outputs.name }}
           ssh_script: "./s.sh"
           operations: "collectstatic,migrate"
