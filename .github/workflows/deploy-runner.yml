@@ -152,6 +152,9 @@ jobs:
         env:
           HOST: ${{ steps.extract.outputs.host }}
 
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
       - name: Run Django Operations in Docker
         uses: ./.github/actions/docker-django-ops
         with:
