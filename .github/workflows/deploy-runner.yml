@@ -156,7 +156,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Run Django Operations in Docker
-        uses: ./.github/actions/docker-django-ops
+        uses: Lascade-Co/actions/.github/actions/docker-django-ops@main
         with:
           host: ${{ steps.extract.outputs.host }}
           project_folder: ${{ steps.repo.outputs.name }}
