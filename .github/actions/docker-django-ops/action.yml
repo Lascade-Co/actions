@@ -17,6 +17,18 @@ inputs:
 runs:
   using: "composite"
   steps:
+    - name: Create SSH Script
+      shell: bash
+      run: |
+        # Create the SSH script if it doesn't exist
+        if [ ! -f "s.sh" ]; then
+          echo "Creating SSH script..."
+          # Extract HOST from the ssh_script path or use a default approach
+          # The ssh_script input should be something like "./s.sh" with HOST set in env
+          echo "ssh -i ~/.ssh/private.key \"ubuntu@$HOST\" \$@" > s.sh
+          chmod +x s.sh
+        fi
+
     - name: Discover Docker Configuration
       id: docker-config
       shell: bash
