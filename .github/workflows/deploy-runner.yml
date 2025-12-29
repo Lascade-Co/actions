@@ -199,9 +199,10 @@ jobs:
           echo "Running collectstatic in temporary Docker container..."
 
           # Build the docker run command with proper volume mounts
+          # Using --network host since the container network is not attachable
           CMD="docker run --rm \
             --user root \
-            --network ${{ steps.docker-config.outputs.network }} \
+            --network host \
             -v /home/ubuntu/${{ steps.repo.outputs.name }}/.env:/app/.env:ro"
 
           # Add volumes if any
@@ -222,8 +223,9 @@ jobs:
           echo "Running migrations in temporary Docker container..."
 
           # Build the docker run command with proper volume mounts
+          # Using --network host since the container network is not attachable
           CMD="docker run --rm \
-            --network ${{ steps.docker-config.outputs.network }} \
+            --network host \
             -v /home/ubuntu/${{ steps.repo.outputs.name }}/.env:/app/.env:ro"
 
           # Add volumes if any
