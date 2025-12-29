@@ -200,9 +200,12 @@ jobs:
 
           # Build the docker run command with proper volume mounts
           # Using --network host since the container network is not attachable
+          # Also setting working directory and using the container's entrypoint
           CMD="docker run --rm \
             --user root \
             --network host \
+            -w /usr/src/app \
+            --entrypoint python \
             -v /home/ubuntu/${{ steps.repo.outputs.name }}/.env:/app/.env:ro"
 
           # Add volumes if any
@@ -211,7 +214,7 @@ jobs:
           fi
 
           # Add the image and command
-          CMD="$CMD ${{ steps.docker-config.outputs.image }} python manage.py collectstatic --no-input"
+          CMD="$CMD ${{ steps.docker-config.outputs.image }} manage.py collectstatic --no-input"
 
           echo "Executing: $CMD"
           ./s.sh "$CMD"
@@ -224,8 +227,11 @@ jobs:
 
           # Build the docker run command with proper volume mounts
           # Using --network host since the container network is not attachable
+          # Also setting working directory and using the container's entrypoint
           CMD="docker run --rm \
             --network host \
+            -w /usr/src/app \
+            --entrypoint python \
             -v /home/ubuntu/${{ steps.repo.outputs.name }}/.env:/app/.env:ro"
 
           # Add volumes if any
@@ -234,7 +240,7 @@ jobs:
           fi
 
           # Add the image and command
-          CMD="$CMD ${{ steps.docker-config.outputs.image }} python manage.py migrate"
+          CMD="$CMD ${{ steps.docker-config.outputs.image }} manage.py migrate"
 
           echo "Executing: $CMD"
           ./s.sh "$CMD"
