@@ -152,13 +152,90 @@ jobs:
         env:
           HOST: ${{ steps.extract.outputs.host }}
 
-      - name: Run Django Operations in Docker
-        uses: Lascade-Co/actions/.github/actions/docker-django-ops@main
-        with:
-          host: ${{ steps.extract.outputs.ip }}
-          project_folder: ${{ steps.repo.outputs.name }}
-          ssh_script: "./s.sh"
-          operations: "collectstatic,migrate"
+      - name: Discover Docker Configuration
+        id: docker-config
+        run: |
+          set -euo pipefail
+
+          echo "Discovering Docker configuration..."
+
+          # Get the running container info (look for Django/web container)
+          CONTAINER_INFO=$(./s.sh "docker ps --filter 'name=server' --format '{{.Image}} {{.Names}} {{.Networks}}' | head -1")
+
+          if [ -z "$CONTAINER_INFO" ]; then
+            # Try alternative container names
+            CONTAINER_INFO=$(./s.sh "docker ps --filter 'name=web' --format '{{.Image}} {{.Names}} {{.Networks}}' | head -1")
+          fi
+
+          if [ -z "$CONTAINER_INFO" ]; then
+            # Try without filter, get first running container
+            CONTAINER_INFO=$(./s.sh "docker ps --format '{{.Image}} {{.Names}} {{.Networks}}' | head -1")
+          fi
+
+          if [ -z "$CONTAINER_INFO" ]; then
+            echo "No running containers found"
+            exit 1
+          fi
+
+          echo "Found container: $CONTAINER_INFO"
+
+          # Extract image, name, and network
+          IMAGE=$(echo $CONTAINER_INFO | awk '{print $1}')
+          NAME=$(echo $CONTAINER_INFO | awk '{print $2}')
+          NETWORK=$(echo $CONTAINER_INFO | awk '{print $3}')
+
+          echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
+          echo "name=$NAME" >> "$GITHUB_OUTPUT"
+          echo "network=$NETWORK" >> "$GITHUB_OUTPUT"
+
+          # Get volume mounts from the container
+          VOLUMES=$(./s.sh "docker inspect $NAME --format '{{range .Mounts}} -v {{.Source}}:{{.Destination}}{{if not .RW}}:ro{{end}}{{end}}'")
+          echo "volumes=$VOLUMES" >> "$GITHUB_OUTPUT"
+
+      - name: Run Collect Static in Docker Container
+        run: |
+          set -euo pipefail
+
+          echo "Running collectstatic in temporary Docker container..."
+
+          # Build the docker run command with proper volume mounts
+          CMD="docker run --rm \
+            --user root \
+            --network ${{ steps.docker-config.outputs.network }} \
+            -v /home/ubuntu/${{ steps.repo.outputs.name }}/.env:/app/.env:ro"
+
+          # Add volumes if any
+          if [ -n "${{ steps.docker-config.outputs.volumes }}" ]; then
+            CMD="$CMD ${{ steps.docker-config.outputs.volumes }}"
+          fi
+
+          # Add the image and command
+          CMD="$CMD ${{ steps.docker-config.outputs.image }} python manage.py collectstatic --no-input"
+
+          echo "Executing: $CMD"
+          ./s.sh "$CMD"
+
+      - name: Run Migrations in Docker Container
+        run: |
+          set -euo pipefail
+
+          echo "Running migrations in temporary Docker container..."
+
+          # Build the docker run command with proper volume mounts
+          CMD="docker run --rm \
+            --network ${{ steps.docker-config.outputs.network }} \
+            -v /home/ubuntu/${{ steps.repo.outputs.name }}/.env:/app/.env:ro"
+
+          # Add volumes if any
+          if [ -n "${{ steps.docker-config.outputs.volumes }}" ]; then
+            CMD="$CMD ${{ steps.docker-config.outputs.volumes }}"
+          fi
+
+          # Add the image and command
+          CMD="$CMD ${{ steps.docker-config.outputs.image }} python manage.py migrate"
+
+          echo "Executing: $CMD"
+          ./s.sh "$CMD"
 
       - name: Decide restart targets
         id: decide
