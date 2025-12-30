@@ -133,17 +133,10 @@ jobs:
         run: ./s.sh "deploy ${{ github.event.client_payload.branch }}"
 
       - name: Run Collect Static in Docker Container
-        run: |
-          set -euo pipefail
-          echo "Running collectstatic in the running Docker container..."
-          ./s.sh "DOCKER_EXEC_USER=0 shell server run bash -lc 'set -euo pipefail; mkdir -p /usr/src/app/staticfiles; chown -R 10001:65533 /usr/src/app/staticfiles; chmod -R 755 /usr/src/app/staticfiles'"
-          ./s.sh "shell server run python manage.py collectstatic --no-input"
+        run: ./s.sh "shell server run python manage.py collectstatic --no-input"
 
       - name: Run Migrations in Docker Container
-        run: |
-          set -euo pipefail
-          echo "Running migrations in the running Docker container..."
-          ./s.sh "shell server run python manage.py migrate"
+        run: ./s.sh "shell server run python manage.py migrate"
 
       - name: Decide restart targets
         id: decide
