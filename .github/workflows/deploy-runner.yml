@@ -132,26 +132,6 @@ jobs:
       - name: Deploy
         run: ./s.sh "deploy ${{ github.event.client_payload.branch }}"
 
-      - name: Wait for server healthcheck
-        run: |
-          timeout=30
-          interval=2
-          elapsed=0
-          url="https://$HOST/healthcheck/"
-
-          until curl --fail --silent $url; do
-            if [ $elapsed -ge $timeout ]; then
-              echo "Healthcheck timed out after $timeout seconds"
-              exit 1
-            fi
-            echo "Waiting for healthcheck ($elapsed/$timeout)..."
-            sleep $interval
-            elapsed=$((elapsed + interval))
-          done
-          echo "Server is healthy."
-        env:
-          HOST: ${{ steps.extract.outputs.host }}
-
       - name: Run Collect Static in Docker Container
         run: |
           set -euo pipefail
@@ -189,6 +169,26 @@ jobs:
       - name: Restart celery
         if: ${{ steps.decide.outputs.celery == 'true' }}
         run: ./s.sh "shell celery restart"
+
+      - name: Wait for server healthcheck
+        run: |
+          timeout=30
+          interval=2
+          elapsed=0
+          url="https://$HOST/healthcheck/"
+
+          until curl --fail --silent $url; do
+            if [ $elapsed -ge $timeout ]; then
+              echo "Healthcheck timed out after $timeout seconds"
+              exit 1
+            fi
+            echo "Waiting for healthcheck ($elapsed/$timeout)..."
+            sleep $interval
+            elapsed=$((elapsed + interval))
+          done
+          echo "Server is healthy."
+        env:
+          HOST: ${{ steps.extract.outputs.host }}
 
       - name: Comment on PR With Success Status
         uses: peter-evans/create-or-update-comment@v4
