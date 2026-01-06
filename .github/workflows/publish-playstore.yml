@@ -103,10 +103,9 @@ jobs:
             const esc = s => s.replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
 
             const msg =
-              `<b>✅ Play Console draft created (Production)</b>\n\n` +
+              `<h1>✅ Play Console draft created (Production)</h1>\n\n` +
               `<b>App:</b> ${esc(appName)}\n` +
               `<b>Version:</b> ${esc(tag)}\n` +
-              `<b>Package:</b> <code>${esc(packageName)}</code>\n\n` +
               `<b>Play Console:</b> <a href="${playConsoleUrl}">Open release</a>\n` +
               `<b>GitHub Release:</b> <a href="${ghUrl}">${esc(tag)}</a>\n\n` +
               `<b>Release notes:</b>\n<pre>${esc(tgNotes)}</pre>\n\n` +
@@ -176,7 +175,7 @@ jobs:
           format: html
           disable_web_page_preview: true
           message: |
-            <b>❌ Play Store publish failed</b>
+            <h1>❌ Play Store publish failed</h1>
 
             <b>App:</b> ${{ github.event.client_payload.app_name }}
             <b>Package:</b> <code>${{ github.event.client_payload.package_name }}</code>
@@ -184,7 +183,6 @@ jobs:
             <b>Repo:</b> <code>${{ github.event.client_payload.repo }}</code>
             <b>Release ID:</b> <code>${{ github.event.client_payload.release_id }}</code>
 
-            <b>Workflow run:</b>
             <a href="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}">
               View logs
             </a>
