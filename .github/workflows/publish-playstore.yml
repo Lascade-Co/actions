@@ -103,7 +103,7 @@ jobs:
             const esc = s => s.replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
 
             const msg =
-              `<h1>✅ Play Console draft created (Production)</h1>\n\n` +
+              `<b>✅ Play Console draft created (Production)</b>\n\n` +
               `<b>App:</b> ${esc(appName)}\n` +
               `<b>Version:</b> ${esc(tag)}\n` +
               `<b>Play Console:</b> <a href="${playConsoleUrl}">Open release</a>\n` +
@@ -175,7 +175,7 @@ jobs:
           format: html
           disable_web_page_preview: true
           message: |
-            <h1>❌ Play Store publish failed</h1>
+            <b>❌ Play Store publish failed</b>
 
             <b>App:</b> ${{ github.event.client_payload.app_name }}
             <b>Package:</b> <code>${{ github.event.client_payload.package_name }}</code>
