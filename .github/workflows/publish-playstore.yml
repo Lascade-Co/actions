@@ -110,7 +110,7 @@ jobs:
               `<b>Play Console:</b> <a href="${playConsoleUrl}">Open release</a>\n` +
               `<b>GitHub Release:</b> <a href="${ghUrl}">${esc(tag)}</a>\n\n` +
               `<b>Release notes:</b>\n<pre>${esc(tgNotes)}</pre>\n\n` +
-              `<i>Status: draft · not sent for review</i>`;
+              `<i>Status: draft </i>`;
 
             fs.writeFileSync('github_release_body.txt', msg, 'utf8');
 
@@ -156,7 +156,7 @@ jobs:
           track: production
           status: draft
           whatsNewDirectory: ${{ steps.meta.outputs.whatsnew_dir }}
-          changesNotSentForReview: true
+          userFraction: 0.99
 
       - name: Notify Telegram
         uses: appleboy/telegram-action@v1.0.1
@@ -166,3 +166,26 @@ jobs:
           format: html
           message_file: ${{ steps.meta.outputs.body_file }}
           disable_web_page_preview: true
+
+      - name: Notify Telegram (FAILURE)
+        if: failure()
+        continue-on-error: true
+        uses: appleboy/telegram-action@v1.0.1
+        with:
+          token: ${{ secrets.SUBSCRIPTION_TELEGRAM_TOKEN }}
+          to: ${{ secrets.SUBSCRIPTION_TELEGRAM_TO }}
+          format: html
+          disable_web_page_preview: true
+          message: |
+            <b>❌ Play Store publish failed</b>
+
+            <b>App:</b> ${{ github.event.client_payload.app_name }}
+            <b>Package:</b> <code>${{ github.event.client_payload.package_name }}</code>
+
+            <b>Repo:</b> <code>${{ github.event.client_payload.repo }}</code>
+            <b>Release ID:</b> <code>${{ github.event.client_payload.release_id }}</code>
+
+            <b>Workflow run:</b>
+            <a href="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}">
+              View logs
+            </a>
