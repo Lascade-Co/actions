@@ -174,9 +174,9 @@ jobs:
             <b>❌ Play Store publish failed</b>
 
             <b>App:</b> ${{ github.event.client_payload.app_name }}
-            <b>Package:</b> <code>${{ github.event.client_payload.package_name }}</code>
             <b>Repo:</b> <code>${{ github.event.client_payload.repo }}</code>
             <b>Release ID:</b> <code>${{ github.event.client_payload.release_id }}</code>
 
-            <b>Run:</b>
-            https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+            <a href="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}">
+              View logs
+            </a>
