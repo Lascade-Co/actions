@@ -16,6 +16,12 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 25
 
+    env:
+      # Hard requirements for this automation
+      TARGET_COUNTRY: BD
+      TARGET_FRACTION: "0.99"
+      TRACK: production
+
     steps:
       - name: Validate payload
         shell: bash
@@ -31,9 +37,10 @@ jobs:
         id: repo
         shell: bash
         run: |
+          set -euo pipefail
           FULL="${{ github.event.client_payload.repo }}"
           echo "owner=${FULL%%/*}" >> "$GITHUB_OUTPUT"
-          echo "name=${FULL#*/}" >> "$GITHUB_OUTPUT"
+          echo "name=${FULL#*/}"   >> "$GITHUB_OUTPUT"
 
       - name: Mint GitHub App token (target repo)
         id: app-token
@@ -44,7 +51,7 @@ jobs:
           owner: ${{ steps.repo.outputs.owner }}
           repositories: ${{ steps.repo.outputs.name }}
 
-      - name: Fetch GitHub Release + write notes + telegram message
+      - name: Fetch GitHub Release + write Play whatsnew (single locale)
         id: meta
         uses: actions/github-script@v8
         with:
@@ -57,25 +64,22 @@ jobs:
             const repo  = '${{ steps.repo.outputs.name }}';
             const releaseId = Number('${{ github.event.client_payload.release_id }}');
 
-            const appName = '${{ github.event.client_payload.app_name }}';
-            const packageName = '${{ github.event.client_payload.package_name }}';
-            const playConsoleUrl = '${{ github.event.client_payload.play_console_production_url }}';
-            const locale = '${{ github.event.client_payload.release_notes_locale || 'en-US' }}';
+            const locale = ('${{ github.event.client_payload.release_notes_locale || 'en-US' }}').trim();
 
             const sleep = ms => new Promise(r => setTimeout(r, ms));
 
+            // retry a bit until assets are visible
             let rel;
             for (let i = 0; i < 5; i++) {
               rel = await github.rest.repos.getRelease({ owner, repo, release_id: releaseId });
               const assets = rel.data.assets || [];
-              if (
-                assets.some(a => a.name.endsWith('.aab')) &&
-                assets.some(a => /native-debug-symbols.*\.zip$/i.test(a.name))
-              ) break;
+              const hasAab = assets.some(a => a.name.toLowerCase().endsWith('.aab'));
+              const hasSym = assets.some(a => /native-debug-symbols.*\.zip$/i.test(a.name));
+              if (hasAab && hasSym) break;
               await sleep(2000);
             }
 
-            const tag = rel.data.tag_name;
+            const tag = rel.data.tag_name || '';
             const ghUrl = rel.data.html_url;
             const rawNotes = (rel.data.body || '').trim();
 
@@ -84,38 +88,20 @@ jobs:
               return a.length <= max ? s : a.slice(0, max - 1).join('') + '…';
             };
 
-            // ---- Play Console notes (≤500 chars)
-            const playNotes = truncate(
-              rawNotes || `See GitHub release: ${ghUrl}`,
-              500
-            );
+            // Play "What's new" is 500 Unicode chars per locale
+            const playNotes = truncate(rawNotes || `See GitHub release: ${ghUrl}`, 500);
 
             const whatsNewDir = path.join(process.env.GITHUB_WORKSPACE, 'whatsnew');
             fs.mkdirSync(whatsNewDir, { recursive: true });
-            fs.writeFileSync(
-              path.join(whatsNewDir, `whatsnew-${locale}`),
-              playNotes,
-              'utf8'
-            );
+            fs.writeFileSync(path.join(whatsNewDir, `whatsnew-${locale}`), playNotes, 'utf8');
 
-            // ---- Telegram message file (HTML)
-            const tgNotes = truncate(rawNotes || 'No release notes provided.', 2800);
-            const esc = s => s.replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
-
-            const msg =
-              `<b>✅ Play Console draft created (Production)</b>\n\n` +
-              `<b>App:</b> ${esc(appName)}\n` +
-              `<b>Version:</b> ${esc(tag)}\n` +
-              `<b>Play Console:</b> <a href="${playConsoleUrl}">Open release</a>\n` +
-              `<b>GitHub Release:</b> <a href="${ghUrl}">${esc(tag)}</a>\n\n` +
-              `<b>Release notes:</b>\n<pre>${esc(tgNotes)}</pre>\n\n` +
-              `<i>Status: draft </i>`;
-
-            fs.writeFileSync('github_release_body.txt', msg, 'utf8');
+            // also store raw notes for later telegram formatting
+            fs.writeFileSync('release_notes_raw.txt', rawNotes, 'utf8');
 
             core.setOutput('tag', tag);
+            core.setOutput('gh_url', ghUrl);
             core.setOutput('whatsnew_dir', 'whatsnew');
-            core.setOutput('body_file', 'github_release_body.txt');
+            core.setOutput('locale', locale);
 
       - name: Download release assets
         uses: robinraju/release-downloader@v1
@@ -131,38 +117,223 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          AAB=$(find release-assets -name "*.aab" | head -n 1)
-          SYM=$(find release-assets -iname "*native-debug-symbols*.zip" | head -n 1)
+          ls -lah release-assets
+          AAB=$(find release-assets -maxdepth 1 -name "*.aab" | head -n 1)
+          SYM=$(find release-assets -maxdepth 1 -iname "*native-debug-symbols*.zip" | head -n 1)
           : "${AAB:?Missing AAB}"
-          : "${SYM:?Missing native debug symbols}"
+          : "${SYM:?Missing native debug symbols zip}"
           echo "aab=$AAB" >> "$GITHUB_OUTPUT"
           echo "symbols=$SYM" >> "$GITHUB_OUTPUT"
 
-      - name: Decode Play service account JSON
+      - name: Decode Play service account JSON -> output credentials_json for auth action
+        id: sa
         shell: bash
         run: |
           set -euo pipefail
-          echo "${{ secrets.SUBSCRIPTION_PLAY_SERVICE_ACCOUNT_JSON_BASE64 }}" \
-            | base64 --decode > play-service-account.json
+          echo "${{ secrets.SUBSCRIPTION_PLAY_SERVICE_ACCOUNT_JSON_BASE64 }}" | base64 --decode > play-sa.json
+          python3 -c "import json; json.load(open('play-sa.json','r',encoding='utf-8')); print('SA JSON OK')"
+          {
+            echo 'credentials_json<<EOF'
+            cat play-sa.json
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
 
-      - name: Upload to Play Console (Production · Draft · No Review)
-        uses: r0adkll/upload-google-play@v1
+      - name: Authenticate to Google (access token)
+        id: gauth
+        uses: google-github-actions/auth@v3
         with:
-          serviceAccountJson: play-service-account.json
-          packageName: ${{ github.event.client_payload.package_name }}
-          releaseFiles: ${{ steps.assets.outputs.aab }}
-          debugSymbols: ${{ steps.assets.outputs.symbols }}
-          track: production
-          status: draft
-          whatsNewDirectory: ${{ steps.meta.outputs.whatsnew_dir }}
+          token_format: access_token
+          credentials_json: ${{ steps.sa.outputs.credentials_json }}
 
-      - name: Notify Telegram
+      - name: Publish production rollout (auto-halt existing inProgress, then BD-only 99%)
+        id: play
+        shell: bash
+        env:
+          ACCESS_TOKEN: ${{ steps.gauth.outputs.access_token }}
+          PKG: ${{ github.event.client_payload.package_name }}
+          AAB: ${{ steps.assets.outputs.aab }}
+          SYM: ${{ steps.assets.outputs.symbols }}
+          TRACK: ${{ env.TRACK }}
+          TARGET_COUNTRY: ${{ env.TARGET_COUNTRY }}
+          TARGET_FRACTION: ${{ env.TARGET_FRACTION }}
+          LOCALE: ${{ steps.meta.outputs.locale }}
+          RELEASE_NAME: ${{ steps.meta.outputs.tag }}
+        run: |
+          set -euo pipefail
+
+          authz=(-H "Authorization: Bearer ${ACCESS_TOKEN}")
+
+          # 1) Create edit
+          edit_json="$(curl -sS "${authz[@]}" -H "Content-Type: application/json" \
+            -X POST "https://androidpublisher.googleapis.com/androidpublisher/v3/applications/${PKG}/edits" \
+            -d '{}')"
+          EDIT_ID="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])' <<<"$edit_json")"
+
+          # 2) Upload AAB (bundle)
+          bundle_json="$(curl -sS "${authz[@]}" -H "Content-Type: application/octet-stream" \
+            --data-binary @"${AAB}" \
+            -X POST "https://androidpublisher.googleapis.com/upload/androidpublisher/v3/applications/${PKG}/edits/${EDIT_ID}/bundles?uploadType=media")"
+          VERSION_CODE="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["versionCode"])' <<<"$bundle_json")"
+
+          # 3) Upload native debug symbols (nativeCode)
+          curl -sS "${authz[@]}" -H "Content-Type: application/octet-stream" \
+            --data-binary @"${SYM}" \
+            -X POST "https://androidpublisher.googleapis.com/upload/androidpublisher/v3/applications/${PKG}/edits/${EDIT_ID}/apks/${VERSION_CODE}/deobfuscationFiles/nativeCode?uploadType=media" \
+            >/dev/null
+
+          # 4) Get current production track state (within this edit)
+          track_url="https://androidpublisher.googleapis.com/androidpublisher/v3/applications/${PKG}/edits/${EDIT_ID}/tracks/${TRACK}"
+          track_json="$(curl -sS "${authz[@]}" "$track_url" || echo '{"track":"'"${TRACK}"'","releases":[]}')"
+
+          NOTES_FILE="whatsnew/whatsnew-${LOCALE}"
+          NOTES="$(cat "$NOTES_FILE")"
+
+          # 5) Build update payload:
+          #    - If any inProgress release exists, change it to halted
+          #    - Drop any draft releases (to avoid conflicts)
+          #    - Append new inProgress release with 99% + BD-only targeting
+          python3 - <<PY
+          import json, sys
+
+          track = json.loads("""${track_json.replace('"','\\"')}""")
+          releases = track.get("releases", [])
+
+          def pick_fields(r):
+            out = {}
+            # keep minimal mutable fields only
+            for k in ("name","versionCodes","status","userFraction","countryTargeting","releaseNotes","inAppUpdatePriority"):
+              if k in r and r[k] is not None:
+                out[k] = r[k]
+            return out
+
+          new_releases = []
+          halted_any = False
+
+          for r in releases:
+            status = r.get("status")
+            if status == "draft":
+              # ignore drafts, we'll create a fresh release
+              continue
+            rr = pick_fields(r)
+            if status == "inProgress":
+              rr["status"] = "halted"
+              # userFraction allowed for halted/inProgress only; keep if present
+              halted_any = True
+            new_releases.append(rr)
+
+          # Ensure we comply with production rules:
+          # - countryTargeting only allowed on inProgress production releases
+          new_release = {
+            "name": "${RELEASE_NAME}",
+            "status": "inProgress",
+            "userFraction": float("${TARGET_FRACTION}"),
+            "countryTargeting": {
+              "countries": ["${TARGET_COUNTRY}"],
+              "includeRestOfWorld": False
+            },
+            "versionCodes": [str(${VERSION_CODE})],
+            "releaseNotes": [{
+              "language": "${LOCALE}",
+              "text": """${NOTES.replace('"','\\"')}"""
+            }],
+            "inAppUpdatePriority": 0
+          }
+          new_releases.append(new_release)
+
+          out = {"track": "${TRACK}", "releases": new_releases}
+          open("track_update.json","w",encoding="utf-8").write(json.dumps(out, separators=(",",":")))
+
+          # Emit whether we halted something (for messaging)
+          open("halted_flag.txt","w",encoding="utf-8").write("true" if halted_any else "false")
+          PY
+
+          # 6) Update production track
+          curl -sS "${authz[@]}" -H "Content-Type: application/json" \
+            -X PUT "$track_url" \
+            --data-binary @track_update.json \
+            >/dev/null
+
+          # 7) Commit edit (starts rollout)
+          curl -sS "${authz[@]}" -X POST \
+            "https://androidpublisher.googleapis.com/androidpublisher/v3/applications/${PKG}/edits/${EDIT_ID}:commit" \
+            >/dev/null
+
+          echo "version_code=${VERSION_CODE}" >> "$GITHUB_OUTPUT"
+          echo "halted_previous=$(cat halted_flag.txt)" >> "$GITHUB_OUTPUT"
+
+      - name: Build Telegram message (success)
+        id: telegram_msg
+        shell: bash
+        env:
+          APP_NAME: ${{ github.event.client_payload.app_name }}
+          PACKAGE_NAME: ${{ github.event.client_payload.package_name }}
+          GH_URL: ${{ steps.meta.outputs.gh_url }}
+          TAG: ${{ steps.meta.outputs.tag }}
+          VERSION_CODE: ${{ steps.play.outputs.version_code }}
+          HALTED_PREV: ${{ steps.play.outputs.halted_previous }}
+          COUNTRY: ${{ env.TARGET_COUNTRY }}
+          FRACTION: ${{ env.TARGET_FRACTION }}
+          PLAY_URL: ${{ github.event.client_payload.play_console_production_url }}
+        run: |
+          set -euo pipefail
+
+          # Ensure we always point to the Releases tab in Play Console (best stable link)
+          if [[ "$PLAY_URL" == *\?* ]]; then
+            PLAY_RELEASE_URL="${PLAY_URL}&tab=releases"
+          else
+            PLAY_RELEASE_URL="${PLAY_URL}?tab=releases"
+          fi
+
+          # Prepare notes for Telegram (keep within message limits)
+          python3 - <<'PY'
+          import html, os
+
+          app = os.environ["APP_NAME"]
+          pkg = os.environ["PACKAGE_NAME"]
+          gh  = os.environ["GH_URL"]
+          tag = os.environ["TAG"]
+          vc  = os.environ["VERSION_CODE"]
+          halted = os.environ["HALTED_PREV"].lower() == "true"
+          country = os.environ["COUNTRY"]
+          frac = os.environ["FRACTION"]
+          play = os.environ["PLAY_RELEASE_URL"]
+
+          notes = open("release_notes_raw.txt", "r", encoding="utf-8").read().strip() or "No release notes provided."
+          # cap notes for Telegram
+          if len(notes) > 2800:
+            notes = notes[:2799] + "…"
+
+          msg = (
+            f"<b>✅ Production rollout started</b>\n\n"
+            f"<b>App:</b> {html.escape(app)}\n"
+            f"<b>Version:</b> {html.escape(tag)}\n"
+            f"<b>VersionCode:</b> <code>{html.escape(vc)}</code>\n"
+            f"<b>Package:</b> <code>{html.escape(pkg)}</code>\n\n"
+            f"<b>Rollout:</b> {html.escape(frac)} (staged)\n"
+            f"<b>Country:</b> {html.escape(country)} only\n"
+          )
+
+          if halted:
+            msg += "\n<i>Note: Previous in-progress production rollout was halted automatically.</i>\n"
+
+          msg += (
+            f"\n<b>Play Console:</b> <a href=\"{html.escape(play)}\">Open production releases</a>\n"
+            f"<b>GitHub Release:</b> <a href=\"{html.escape(gh)}\">{html.escape(tag)}</a>\n\n"
+            f"<b>Release notes:</b>\n<pre>{html.escape(notes)}</pre>\n"
+          )
+
+          open("github_release_body.txt", "w", encoding="utf-8").write(msg)
+          PY
+
+          echo "body_file=github_release_body.txt" >> "$GITHUB_OUTPUT"
+
+      - name: Notify Telegram (success)
         uses: appleboy/telegram-action@v1.0.1
         with:
           token: ${{ secrets.SUBSCRIPTION_TELEGRAM_TOKEN }}
           to: ${{ secrets.SUBSCRIPTION_TELEGRAM_TO }}
           format: html
-          message_file: ${{ steps.meta.outputs.body_file }}
+          message_file: ${{ steps.telegram_msg.outputs.body_file }}
           disable_web_page_preview: true
 
       - name: Notify Telegram (FAILURE)
