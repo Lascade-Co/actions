@@ -1,0 +1,168 @@
+name: Publish Play Store
+
+on:
+  repository_dispatch:
+    types: [publish-playstore]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: playstore-${{ github.event.client_payload.package_name }}
+  cancel-in-progress: true
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Validate payload
+        shell: bash
+        run: |
+          set -euo pipefail
+          : "${{ github.event.client_payload.repo }}"
+          : "${{ github.event.client_payload.release_id }}"
+          : "${{ github.event.client_payload.package_name }}"
+          : "${{ github.event.client_payload.app_name }}"
+          : "${{ github.event.client_payload.play_console_production_url }}"
+
+      - name: Parse owner/repo
+        id: repo
+        shell: bash
+        run: |
+          FULL="${{ github.event.client_payload.repo }}"
+          echo "owner=${FULL%%/*}" >> "$GITHUB_OUTPUT"
+          echo "name=${FULL#*/}" >> "$GITHUB_OUTPUT"
+
+      - name: Mint GitHub App token (target repo)
+        id: app-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.CI_APP_ID }}
+          private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
+          owner: ${{ steps.repo.outputs.owner }}
+          repositories: ${{ steps.repo.outputs.name }}
+
+      - name: Fetch GitHub Release + write notes + telegram message
+        id: meta
+        uses: actions/github-script@v8
+        with:
+          github-token: ${{ steps.app-token.outputs.token }}
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+
+            const owner = '${{ steps.repo.outputs.owner }}';
+            const repo  = '${{ steps.repo.outputs.name }}';
+            const releaseId = Number('${{ github.event.client_payload.release_id }}');
+
+            const appName = '${{ github.event.client_payload.app_name }}';
+            const packageName = '${{ github.event.client_payload.package_name }}';
+            const playConsoleUrl = '${{ github.event.client_payload.play_console_production_url }}';
+            const locale = '${{ github.event.client_payload.release_notes_locale || 'en-US' }}';
+
+            const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+            let rel;
+            for (let i = 0; i < 5; i++) {
+              rel = await github.rest.repos.getRelease({ owner, repo, release_id: releaseId });
+              const assets = rel.data.assets || [];
+              if (
+                assets.some(a => a.name.endsWith('.aab')) &&
+                assets.some(a => /native-debug-symbols.*\.zip$/i.test(a.name))
+              ) break;
+              await sleep(2000);
+            }
+
+            const tag = rel.data.tag_name;
+            const ghUrl = rel.data.html_url;
+            const rawNotes = (rel.data.body || '').trim();
+
+            const truncate = (s, max) => {
+              const a = Array.from(s);
+              return a.length <= max ? s : a.slice(0, max - 1).join('') + '…';
+            };
+
+            // ---- Play Console notes (≤500 chars)
+            const playNotes = truncate(
+              rawNotes || `See GitHub release: ${ghUrl}`,
+              500
+            );
+
+            const whatsNewDir = path.join(process.env.GITHUB_WORKSPACE, 'whatsnew');
+            fs.mkdirSync(whatsNewDir, { recursive: true });
+            fs.writeFileSync(
+              path.join(whatsNewDir, `whatsnew-${locale}`),
+              playNotes,
+              'utf8'
+            );
+
+            // ---- Telegram message file (HTML)
+            const tgNotes = truncate(rawNotes || 'No release notes provided.', 2800);
+            const esc = s => s.replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+
+            const msg =
+              `<b>✅ Play Console draft created (Production)</b>\n\n` +
+              `<b>App:</b> ${esc(appName)}\n` +
+              `<b>Version:</b> ${esc(tag)}\n` +
+              `<b>Package:</b> <code>${esc(packageName)}</code>\n\n` +
+              `<b>Play Console:</b> <a href="${playConsoleUrl}">Open release</a>\n` +
+              `<b>GitHub Release:</b> <a href="${ghUrl}">${esc(tag)}</a>\n\n` +
+              `<b>Release notes:</b>\n<pre>${esc(tgNotes)}</pre>\n\n` +
+              `<i>Status: draft · not sent for review</i>`;
+
+            fs.writeFileSync('github_release_body.txt', msg, 'utf8');
+
+            core.setOutput('tag', tag);
+            core.setOutput('whatsnew_dir', 'whatsnew');
+            core.setOutput('body_file', 'github_release_body.txt');
+
+      - name: Download release assets
+        uses: robinraju/release-downloader@v1
+        with:
+          repository: ${{ github.event.client_payload.repo }}
+          releaseId: ${{ github.event.client_payload.release_id }}
+          fileName: "*"
+          out-file-path: release-assets
+          token: ${{ steps.app-token.outputs.token }}
+
+      - name: Locate AAB + native debug symbols
+        id: assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          AAB=$(find release-assets -name "*.aab" | head -n 1)
+          SYM=$(find release-assets -iname "*native-debug-symbols*.zip" | head -n 1)
+          : "${AAB:?Missing AAB}"
+          : "${SYM:?Missing native debug symbols}"
+          echo "aab=$AAB" >> "$GITHUB_OUTPUT"
+          echo "symbols=$SYM" >> "$GITHUB_OUTPUT"
+
+      - name: Decode Play service account JSON
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "${{ secrets.SUBSCRIPTION_PLAY_SERVICE_ACCOUNT_JSON_BASE64 }}" \
+            | base64 --decode > play-service-account.json
+
+      - name: Upload to Play Console (Production · Draft · No Review)
+        uses: r0adkll/upload-google-play@v1
+        with:
+          serviceAccountJson: play-service-account.json
+          packageName: ${{ github.event.client_payload.package_name }}
+          releaseFiles: ${{ steps.assets.outputs.aab }}
+          debugSymbols: ${{ steps.assets.outputs.symbols }}
+          track: production
+          status: draft
+          whatsNewDirectory: ${{ steps.meta.outputs.whatsnew_dir }}
+          changesNotSentForReview: true
+
+      - name: Notify Telegram
+        uses: appleboy/telegram-action@v1.0.1
+        with:
+          token: ${{ secrets.SUBSCRIPTION_TELEGRAM_TOKEN }}
+          to: ${{ secrets.SUBSCRIPTION_TELEGRAM_TO }}
+          format: html
+          message_file: ${{ steps.meta.outputs.body_file }}
+          disable_web_page_preview: true
