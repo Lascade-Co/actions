@@ -81,7 +81,7 @@ jobs:
         run: echo "${{ env.KEYSTORE_BASE64 }}" | base64 --decode > app/keystore.jks
 
       - name: Decode Google Service JSON
-        run: echo "${{ env.SERVICE_JSON_BASE64 }}" | base64 --decode > google-services.json
+        run: echo "${{ env.SERVICE_JSON_BASE64 }}" | base64 --decode > app/google-services.json
 
       - name: Set up JDK 21
         uses: actions/setup-java@v4
@@ -172,6 +172,9 @@ jobs:
 
       - name: Decode keystore
         run: echo "${{ env.KEYSTORE_BASE64 }}" | base64 --decode > app/keystore.jks
+
+      - name: Decode Google Service JSON
+        run: echo "${{ env.SERVICE_JSON_BASE64 }}" | base64 --decode > app/google-services.json
 
       - name: Set up JDK 21
         uses: actions/setup-java@v4
