@@ -87,7 +87,7 @@ jobs:
         uses: actions/setup-java@v5
         with:
           distribution: microsoft
-          java-version: '25'
+          java-version: '21'
           cache: gradle
 
       - name: Setup Gradle
@@ -180,7 +180,7 @@ jobs:
         uses: actions/setup-java@v5
         with:
           distribution: microsoft
-          java-version: '25'
+          java-version: '21'
           cache: gradle
 
       - name: Setup Gradle
