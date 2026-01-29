@@ -66,7 +66,7 @@ jobs:
           repository: ${{ github.event.client_payload.repo }}
           ref: ${{ steps.ref.outputs.ref }}
           token: ${{ steps.app-token.outputs.token }}
-          fetch-depth: 0
+          fetch-depth: 1
 
       - name: Fetch local.properties from Infisical
         uses: Infisical/secrets-action@v1.0.9
@@ -79,10 +79,19 @@ jobs:
           domain: ${{ secrets.INFISICAL_DOMAIN }}
           secret-path: /Local-Properties
           export-type: file
-          file-output-path: local.properties
+          file-output-path: /local.properties
 
       - name: Clean local.properties
         run: sed -i -e "s/'//g" local.properties
+
+      - name: Cache Kotlin/Native
+        uses: actions/cache@v4
+        with:
+          path: ~/.konan
+          key: konan-${{ runner.os }}-${{ hashFiles('**/gradle/wrapper/gradle-wrapper.properties') }}-${{ hashFiles('**/gradle/libs.versions.toml') }}
+          restore-keys: |
+            konan-${{ runner.os }}-${{ hashFiles('**/gradle/wrapper/gradle-wrapper.properties') }}-
+            konan-${{ runner.os }}-
 
       - name: Set up JDK
         uses: actions/setup-java@v4
@@ -123,6 +132,7 @@ jobs:
           repository: ${{ github.event.client_payload.spm_repo }}
           token: ${{ steps.spm-token.outputs.token }}
           path: spm-repo
+          fetch-depth: 1
 
       - name: Install envsubst
         run: |
