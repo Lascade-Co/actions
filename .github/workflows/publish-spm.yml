@@ -4,30 +4,21 @@ on:
   repository_dispatch:
     types: [publish-spm]
 
-permissions:
-  contents: write
-
 concurrency:
-  group: publish-spm-${{ github.event.client_payload.repo }}-${{ github.event.client_payload.branch }}
+  group: publish-spm-${{ github.event.client_payload.repo }}
   cancel-in-progress: true
 
 jobs:
-  publish:
-    runs-on: macos-latest
+  get-base-token:
+    runs-on: ubuntu-latest
+    outputs:
+      token: ${{ steps.app-token.outputs.token }}
     steps:
       - name: Extract owner/repo
         id: repo
         shell: bash
         run: |
           FULL="${{ github.event.client_payload.repo }}"
-          echo "owner=${FULL%%/*}" >> "$GITHUB_OUTPUT"
-          echo "name=${FULL#*/}" >> "$GITHUB_OUTPUT"
-
-      - name: Extract SPM owner/repo
-        id: spm_repo
-        shell: bash
-        run: |
-          FULL="${{ github.event.client_payload.spm_repo }}"
           echo "owner=${FULL%%/*}" >> "$GITHUB_OUTPUT"
           echo "name=${FULL#*/}" >> "$GITHUB_OUTPUT"
 
@@ -40,6 +31,19 @@ jobs:
           owner: ${{ steps.repo.outputs.owner }}
           repositories: ${{ steps.repo.outputs.name }}
 
+  get-spm-token:
+    runs-on: ubuntu-latest
+    outputs:
+      token: ${{ steps.spm-token.outputs.token }}
+    steps:
+      - name: Extract SPM owner/repo
+        id: spm_repo
+        shell: bash
+        run: |
+          FULL="${{ github.event.client_payload.spm_repo }}"
+          echo "owner=${FULL%%/*}" >> "$GITHUB_OUTPUT"
+          echo "name=${FULL#*/}" >> "$GITHUB_OUTPUT"
+
       - name: Mint GitHub App token (SPM repo)
         id: spm-token
         uses: actions/create-github-app-token@v2
@@ -49,6 +53,10 @@ jobs:
           owner: ${{ steps.spm_repo.outputs.owner }}
           repositories: ${{ steps.spm_repo.outputs.name }}
 
+  publish:
+    runs-on: macos-latest
+    needs: [get-base-token, get-spm-token]
+    steps:
       - name: Decide ref to checkout
         id: ref
         run: |
@@ -65,7 +73,7 @@ jobs:
         with:
           repository: ${{ github.event.client_payload.repo }}
           ref: ${{ steps.ref.outputs.ref }}
-          token: ${{ steps.app-token.outputs.token }}
+          token: ${{ needs.get-base-token.outputs.token }}
           fetch-depth: 1
 
       - name: Fetch local.properties from Infisical
@@ -112,60 +120,25 @@ jobs:
       - name: Build XCFramework
         run: ./gradlew :shared:assembleSharedReleaseXCFramework
 
-      - name: Zip XCFramework
-        uses: thedoctor0/zip-release@0.7.1
-        with:
-          type: zip
-          directory: shared/build/XCFrameworks/release
-          path: shared.xcframework
-          filename: TAShared.xcframework.zip
-
-      - name: Compute checksum
-        id: checksum
-        run: |
-          CHECKSUM=$(swift package compute-checksum shared/build/XCFrameworks/release/TAShared.xcframework.zip)
-          echo "value=$CHECKSUM" >> "$GITHUB_OUTPUT"
-
       - name: Checkout SPM repo
         uses: actions/checkout@v4
         with:
           repository: ${{ github.event.client_payload.spm_repo }}
-          token: ${{ steps.spm-token.outputs.token }}
+          token: ${{ needs.get-spm-token.outputs.token }}
           path: spm-repo
           fetch-depth: 1
 
-      - name: Install envsubst
-        run: |
-          brew install gettext
-          echo "$(brew --prefix gettext)/bin" >> "$GITHUB_PATH"
+      - name: Remove existing XCFramework
+        run: rm -rf spm-repo/TAShared.xcframework
 
-      - name: Prepare Package.swift
-        run: cp shared/Package.swift spm-repo/Package.swift
+      - name: Copy XCFramework to SPM repo
+        run: cp -r shared/build/XCFrameworks/release/shared.xcframework spm-repo/TAShared.xcframework
 
-      - name: Render Package.swift
-        uses: DominicWatson/github-action-envsubst@stable
-        env:
-          ASSET_URL: https://github.com/${{ github.event.client_payload.spm_repo }}/releases/download/v${{ steps.version.outputs.new_version }}/TAShared.xcframework.zip
-          CHECKSUM: ${{ steps.checksum.outputs.value }}
-        with:
-          files: spm-repo/Package.swift
-
-      - name: Commit Package.swift
-        id: spm_commit
+      - name: Commit XCFramework
         uses: stefanzweifel/git-auto-commit-action@v7
         with:
           repository: spm-repo
-          commit_message: Update TAShared to v${{ steps.version.outputs.new_version }}
+          file_pattern: spm-repo/TAShared.xcframework/**/*
+          tag_name: v${{ steps.version.outputs.new_version }}
+          commit_message: Update to v${{ steps.version.outputs.new_version }}
           branch: main
-
-      - name: Create SPM release
-        if: steps.spm_commit.outputs.changes_detected == 'true'
-        uses: ncipollo/release-action@v1
-        with:
-          owner: ${{ steps.spm_repo.outputs.owner }}
-          repo: ${{ steps.spm_repo.outputs.name }}
-          tag: v${{ steps.version.outputs.new_version }}
-          name: TAShared v${{ steps.version.outputs.new_version }}
-          artifacts: shared/build/XCFrameworks/release/TAShared.xcframework.zip
-          commit: ${{ steps.spm_commit.outputs.commit_hash }}
-          token: ${{ steps.spm-token.outputs.token }}
