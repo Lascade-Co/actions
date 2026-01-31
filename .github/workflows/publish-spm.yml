@@ -70,15 +70,6 @@ jobs:
       - name: Clean local.properties
         run: sed -i -e "s/'//g" local.properties
 
-      - name: Cache Kotlin/Native
-        uses: actions/cache@v4
-        with:
-          path: ~/.konan
-          key: konan-${{ runner.os }}-${{ hashFiles('**/gradle/wrapper/gradle-wrapper.properties') }}-${{ hashFiles('**/gradle/libs.versions.toml') }}
-          restore-keys: |
-            konan-${{ runner.os }}-${{ hashFiles('**/gradle/wrapper/gradle-wrapper.properties') }}-
-            konan-${{ runner.os }}-
-
       - name: Set up JDK
         uses: actions/setup-java@v4
         with:
@@ -116,7 +107,6 @@ jobs:
         uses: stefanzweifel/git-auto-commit-action@v7
         with:
           repository: spm-repo
-          file_pattern: TAShared.xcframework/**/*
           tag_name: v${{ steps.version.outputs.new_version }}
           commit_message: Update to v${{ steps.version.outputs.new_version }}
           branch: main
