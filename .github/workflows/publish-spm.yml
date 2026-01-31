@@ -90,7 +90,7 @@ jobs:
         run: ./gradlew :shared:assembleSharedReleaseXCFramework
 
       - name: Show built XCFramework
-        run: tree shared/build/XCFrameworks/release
+        run: find shared/build/XCFrameworks/release/shared.xcframework
 
       - name: Checkout SPM repo
         uses: actions/checkout@v4
