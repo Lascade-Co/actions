@@ -16,6 +16,10 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
+    container:
+      image: ${{ vars.ANDROID_CI_IMAGE || 'lascade/android-ci:android35-ndk26-jdk21' }}
+    env:
+      GRADLE_USER_HOME: /github/home/.gradle
     steps:
       - name: Extract owner/repo
         id: repo
@@ -129,13 +133,6 @@ jobs:
 
       - name: Decode Google Service JSON
         run: echo "${{ env.SERVICE_JSON_BASE64 }}" | base64 --decode > app/google-services.json
-
-      - name: Set up JDK 25
-        uses: actions/setup-java@v5
-        with:
-          distribution: microsoft
-          java-version: '21'
-          cache: gradle
 
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
