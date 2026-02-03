@@ -241,6 +241,12 @@ jobs:
         with:
           name: apk
 
+      - name: Ensure release notes file
+        run: |
+          if [ ! -f releasenotes.txt ]; then
+            printf "Bug fixes and improvements\n" > releasenotes.txt
+          fi
+
       - name: Create GitHub Release in source repo
         uses: softprops/action-gh-release@v2
         with:
@@ -249,6 +255,7 @@ jobs:
           tag_name: ${{ steps.increment_version.outputs.new_version }}
           target_commitish: ${{ steps.headsha.outputs.sha }}
           name: Release ${{ steps.increment_version.outputs.new_version }}
+          body_path: releasenotes.txt
           files: |
             **/app-release.aab
             **/native-debug-symbols.zip
