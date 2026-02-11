@@ -133,7 +133,10 @@ jobs:
         run: ./s.sh "deploy ${{ github.event.client_payload.branch }}"
 
       - name: Run Collect Static in Docker Container
-        run: ./s.sh "shell server run python manage.py collectstatic --no-input"
+        run: |
+          echo "Waiting 10 seconds for old containers to stop..."
+          sleep 10
+          ./s.sh "shell server run python manage.py collectstatic --no-input"
 
       - name: Run Migrations in Docker Container
         run: ./s.sh "shell server run python manage.py migrate"
