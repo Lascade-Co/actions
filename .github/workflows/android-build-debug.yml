@@ -180,6 +180,19 @@ jobs:
             ✅ Debug APK is ready: [Download](${{ steps.create_release.outputs.url }})
             Workflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}    
 
+      - name: Send Telegram notification
+        if: ${{ success() && secrets.TELEGRAM_BOT_TOKEN != '' && secrets.TELEGRAM_CHAT_ID != '' }}
+        uses: appleboy/telegram-action@master
+        with:
+          to: ${{ secrets.TELEGRAM_CHAT_ID }}
+          token: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          format: markdown
+          message: |
+            ✅ *Debug APK Ready*
+
+            PR: ${{ github.event.client_payload.title || 'Debug APK' }}
+            [Download APK](${{ steps.create_release.outputs.url }})
+
           # ---------- Failure comment ----------
       - name: Comment on PR if build failed
         if: ${{ failure() && github.event.client_payload.pr && github.event.client_payload.pr != '' && github.event.client_payload.pr != 'null' }}
