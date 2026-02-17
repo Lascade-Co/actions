@@ -181,7 +181,7 @@ jobs:
             Workflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}    
 
       - name: Send Telegram notification
-        if: ${{ success() && env.TELEGRAM_BOT_TOKEN != '' && env.TELEGRAM_CHAT_ID != '' }}
+        continue-on-error: true
         uses: appleboy/telegram-action@master
         with:
           to: ${{ env.TELEGRAM_CHAT_ID }}
