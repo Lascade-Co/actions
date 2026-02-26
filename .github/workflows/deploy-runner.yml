@@ -154,55 +154,63 @@ jobs:
             echo "collectstatic=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Pre-wait
+      - name: Resolve server task option
+        id: server-task
+        shell: bash
         run: |
-          echo "Waiting 10 seconds before running functions..."
-          sleep 10
+          set -euo pipefail
+
+          probe_output="$(timeout 10s ./s.sh "shell server" </dev/null 2>&1 || true)"
+          echo "$probe_output"
+
+          if ! printf '%s\n' "$probe_output" | grep -qi "Multiple tasks found for service"; then
+            echo "No interactive task selection prompt detected; using direct server commands."
+            echo "interactive=false" >> "$GITHUB_OUTPUT"
+            echo "option=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          option="$(
+            printf '%s\n' "$probe_output" | awk '
+              match($0, /^[[:space:]]*([0-9]+)\)/, m) {
+                idx = m[1]
+                if (match($0, /Node:[[:space:]]*([^)]*)/, n)) {
+                  node = n[1]
+                  gsub(/^[[:space:]]+|[[:space:]]+$/, "", node)
+                  if (length(node) > 0) {
+                    print idx
+                    exit
+                  }
+                }
+              }
+            '
+          )"
+
+          if [ -z "${option:-}" ]; then
+            option=1
+            echo "Could not detect non-empty Node option. Defaulting to option ${option}."
+          else
+            echo "Selected server task option ${option} (non-empty Node)."
+          fi
+
+          echo "interactive=true" >> "$GITHUB_OUTPUT"
+          echo "option=${option}" >> "$GITHUB_OUTPUT"
+
+      - name: Run Collectstatic in Docker Container (interactive server selection)
+        if: ${{ steps.decide.outputs.collectstatic == 'true' && steps.server-task.outputs.interactive == 'true' }}
+        run: printf '%s\n' "${{ steps.server-task.outputs.option }}" | ./s.sh "shell server run python manage.py collectstatic --no-input"
 
       - name: Run Collectstatic in Docker Container
-        if: ${{ steps.decide.outputs.collectstatic == 'true' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          attempts=3
-          for attempt in $(seq 1 "$attempts"); do
-            echo "Collectstatic attempt $attempt/$attempts..."
-            if ./s.sh "shell server run python manage.py collectstatic --no-input"; then
-              echo "Collectstatic succeeded."
-              exit 0
-            fi
+        if: ${{ steps.decide.outputs.collectstatic == 'true' && steps.server-task.outputs.interactive != 'true' }}
+        run: ./s.sh "shell server run python manage.py collectstatic --no-input"
 
-            if [ "$attempt" -lt "$attempts" ]; then
-              wait_seconds=$((attempt * 15))
-              echo "Collectstatic failed. Waiting ${wait_seconds}s before retry..."
-              sleep "$wait_seconds"
-            fi
-          done
-
-          echo "Collectstatic failed after $attempts attempts."
-          exit 1
+      - name: Run Migrations in Docker Container (interactive server selection)
+        if: ${{ steps.server-task.outputs.interactive == 'true' }}
+        run: printf '%s\n' "${{ steps.server-task.outputs.option }}" | ./s.sh "shell server run python manage.py migrate"
 
       - name: Run Migrations in Docker Container
-        shell: bash
-        run: |
-          set -euo pipefail
-          attempts=3
-          for attempt in $(seq 1 "$attempts"); do
-            echo "Migrate attempt $attempt/$attempts..."
-            if ./s.sh "shell server run python manage.py migrate"; then
-              echo "Migrations succeeded."
-              exit 0
-            fi
-
-            if [ "$attempt" -lt "$attempts" ]; then
-              wait_seconds=$((attempt * 15))
-              echo "Migrate failed. Waiting ${wait_seconds}s before retry..."
-              sleep "$wait_seconds"
-            fi
-          done
-
-          echo "Migrations failed after $attempts attempts."
-          exit 1
+        if: ${{ steps.server-task.outputs.interactive != 'true' }}
+        run: ./s.sh "shell server run python manage.py migrate"
 
       - name: Restart server
         if: ${{ steps.decide.outputs.server == 'true' }}
