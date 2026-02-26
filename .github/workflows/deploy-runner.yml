@@ -132,15 +132,6 @@ jobs:
       - name: Deploy
         run: ./s.sh "deploy ${{ github.event.client_payload.branch }}"
 
-      - name: Run Collect Static in Docker Container
-        run: |
-          echo "Waiting 10 seconds for old containers to stop..."
-          sleep 10
-          ./s.sh "shell server run python manage.py collectstatic --no-input"
-
-      - name: Run Migrations in Docker Container
-        run: ./s.sh "shell server run python manage.py migrate"
-
       - name: Decide restart targets
         id: decide
         shell: bash
@@ -157,14 +148,80 @@ jobs:
           else
             echo "celery=false" >> "$GITHUB_OUTPUT"
           fi
+          if echo "$body" | grep -Eqi '\b(collectstatic|static)\b'; then
+            echo "collectstatic=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "collectstatic=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Pre-wait
+        run: |
+          echo "Waiting 10 seconds before running functions..."
+          sleep 10
+
+      - name: Run Collectstatic in Docker Container
+        if: ${{ steps.decide.outputs.collectstatic == 'true' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          attempts=3
+          for attempt in $(seq 1 "$attempts"); do
+            echo "Collectstatic attempt $attempt/$attempts..."
+            if ./s.sh "shell server run python manage.py collectstatic --no-input"; then
+              echo "Collectstatic succeeded."
+              exit 0
+            fi
+
+            if [ "$attempt" -lt "$attempts" ]; then
+              wait_seconds=$((attempt * 15))
+              echo "Collectstatic failed. Waiting ${wait_seconds}s before retry..."
+              sleep "$wait_seconds"
+            fi
+          done
+
+          echo "Collectstatic failed after $attempts attempts."
+          exit 1
+
+      - name: Run Migrations in Docker Container
+        shell: bash
+        run: |
+          set -euo pipefail
+          attempts=3
+          for attempt in $(seq 1 "$attempts"); do
+            echo "Migrate attempt $attempt/$attempts..."
+            if ./s.sh "shell server run python manage.py migrate"; then
+              echo "Migrations succeeded."
+              exit 0
+            fi
+
+            if [ "$attempt" -lt "$attempts" ]; then
+              wait_seconds=$((attempt * 15))
+              echo "Migrate failed. Waiting ${wait_seconds}s before retry..."
+              sleep "$wait_seconds"
+            fi
+          done
+
+          echo "Migrations failed after $attempts attempts."
+          exit 1
 
       - name: Restart server
         if: ${{ steps.decide.outputs.server == 'true' }}
         run: ./s.sh "shell server restart"
 
-      - name: Restart celery
+      - name: Restart celery (with beat/worker fallback)
         if: ${{ steps.decide.outputs.celery == 'true' }}
-        run: ./s.sh "shell celery restart"
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ./s.sh "shell celery restart"; then
+            echo "Celery restarted successfully."
+            exit 0
+          fi
+
+          echo "Celery restart failed. Falling back to beat and worker restarts..."
+          ./s.sh "shell beat restart"
+          ./s.sh "shell worker restart"
+          echo "Fallback beat and worker restarts succeeded."
 
       - name: Wait for server healthcheck
         run: |
