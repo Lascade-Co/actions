@@ -132,7 +132,18 @@ jobs:
           KTLINT_VERSION="1.5.0"
           curl -sSLO "https://github.com/pinterest/ktlint/releases/download/${KTLINT_VERSION}/ktlint"
           chmod +x ktlint
-          echo "${{ steps.changed.outputs.files }}" | xargs ./ktlint --relative
+
+          # Use Android Studio code style to match IDE warnings
+          cat > /tmp/ktlint-override.editorconfig << 'EDITORCONFIG'
+          [*.{kt,kts}]
+          ktlint_code_style = android_studio
+          ktlint_standard_multiline-expression-wrapping = disabled
+          ktlint_standard_multiline-if-else = disabled
+          ktlint_standard_if-else-wrapping = disabled
+          ktlint_standard_function-signature = disabled
+          EDITORCONFIG
+
+          echo "${{ steps.changed.outputs.files }}" | xargs ./ktlint --editorconfig=/tmp/ktlint-override.editorconfig --relative
 
       # === Infisical: export local.properties file ===
       - name: Fetch local.properties from Infisical
