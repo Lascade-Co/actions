@@ -133,14 +133,27 @@ jobs:
           curl -sSLO "https://github.com/pinterest/ktlint/releases/download/${KTLINT_VERSION}/ktlint"
           chmod +x ktlint
 
-          # Use Android Studio code style to match IDE warnings
+          # Match Android Studio: allow trailing commas, set line length to 120,
+          # and disable all style rules that AS does not flag as warnings.
           cat > /tmp/ktlint-override.editorconfig << 'EDITORCONFIG'
           [*.{kt,kts}]
           ktlint_code_style = android_studio
+          max_line_length = 120
+          ij_kotlin_allow_trailing_comma = true
+          ij_kotlin_allow_trailing_comma_on_call_site = true
+          ktlint_standard_argument-list-wrapping = disabled
+          ktlint_standard_binary-expression-wrapping = disabled
+          ktlint_standard_chain-wrapping = disabled
+          ktlint_standard_condition-wrapping = disabled
+          ktlint_standard_final-newline = disabled
+          ktlint_standard_function-expression-body = disabled
+          ktlint_standard_function-signature = disabled
+          ktlint_standard_if-else-wrapping = disabled
+          ktlint_standard_import-ordering = disabled
+          ktlint_standard_indent = disabled
           ktlint_standard_multiline-expression-wrapping = disabled
           ktlint_standard_multiline-if-else = disabled
-          ktlint_standard_if-else-wrapping = disabled
-          ktlint_standard_function-signature = disabled
+          ktlint_standard_no-consecutive-blank-lines = disabled
           EDITORCONFIG
 
           echo "${{ steps.changed.outputs.files }}" | xargs ./ktlint --editorconfig=/tmp/ktlint-override.editorconfig --relative
