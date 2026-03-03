@@ -109,54 +109,6 @@ jobs:
               core.setOutput("ref", "main");
             }
 
-      - name: Compute changed Kotlin files
-        id: changed
-        shell: bash
-        run: |
-          BASE_REF="${{ steps.base.outputs.ref }}"
-          git fetch origin "$BASE_REF":"refs/remotes/origin/$BASE_REF" || true
-          CHANGED=$(git diff --name-only "origin/${BASE_REF}...HEAD" -- '*.kt' '*.kts' || true)
-          if [ -z "$CHANGED" ]; then
-            echo "has_kt_files=false" >> "$GITHUB_OUTPUT"
-            echo "files=" >> "$GITHUB_OUTPUT"
-          else
-            echo "has_kt_files=true" >> "$GITHUB_OUTPUT"
-            echo "files=$(echo "$CHANGED" | tr '\n' ' ')" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Run ktlint on changed files
-        id: lint
-        if: steps.changed.outputs.has_kt_files == 'true'
-        shell: bash
-        run: |
-          KTLINT_VERSION="1.5.0"
-          curl -sSLO "https://github.com/pinterest/ktlint/releases/download/${KTLINT_VERSION}/ktlint"
-          chmod +x ktlint
-
-          # Match Android Studio: disable all style rules that AS does not flag as warnings.
-          cat > /tmp/ktlint-override.editorconfig << 'EDITORCONFIG'
-          [*.{kt,kts}]
-          ktlint_code_style = android_studio
-          max_line_length = 120
-          ktlint_standard_argument-list-wrapping = disabled
-          ktlint_standard_binary-expression-wrapping = disabled
-          ktlint_standard_chain-wrapping = disabled
-          ktlint_standard_condition-wrapping = disabled
-          ktlint_standard_final-newline = disabled
-          ktlint_standard_function-expression-body = disabled
-          ktlint_standard_function-signature = disabled
-          ktlint_standard_if-else-wrapping = disabled
-          ktlint_standard_import-ordering = disabled
-          ktlint_standard_indent = disabled
-          ktlint_standard_multiline-expression-wrapping = disabled
-          ktlint_standard_multiline-if-else = disabled
-          ktlint_standard_trailing-comma-on-call-site = disabled
-          ktlint_standard_trailing-comma-on-declaration-site = disabled
-          ktlint_standard_no-consecutive-blank-lines = disabled
-          EDITORCONFIG
-
-          echo "${{ steps.changed.outputs.files }}" | xargs ./ktlint --editorconfig=/tmp/ktlint-override.editorconfig --relative
-
       # === Infisical: export local.properties file ===
       - name: Fetch local.properties from Infisical
         uses: Infisical/secrets-action@v1.0.9
@@ -215,6 +167,16 @@ jobs:
           KEYSTORE_PASSWORD_DEBUG: ${{ env.KEYSTORE_PASSWORD }}
           KEY_ALIAS_DEBUG: ${{ env.KEY_ALIAS }}
           KEY_PASSWORD_DEBUG: ${{ env.KEY_PASSWORD }}
+
+      - name: Run Android Lint
+        id: lint
+        shell: bash
+        env:
+          KEYSTORE_PASSWORD_DEBUG: ${{ env.KEYSTORE_PASSWORD }}
+          KEY_ALIAS_DEBUG: ${{ env.KEY_ALIAS }}
+          KEY_PASSWORD_DEBUG: ${{ env.KEY_PASSWORD }}
+        run: |
+          curl -sSL https://raw.githubusercontent.com/Lascade-Co/actions/main/scripts/lint_android.py | python3 - --run-lint --base-ref ${{ steps.base.outputs.ref }}
 
       - name: Build Debug APK
         id: build
@@ -277,7 +239,7 @@ jobs:
             const buildOutcome = "${{ steps.build.outcome }}";
 
             let reason = "Unknown step";
-            if (lintOutcome === "failure") reason = "Lint (ktlint)";
+            if (lintOutcome === "failure") reason = "Android Lint";
             else if (testOutcome === "failure") reason = "Unit tests";
             else if (buildOutcome === "failure") reason = "Build";
 
