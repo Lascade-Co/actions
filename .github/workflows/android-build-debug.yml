@@ -94,6 +94,46 @@ jobs:
           fetch-depth: 0
         # PR HEAD via refs/pull/<PR>/head (not the merge ref). :contentReference[oaicite:5]{index=5}
 
+      - name: Resolve base branch for diff
+        id: base
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ steps.app-token.outputs.token }}
+          script: |
+            const pr = "${{ github.event.client_payload.pr }}";
+            if (pr && pr !== "" && pr !== "null") {
+              const [owner, repo] = "${{ github.event.client_payload.repo }}".split("/");
+              const { data } = await github.rest.pulls.get({ owner, repo, pull_number: Number(pr) });
+              core.setOutput("ref", data.base.ref);
+            } else {
+              core.setOutput("ref", "main");
+            }
+
+      - name: Compute changed Kotlin files
+        id: changed
+        shell: bash
+        run: |
+          BASE_REF="${{ steps.base.outputs.ref }}"
+          git fetch origin "$BASE_REF":"refs/remotes/origin/$BASE_REF" || true
+          CHANGED=$(git diff --name-only "origin/${BASE_REF}...HEAD" -- '*.kt' '*.kts' || true)
+          if [ -z "$CHANGED" ]; then
+            echo "has_kt_files=false" >> "$GITHUB_OUTPUT"
+            echo "files=" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_kt_files=true" >> "$GITHUB_OUTPUT"
+            echo "files=$(echo "$CHANGED" | tr '\n' ' ')" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Run ktlint on changed files
+        id: lint
+        if: steps.changed.outputs.has_kt_files == 'true'
+        shell: bash
+        run: |
+          KTLINT_VERSION="1.5.0"
+          curl -sSLO "https://github.com/pinterest/ktlint/releases/download/${KTLINT_VERSION}/ktlint"
+          chmod +x ktlint
+          echo "${{ steps.changed.outputs.files }}" | xargs ./ktlint --relative
+
       # === Infisical: export local.properties file ===
       - name: Fetch local.properties from Infisical
         uses: Infisical/secrets-action@v1.0.9
@@ -145,7 +185,16 @@ jobs:
       - name: Make gradlew executable
         run: chmod +x gradlew
 
+      - name: Run unit tests
+        id: test
+        run: ./gradlew --no-daemon testDebugUnitTest
+        env:
+          KEYSTORE_PASSWORD_DEBUG: ${{ env.KEYSTORE_PASSWORD }}
+          KEY_ALIAS_DEBUG: ${{ env.KEY_ALIAS }}
+          KEY_PASSWORD_DEBUG: ${{ env.KEY_PASSWORD }}
+
       - name: Build Debug APK
+        id: build
         run: ./gradlew --no-daemon assembleDebug
         env:
           KEYSTORE_PASSWORD_DEBUG: ${{ env.KEYSTORE_PASSWORD }}
@@ -194,17 +243,32 @@ jobs:
             [Download APK](${{ steps.create_release.outputs.url }})
 
           # ---------- Failure comment ----------
-      - name: Comment on PR if build failed
+      - name: Comment on PR if pipeline failed
         if: ${{ failure() && github.event.client_payload.pr && github.event.client_payload.pr != '' && github.event.client_payload.pr != 'null' }}
-        uses: peter-evans/create-or-update-comment@v4
+        uses: actions/github-script@v7
         with:
-          comment-id: ${{ steps.status.outputs.comment-id }}
-          token: ${{ steps.app-token.outputs.token }}
-          repository: ${{ github.event.client_payload.repo }}
-          issue-number: ${{ github.event.client_payload.pr }}
-          edit-mode: 'replace'
-          body: |
-            <!-- central-build-debug -->
-            ❌ Build failed.
-            [Check logs](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
+          github-token: ${{ steps.app-token.outputs.token }}
+          script: |
+            const lintOutcome = "${{ steps.lint.outcome }}";
+            const testOutcome = "${{ steps.test.outcome }}";
+            const buildOutcome = "${{ steps.build.outcome }}";
+
+            let reason = "Unknown step";
+            if (lintOutcome === "failure") reason = "Lint (ktlint)";
+            else if (testOutcome === "failure") reason = "Unit tests";
+            else if (buildOutcome === "failure") reason = "Build";
+
+            const [owner, repo] = "${{ github.event.client_payload.repo }}".split("/");
+            const body = [
+              "<!-- central-build-debug -->",
+              `❌ **${reason}** failed.`,
+              `[Check logs](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})`,
+            ].join("\n");
+
+            await github.rest.issues.updateComment({
+              owner,
+              repo,
+              comment_id: Number("${{ steps.status.outputs.comment-id }}"),
+              body,
+            });
       
