@@ -34,17 +34,28 @@ def run_gradle_lint():
 
 def get_changed_files(base_ref):
     """Compute changed files by diffing HEAD against a base ref."""
-    # Ensure the base ref is fetched
-    subprocess.run(
-        ["git", "fetch", "origin", f"{base_ref}:refs/remotes/origin/{base_ref}"],
-        check=False,
-        capture_output=True,
-    )
-    result = subprocess.run(
-        ["git", "diff", "--name-only", f"origin/{base_ref}...HEAD"],
+    # Fetch the base branch from origin
+    fetch = subprocess.run(
+        ["git", "fetch", "origin", base_ref],
         capture_output=True,
         text=True,
     )
+    if fetch.returncode != 0:
+        print(f"Warning: git fetch failed: {fetch.stderr.strip()}")
+
+    # Try three-dot diff with FETCH_HEAD (works after git fetch origin <branch>)
+    result = subprocess.run(
+        ["git", "diff", "--name-only", "FETCH_HEAD...HEAD"],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        # Fallback: try origin/<base_ref> in case it already exists
+        result = subprocess.run(
+            ["git", "diff", "--name-only", f"origin/{base_ref}...HEAD"],
+            capture_output=True,
+            text=True,
+        )
     if result.returncode != 0:
         print(f"git diff failed: {result.stderr.strip()}")
         return []
