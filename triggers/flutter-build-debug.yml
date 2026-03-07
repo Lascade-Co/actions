@@ -1,0 +1,23 @@
+name: "Flutter Debug Build Trigger"
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+jobs:
+  trigger-build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Dispatch to central repo
+        uses: peter-evans/repository-dispatch@v3
+        with:
+          token: ${{ secrets.CENTRAL_DISPATCH_TOKEN }}
+          repository: Lascade-Co/actions
+          event-type: build-debug-flutter
+          client-payload: >-
+            {
+              "repo": ${{ toJSON(github.repository) }},
+              "pr": ${{ toJSON(github.event.pull_request.number) }},
+              "title": ${{ toJSON(github.event.pull_request.title) }},
+              "project_slug": "${{ vars.PROJECT_SLUG }}"
+            }
