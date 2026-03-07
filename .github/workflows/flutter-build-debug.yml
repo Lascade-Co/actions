@@ -104,6 +104,19 @@ jobs:
           secret-path: /Build
           export-type: env
 
+      - name: Fetch .env from Infisical
+        uses: Infisical/secrets-action@v1.0.9
+        with:
+          method: universal
+          client-id: ${{ secrets.INFISICAL_CLIENT_ID }}
+          client-secret: ${{ secrets.INFISICAL_CLIENT_SECRET }}
+          project-slug: ${{ github.event.client_payload.project_slug }}
+          env-slug: "staging"
+          domain: ${{ secrets.INFISICAL_DOMAIN }}
+          secret-path: /App-Env
+          export-type: file
+          file-output-path: /.env
+
       - name: Decode keystore
         run: echo "${{ env.KEYSTORE_BASE64 }}" | base64 --decode > android/app/keystore-debug.jks
 
@@ -174,6 +187,19 @@ jobs:
           domain: ${{ secrets.INFISICAL_DOMAIN }}
           secret-path: /Build
           export-type: env
+
+      - name: Fetch .env from Infisical
+        uses: Infisical/secrets-action@v1.0.9
+        with:
+          method: universal
+          client-id: ${{ secrets.INFISICAL_CLIENT_ID }}
+          client-secret: ${{ secrets.INFISICAL_CLIENT_SECRET }}
+          project-slug: ${{ github.event.client_payload.project_slug }}
+          env-slug: "staging"
+          domain: ${{ secrets.INFISICAL_DOMAIN }}
+          secret-path: /App-Env
+          export-type: file
+          file-output-path: /.env
 
       - name: Decode GoogleService-Info.plist
         run: echo "${{ env.SERVICE_PLIST_BASE64 }}" | base64 --decode > ios/Runner/GoogleService-Info.plist
