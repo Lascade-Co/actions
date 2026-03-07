@@ -204,11 +204,12 @@ jobs:
       - name: Decode GoogleService-Info.plist
         run: echo "${{ env.SERVICE_PLIST_BASE64 }}" | base64 --decode > ios/Runner/GoogleService-Info.plist
 
-      - name: Install Apple certificate and provisioning profile
+      - name: Install Apple certificate and provisioning profiles
         run: |
-          # Decode cert and profile
+          # Decode cert and profiles
           echo "${{ env.IOS_CERTIFICATE_BASE64 }}" | base64 --decode > certificate.p12
-          echo "${{ env.IOS_PROVISION_PROFILE_BASE64 }}" | base64 --decode > profile.mobileprovision
+          echo "${{ env.IOS_PROVISION_PROFILE_BASE64 }}" | base64 --decode > app.mobileprovision
+          echo "${{ env.IOS_NSE_PROVISION_PROFILE_BASE64 }}" | base64 --decode > nse.mobileprovision
 
           # Create temporary keychain
           KEYCHAIN_PATH=$RUNNER_TEMP/build.keychain-db
@@ -219,22 +220,41 @@ jobs:
           security set-key-partition-list -S apple-tool:,apple: -s -k "temp_password" $KEYCHAIN_PATH
           security list-keychains -d user -s $KEYCHAIN_PATH
 
-          # Install provisioning profile
-          PROFILE_UUID=$(security cms -D -i profile.mobileprovision | plutil -extract UUID raw -)
+          # Install provisioning profiles
           mkdir -p ~/Library/MobileDevices/Provisioning\ Profiles
-          cp profile.mobileprovision ~/Library/MobileDevices/Provisioning\ Profiles/$PROFILE_UUID.mobileprovision
-          echo "PROFILE_UUID=$PROFILE_UUID" >> $GITHUB_ENV
+          APP_UUID=$(security cms -D -i app.mobileprovision | plutil -extract UUID raw -)
+          cp app.mobileprovision ~/Library/MobileDevices/Provisioning\ Profiles/$APP_UUID.mobileprovision
+          echo "APP_PROFILE_UUID=$APP_UUID" >> $GITHUB_ENV
+
+          NSE_UUID=$(security cms -D -i nse.mobileprovision | plutil -extract UUID raw -)
+          cp nse.mobileprovision ~/Library/MobileDevices/Provisioning\ Profiles/$NSE_UUID.mobileprovision
+          echo "NSE_PROFILE_UUID=$NSE_UUID" >> $GITHUB_ENV
 
           # Cleanup decoded files
-          rm certificate.p12 profile.mobileprovision
+          rm certificate.p12 app.mobileprovision nse.mobileprovision
+
+      - name: Switch Xcode project to manual signing
+        run: |
+          PROJECT="ios/Runner.xcodeproj/project.pbxproj"
+
+          # Disable automatic signing for all targets
+          sed -i '' 's/CODE_SIGN_STYLE = Automatic/CODE_SIGN_STYLE = Manual/g' "$PROJECT"
+
+          # Set provisioning profile for Runner target
+          sed -i '' 's/PROVISIONING_PROFILE_SPECIFIER = ""/PROVISIONING_PROFILE_SPECIFIER = "${{ env.APP_PROFILE_UUID }}"/g' "$PROJECT"
+
+          # Set code sign identity to distribution
+          sed -i '' 's/CODE_SIGN_IDENTITY = "Apple Development"/CODE_SIGN_IDENTITY = "Apple Distribution"/g' "$PROJECT"
 
       - name: Generate ExportOptions.plist
         run: |
           /usr/libexec/PlistBuddy -c "Clear dict" ExportOptions.plist
           /usr/libexec/PlistBuddy -c "Add :method string ad-hoc" ExportOptions.plist
           /usr/libexec/PlistBuddy -c "Add :teamID string ${{ env.IOS_TEAM_ID }}" ExportOptions.plist
+          /usr/libexec/PlistBuddy -c "Add :signingStyle string manual" ExportOptions.plist
           /usr/libexec/PlistBuddy -c "Add :provisioningProfiles dict" ExportOptions.plist
-          /usr/libexec/PlistBuddy -c "Add :provisioningProfiles:${{ env.IOS_BUNDLE_ID }} string ${{ env.PROFILE_UUID }}" ExportOptions.plist
+          /usr/libexec/PlistBuddy -c "Add :provisioningProfiles:${{ env.IOS_BUNDLE_ID }} string ${{ env.APP_PROFILE_UUID }}" ExportOptions.plist
+          /usr/libexec/PlistBuddy -c "Add :provisioningProfiles:${{ env.IOS_BUNDLE_ID }}.OneSignalNotificationServiceExtension string ${{ env.NSE_PROFILE_UUID }}" ExportOptions.plist
 
       - name: Set up Flutter
         uses: subosito/flutter-action@v2
