@@ -5,8 +5,7 @@
 name: Request Central Vercel Deployment
 
 on:
-  # Uncomment this
-#  push:
+  push:
 
 permissions:
   pull-requests: read
