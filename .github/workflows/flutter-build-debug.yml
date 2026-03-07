@@ -135,8 +135,17 @@ jobs:
           channel: stable
           cache: true
 
+      - name: Cache Android build
+        uses: actions/cache@v4
+        with:
+          path: |
+            build/
+            android/.gradle
+          key: android-build-${{ hashFiles('pubspec.lock', 'android/**/*.gradle*', 'android/gradle.properties') }}
+          restore-keys: android-build-
+
       - name: Build debug APK
-        run: flutter build apk --debug
+        run: flutter build apk --debug --target-platform android-arm64
         env:
           KEYSTORE_PASSWORD_DEBUG: ${{ env.KEYSTORE_PASSWORD }}
           KEY_ALIAS_DEBUG: ${{ env.KEY_ALIAS }}
@@ -158,7 +167,7 @@ jobs:
 
   build-ios:
     needs: prepare
-    runs-on: macos-latest
+    runs-on: macos-15
     steps:
       - name: Mint GitHub App token
         id: app-token
@@ -218,17 +227,26 @@ jobs:
           security unlock-keychain -p "temp_password" $KEYCHAIN_PATH
           security import certificate.p12 -k $KEYCHAIN_PATH -P "${{ env.IOS_CERTIFICATE_PASSWORD }}" -T /usr/bin/codesign
           security set-key-partition-list -S apple-tool:,apple: -s -k "temp_password" $KEYCHAIN_PATH
-          security list-keychains -d user -s $KEYCHAIN_PATH
+          security list-keychains -d user -s $KEYCHAIN_PATH $(security list-keychains -d user | sed 's/"//g' | tr '\n' ' ')
 
-          # Install provisioning profiles
-          mkdir -p ~/Library/MobileDevices/Provisioning\ Profiles
+          # Install provisioning profiles (both paths for Xcode 16+ compatibility)
+          PROFILE_DIR_LEGACY=~/Library/MobileDevice/Provisioning\ Profiles
+          PROFILE_DIR_NEW=~/Library/Developer/Xcode/UserData/Provisioning\ Profiles
+          mkdir -p "$PROFILE_DIR_LEGACY" "$PROFILE_DIR_NEW"
+
           APP_UUID=$(security cms -D -i app.mobileprovision | plutil -extract UUID raw -)
-          cp app.mobileprovision ~/Library/MobileDevices/Provisioning\ Profiles/$APP_UUID.mobileprovision
+          APP_NAME=$(security cms -D -i app.mobileprovision | plutil -extract Name raw -)
+          cp app.mobileprovision "$PROFILE_DIR_LEGACY/$APP_UUID.mobileprovision"
+          cp app.mobileprovision "$PROFILE_DIR_NEW/$APP_UUID.mobileprovision"
           echo "APP_PROFILE_UUID=$APP_UUID" >> $GITHUB_ENV
+          echo "APP_PROFILE_NAME=$APP_NAME" >> $GITHUB_ENV
 
           NSE_UUID=$(security cms -D -i nse.mobileprovision | plutil -extract UUID raw -)
-          cp nse.mobileprovision ~/Library/MobileDevices/Provisioning\ Profiles/$NSE_UUID.mobileprovision
+          NSE_NAME=$(security cms -D -i nse.mobileprovision | plutil -extract Name raw -)
+          cp nse.mobileprovision "$PROFILE_DIR_LEGACY/$NSE_UUID.mobileprovision"
+          cp nse.mobileprovision "$PROFILE_DIR_NEW/$NSE_UUID.mobileprovision"
           echo "NSE_PROFILE_UUID=$NSE_UUID" >> $GITHUB_ENV
+          echo "NSE_PROFILE_NAME=$NSE_NAME" >> $GITHUB_ENV
 
           # Cleanup decoded files
           rm certificate.p12 app.mobileprovision nse.mobileprovision
@@ -240,16 +258,63 @@ jobs:
           # Disable automatic signing for all targets
           sed -i '' 's/CODE_SIGN_STYLE = Automatic/CODE_SIGN_STYLE = Manual/g' "$PROJECT"
 
-          # Set provisioning profile for Runner target
-          sed -i '' 's/PROVISIONING_PROFILE_SPECIFIER = ""/PROVISIONING_PROFILE_SPECIFIER = "${{ env.APP_PROFILE_UUID }}"/g' "$PROJECT"
-
           # Set code sign identity to distribution
           sed -i '' 's/CODE_SIGN_IDENTITY = "Apple Development"/CODE_SIGN_IDENTITY = "Apple Distribution"/g' "$PROJECT"
+
+          # Set per-target provisioning profiles (Runner vs NSE need different profiles)
+          # PROVISIONING_PROFILE_SPECIFIER requires profile NAME (not UUID)
+          python3 << 'PYEOF'
+          import os
+
+          path = "ios/Runner.xcodeproj/project.pbxproj"
+          app_name = os.environ["APP_PROFILE_NAME"]
+          nse_name = os.environ["NSE_PROFILE_NAME"]
+
+          with open(path) as f:
+              lines = f.readlines()
+
+          in_settings = False
+          depth = 0
+          block = []
+          is_nse = False
+          result = []
+
+          for line in lines:
+              if not in_settings:
+                  if "buildSettings = {" in line:
+                      in_settings = True
+                      depth = line.count("{") - line.count("}")
+                      block = [line]
+                      is_nse = False
+                      continue
+                  result.append(line)
+              else:
+                  depth += line.count("{") - line.count("}")
+                  block.append(line)
+                  if "OneSignalNotificationServiceExtension" in line:
+                      is_nse = True
+                  if depth <= 0:
+                      name = nse_name if is_nse else app_name
+                      for bl in block:
+                          result.append(
+                              bl.replace(
+                                  'PROVISIONING_PROFILE_SPECIFIER = ""',
+                                  f'PROVISIONING_PROFILE_SPECIFIER = "{name}"',
+                              )
+                          )
+                      in_settings = False
+                      block = []
+
+          result.extend(block)
+
+          with open(path, "w") as f:
+              f.writelines(result)
+          PYEOF
 
       - name: Generate ExportOptions.plist
         run: |
           /usr/libexec/PlistBuddy -c "Clear dict" ExportOptions.plist
-          /usr/libexec/PlistBuddy -c "Add :method string ad-hoc" ExportOptions.plist
+          /usr/libexec/PlistBuddy -c "Add :method string release-testing" ExportOptions.plist
           /usr/libexec/PlistBuddy -c "Add :teamID string ${{ env.IOS_TEAM_ID }}" ExportOptions.plist
           /usr/libexec/PlistBuddy -c "Add :signingStyle string manual" ExportOptions.plist
           /usr/libexec/PlistBuddy -c "Add :provisioningProfiles dict" ExportOptions.plist
@@ -261,6 +326,22 @@ jobs:
         with:
           channel: stable
           cache: true
+
+      - name: Cache CocoaPods
+        uses: actions/cache@v4
+        with:
+          path: |
+            ios/Pods
+            ~/Library/Caches/CocoaPods
+          key: pods-${{ runner.os }}-${{ hashFiles('ios/Podfile.lock') }}
+          restore-keys: pods-${{ runner.os }}-
+
+      - name: Cache Xcode DerivedData
+        uses: actions/cache@v4
+        with:
+          path: build/ios
+          key: xcode-${{ runner.os }}-${{ hashFiles('pubspec.lock', 'ios/Podfile.lock') }}
+          restore-keys: xcode-${{ runner.os }}-
 
       - name: Build IPA
         run: flutter build ipa --export-options-plist=ExportOptions.plist
