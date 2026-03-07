@@ -69,7 +69,7 @@ jobs:
           issue-number: ${{ github.event.client_payload.pr }}
           body: |
             <!-- central-build-debug-flutter -->
-            Building Flutter debug APK (Android) and IPA (iOS)...
+            Building debug APK (Android) and IPA (iOS)...
             Watch progress [here](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
 
   build-android:
@@ -307,8 +307,8 @@ jobs:
         with:
           repository: ${{ github.event.client_payload.repo }}
           token: ${{ steps.app-token.outputs.token }}
-          tag_name: ${{ format('flutter-debug-pr-{0}', github.event.client_payload.pr) }}
-          name: ${{ github.event.client_payload.title || 'Flutter Debug Build' }}
+          tag_name: ${{ format('debug-pr-{0}', github.event.client_payload.pr) }}
+          name: ${{ github.event.client_payload.title || 'Debug Build' }}
           prerelease: true
           files: artifacts/*
 
@@ -335,9 +335,9 @@ jobs:
           token: ${{ env.TELEGRAM_BOT_TOKEN }}
           format: markdown
           message: |
-            *Flutter Debug Build Ready*
+            *Debug Build Ready*
 
-            PR: ${{ github.event.client_payload.title || 'Flutter Debug Build' }}
+            PR: ${{ github.event.client_payload.title || 'Debug Build' }}
             [Download](${{ steps.create_release.outputs.url }})
 
       - name: Comment on PR if any build failed
