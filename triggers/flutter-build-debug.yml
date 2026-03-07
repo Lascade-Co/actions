@@ -4,12 +4,11 @@ on:
   pull_request:
     types: [opened, synchronize, reopened]
 
-jobs:
-  dispatch:
-    concurrency:
-      group: central-debug-${{ github.event.pull_request.number }}
-      cancel-in-progress: true
+concurrency:
+  group: central-debug-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
 
+jobs:
   trigger-build:
     runs-on: ubuntu-latest
     steps:
