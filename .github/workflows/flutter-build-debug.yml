@@ -128,6 +128,10 @@ jobs:
         with:
           distribution: microsoft
           java-version: '21'
+          cache: gradle
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
 
       - name: Set up Flutter
         uses: subosito/flutter-action@v2
@@ -135,21 +139,46 @@ jobs:
           channel: stable
           cache: true
 
-      - name: Cache Android build
+      - name: Cache Android project Gradle
+        id: android-project-gradle-cache
         uses: actions/cache@v4
         with:
-          path: |
-            build/
-            android/.gradle
-          key: android-build-${{ hashFiles('pubspec.lock', 'android/**/*.gradle*', 'android/gradle.properties') }}
-          restore-keys: android-build-
+          path: .gradle/
+          key: android-project-gradle-${{ runner.os }}-${{ hashFiles('pubspec.lock', 'android/**/*.gradle*', 'android/gradle.properties', 'android/gradle/wrapper/gradle-wrapper.properties') }}
+          restore-keys: |
+            android-project-gradle-${{ runner.os }}-
+
+      - name: Flutter pub get
+        id: android-pub-get
+        shell: bash
+        run: |
+          start=$(date +%s)
+          flutter pub get
+          duration=$(( $(date +%s) - start ))
+          echo "duration=${duration}" >> "$GITHUB_OUTPUT"
 
       - name: Build debug APK
-        run: flutter build apk --debug --target-platform android-arm64
+        id: android-build
+        shell: bash
+        run: |
+          start=$(date +%s)
+          flutter build apk --debug --target-platform android-arm64 --no-pub --android-project-cache-dir=.gradle
+          duration=$(( $(date +%s) - start ))
+          echo "duration=${duration}" >> "$GITHUB_OUTPUT"
         env:
           KEYSTORE_PASSWORD_DEBUG: ${{ env.KEYSTORE_PASSWORD }}
           KEY_ALIAS_DEBUG: ${{ env.KEY_ALIAS }}
           KEY_PASSWORD_DEBUG: ${{ env.KEY_PASSWORD }}
+
+      - name: Summarize Android timings
+        if: always()
+        run: |
+          {
+            echo "### Android Debug Build"
+            echo "- Project Gradle cache hit: ${{ steps.android-project-gradle-cache.outputs.cache-hit }}"
+            echo "- flutter pub get: ${{ steps.android-pub-get.outputs.duration }}s"
+            echo "- flutter build apk: ${{ steps.android-build.outputs.duration }}s"
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload APK to Firebase App Distribution
         run: |
@@ -165,10 +194,13 @@ jobs:
         with:
           name: apk
           path: build/app/outputs/flutter-apk/app-debug.apk
+          compression-level: 0
 
   build-ios:
     needs: prepare
     runs-on: macos-latest
+    env:
+      COCOAPODS_DISABLE_STATS: "true"
     steps:
       - name: Mint GitHub App token
         id: app-token
@@ -185,6 +217,15 @@ jobs:
           repository: ${{ github.event.client_payload.repo }}
           ref: refs/pull/${{ github.event.client_payload.pr }}/head
           token: ${{ steps.app-token.outputs.token }}
+
+      - name: Capture Xcode version
+        id: xcode-version
+        shell: bash
+        run: |
+          version="$(xcodebuild -version | tr '\n' ' ' | sed 's/[[:space:]]\+/ /g; s/ $//')"
+          key="$(printf '%s' "$version" | shasum -a 256 | cut -d' ' -f1)"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "cache-key=$key" >> "$GITHUB_OUTPUT"
 
       - name: Fetch secrets from Infisical
         uses: Infisical/secrets-action@v1.0.9
@@ -237,23 +278,46 @@ jobs:
           cache: true
 
       - name: Cache CocoaPods
+        id: ios-cocoapods-cache
         uses: actions/cache@v4
         with:
           path: |
             ios/Pods
             ~/Library/Caches/CocoaPods
-          key: pods-${{ runner.os }}-${{ hashFiles('ios/Podfile.lock') }}
-          restore-keys: pods-${{ runner.os }}-
+            ~/.cocoapods/repos
+          key: pods-${{ runner.os }}-${{ steps.xcode-version.outputs.cache-key }}-${{ hashFiles('ios/Podfile', 'ios/Podfile.lock') }}
+          restore-keys: |
+            pods-${{ runner.os }}-${{ steps.xcode-version.outputs.cache-key }}-
+            pods-${{ runner.os }}-
 
-      - name: Cache Xcode DerivedData
-        uses: actions/cache@v4
-        with:
-          path: build/ios
-          key: xcode-${{ runner.os }}-${{ hashFiles('pubspec.lock', 'ios/Podfile.lock') }}
-          restore-keys: xcode-${{ runner.os }}-
+      - name: Flutter pub get
+        id: ios-pub-get
+        shell: bash
+        run: |
+          start=$(date +%s)
+          flutter pub get
+          duration=$(( $(date +%s) - start ))
+          echo "duration=${duration}" >> "$GITHUB_OUTPUT"
 
       - name: Build IPA
-        run: flutter build ipa --export-options-plist=ExportOptions.plist
+        id: ios-build
+        shell: bash
+        run: |
+          start=$(date +%s)
+          flutter build ipa --export-options-plist=ExportOptions.plist --no-pub
+          duration=$(( $(date +%s) - start ))
+          echo "duration=${duration}" >> "$GITHUB_OUTPUT"
+
+      - name: Summarize iOS timings
+        if: always()
+        run: |
+          {
+            echo "### iOS Debug Build"
+            echo "- Xcode: ${{ steps.xcode-version.outputs.version }}"
+            echo "- CocoaPods cache hit: ${{ steps.ios-cocoapods-cache.outputs.cache-hit }}"
+            echo "- flutter pub get: ${{ steps.ios-pub-get.outputs.duration }}s"
+            echo "- flutter build ipa: ${{ steps.ios-build.outputs.duration }}s"
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload IPA to Firebase App Distribution
         run: |
@@ -270,6 +334,7 @@ jobs:
         with:
           name: ipa
           path: build/ios/ipa/*.ipa
+          compression-level: 0
 
   notify:
     needs: [prepare, build-android, build-ios]
