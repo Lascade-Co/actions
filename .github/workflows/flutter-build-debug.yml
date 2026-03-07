@@ -167,7 +167,7 @@ jobs:
 
   build-ios:
     needs: prepare
-    runs-on: macos-15
+    runs-on: macos-latest
     steps:
       - name: Mint GitHub App token
         id: app-token
