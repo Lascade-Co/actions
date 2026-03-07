@@ -143,7 +143,7 @@ jobs:
         id: android-project-gradle-cache
         uses: actions/cache@v4
         with:
-          path: .gradle/
+          path: android/.gradle/
           key: android-project-gradle-${{ runner.os }}-${{ hashFiles('pubspec.lock', 'android/**/*.gradle*', 'android/gradle.properties', 'android/gradle/wrapper/gradle-wrapper.properties') }}
           restore-keys: |
             android-project-gradle-${{ runner.os }}-
@@ -172,13 +172,19 @@ jobs:
 
       - name: Summarize Android timings
         if: always()
+        shell: bash
+        env:
+          ANDROID_GRADLE_CACHE_HIT: ${{ steps.android-project-gradle-cache.outputs.cache-hit || 'false' }}
+          ANDROID_PUB_GET_DURATION: ${{ steps.android-pub-get.outputs.duration || 'n/a' }}
+          ANDROID_BUILD_DURATION: ${{ steps.android-build.outputs.duration || 'n/a' }}
         run: |
+          summary_target="${GITHUB_STEP_SUMMARY:-/dev/null}"
           {
-            echo "### Android Debug Build"
-            echo "- Project Gradle cache hit: ${{ steps.android-project-gradle-cache.outputs.cache-hit }}"
-            echo "- flutter pub get: ${{ steps.android-pub-get.outputs.duration }}s"
-            echo "- flutter build apk: ${{ steps.android-build.outputs.duration }}s"
-          } >> "$GITHUB_STEP_SUMMARY"
+            printf '### Android Debug Build\n\n'
+            printf -- '- Project Gradle cache hit: %s\n' "$ANDROID_GRADLE_CACHE_HIT"
+            printf -- '- flutter pub get: %ss\n' "$ANDROID_PUB_GET_DURATION"
+            printf -- '- flutter build apk: %ss\n' "$ANDROID_BUILD_DURATION"
+          } | tee -a "$summary_target"
 
       - name: Upload APK to Firebase App Distribution
         run: |
@@ -310,14 +316,21 @@ jobs:
 
       - name: Summarize iOS timings
         if: always()
+        shell: bash
+        env:
+          IOS_XCODE_VERSION: ${{ steps.xcode-version.outputs.version || 'unknown' }}
+          IOS_COCOAPODS_CACHE_HIT: ${{ steps.ios-cocoapods-cache.outputs.cache-hit || 'false' }}
+          IOS_PUB_GET_DURATION: ${{ steps.ios-pub-get.outputs.duration || 'n/a' }}
+          IOS_BUILD_DURATION: ${{ steps.ios-build.outputs.duration || 'n/a' }}
         run: |
+          summary_target="${GITHUB_STEP_SUMMARY:-/dev/null}"
           {
-            echo "### iOS Debug Build"
-            echo "- Xcode: ${{ steps.xcode-version.outputs.version }}"
-            echo "- CocoaPods cache hit: ${{ steps.ios-cocoapods-cache.outputs.cache-hit }}"
-            echo "- flutter pub get: ${{ steps.ios-pub-get.outputs.duration }}s"
-            echo "- flutter build ipa: ${{ steps.ios-build.outputs.duration }}s"
-          } >> "$GITHUB_STEP_SUMMARY"
+            printf '### iOS Debug Build\n\n'
+            printf -- '- Xcode: %s\n' "$IOS_XCODE_VERSION"
+            printf -- '- CocoaPods cache hit: %s\n' "$IOS_COCOAPODS_CACHE_HIT"
+            printf -- '- flutter pub get: %ss\n' "$IOS_PUB_GET_DURATION"
+            printf -- '- flutter build ipa: %ss\n' "$IOS_BUILD_DURATION"
+          } | tee -a "$summary_target"
 
       - name: Upload IPA to Firebase App Distribution
         run: |
