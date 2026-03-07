@@ -1,10 +1,15 @@
-name: "Flutter Debug Build Trigger"
+name: "Debug Build Trigger"
 
 on:
   pull_request:
     types: [opened, synchronize, reopened]
 
 jobs:
+  dispatch:
+    concurrency:
+      group: central-debug-${{ github.event.pull_request.number }}
+      cancel-in-progress: true
+
   trigger-build:
     runs-on: ubuntu-latest
     steps:
@@ -19,5 +24,5 @@ jobs:
               "repo": ${{ toJSON(github.repository) }},
               "pr": ${{ toJSON(github.event.pull_request.number) }},
               "title": ${{ toJSON(github.event.pull_request.title) }},
-              "project_slug": "${{ vars.PROJECT_SLUG }}"
+              "project_slug": "the infisical project slug"
             }
