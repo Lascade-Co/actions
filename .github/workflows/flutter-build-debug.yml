@@ -188,15 +188,6 @@ jobs:
             printf -- '- flutter build apk: %ss\n' "$ANDROID_BUILD_DURATION"
           } | tee -a "$summary_target"
 
-      - name: Upload APK to Firebase App Distribution
-        run: |
-          echo "${{ env.FIREBASE_SERVICE_ACCOUNT }}" | base64 --decode > sa.json
-          export GOOGLE_APPLICATION_CREDENTIALS=sa.json
-          npm install -g firebase-tools
-          firebase appdistribution:distribute build/app/outputs/flutter-apk/app-debug.apk \
-            --app "${{ env.FIREBASE_APP_ID_ANDROID }}" \
-            --groups "qa" || echo "Failed to upload to Firebase"
-
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
@@ -334,16 +325,6 @@ jobs:
             printf -- '- flutter build ipa: %ss\n' "$IOS_BUILD_DURATION"
           } | tee -a "$summary_target"
 
-      - name: Upload IPA to Firebase App Distribution
-        run: |
-          echo "${{ env.FIREBASE_SERVICE_ACCOUNT }}" | base64 --decode > sa.json
-          export GOOGLE_APPLICATION_CREDENTIALS=sa.json
-          npm install -g firebase-tools
-          IPA_PATH=$(find build/ios/ipa -name "*.ipa" | head -1)
-          firebase appdistribution:distribute "$IPA_PATH" \
-            --app "${{ env.FIREBASE_APP_ID_IOS }}" \
-            --groups "qa" || echo "Failed to upload to Firebase"
-
       - name: Upload IPA artifact
         uses: actions/upload-artifact@v4
         with:
@@ -391,6 +372,36 @@ jobs:
           name: ipa
           path: artifacts/
 
+      - name: Install Firebase CLI
+        id: firebase-cli
+        if: needs.build-android.result == 'success' || needs.build-ios.result == 'success'
+        run: npm install -g firebase-tools
+
+      - name: Prepare Firebase credentials
+        id: firebase-credentials
+        if: needs.build-android.result == 'success' || needs.build-ios.result == 'success'
+        run: echo "${{ env.FIREBASE_SERVICE_ACCOUNT }}" | base64 --decode > sa.json
+
+      - name: Upload APK to Firebase App Distribution
+        id: upload-android
+        if: always() && needs.build-android.result == 'success' && steps.firebase-cli.outcome == 'success' && steps.firebase-credentials.outcome == 'success'
+        run: |
+          export GOOGLE_APPLICATION_CREDENTIALS="$PWD/sa.json"
+          APK_PATH=$(find artifacts -name "*.apk" | head -1)
+          firebase appdistribution:distribute "$APK_PATH" \
+            --app "${{ env.FIREBASE_APP_ID_ANDROID }}" \
+            --groups "qa"
+
+      - name: Upload IPA to Firebase App Distribution
+        id: upload-ios
+        if: always() && needs.build-ios.result == 'success' && steps.firebase-cli.outcome == 'success' && steps.firebase-credentials.outcome == 'success'
+        run: |
+          export GOOGLE_APPLICATION_CREDENTIALS="$PWD/sa.json"
+          IPA_PATH=$(find artifacts -name "*.ipa" | head -1)
+          firebase appdistribution:distribute "$IPA_PATH" \
+            --app "${{ env.FIREBASE_APP_ID_IOS }}" \
+            --groups "qa"
+
       - name: Create debug release in source repo
         if: needs.build-android.result == 'success' && needs.build-ios.result == 'success'
         id: create_release
@@ -404,7 +415,7 @@ jobs:
           files: artifacts/*
 
       - name: Comment on PR with download link
-        if: needs.build-android.result == 'success' && needs.build-ios.result == 'success'
+        if: needs.build-android.result == 'success' && needs.build-ios.result == 'success' && steps.upload-android.outcome == 'success' && steps.upload-ios.outcome == 'success'
         uses: peter-evans/create-or-update-comment@v4
         with:
           token: ${{ steps.app-token.outputs.token }}
@@ -418,7 +429,7 @@ jobs:
             Workflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
 
       - name: Send Telegram notification
-        if: needs.build-android.result == 'success' && needs.build-ios.result == 'success'
+        if: needs.build-android.result == 'success' && needs.build-ios.result == 'success' && steps.upload-android.outcome == 'success' && steps.upload-ios.outcome == 'success'
         continue-on-error: true
         uses: appleboy/telegram-action@master
         with:
@@ -432,13 +443,17 @@ jobs:
             [Download](${{ steps.create_release.outputs.url }})
 
       - name: Comment on PR if any build failed
-        if: needs.build-android.result == 'failure' || needs.build-ios.result == 'failure'
+        if: always() && (needs.build-android.result == 'failure' || needs.build-ios.result == 'failure' || steps.firebase-cli.outcome == 'failure' || steps.firebase-credentials.outcome == 'failure' || steps.upload-android.outcome == 'failure' || steps.upload-ios.outcome == 'failure')
         uses: actions/github-script@v7
         with:
           github-token: ${{ steps.app-token.outputs.token }}
           script: |
             const androidResult = "${{ needs.build-android.result }}";
             const iosResult = "${{ needs.build-ios.result }}";
+            const firebaseCliResult = "${{ steps.firebase-cli.outcome }}";
+            const firebaseCredentialsResult = "${{ steps.firebase-credentials.outcome }}";
+            const androidUploadResult = "${{ steps.upload-android.outcome }}";
+            const iosUploadResult = "${{ steps.upload-ios.outcome }}";
 
             let reason;
             if (androidResult === "failure" && iosResult === "failure") {
@@ -447,6 +462,20 @@ jobs:
               reason = "Android build";
             } else {
               reason = "iOS build";
+            }
+
+            if (androidResult !== "failure" && iosResult !== "failure") {
+              if (firebaseCliResult === "failure") {
+                reason = "Firebase CLI setup";
+              } else if (firebaseCredentialsResult === "failure") {
+                reason = "Firebase credentials setup";
+              } else if (androidUploadResult === "failure" && iosUploadResult === "failure") {
+                reason = "Android and iOS Firebase uploads";
+              } else if (androidUploadResult === "failure") {
+                reason = "Android Firebase upload";
+              } else if (iosUploadResult === "failure") {
+                reason = "iOS Firebase upload";
+              }
             }
 
             const [owner, repo] = "${{ github.event.client_payload.repo }}".split("/");
