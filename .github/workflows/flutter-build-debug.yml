@@ -303,7 +303,7 @@ jobs:
         shell: bash
         run: |
           start=$(date +%s)
-          flutter build ipa --export-options-plist=ExportOptions.plist --no-pub
+          flutter build ipa --debug --export-options-plist=ExportOptions.plist --no-pub
           duration=$(( $(date +%s) - start ))
           echo "duration=${duration}" >> "$GITHUB_OUTPUT"
 
