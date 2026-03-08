@@ -128,10 +128,12 @@ jobs:
         with:
           distribution: microsoft
           java-version: '21'
-          cache: gradle
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
+        with:
+          cache-overwrite-existing: true
+          cache-read-only: false
 
       - name: Set up Flutter
         uses: subosito/flutter-action@v2
