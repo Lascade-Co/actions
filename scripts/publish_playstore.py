@@ -237,6 +237,7 @@ def main() -> int:
 
             if status == "inProgress":
                 rr["status"] = "halted"
+                rr.pop("userFraction", None)
                 halted_previous = True
 
             new_releases_a.append(rr)
