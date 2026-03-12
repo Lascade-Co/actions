@@ -19,14 +19,14 @@ jobs:
           BRANCH="${{ github.event.client_payload.branch }}"
           SLUG="${{ github.event.client_payload.project_slug }}"
           PR="${{ github.event.client_payload.pr_number || '' }}"
-          
+
           echo "repo=$REPO" >> "$GITHUB_OUTPUT"
           echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
           echo "owner=${REPO%%/*}" >> "$GITHUB_OUTPUT"
           echo "name=${REPO#*/}" >> "$GITHUB_OUTPUT"
           echo "project_slug=$SLUG" >> "$GITHUB_OUTPUT"
           echo "pr_number=$PR" >> "$GITHUB_OUTPUT"
-          
+
           if [[ "$BRANCH" == "main" || "$BRANCH" == "master" ]]; then
             echo "type=prod" >> "$GITHUB_OUTPUT"
             echo "build_flag=--prod" >> "$GITHUB_OUTPUT"
@@ -72,7 +72,7 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 24
-          cache: 'npm'
+          cache: "npm"
 
       - name: Install dependencies
         run: npm ci
@@ -89,8 +89,13 @@ jobs:
         id: deploy
         env:
           VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          VERCEL_COMPRESS_BUILD: ${{ github.event.client_payload.compress_build }}
         run: |
-          URL=$(vercel deploy --token "$VERCEL_TOKEN" ${{ steps.prepare.outputs.build_flag }} --prebuilt --yes)
+          ARCHIVE_FLAG=""
+          if [[ "${VERCEL_COMPRESS_BUILD:-}" == "true" ]]; then
+            ARCHIVE_FLAG="--archive=tgz"
+          fi
+          URL=$(vercel deploy --token "$VERCEL_TOKEN" ${{ steps.prepare.outputs.build_flag }} --prebuilt --yes $ARCHIVE_FLAG)
           echo "deploy_url=$URL" >> "$GITHUB_OUTPUT"
 
       - name: Comment on PR (if applicable)
