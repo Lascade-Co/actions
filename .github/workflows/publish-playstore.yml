@@ -161,6 +161,22 @@ jobs:
           message_file: github_release_body.txt
           disable_web_page_preview: true
 
+      - name: Create PostHog annotation
+        if: github.event.client_payload.posthog_project_id != ''
+        shell: bash
+        env:
+          POSTHOG_API_KEY: ${{ secrets.POSTHOG_PERSONAL_API_KEY }}
+        run: |
+          set -euo pipefail
+          curl -sf -X POST \
+            -H 'Content-Type: application/json' \
+            -H "Authorization: Bearer $POSTHOG_API_KEY" \
+            "https://us.posthog.com/api/projects/${{ github.event.client_payload.posthog_project_id }}/annotations/" \
+            -d "$(jq -n \
+              --arg content "Android ${{ steps.meta.outputs.tag }} released" \
+              --arg date "$(date -u +%Y-%m-%dT%H:%M:%S%z)" \
+              '{content: $content, date_marker: $date, scope: "project"}')"
+
       - name: Notify Telegram (FAILURE)
         if: failure()
         continue-on-error: true
