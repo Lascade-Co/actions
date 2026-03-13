@@ -236,8 +236,12 @@ def main() -> int:
                 continue
 
             if status == "inProgress":
-                rr["status"] = "halted"
-                rr.pop("userFraction", None)
+                fraction = rr.get("userFraction")
+                if fraction is not None and fraction < 1.0:
+                    rr["status"] = "halted"
+                else:
+                    rr["status"] = "completed"
+                    rr.pop("userFraction", None)
                 halted_previous = True
 
             new_releases_a.append(rr)
