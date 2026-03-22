@@ -281,9 +281,9 @@ def send_telegram(chat_id, text):
 
 def build_user_message(gh_user, tg_user_map, issues, version):
     """Build a Telegram message for a single user."""
-    tg_username = tg_user_map.get(gh_user)
-    if tg_username:
-        greeting = f"@{tg_username}"
+    tg_user_id = tg_user_map.get(gh_user)
+    if tg_user_id:
+        greeting = f'<a href="tg://user?id={tg_user_id}">{html.escape(gh_user)}</a>'
     else:
         greeting = f"<b>{html.escape(gh_user)}</b>"
 
@@ -356,6 +356,10 @@ def process_crash(crash, repo):
         url = existing.get("url", "")
         assignees = existing.get("assignees", [])
         assignee = assignees[0]["login"] if assignees else None
+
+        if not assignee:
+            # Fall back to git blame when no GitHub assignee
+            assignee = blame_frames(crash.get("frames", []), repo)
 
         if not assignee:
             print(f"  Skipping #{number} — no assignee")
