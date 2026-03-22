@@ -226,6 +226,34 @@ def comment_issue(number, repo, message):
 # Telegram report
 # ---------------------------------------------------------------------------
 
+TG_USER_MAP_URL = (
+    "https://raw.githubusercontent.com/Lascade-Co/actions/main/data/tg_user.json"
+)
+
+STATUS_EMOJI = {
+    "new": "\U0001F195",        # 🆕
+    "regression": "\U0001F525",  # 🔥
+    "active": "\U0001F504",      # 🔄
+}
+
+STATUS_LABEL = {
+    "new": "New",
+    "regression": "Regression",
+    "active": "Active",
+}
+
+
+def fetch_tg_user_map():
+    """Fetch the GitHub-to-Telegram username mapping."""
+    try:
+        req = urllib.request.Request(TG_USER_MAP_URL)
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return json.loads(resp.read())
+    except Exception as e:
+        print(f"Failed to fetch tg_user.json: {e}", file=sys.stderr)
+        return {}
+
+
 def send_telegram(chat_id, text):
     """Send an HTML message via Telegram Bot API."""
     token = os.environ.get("TELEGRAM_TOKEN", "")
@@ -251,37 +279,59 @@ def send_telegram(chat_id, text):
         print(f"Telegram send failed: {e}", file=sys.stderr)
 
 
-def build_telegram_report(results, version):
-    """Build an HTML-formatted Telegram report."""
-    if not results:
-        return None
+def build_user_message(gh_user, tg_user_map, issues, version):
+    """Build a Telegram message for a single user."""
+    tg_username = tg_user_map.get(gh_user)
+    if tg_username:
+        greeting = f"@{tg_username}"
+    else:
+        greeting = f"<b>{html.escape(gh_user)}</b>"
 
-    header = (
-        f"<b>Crashlytics Daily Report</b>\n"
-        f"<i>v{html.escape(version)}</i>\n"
-    )
-    rows = []
-    for i, r in enumerate(results, 1):
+    lines = [
+        f"\U0001F4CB <b>Crashlytics Report</b> \u2014 <i>v{html.escape(version)}</i>",
+        f"\U0001F464 {greeting}",
+        "",
+    ]
+
+    for i, r in enumerate(issues, 1):
         title = html.escape(r["title"])
         if len(title) > 60:
             title = title[:57] + "..."
-        assignee = html.escape(r.get("assignee") or "unassigned")
-        reported = r.get("reported", "today")
         url = r.get("url", "")
-        link = f'<a href="{html.escape(url)}">GH Issue</a>' if url else ""
+        status = r.get("status", "active")
+        sessions = r.get("sessions", "?")
+        emoji = STATUS_EMOJI.get(status, "\u2022")
+        label = STATUS_LABEL.get(status, status)
 
         if url:
             title_display = f'<a href="{html.escape(url)}">{title}</a>'
         else:
             title_display = title
 
-        rows.append(
-            f"<b>{i}.</b> {title_display}\n"
-            f"    Assigned: <b>{assignee}</b>  |  Since: {reported}"
-        )
+        lines.append(f"{emoji} {title_display}")
+        lines.append(f"      <i>{label}</i> \u00b7 {sessions} sessions")
+        lines.append("")
 
-    footer = f"\n<i>{len(results)} issue(s) tracked</i>"
-    return header + "\n" + "\n\n".join(rows) + footer
+    lines.append(f"\U0001F4CA <i>{len(issues)} issue(s) assigned to you</i>")
+    return "\n".join(lines)
+
+
+def send_telegram_reports(results, version, chat_id):
+    """Group results by assignee and send one Telegram message per user."""
+    tg_user_map = fetch_tg_user_map()
+
+    # Group by assignee
+    by_user = {}
+    for r in results:
+        assignee = r.get("assignee")
+        if not assignee:
+            continue
+        by_user.setdefault(assignee, []).append(r)
+
+    for gh_user, issues in by_user.items():
+        msg = build_user_message(gh_user, tg_user_map, issues, version)
+        print(f"  Sending to {gh_user} ({len(issues)} issues)")
+        send_telegram(chat_id, msg)
 
 
 # ---------------------------------------------------------------------------
@@ -307,6 +357,10 @@ def process_crash(crash, repo):
         assignees = existing.get("assignees", [])
         assignee = assignees[0]["login"] if assignees else None
 
+        if not assignee:
+            print(f"  Skipping #{number} — no assignee")
+            return None
+
         if state == "CLOSED":
             print(f"  Reopening #{number} (regression)")
             reopen_issue(number, repo)
@@ -314,18 +368,22 @@ def process_crash(crash, repo):
                 number, repo,
                 f"Issue regressed with {sessions} affected sessions in v{version}",
             )
+            status = "regression"
         else:
             print(f"  Commenting on #{number} (still active)")
             comment_issue(
                 number, repo,
                 f"Issue still active with {sessions} affected sessions in v{version}",
             )
+            status = "active"
 
         return {
             "title": title,
             "assignee": assignee,
             "reported": created,
             "url": url,
+            "status": status,
+            "sessions": sessions,
         }
 
     # New issue — git blame to find assignee
@@ -345,6 +403,8 @@ def process_crash(crash, repo):
         "assignee": assignee,
         "reported": date.today().isoformat(),
         "url": created["url"],
+        "status": "new",
+        "sessions": sessions,
     }
 
 
@@ -381,12 +441,10 @@ def main():
         if row:
             results.append(row)
 
-    # Telegram report
+    # Telegram reports — one message per assignee
     if args.telegram_chat_id and results:
-        report = build_telegram_report(results, version)
-        if report:
-            print(f"\nSending Telegram report to {args.telegram_chat_id}")
-            send_telegram(args.telegram_chat_id, report)
+        print(f"\nSending Telegram reports to {args.telegram_chat_id}")
+        send_telegram_reports(results, version, args.telegram_chat_id)
 
     print(f"\nDone. Processed {len(crashes)} crashes, {len(results)} issues updated/created.")
 
