@@ -1,4 +1,4 @@
-name: Assign issues based on crashlytics
+name: Assign Crashlytics Issues
 
 on:
   workflow_dispatch:
