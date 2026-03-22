@@ -279,6 +279,29 @@ def send_telegram(chat_id, text):
         print(f"Telegram send failed: {e}", file=sys.stderr)
 
 
+def _format_issue_line(r):
+    """Format a single issue as Telegram HTML lines."""
+    title = html.escape(r["title"])
+    if len(title) > 60:
+        title = title[:57] + "..."
+    url = r.get("url", "")
+    status = r.get("status", "active")
+    sessions = r.get("sessions", "?")
+    emoji = STATUS_EMOJI.get(status, "\u2022")
+    label = STATUS_LABEL.get(status, status)
+
+    if url:
+        title_display = f'<a href="{html.escape(url)}">{title}</a>'
+    else:
+        title_display = title
+
+    return [
+        f"{emoji} {title_display}",
+        f"      <i>{label}</i> \u00b7 {sessions} sessions",
+        "",
+    ]
+
+
 def build_user_message(gh_user, tg_user_map, issues, version):
     """Build a Telegram message for a single user."""
     tg_user_id = tg_user_map.get(gh_user)
@@ -287,32 +310,35 @@ def build_user_message(gh_user, tg_user_map, issues, version):
     else:
         greeting = f"<b>{html.escape(gh_user)}</b>"
 
+    fatal = [r for r in issues if r.get("error_type") == "FATAL"]
+    non_fatal = [r for r in issues if r.get("error_type") != "FATAL"]
+
     lines = [
         f"\U0001F4CB <b>Crashlytics Report</b> \u2014 <i>v{html.escape(version)}</i>",
         f"\U0001F464 {greeting}",
         "",
     ]
 
-    for i, r in enumerate(issues, 1):
-        title = html.escape(r["title"])
-        if len(title) > 60:
-            title = title[:57] + "..."
-        url = r.get("url", "")
-        status = r.get("status", "active")
-        sessions = r.get("sessions", "?")
-        emoji = STATUS_EMOJI.get(status, "\u2022")
-        label = STATUS_LABEL.get(status, status)
+    if fatal:
+        lines.append("\U0001F6A8 <b>Fatal</b>")
+        lines.append("")
+        for r in fatal:
+            lines.extend(_format_issue_line(r))
 
-        if url:
-            title_display = f'<a href="{html.escape(url)}">{title}</a>'
-        else:
-            title_display = title
-
-        lines.append(f"{emoji} {title_display}")
-        lines.append(f"      <i>{label}</i> \u00b7 {sessions} sessions")
+    if fatal and non_fatal:
+        lines.append("\u2500" * 20)
         lines.append("")
 
-    lines.append(f"\U0001F4CA <i>{len(issues)} issue(s) assigned to you</i>")
+    if non_fatal:
+        lines.append("\u26A0\uFE0F <b>Non-Fatal</b>")
+        lines.append("")
+        for r in non_fatal:
+            lines.extend(_format_issue_line(r))
+
+    lines.append(
+        f"\U0001F4CA <i>{len(issues)} issue(s) assigned to you"
+        f" \u00b7 {len(fatal)} fatal, {len(non_fatal)} non-fatal</i>"
+    )
     return "\n".join(lines)
 
 
@@ -398,6 +424,7 @@ def process_crash(crash, repo):
             "url": url,
             "status": status,
             "sessions": sessions,
+            "error_type": crash.get("error_type", "FATAL"),
         }
 
     # New issue — git blame to find assignee
@@ -419,6 +446,7 @@ def process_crash(crash, repo):
         "url": created["url"],
         "status": "new",
         "sessions": sessions,
+        "error_type": crash.get("error_type", "FATAL"),
     }
 
 
