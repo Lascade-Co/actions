@@ -85,11 +85,9 @@ def frames_to_table(frames):
 def is_library_frame(frame):
     """Check if a frame belongs to a library (should be skipped for blame)."""
     file_name = frame.get("file", "")
-    # Files like Preconditions.java, Thread.java — standard library
-    if file_name in ("Thread.java",):
-        return True
-    # Cannot blame without a file name
     if not file_name or file_name == "?":
+        return True
+    if file_name.startswith(SKIP_PREFIXES):
         return True
     return False
 
@@ -159,17 +157,19 @@ def blame_frames(frames, repo):
 
 def find_existing_issue(issue_id, repo):
     """Search for a GitHub issue containing the crashlytics marker."""
-    marker = f"crashlytics:{issue_id}"
+    marker = f"<!-- crashlytics:{issue_id} -->"
     data = gh_json([
         "gh", "issue", "list",
         "--repo", repo,
-        "--search", f"{marker} in:body",
+        "--search", f"crashlytics:{issue_id} in:body",
         "--state", "all",
-        "--json", "number,state,createdAt,assignees,url",
-        "--limit", "1",
+        "--json", "number,state,createdAt,assignees,url,body",
+        "--limit", "5",
     ])
-    if data and isinstance(data, list) and len(data) > 0:
-        return data[0]
+    if data and isinstance(data, list):
+        for issue in data:
+            if marker in issue.get("body", ""):
+                return issue
     return None
 
 
@@ -320,9 +320,19 @@ def send_telegram_reports(results, version, chat_id):
     """Group results by assignee and send one Telegram message per user."""
     tg_user_map = fetch_tg_user_map()
 
+    # Deduplicate by URL (safety net against search false positives)
+    seen_urls = set()
+    unique_results = []
+    for r in results:
+        url = r.get("url", "")
+        if url and url in seen_urls:
+            continue
+        seen_urls.add(url)
+        unique_results.append(r)
+
     # Group by assignee
     by_user = {}
-    for r in results:
+    for r in unique_results:
         assignee = r.get("assignee")
         if not assignee:
             continue
