@@ -20,6 +20,11 @@ jobs:
             app: com.travelanimator.routemap
             platform: ANDROID
             telegram_chat_id: "-5105920369"
+          - repo: Lascade-Co/travel-animator-ios
+            gcp_project: travelanimator-c8542
+            app: com.travelanimator.routemap
+            platform: IOS
+            telegram_chat_id: "-5105920369"
     steps:
       - name: Extract owner/repo
         id: repo
