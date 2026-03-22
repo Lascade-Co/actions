@@ -1,3 +1,4 @@
 .idea/
 trigger.sh
 *.env
+.letta/

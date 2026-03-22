@@ -1,0 +1,83 @@
+name: Assign issues based on crashlytics
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '11 0 * * *'
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  assign:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - repo: Lascade-Co/travel-animator-android
+            gcp_project: travelanimator-c8542
+            app: com.travelanimator.routemap
+            platform: ANDROID
+            telegram_chat_id: "-5105920369"
+    steps:
+      - name: Extract owner/repo
+        id: repo
+        run: |
+          FULL="${{ matrix.repo }}"
+          echo "owner=${FULL%%/*}" >> "$GITHUB_OUTPUT"
+          echo "name=${FULL#*/}"   >> "$GITHUB_OUTPUT"
+
+      - name: Mint GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.CI_APP_ID }}
+          private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
+          owner: ${{ steps.repo.outputs.owner }}
+          repositories: ${{ steps.repo.outputs.name }}
+
+      - name: Checkout target repo
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ matrix.repo }}
+          token: ${{ steps.app-token.outputs.token }}
+          fetch-depth: 0
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Setup Google Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Download crashlytics_report.py
+        run: |
+          curl -fsSL -o crashlytics_report.py \
+            https://raw.githubusercontent.com/Lascade-Co/actions/main/scripts/crashlytics_report.py
+
+      - name: Fetch crash reports from BigQuery
+        run: |
+          python crashlytics_report.py \
+            --project "${{ matrix.gcp_project }}" \
+            --app "${{ matrix.app }}" \
+            --platform "${{ matrix.platform }}" \
+            > crashes.json
+
+      - name: Download crashlytics_blame.py
+        run: |
+          curl -fsSL -o crashlytics_blame.py \
+            https://raw.githubusercontent.com/Lascade-Co/actions/main/scripts/crashlytics_blame.py
+
+      - name: Create / update GitHub issues
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          TELEGRAM_TOKEN: ${{ secrets.SUBSCRIPTION_TELEGRAM_TOKEN }}
+        run: |
+          python crashlytics_blame.py \
+            --crashes crashes.json \
+            --repo "${{ matrix.repo }}" \
+            --telegram-chat-id "${{ matrix.telegram_chat_id }}"
+
+
