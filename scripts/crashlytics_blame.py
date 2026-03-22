@@ -256,19 +256,32 @@ def build_telegram_report(results, version):
     if not results:
         return None
 
-    lines = [f"<b>Crashlytics Report — v{html.escape(version)}</b>", ""]
-    for r in results:
+    header = (
+        f"<b>Crashlytics Daily Report</b>\n"
+        f"<i>v{html.escape(version)}</i>\n"
+    )
+    rows = []
+    for i, r in enumerate(results, 1):
         title = html.escape(r["title"])
-        # Truncate long titles for readability
-        if len(title) > 50:
-            title = title[:47] + "..."
-        assignee = r.get("assignee") or "unassigned"
+        if len(title) > 60:
+            title = title[:57] + "..."
+        assignee = html.escape(r.get("assignee") or "unassigned")
         reported = r.get("reported", "today")
         url = r.get("url", "")
-        link = f'<a href="{html.escape(url)}">GH Issue</a>' if url else "—"
-        lines.append(f"{title} | {assignee} | {reported} | {link}")
+        link = f'<a href="{html.escape(url)}">GH Issue</a>' if url else ""
 
-    return "\n".join(lines)
+        if url:
+            title_display = f'<a href="{html.escape(url)}">{title}</a>'
+        else:
+            title_display = title
+
+        rows.append(
+            f"<b>{i}.</b> {title_display}\n"
+            f"    Assigned: <b>{assignee}</b>  |  Since: {reported}"
+        )
+
+    footer = f"\n<i>{len(results)} issue(s) tracked</i>"
+    return header + "\n" + "\n\n".join(rows) + footer
 
 
 # ---------------------------------------------------------------------------
@@ -318,11 +331,11 @@ def process_crash(crash, repo):
     # New issue — git blame to find assignee
     print("  Running git blame...")
     assignee = blame_frames(crash.get("frames", []), repo)
-    if assignee:
-        print(f"  Assigning to {assignee}")
-    else:
-        print("  Could not determine assignee from blame")
+    if not assignee:
+        print("  Skipping — could not determine assignee from blame")
+        return None
 
+    print(f"  Assigning to {assignee}")
     created = create_issue(crash, assignee, repo)
     if not created:
         return None
