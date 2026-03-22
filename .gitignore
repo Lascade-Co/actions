@@ -2,3 +2,4 @@
 trigger.sh
 *.env
 .letta/
+.gitnexus
