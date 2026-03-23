@@ -1,0 +1,191 @@
+name: Central Build & Release Flutter
+
+on:
+  repository_dispatch:
+    types: [release-flutter]
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+concurrency:
+  group: release-flutter-${{ github.event.client_payload.repo }}
+  cancel-in-progress: true
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      owner: ${{ steps.repo.outputs.owner }}
+      name: ${{ steps.repo.outputs.name }}
+    steps:
+      - name: Extract owner/repo
+        id: repo
+        shell: bash
+        run: |
+          FULL="${{ github.event.client_payload.repo }}"
+          echo "owner=${FULL%%/*}" >> "$GITHUB_OUTPUT"
+          echo "name=${FULL#*/}"   >> "$GITHUB_OUTPUT"
+
+  build-and-release:
+    needs: prepare
+    runs-on: ubuntu-latest
+    steps:
+      - name: Mint GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.CI_APP_ID }}
+          private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
+          owner: ${{ needs.prepare.outputs.owner }}
+          repositories: ${{ needs.prepare.outputs.name }}
+
+      - name: Checkout target repo @ branch
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.event.client_payload.repo }}
+          ref: refs/heads/${{ github.event.client_payload.branch }}
+          token: ${{ steps.app-token.outputs.token }}
+          fetch-depth: 0
+
+      - name: Fetch build secrets from Infisical (prod)
+        uses: Infisical/secrets-action@v1.0.12
+        with:
+          method: universal
+          client-id: ${{ secrets.INFISICAL_CLIENT_ID }}
+          client-secret: ${{ secrets.INFISICAL_CLIENT_SECRET }}
+          project-slug: ${{ github.event.client_payload.project_slug }}
+          env-slug: "prod"
+          domain: ${{ secrets.INFISICAL_DOMAIN }}
+          secret-path: /Build
+          export-type: env
+
+      - name: Fetch .env from Infisical (prod)
+        uses: Infisical/secrets-action@v1.0.12
+        with:
+          method: universal
+          client-id: ${{ secrets.INFISICAL_CLIENT_ID }}
+          client-secret: ${{ secrets.INFISICAL_CLIENT_SECRET }}
+          project-slug: ${{ github.event.client_payload.project_slug }}
+          env-slug: "prod"
+          domain: ${{ secrets.INFISICAL_DOMAIN }}
+          secret-path: /App-Env
+          export-type: file
+          file-output-path: /.env
+
+      - name: Decode keystore
+        run: echo "${{ env.KEYSTORE_BASE64 }}" | base64 --decode > android/app/keystore.jks
+
+      - name: Decode google-services.json
+        run: echo "${{ env.SERVICE_JSON_BASE64 }}" | base64 --decode > android/app/google-services.json
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v5
+        with:
+          distribution: microsoft
+          java-version: '21'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v5
+        with:
+          cache-overwrite-existing: true
+          cache-read-only: false
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Cache Android project Gradle
+        id: android-project-gradle-cache
+        uses: actions/cache@v4
+        with:
+          path: android/.gradle/
+          key: android-project-gradle-${{ runner.os }}-${{ hashFiles('pubspec.lock', 'android/**/*.gradle*', 'android/gradle.properties', 'android/gradle/wrapper/gradle-wrapper.properties') }}
+          restore-keys: |
+            android-project-gradle-${{ runner.os }}-
+
+      - name: Increment version
+        id: increment_version
+        run: bash increment_version.sh
+
+      - name: Flutter pub get
+        run: flutter pub get
+
+      - name: Build release AAB
+        run: flutter build appbundle --release --no-pub --android-project-cache-dir=.gradle
+        env:
+          KEYSTORE_PASSWORD: ${{ env.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ env.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ env.KEY_PASSWORD }}
+
+      - name: Zip native debug symbols if not pre-zipped
+        run: |
+          SYMBOLS_DIR="build/app/intermediates/merged_native_libs/release/mergeReleaseNativeLibs/out/lib"
+          OUTPUT_DIR="build/app/outputs/bundle/release"
+          if [ ! -f "${OUTPUT_DIR}/native-debug-symbols.zip" ] && [ -d "$SYMBOLS_DIR" ]; then
+            (cd "$SYMBOLS_DIR" && zip -r "${GITHUB_WORKSPACE}/${OUTPUT_DIR}/native-debug-symbols.zip" .)
+          fi
+
+      - name: Determine HEAD SHA for tag
+        id: headsha
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Ensure release notes file
+        run: |
+          if [ ! -f releasenotes.txt ]; then
+            printf "Bug fixes and improvements\n" > releasenotes.txt
+          fi
+
+      - name: Create GitHub Release in source repo
+        id: create_release
+        uses: softprops/action-gh-release@v2
+        with:
+          repository: ${{ github.event.client_payload.repo }}
+          token: ${{ steps.app-token.outputs.token }}
+          tag_name: ${{ steps.increment_version.outputs.new_version }}
+          target_commitish: ${{ steps.headsha.outputs.sha }}
+          name: Release ${{ steps.increment_version.outputs.new_version }}
+          body_path: releasenotes.txt
+          files: |
+            build/app/outputs/bundle/release/app-release.aab
+            build/app/outputs/bundle/release/native-debug-symbols.zip
+
+      - name: Commit version bump and push
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add pubspec.yaml
+          git commit -m "[skip ci] Increment version to ${{ steps.increment_version.outputs.new_version }}" || echo "No changes"
+          git push origin HEAD:${{ github.event.client_payload.branch }}
+
+      - name: Send Telegram notification
+        if: success()
+        continue-on-error: true
+        uses: appleboy/telegram-action@v1.0.1
+        with:
+          to: ${{ env.TELEGRAM_CHAT_ID }}
+          token: ${{ env.TELEGRAM_BOT_TOKEN }}
+          format: markdown
+          message: |
+            *Flutter Release Ready*
+
+            Version: ${{ steps.increment_version.outputs.new_version }}
+            [Download](${{ steps.create_release.outputs.url }})
+
+      - name: Notify Telegram on failure
+        if: failure()
+        continue-on-error: true
+        uses: appleboy/telegram-action@v1.0.1
+        with:
+          to: ${{ env.TELEGRAM_CHAT_ID }}
+          token: ${{ env.TELEGRAM_BOT_TOKEN }}
+          format: markdown
+          message: |
+            *Flutter Release Build FAILED*
+
+            Repo: ${{ github.event.client_payload.repo }}
+            Branch: ${{ github.event.client_payload.branch }}
+            [View logs](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})

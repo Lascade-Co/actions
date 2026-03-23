@@ -1,0 +1,21 @@
+name: "Flutter Release Build Trigger"
+
+on:
+  workflow_dispatch:
+
+jobs:
+  trigger-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Dispatch to central repo
+        uses: peter-evans/repository-dispatch@v3
+        with:
+          token: ${{ secrets.CENTRAL_DISPATCH_TOKEN }}
+          repository: Lascade-Co/actions
+          event-type: release-flutter
+          client-payload: >-
+            {
+              "repo": ${{ toJSON(github.repository) }},
+              "branch": ${{ toJSON(github.ref_name) }},
+              "project_slug": "the infisical project slug"
+            }
