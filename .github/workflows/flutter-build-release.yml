@@ -12,7 +12,7 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  build:
+  prepare:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.increment_version.outputs.new_version }}
@@ -20,6 +20,7 @@ jobs:
       name: ${{ steps.repo.outputs.name }}
       package_name: ${{ steps.app_meta.outputs.package_name }}
       app_name: ${{ steps.app_meta.outputs.app_name }}
+      commit_sha: ${{ steps.push.outputs.commit_sha }}
     steps:
       - name: Extract owner/repo
         id: repo
@@ -45,6 +46,49 @@ jobs:
           ref: refs/heads/${{ github.event.client_payload.branch }}
           token: ${{ steps.app-token.outputs.token }}
           fetch-depth: 0
+
+      - name: Increment version
+        id: increment_version
+        run: bash increment_version.sh
+
+      - name: Extract app metadata
+        id: app_meta
+        shell: bash
+        run: |
+          PACKAGE_NAME=$(grep -oP 'applicationId\s+["'"'"']\K[^"'"'"']+' android/app/build.gradle)
+          APP_NAME=$(grep -oP '^name:\s*\K\S+' pubspec.yaml)
+          echo "package_name=$PACKAGE_NAME" >> "$GITHUB_OUTPUT"
+          echo "app_name=$APP_NAME" >> "$GITHUB_OUTPUT"
+
+      - name: Commit version bump and push
+        id: push
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add pubspec.yaml
+          git commit -m "[skip ci] Increment version to ${{ steps.increment_version.outputs.new_version }}" || echo "No changes"
+          git push origin HEAD:${{ github.event.client_payload.branch }}
+          echo "commit_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+  build-android:
+    needs: prepare
+    runs-on: ubuntu-latest
+    steps:
+      - name: Mint GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.CI_APP_ID }}
+          private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
+          owner: ${{ needs.prepare.outputs.owner }}
+          repositories: ${{ needs.prepare.outputs.name }}
+
+      - name: Checkout target repo @ version-bumped commit
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.event.client_payload.repo }}
+          ref: ${{ needs.prepare.outputs.commit_sha }}
+          token: ${{ steps.app-token.outputs.token }}
 
       - name: Fetch build secrets from Infisical (prod)
         uses: Infisical/secrets-action@v1.0.12
@@ -103,19 +147,6 @@ jobs:
           restore-keys: |
             android-project-gradle-${{ runner.os }}-
 
-      - name: Increment version
-        id: increment_version
-        run: bash increment_version.sh
-
-      - name: Extract app metadata
-        id: app_meta
-        shell: bash
-        run: |
-          PACKAGE_NAME=$(grep -oP 'applicationId\s+["'"'"']\K[^"'"'"']+' android/app/build.gradle)
-          APP_NAME=$(grep -oP '^name:\s*\K\S+' pubspec.yaml)
-          echo "package_name=$PACKAGE_NAME" >> "$GITHUB_OUTPUT"
-          echo "app_name=$APP_NAME" >> "$GITHUB_OUTPUT"
-
       - name: Flutter pub get
         run: flutter pub get
 
@@ -143,23 +174,121 @@ jobs:
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: flutter-release
+          name: android-release
           path: |
             build/app/outputs/bundle/release/app-release.aab
             build/app/outputs/bundle/release/native-debug-symbols.zip
             releasenotes.txt
           if-no-files-found: error
 
-      - name: Commit version bump and push
-        run: |
-          git config user.name  "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add pubspec.yaml
-          git commit -m "[skip ci] Increment version to ${{ steps.increment_version.outputs.new_version }}" || echo "No changes"
-          git push origin HEAD:${{ github.event.client_payload.branch }}
+  build-ios:
+    needs: prepare
+    runs-on: macos-latest
+    env:
+      COCOAPODS_DISABLE_STATS: "true"
+    steps:
+      - name: Mint GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.CI_APP_ID }}
+          private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
+          owner: ${{ needs.prepare.outputs.owner }}
+          repositories: ${{ needs.prepare.outputs.name }}
 
-  publish:
-    needs: build
+      - name: Checkout target repo @ version-bumped commit
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.event.client_payload.repo }}
+          ref: ${{ needs.prepare.outputs.commit_sha }}
+          token: ${{ steps.app-token.outputs.token }}
+
+      - name: Capture Xcode version
+        id: xcode-version
+        shell: bash
+        run: |
+          version="$(xcodebuild -version | tr '\n' ' ' | sed 's/[[:space:]]\+/ /g; s/ $//')"
+          key="$(printf '%s' "$version" | shasum -a 256 | cut -d' ' -f1)"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "cache-key=$key" >> "$GITHUB_OUTPUT"
+
+      - name: Fetch build secrets from Infisical (prod)
+        uses: Infisical/secrets-action@v1.0.12
+        with:
+          method: universal
+          client-id: ${{ secrets.INFISICAL_CLIENT_ID }}
+          client-secret: ${{ secrets.INFISICAL_CLIENT_SECRET }}
+          project-slug: ${{ github.event.client_payload.project_slug }}
+          env-slug: "prod"
+          domain: ${{ secrets.INFISICAL_DOMAIN }}
+          secret-path: /Build
+          export-type: env
+
+      - name: Fetch .env from Infisical (prod)
+        uses: Infisical/secrets-action@v1.0.12
+        with:
+          method: universal
+          client-id: ${{ secrets.INFISICAL_CLIENT_ID }}
+          client-secret: ${{ secrets.INFISICAL_CLIENT_SECRET }}
+          project-slug: ${{ github.event.client_payload.project_slug }}
+          env-slug: "prod"
+          domain: ${{ secrets.INFISICAL_DOMAIN }}
+          secret-path: /App-Env
+          export-type: file
+          file-output-path: /.env
+
+      - name: Decode GoogleService-Info.plist
+        run: echo "${{ env.SERVICE_PLIST_BASE64 }}" | base64 --decode > ios/Runner/GoogleService-Info.plist
+
+      - name: Install Apple certificate and provisioning profiles
+        run: curl -sSL https://raw.githubusercontent.com/Lascade-Co/actions/main/scripts/install_apple_cert.sh | bash
+
+      - name: Switch Xcode project to manual signing
+        run: curl -sSL https://raw.githubusercontent.com/Lascade-Co/actions/main/scripts/fix_ios_signing.py | python3 -
+
+      - name: Generate ExportOptions.plist
+        run: |
+          /usr/libexec/PlistBuddy -c "Clear dict" ExportOptions.plist
+          /usr/libexec/PlistBuddy -c "Add :method string app-store-connect" ExportOptions.plist
+          /usr/libexec/PlistBuddy -c "Add :teamID string ${{ env.IOS_TEAM_ID }}" ExportOptions.plist
+          /usr/libexec/PlistBuddy -c "Add :signingStyle string manual" ExportOptions.plist
+          /usr/libexec/PlistBuddy -c "Add :provisioningProfiles dict" ExportOptions.plist
+          /usr/libexec/PlistBuddy -c "Add :provisioningProfiles:${{ env.IOS_BUNDLE_ID }} string ${{ env.APP_PROFILE_UUID }}" ExportOptions.plist
+          /usr/libexec/PlistBuddy -c "Add :provisioningProfiles:${{ env.IOS_BUNDLE_ID }}.OneSignalNotificationServiceExtension string ${{ env.NSE_PROFILE_UUID }}" ExportOptions.plist
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Cache CocoaPods
+        uses: actions/cache@v4
+        with:
+          path: |
+            ios/Pods
+            ~/Library/Caches/CocoaPods
+            ~/.cocoapods/repos
+          key: pods-${{ runner.os }}-${{ steps.xcode-version.outputs.cache-key }}-${{ hashFiles('ios/Podfile', 'ios/Podfile.lock') }}
+          restore-keys: |
+            pods-${{ runner.os }}-${{ steps.xcode-version.outputs.cache-key }}-
+            pods-${{ runner.os }}-
+
+      - name: Flutter pub get
+        run: flutter pub get
+
+      - name: Build release IPA
+        run: flutter build ipa --export-options-plist=ExportOptions.plist --no-pub
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-release
+          path: build/ios/ipa/*.ipa
+          if-no-files-found: error
+
+  publish-android:
+    needs: [prepare, build-android]
     runs-on: ubuntu-latest
     timeout-minutes: 25
 
@@ -172,7 +301,7 @@ jobs:
       - name: Download build artifacts
         uses: actions/download-artifact@v4
         with:
-          name: flutter-release
+          name: android-release
 
       - name: Locate AAB + native debug symbols
         id: assets
@@ -210,14 +339,14 @@ jobs:
 
           python3 publish_playstore.py \
             --service-account-json play-sa.json \
-            --package-name "${{ needs.build.outputs.package_name }}" \
+            --package-name "${{ needs.prepare.outputs.package_name }}" \
             --track "${{ env.TRACK }}" \
             --aab "${{ steps.assets.outputs.aab }}" \
             --native-symbols "${{ steps.assets.outputs.symbols }}" \
-            --release-name "${{ needs.build.outputs.version }}" \
+            --release-name "${{ needs.prepare.outputs.version }}" \
             --notes-file "whatsnew/whatsnew-en-US" \
             --raw-notes-file "release_notes_raw.txt" \
-            --app-name "${{ needs.build.outputs.app_name }}" \
+            --app-name "${{ needs.prepare.outputs.app_name }}" \
             --country "${{ env.TARGET_COUNTRY }}" \
             --user-fraction "${{ env.TARGET_FRACTION }}" \
             --telegram-out "github_release_body.txt"
@@ -243,7 +372,7 @@ jobs:
             -H "Authorization: Bearer $POSTHOG_API_KEY" \
             "https://us.posthog.com/api/projects/${{ github.event.client_payload.posthog_project_id }}/annotations/" \
             -d "$(jq -n \
-              --arg content "Flutter ${{ needs.build.outputs.version }} released" \
+              --arg content "Android ${{ needs.prepare.outputs.version }} released" \
               --arg date "$(date -u +%Y-%m-%dT%H:%M:%S%z)" \
               '{content: $content, date_marker: $date, scope: "project"}')"
 
@@ -259,9 +388,75 @@ jobs:
           message: |
             <b>Play Store publish failed</b>
 
-            <b>App:</b> ${{ needs.build.outputs.app_name }}
+            <b>App:</b> ${{ needs.prepare.outputs.app_name }}
             <b>Repo:</b> <code>${{ github.event.client_payload.repo }}</code>
 
             <a href="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}">
               View logs
             </a>
+
+  publish-ios:
+    needs: [prepare, build-ios]
+    runs-on: macos-latest
+    timeout-minutes: 25
+    steps:
+      - name: Download IPA artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ios-release
+
+      - name: Locate IPA
+        id: assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          IPA=$(find . -maxdepth 2 -name "*.ipa" | head -n 1)
+          : "${IPA:?Missing IPA}"
+          echo "ipa=$IPA" >> "$GITHUB_OUTPUT"
+
+      - name: Upload to TestFlight
+        uses: apple-actions/upload-testflight-build@v4
+        with:
+          app-path: ${{ steps.assets.outputs.ipa }}
+          issuer-id: ${{ secrets.APPSTORE_ISSUER_ID }}
+          api-key-id: ${{ secrets.APPSTORE_API_KEY_ID }}
+          api-private-key: ${{ secrets.APPSTORE_API_PRIVATE_KEY }}
+
+      - name: Notify Telegram (success)
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.SUBSCRIPTION_TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.SUBSCRIPTION_TELEGRAM_TO }}
+        run: |
+          curl -sf -X POST "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage" \
+            -d chat_id="${TELEGRAM_CHAT_ID}" \
+            -d parse_mode=html \
+            -d disable_web_page_preview=true \
+            -d text="$(cat <<'MSG'
+          <b>iOS build published to TestFlight</b>
+
+          <b>App:</b> ${{ needs.prepare.outputs.app_name }}
+          <b>Version:</b> ${{ needs.prepare.outputs.version }}
+          <b>Repo:</b> <code>${{ github.event.client_payload.repo }}</code>
+          MSG
+          )"
+
+      - name: Notify Telegram (FAILURE)
+        if: failure()
+        continue-on-error: true
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.SUBSCRIPTION_TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.SUBSCRIPTION_TELEGRAM_TO }}
+        run: |
+          curl -sf -X POST "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage" \
+            -d chat_id="${TELEGRAM_CHAT_ID}" \
+            -d parse_mode=html \
+            -d disable_web_page_preview=true \
+            -d text="$(cat <<'MSG'
+          <b>App Store publish failed</b>
+
+          <b>App:</b> ${{ needs.prepare.outputs.app_name }}
+          <b>Repo:</b> <code>${{ github.event.client_payload.repo }}</code>
+
+          <a href="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}">View logs</a>
+          MSG
+          )"

@@ -19,5 +19,6 @@ jobs:
             {
               "repo": ${{ toJSON(github.repository) }},
               "branch": ${{ toJSON(github.ref_name) }},
-              "project_slug": "the infisical project slug"
+              "project_slug": "the infisical project slug",
+              "posthog_project_id": ""
             }
