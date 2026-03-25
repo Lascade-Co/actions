@@ -201,8 +201,8 @@ def main() -> int:
 
     ap.add_argument("--raw-notes-file", required=True)
     ap.add_argument("--app-name", required=True)
-    ap.add_argument("--github-release-url", required=True)
-    ap.add_argument("--play-console-production-url", required=True)
+    ap.add_argument("--github-release-url", default="")
+    ap.add_argument("--play-console-production-url", default="")
     ap.add_argument("--telegram-out", required=True)
 
     ap.add_argument("--country", required=True)  # BD
@@ -297,7 +297,8 @@ def main() -> int:
     raw_notes = truncate_unicode(raw_notes, 2800)
 
     play_link = args.play_console_production_url
-    play_link = play_link + ("&tab=releases" if "?" in play_link else "?tab=releases")
+    if play_link:
+        play_link = play_link + ("&tab=releases" if "?" in play_link else "?tab=releases")
 
     msg = (
         f"<b>✅ Production rollout started</b>\n\n"
@@ -312,11 +313,12 @@ def main() -> int:
     if halted_previous:
         msg += "\n<i>Note: Previous in-progress production rollout was halted automatically.</i>\n"
 
-    msg += (
-        f"\n<b>Play Console:</b> <a href=\"{html.escape(play_link)}\">Open production releases</a>\n"
-        f"<b>GitHub Release:</b> <a href=\"{html.escape(args.github_release_url)}\">{html.escape(args.release_name)}</a>\n\n"
-        f"<b>Release notes:</b>\n<pre>{html.escape(raw_notes)}</pre>\n"
-    )
+    msg += "\n"
+    if play_link:
+        msg += f"<b>Play Console:</b> <a href=\"{html.escape(play_link)}\">Open production releases</a>\n"
+    if args.github_release_url:
+        msg += f"<b>GitHub Release:</b> <a href=\"{html.escape(args.github_release_url)}\">{html.escape(args.release_name)}</a>\n"
+    msg += f"\n<b>Release notes:</b>\n<pre>{html.escape(raw_notes)}</pre>\n"
 
     with open(args.telegram_out, "w", encoding="utf-8") as f:
         f.write(msg)
