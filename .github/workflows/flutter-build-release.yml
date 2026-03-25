@@ -308,8 +308,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          AAB=$(find . -maxdepth 3 -name "*.aab" | head -n 1)
-          SYM=$(find . -maxdepth 3 -iname "*native-debug-symbols*.zip" | head -n 1)
+          AAB=$(find . -name "*.aab" | head -n 1)
+          SYM=$(find . -iname "*native-debug-symbols*.zip" | head -n 1)
           : "${AAB:?Missing AAB}"
           : "${SYM:?Missing native debug symbols zip}"
           echo "aab=$AAB" >> "$GITHUB_OUTPUT"
