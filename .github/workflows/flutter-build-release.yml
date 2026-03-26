@@ -436,7 +436,6 @@ jobs:
 
           <b>App:</b> ${{ needs.prepare.outputs.app_name }}
           <b>Version:</b> ${{ needs.prepare.outputs.version }}
-          <b>Repo:</b> <code>${{ github.event.client_payload.repo }}</code>
           MSG
           )"
 
