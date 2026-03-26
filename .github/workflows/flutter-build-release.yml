@@ -405,19 +405,19 @@ jobs:
         with:
           name: ios-release
 
-      - name: Locate IPA
+      - name: Locate and rename IPA
         id: assets
         shell: bash
         run: |
           set -euo pipefail
           IPA=$(find . -maxdepth 2 -name "*.ipa" | head -n 1)
           : "${IPA:?Missing IPA}"
-          echo "ipa=$IPA" >> "$GITHUB_OUTPUT"
+          mv "$IPA" app-release.ipa
 
       - name: Upload to TestFlight
         uses: apple-actions/upload-testflight-build@v4
         with:
-          app-path: ${{ steps.assets.outputs.ipa }}
+          app-path: app-release.ipa
           issuer-id: ${{ secrets.APPSTORE_ISSUER_ID }}
           api-key-id: ${{ secrets.APPSTORE_API_KEY_ID }}
           api-private-key: ${{ secrets.APPSTORE_API_PRIVATE_KEY }}
