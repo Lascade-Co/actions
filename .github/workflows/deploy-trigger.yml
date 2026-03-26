@@ -21,7 +21,7 @@ jobs:
   trigger-deploy:
     runs-on: ubuntu-latest
     steps:
-      - uses: github/branch-deploy@v9.9.1
+      - uses: github/branch-deploy@v11
         id: branch-deploy
         with:
           environment: "test"
@@ -30,7 +30,7 @@ jobs:
 
       - name: Dispatch to central repo
         if: ${{ steps.branch-deploy.outputs.continue == 'true' }}
-        uses: peter-evans/repository-dispatch@v3
+        uses: peter-evans/repository-dispatch@v4
         with:
           token: ${{ secrets.central_dispatch_token }}
           repository: Lascade-Co/actions

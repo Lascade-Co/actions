@@ -34,7 +34,7 @@ jobs:
     steps:
       - name: Mint GitHub App token
         id: app-token
-        uses: actions/create-github-app-token@v2
+        uses: actions/create-github-app-token@v3
         with:
           app-id: ${{ secrets.CI_APP_ID }}
           private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
@@ -42,7 +42,7 @@ jobs:
           repositories: ${{ needs.prepare.outputs.name }}
 
       - name: Checkout target repo @ branch
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: ${{ github.event.client_payload.repo }}
           ref: refs/heads/${{ github.event.client_payload.branch }}
@@ -50,7 +50,7 @@ jobs:
           fetch-depth: 0
 
       - name: Fetch local.properties from Infisical (prod)
-        uses: Infisical/secrets-action@v1.0.9
+        uses: Infisical/secrets-action@v1.0.15
         with:
           method: universal
           client-id: ${{ secrets.INFISICAL_CLIENT_ID }}
@@ -66,7 +66,7 @@ jobs:
         run: sed -i -e "s/'//g" local.properties
 
       - name: Fetch keystore secrets as env (prod)
-        uses: Infisical/secrets-action@v1.0.9
+        uses: Infisical/secrets-action@v1.0.15
         with:
           method: universal
           client-id: ${{ secrets.INFISICAL_CLIENT_ID }}
@@ -91,7 +91,7 @@ jobs:
           cache: gradle
 
       - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v4
+        uses: gradle/actions/setup-gradle@v6
         with:
           cache-read-only: false
 
@@ -113,7 +113,7 @@ jobs:
           fi
 
       - name: Upload AAB + symbols
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: aab
           path: |
@@ -127,7 +127,7 @@ jobs:
     steps:
       - name: Mint GitHub App token
         id: app-token
-        uses: actions/create-github-app-token@v2
+        uses: actions/create-github-app-token@v3
         with:
           app-id: ${{ secrets.CI_APP_ID }}
           private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
@@ -135,7 +135,7 @@ jobs:
           repositories: ${{ needs.prepare.outputs.name }}
 
       - name: Checkout target repo @ branch
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: ${{ github.event.client_payload.repo }}
           ref: refs/heads/${{ github.event.client_payload.branch }}
@@ -143,7 +143,7 @@ jobs:
           fetch-depth: 0
 
       - name: Fetch local.properties from Infisical (prod)
-        uses: Infisical/secrets-action@v1.0.9
+        uses: Infisical/secrets-action@v1.0.15
         with:
           method: universal
           client-id: ${{ secrets.INFISICAL_CLIENT_ID }}
@@ -159,7 +159,7 @@ jobs:
         run: sed -i -e "s/'//g" local.properties
 
       - name: Fetch keystore secrets as env (prod)
-        uses: Infisical/secrets-action@v1.0.9
+        uses: Infisical/secrets-action@v1.0.15
         with:
           method: universal
           client-id: ${{ secrets.INFISICAL_CLIENT_ID }}
@@ -184,7 +184,7 @@ jobs:
           cache: gradle
 
       - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v4
+        uses: gradle/actions/setup-gradle@v6
         with:
           cache-read-only: false
 
@@ -196,7 +196,7 @@ jobs:
         run: ./gradlew --no-daemon --configuration-cache assembleRelease
 
       - name: Upload APK
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: apk
           path: app/build/outputs/apk/release/app-release.apk
@@ -207,7 +207,7 @@ jobs:
     steps:
       - name: Mint GitHub App token
         id: app-token
-        uses: actions/create-github-app-token@v2
+        uses: actions/create-github-app-token@v3
         with:
           app-id: ${{ secrets.CI_APP_ID }}
           private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
@@ -215,7 +215,7 @@ jobs:
           repositories: ${{ needs.prepare.outputs.name }}
 
       - name: Checkout target repo @ branch
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: ${{ github.event.client_payload.repo }}
           ref: refs/heads/${{ github.event.client_payload.branch }}
@@ -232,12 +232,12 @@ jobs:
         # Script must: echo "new_version=<ver>" >> "$GITHUB_OUTPUT"
 
       - name: Download AAB artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: aab
 
       - name: Download APK artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: apk
 

@@ -32,7 +32,7 @@ jobs:
 
       - name: Mint GitHub App token
         id: app-token
-        uses: actions/create-github-app-token@v2
+        uses: actions/create-github-app-token@v3
         with:
           app-id: ${{ secrets.CI_APP_ID }}
           private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
@@ -40,7 +40,7 @@ jobs:
           repositories: ${{ steps.repo.outputs.name }}
 
       - name: Checkout target repo @ branch
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: ${{ github.event.client_payload.repo }}
           ref: refs/heads/${{ github.event.client_payload.branch }}
@@ -76,7 +76,7 @@ jobs:
     steps:
       - name: Mint GitHub App token
         id: app-token
-        uses: actions/create-github-app-token@v2
+        uses: actions/create-github-app-token@v3
         with:
           app-id: ${{ secrets.CI_APP_ID }}
           private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
@@ -84,14 +84,14 @@ jobs:
           repositories: ${{ needs.prepare.outputs.name }}
 
       - name: Checkout target repo @ version-bumped commit
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: ${{ github.event.client_payload.repo }}
           ref: ${{ needs.prepare.outputs.commit_sha }}
           token: ${{ steps.app-token.outputs.token }}
 
       - name: Fetch build secrets from Infisical (prod)
-        uses: Infisical/secrets-action@v1.0.12
+        uses: Infisical/secrets-action@v1.0.15
         with:
           method: universal
           client-id: ${{ secrets.INFISICAL_CLIENT_ID }}
@@ -103,7 +103,7 @@ jobs:
           export-type: env
 
       - name: Fetch .env from Infisical (prod)
-        uses: Infisical/secrets-action@v1.0.12
+        uses: Infisical/secrets-action@v1.0.15
         with:
           method: universal
           client-id: ${{ secrets.INFISICAL_CLIENT_ID }}
@@ -128,7 +128,7 @@ jobs:
           java-version: '21'
 
       - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@v5
+        uses: gradle/actions/setup-gradle@v6
         with:
           cache-overwrite-existing: true
           cache-read-only: false
@@ -140,7 +140,7 @@ jobs:
           cache: true
 
       - name: Cache Android project Gradle
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: android/.gradle/
           key: android-project-gradle-${{ runner.os }}-${{ hashFiles('pubspec.lock', 'android/**/*.gradle*', 'android/gradle.properties', 'android/gradle/wrapper/gradle-wrapper.properties') }}
@@ -172,7 +172,7 @@ jobs:
           fi
 
       - name: Upload build artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: android-release
           path: |
@@ -189,7 +189,7 @@ jobs:
     steps:
       - name: Mint GitHub App token
         id: app-token
-        uses: actions/create-github-app-token@v2
+        uses: actions/create-github-app-token@v3
         with:
           app-id: ${{ secrets.CI_APP_ID }}
           private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
@@ -197,7 +197,7 @@ jobs:
           repositories: ${{ needs.prepare.outputs.name }}
 
       - name: Checkout target repo @ version-bumped commit
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: ${{ github.event.client_payload.repo }}
           ref: ${{ needs.prepare.outputs.commit_sha }}
@@ -213,7 +213,7 @@ jobs:
           echo "cache-key=$key" >> "$GITHUB_OUTPUT"
 
       - name: Fetch build secrets from Infisical (prod)
-        uses: Infisical/secrets-action@v1.0.12
+        uses: Infisical/secrets-action@v1.0.15
         with:
           method: universal
           client-id: ${{ secrets.INFISICAL_CLIENT_ID }}
@@ -225,7 +225,7 @@ jobs:
           export-type: env
 
       - name: Fetch .env from Infisical (prod)
-        uses: Infisical/secrets-action@v1.0.12
+        uses: Infisical/secrets-action@v1.0.15
         with:
           method: universal
           client-id: ${{ secrets.INFISICAL_CLIENT_ID }}
@@ -263,7 +263,7 @@ jobs:
           cache: true
 
       - name: Cache CocoaPods
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ios/Pods
@@ -281,7 +281,7 @@ jobs:
         run: flutter build ipa --export-options-plist=ExportOptions.plist --no-pub
 
       - name: Upload IPA artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ios-release
           path: build/ios/ipa/*.ipa
@@ -299,7 +299,7 @@ jobs:
 
     steps:
       - name: Download build artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: android-release
 
@@ -324,7 +324,7 @@ jobs:
           echo "$NOTES" > release_notes_raw.txt
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.11"
 
@@ -401,7 +401,7 @@ jobs:
     timeout-minutes: 25
     steps:
       - name: Download IPA artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: ios-release
 

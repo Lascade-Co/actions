@@ -31,7 +31,7 @@ jobs:
 
       - name: Mint GitHub App token
         id: app-token
-        uses: actions/create-github-app-token@v2
+        uses: actions/create-github-app-token@v3
         with:
           app-id: ${{ secrets.CI_APP_ID }}
           private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
@@ -39,7 +39,7 @@ jobs:
           repositories: ${{ steps.repo.outputs.name }}
 
       - name: Purge previous comments from this workflow
-        uses: actions/github-script@v7
+        uses: actions/github-script@v8
         with:
           github-token: ${{ steps.app-token.outputs.token }}
           script: |
@@ -60,7 +60,7 @@ jobs:
             core.info(`Deleted ${deleted} prior central-build-debug-flutter comments`);
 
       - name: Comment on PR about build status
-        uses: peter-evans/create-or-update-comment@v4
+        uses: peter-evans/create-or-update-comment@v5
         id: status
         with:
           edit-mode: 'replace'
@@ -78,7 +78,7 @@ jobs:
     steps:
       - name: Mint GitHub App token
         id: app-token
-        uses: actions/create-github-app-token@v2
+        uses: actions/create-github-app-token@v3
         with:
           app-id: ${{ secrets.CI_APP_ID }}
           private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
@@ -86,14 +86,14 @@ jobs:
           repositories: ${{ needs.prepare.outputs.name }}
 
       - name: Checkout target repo at PR HEAD
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: ${{ github.event.client_payload.repo }}
           ref: refs/pull/${{ github.event.client_payload.pr }}/head
           token: ${{ steps.app-token.outputs.token }}
 
       - name: Fetch secrets from Infisical
-        uses: Infisical/secrets-action@v1.0.9
+        uses: Infisical/secrets-action@v1.0.15
         with:
           method: universal
           client-id: ${{ secrets.INFISICAL_CLIENT_ID }}
@@ -105,7 +105,7 @@ jobs:
           export-type: env
 
       - name: Fetch .env from Infisical
-        uses: Infisical/secrets-action@v1.0.9
+        uses: Infisical/secrets-action@v1.0.15
         with:
           method: universal
           client-id: ${{ secrets.INFISICAL_CLIENT_ID }}
@@ -130,7 +130,7 @@ jobs:
           java-version: '21'
 
       - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@v4
+        uses: gradle/actions/setup-gradle@v6
         with:
           cache-overwrite-existing: true
           cache-read-only: false
@@ -143,7 +143,7 @@ jobs:
 
       - name: Cache Android project Gradle
         id: android-project-gradle-cache
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: android/.gradle/
           key: android-project-gradle-${{ runner.os }}-${{ hashFiles('pubspec.lock', 'android/**/*.gradle*', 'android/gradle.properties', 'android/gradle/wrapper/gradle-wrapper.properties') }}
@@ -189,7 +189,7 @@ jobs:
           } | tee -a "$summary_target"
 
       - name: Upload APK artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: apk
           path: build/app/outputs/flutter-apk/app-debug.apk
@@ -203,7 +203,7 @@ jobs:
     steps:
       - name: Mint GitHub App token
         id: app-token
-        uses: actions/create-github-app-token@v2
+        uses: actions/create-github-app-token@v3
         with:
           app-id: ${{ secrets.CI_APP_ID }}
           private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
@@ -211,7 +211,7 @@ jobs:
           repositories: ${{ needs.prepare.outputs.name }}
 
       - name: Checkout target repo at PR HEAD
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: ${{ github.event.client_payload.repo }}
           ref: refs/pull/${{ github.event.client_payload.pr }}/head
@@ -227,7 +227,7 @@ jobs:
           echo "cache-key=$key" >> "$GITHUB_OUTPUT"
 
       - name: Fetch secrets from Infisical
-        uses: Infisical/secrets-action@v1.0.9
+        uses: Infisical/secrets-action@v1.0.15
         with:
           method: universal
           client-id: ${{ secrets.INFISICAL_CLIENT_ID }}
@@ -239,7 +239,7 @@ jobs:
           export-type: env
 
       - name: Fetch .env from Infisical
-        uses: Infisical/secrets-action@v1.0.9
+        uses: Infisical/secrets-action@v1.0.15
         with:
           method: universal
           client-id: ${{ secrets.INFISICAL_CLIENT_ID }}
@@ -278,7 +278,7 @@ jobs:
 
       - name: Cache CocoaPods
         id: ios-cocoapods-cache
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ios/Pods
@@ -326,7 +326,7 @@ jobs:
           } | tee -a "$summary_target"
 
       - name: Upload IPA artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ipa
           path: build/ios/ipa/*.ipa
@@ -339,7 +339,7 @@ jobs:
     steps:
       - name: Mint GitHub App token
         id: app-token
-        uses: actions/create-github-app-token@v2
+        uses: actions/create-github-app-token@v3
         with:
           app-id: ${{ secrets.CI_APP_ID }}
           private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
@@ -347,7 +347,7 @@ jobs:
           repositories: ${{ needs.prepare.outputs.name }}
 
       - name: Fetch secrets from Infisical
-        uses: Infisical/secrets-action@v1.0.9
+        uses: Infisical/secrets-action@v1.0.15
         with:
           method: universal
           client-id: ${{ secrets.INFISICAL_CLIENT_ID }}
@@ -360,14 +360,14 @@ jobs:
 
       - name: Download APK artifact
         if: needs.build-android.result == 'success'
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: apk
           path: artifacts/
 
       - name: Download IPA artifact
         if: needs.build-ios.result == 'success'
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: ipa
           path: artifacts/
@@ -416,7 +416,7 @@ jobs:
 
       - name: Comment on PR with download link
         if: needs.build-android.result == 'success' && needs.build-ios.result == 'success' && steps.upload-android.outcome == 'success' && steps.upload-ios.outcome == 'success'
-        uses: peter-evans/create-or-update-comment@v4
+        uses: peter-evans/create-or-update-comment@v5
         with:
           token: ${{ steps.app-token.outputs.token }}
           repository: ${{ github.event.client_payload.repo }}
@@ -431,7 +431,7 @@ jobs:
       - name: Send Telegram notification
         if: needs.build-android.result == 'success' && needs.build-ios.result == 'success' && steps.upload-android.outcome == 'success' && steps.upload-ios.outcome == 'success'
         continue-on-error: true
-        uses: appleboy/telegram-action@master
+        uses: appleboy/telegram-action@v1.0.1
         with:
           to: ${{ env.TELEGRAM_CHAT_ID }}
           token: ${{ env.TELEGRAM_BOT_TOKEN }}
@@ -444,7 +444,7 @@ jobs:
 
       - name: Comment on PR if any build failed
         if: always() && (needs.build-android.result == 'failure' || needs.build-ios.result == 'failure' || steps.firebase-cli.outcome == 'failure' || steps.firebase-credentials.outcome == 'failure' || steps.upload-android.outcome == 'failure' || steps.upload-ios.outcome == 'failure')
-        uses: actions/github-script@v7
+        uses: actions/github-script@v8
         with:
           github-token: ${{ steps.app-token.outputs.token }}
           script: |
