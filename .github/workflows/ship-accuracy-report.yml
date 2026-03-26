@@ -50,7 +50,7 @@ jobs:
       - name: Run accuracy report
         run: |
           python3 ship_accuracy_report.py \
-            --bbox "${{ steps.port.outputs.bbox }}" \
+            --bbox="${{ steps.port.outputs.bbox }}" \
             --output report.html
 
       - name: Send report to Telegram
