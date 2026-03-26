@@ -415,12 +415,14 @@ jobs:
           mv "$IPA" app-release.ipa
 
       - name: Upload to TestFlight
-        uses: apple-actions/upload-testflight-build@v4
-        with:
-          app-path: app-release.ipa
-          issuer-id: ${{ secrets.APPSTORE_ISSUER_ID }}
-          api-key-id: ${{ secrets.APPSTORE_API_KEY_ID }}
-          api-private-key: ${{ secrets.APPSTORE_API_PRIVATE_KEY }}
+        run: |
+          mkdir -p ~/private_keys
+          echo "${{ secrets.APPSTORE_API_PRIVATE_KEY }}" > ~/private_keys/AuthKey_${{ secrets.APPSTORE_API_KEY_ID }}.p8
+          xcrun altool --upload-app \
+            -f app-release.ipa \
+            --type ios \
+            --apiKey "${{ secrets.APPSTORE_API_KEY_ID }}" \
+            --apiIssuer "${{ secrets.APPSTORE_ISSUER_ID }}"
 
       - name: Notify Telegram (success)
         env:
