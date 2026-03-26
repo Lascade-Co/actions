@@ -23,6 +23,7 @@ def main():
     path = os.environ.get("PBXPROJ_PATH", "ios/Runner.xcodeproj/project.pbxproj")
     app_name = os.environ.get("APP_PROFILE_NAME")
     nse_name = os.environ.get("NSE_PROFILE_NAME")
+    team_id = os.environ.get("IOS_TEAM_ID")
 
     if not app_name or not nse_name:
         print("ERROR: APP_PROFILE_NAME and NSE_PROFILE_NAME must be set", file=sys.stderr)
@@ -77,6 +78,13 @@ def main():
                             bl = re.sub(
                                 r'CODE_SIGN_IDENTITY = ".*?"',
                                 'CODE_SIGN_IDENTITY = "Apple Distribution"',
+                                bl,
+                            )
+                        # Replace DEVELOPMENT_TEAM if IOS_TEAM_ID is set
+                        if "DEVELOPMENT_TEAM" in bl and team_id:
+                            bl = re.sub(
+                                r"DEVELOPMENT_TEAM = \w+",
+                                f"DEVELOPMENT_TEAM = {team_id}",
                                 bl,
                             )
                         # Replace PROVISIONING_PROFILE_SPECIFIER
