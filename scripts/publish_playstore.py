@@ -170,21 +170,38 @@ def infer_locale_from_whatsnew(notes_file: str) -> str:
 
 def upload_bundle_and_symbols(token, edit_id_b, pkg, aab, native_symbols) -> str:
     # Upload AAB (bundle)
-    bundle = http_upload_octet(
-        "POST",
-        f"{UPLOAD_BASE}/applications/{pkg}/edits/{edit_id_b}/bundles?uploadType=media",
-        token,
-        aab,
-    )
-    version_code = str(bundle["versionCode"])
+    already_uploaded = False
+    try:
+        bundle = http_upload_octet(
+            "POST",
+            f"{UPLOAD_BASE}/applications/{pkg}/edits/{edit_id_b}/bundles?uploadType=media",
+            token,
+            aab,
+        )
+        version_code = str(bundle["versionCode"])
+    except RuntimeError as e:
+        if "version code that has already been used" not in str(e):
+            raise
+        # Bundle was uploaded in a previous committed edit; look up its version code.
+        already_uploaded = True
+        resp = http_json("GET", f"{API_BASE}/applications/{pkg}/edits/{edit_id_b}/bundles", token)
+        codes = [b["versionCode"] for b in resp.get("bundles", [])]
+        if not codes:
+            raise
+        version_code = str(max(codes))
 
     # Upload native debug symbols (nativeCode)
-    http_upload_octet(
-        "POST",
-        f"{UPLOAD_BASE}/applications/{pkg}/edits/{edit_id_b}/apks/{version_code}/deobfuscationFiles/nativeCode?uploadType=media",
-        token,
-        native_symbols,
-    )
+    try:
+        http_upload_octet(
+            "POST",
+            f"{UPLOAD_BASE}/applications/{pkg}/edits/{edit_id_b}/apks/{version_code}/deobfuscationFiles/nativeCode?uploadType=media",
+            token,
+            native_symbols,
+        )
+    except RuntimeError:
+        if not already_uploaded:
+            raise
+        # On retry, symbols were likely already uploaded.
 
     return version_code
 
@@ -255,9 +272,11 @@ def main() -> int:
                 else:
                     rr["status"] = "completed"
                     rr.pop("userFraction", None)
-                    rr.pop("countryTargeting", None)
                 halted_previous = True
 
+            # Only inProgress releases may carry countryTargeting; strip from
+            # all releases since every inProgress is now halted or completed.
+            rr.pop("countryTargeting", None)
             new_releases_a.append(rr)
 
         update_track(token, pkg, edit_id_a, track_name, new_releases_a)
