@@ -231,26 +231,34 @@ def main() -> int:
     track_name = args.track
 
     # -----------------------------
-    # Phase 1: Halt any inProgress rollout (commit immediately)
+    # Phase 1: Transition any inProgress rollout into a valid fallback state.
+    # A country-targeted staged rollout must sit on top of a completed release
+    # so users outside the target country still have an upgrade path.
     # -----------------------------
-    halted_previous = False
+    previous_rollout_action = "none"
 
     edit_id_a = create_edit(token, pkg)
     track_a = get_track(token, pkg, edit_id_a, track_name)
     releases_a = track_a.get("releases", []) or []
 
-    # If there is an inProgress, halt it in its own commit.
+    # If there is an inProgress, move it to its next stable state in its own
+    # commit before creating the new rollout.
     new_releases_a: List[Dict[str, Any]] = []
     has_inprogress = any(r.get("status") == "inProgress" for r in releases_a)
+    has_completed_fallback = any(r.get("status") == "completed" for r in releases_a)
 
     if has_inprogress:
-        completing_inprogress = False
-        for r in releases_a:
-            status = r.get("status")
-            if status == "inProgress":
+        # If there is no completed release yet, promote the current staged
+        # rollout to completed so the next country rollout has a fallback.
+        completing_inprogress = not has_completed_fallback
+        if not completing_inprogress:
+            for r in releases_a:
+                if r.get("status") != "inProgress":
+                    continue
                 fraction = r.get("userFraction")
                 if fraction is None or fraction >= 1.0:
                     completing_inprogress = True
+                    break
 
         for r in releases_a:
             status = r.get("status")
@@ -267,12 +275,13 @@ def main() -> int:
 
             if status == "inProgress":
                 fraction = rr.get("userFraction")
-                if fraction is not None and fraction < 1.0:
-                    rr["status"] = "halted"
-                else:
+                if completing_inprogress or fraction is None or fraction >= 1.0:
                     rr["status"] = "completed"
                     rr.pop("userFraction", None)
-                halted_previous = True
+                    previous_rollout_action = "completed_for_fallback" if not has_completed_fallback else "completed"
+                else:
+                    rr["status"] = "halted"
+                    previous_rollout_action = "halted"
 
             # Only inProgress releases may carry countryTargeting; strip from
             # all releases since every inProgress is now halted or completed.
@@ -308,6 +317,13 @@ def main() -> int:
             rr.pop("countryTargeting", None)
             completed_only.append(rr)
 
+    if not completed_only:
+        raise RuntimeError(
+            "Cannot start a country-targeted rollout without an existing completed fallback release. "
+            "Complete the current production rollout first, or publish a completed baseline release "
+            "before starting another country-only rollout."
+        )
+
     locale = infer_locale_from_whatsnew(args.notes_file)
     notes_text = read_text(args.notes_file).strip()
 
@@ -328,7 +344,15 @@ def main() -> int:
 
     # Write outputs
     with open("play_outputs.json", "w", encoding="utf-8") as f:
-        json.dump({"version_code": version_code, "halted_previous": halted_previous}, f, separators=(",", ":"))
+        json.dump(
+            {
+                "version_code": version_code,
+                "halted_previous": previous_rollout_action == "halted",
+                "previous_rollout_action": previous_rollout_action,
+            },
+            f,
+            separators=(",", ":"),
+        )
 
     # Telegram message
     raw_notes = read_text(args.raw_notes_file).strip() or "No release notes provided."
@@ -348,8 +372,15 @@ def main() -> int:
         f"<b>Country:</b> {html.escape(args.country)} only\n"
     )
 
-    if halted_previous:
+    if previous_rollout_action == "halted":
         msg += "\n<i>Note: Previous in-progress production rollout was halted automatically.</i>\n"
+    elif previous_rollout_action == "completed_for_fallback":
+        msg += (
+            "\n<i>Note: Previous in-progress production rollout was promoted to completed automatically "
+            "so this rollout still has a valid fallback release.</i>\n"
+        )
+    elif previous_rollout_action == "completed":
+        msg += "\n<i>Note: Previous in-progress production rollout was completed automatically.</i>\n"
 
     msg += "\n"
     if play_link:
