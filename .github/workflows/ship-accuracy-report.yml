@@ -38,6 +38,7 @@ jobs:
             ["Cape of Good Hope"]="-34.8,17.5,-33.5,18.9"
             ["Portuguese Coast"]="39.72,-11.69,42.28,-7.93"
             ["Gulf of Aden"]="11.5,43.0,13.0,45.5"
+            ["St Lawrence River"]="44.0,-76.5,45.6,-73.5"
           )
 
           NAMES=("${!PORTS[@]}")
