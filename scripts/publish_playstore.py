@@ -227,12 +227,25 @@ def main() -> int:
     has_inprogress = any(r.get("status") == "inProgress" for r in releases_a)
 
     if has_inprogress:
+        completing_inprogress = False
+        for r in releases_a:
+            status = r.get("status")
+            if status == "inProgress":
+                fraction = r.get("userFraction")
+                if fraction is None or fraction >= 1.0:
+                    completing_inprogress = True
+
         for r in releases_a:
             status = r.get("status")
             rr = keep_fields(r)
 
             # keep drafts out; they often block releases anyway
             if status == "draft":
+                continue
+
+            # Drop old completed releases when promoting inProgress to completed,
+            # because the Play API only allows one completed release per track.
+            if status == "completed" and completing_inprogress:
                 continue
 
             if status == "inProgress":
