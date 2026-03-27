@@ -255,6 +255,7 @@ def main() -> int:
                 else:
                     rr["status"] = "completed"
                     rr.pop("userFraction", None)
+                    rr.pop("countryTargeting", None)
                 halted_previous = True
 
             new_releases_a.append(rr)
