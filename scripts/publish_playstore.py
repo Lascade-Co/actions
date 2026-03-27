@@ -279,10 +279,15 @@ def main() -> int:
     releases_b = track_b.get("releases", []) or []
 
     # Keep only completed releases to avoid "Too many staged releases specified."
+    # Strip countryTargeting so completed releases serve ALL countries as a
+    # fallback — otherwise country-targeted staged rollouts fail with
+    # "does not allow any existing users to upgrade".
     completed_only: List[Dict[str, Any]] = []
     for r in releases_b:
         if r.get("status") == "completed":
-            completed_only.append(keep_fields(r))
+            rr = keep_fields(r)
+            rr.pop("countryTargeting", None)
+            completed_only.append(rr)
 
     locale = infer_locale_from_whatsnew(args.notes_file)
     notes_text = read_text(args.notes_file).strip()
