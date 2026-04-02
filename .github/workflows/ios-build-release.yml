@@ -165,6 +165,20 @@ jobs:
             -exportOptionsPlist ExportOptions.plist \
             | xcpretty
 
+      - name: Upload dSYMs to Firebase Crashlytics
+        shell: bash
+        run: |
+          UPLOAD_SYMBOLS=$(find SourcePackages -name "upload-symbols" -type f | head -1)
+          if [ -z "$UPLOAD_SYMBOLS" ]; then
+            echo "Warning: upload-symbols not found, skipping dSYM upload"
+            exit 0
+          fi
+          chmod +x "$UPLOAD_SYMBOLS"
+
+          PLIST=$(find . -name "GoogleService-Info.plist" -not -path "*/Pods/*" -not -path "*/.build/*" | head -1)
+
+          "$UPLOAD_SYMBOLS" -gsp "$PLIST" -p ios build/App.xcarchive/dSYMs
+
       - name: Upload IPA artifact
         uses: actions/upload-artifact@v7
         with:
