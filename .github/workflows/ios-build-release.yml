@@ -12,14 +12,14 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  prepare:
+  build:
     runs-on: macos-latest
+    timeout-minutes: 60
     outputs:
-      version: ${{ steps.increment_version.outputs.new_version }}
+      version: ${{ steps.version.outputs.version }}
       owner: ${{ steps.repo.outputs.owner }}
       name: ${{ steps.repo.outputs.name }}
       app_name: ${{ steps.app_meta.outputs.app_name }}
-      commit_sha: ${{ steps.push.outputs.commit_sha }}
     steps:
       - name: Extract owner/repo
         id: repo
@@ -46,9 +46,12 @@ jobs:
           token: ${{ steps.app-token.outputs.token }}
           fetch-depth: 0
 
-      - name: Increment version
-        id: increment_version
-        run: bash increment_version.sh
+      - name: Extract version and app metadata
+        id: version
+        shell: bash
+        run: |
+          VERSION=$(grep 'MARKETING_VERSION' *.xcodeproj/project.pbxproj | grep -v '1.0' | head -1 | sed 's/.*= //;s/;//;s/ //g')
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Extract app metadata
         id: app_meta
@@ -56,37 +59,6 @@ jobs:
         run: |
           APP_NAME=$(grep -m1 'PRODUCT_NAME' *.xcodeproj/project.pbxproj | sed 's/.*= //;s/;//;s/"//g;s/ //g' || echo "TravelRoute")
           echo "app_name=$APP_NAME" >> "$GITHUB_OUTPUT"
-
-      - name: Commit version bump and push
-        id: push
-        run: |
-          git config user.name  "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add *.xcodeproj/project.pbxproj
-          git commit -m "[skip ci] Increment version to ${{ steps.increment_version.outputs.new_version }}" || echo "No changes"
-          git push origin HEAD:${{ github.event.client_payload.branch }}
-          echo "commit_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-
-  build:
-    needs: prepare
-    runs-on: macos-latest
-    timeout-minutes: 60
-    steps:
-      - name: Mint GitHub App token
-        id: app-token
-        uses: actions/create-github-app-token@v3
-        with:
-          app-id: ${{ secrets.CI_APP_ID }}
-          private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
-          owner: ${{ needs.prepare.outputs.owner }}
-          repositories: ${{ needs.prepare.outputs.name }}
-
-      - name: Checkout target repo @ version-bumped commit
-        uses: actions/checkout@v6
-        with:
-          repository: ${{ github.event.client_payload.repo }}
-          ref: ${{ needs.prepare.outputs.commit_sha }}
-          token: ${{ steps.app-token.outputs.token }}
 
       - name: Capture Xcode version
         id: xcode-version
@@ -121,10 +93,8 @@ jobs:
       - name: Decode GoogleService-Info.plist
         shell: bash
         run: |
-          # Find the GoogleService-Info.plist location from .gitignore or use default
           PLIST_PATH=$(find . -path "*/GoogleService-Info.plist" -not -path "*/Pods/*" -not -path "*/.build/*" 2>/dev/null | head -1)
           if [ -z "$PLIST_PATH" ]; then
-            # Default location based on scheme name
             PLIST_PATH="${{ steps.detect.outputs.scheme }}/GoogleService-Info.plist"
           fi
           echo "${{ env.SERVICE_PLIST_BASE64 }}" | base64 --decode > "$PLIST_PATH"
@@ -136,7 +106,6 @@ jobs:
         shell: bash
         run: |
           PROFILES_DIR="$HOME/Library/MobileDevice/Provisioning Profiles"
-          # Install share extension profile if provided
           if [ -n "$IOS_SHARE_EXT_PROVISION_PROFILE_BASE64" ]; then
             TEMP_PROFILE=$(mktemp)
             echo "$IOS_SHARE_EXT_PROVISION_PROFILE_BASE64" | base64 --decode > "$TEMP_PROFILE"
@@ -183,7 +152,6 @@ jobs:
             -destination "generic/platform=iOS" \
             -archivePath build/App.xcarchive \
             -clonedSourcePackagesDirPath SourcePackages \
-            MARKETING_VERSION="${{ needs.prepare.outputs.version }}" \
             CURRENT_PROJECT_VERSION="${{ github.run_number }}" \
             CODE_SIGN_STYLE=Manual \
             | xcpretty
@@ -205,7 +173,7 @@ jobs:
           if-no-files-found: error
 
   publish:
-    needs: [prepare, build]
+    needs: build
     runs-on: macos-latest
     timeout-minutes: 25
     steps:
@@ -245,7 +213,7 @@ jobs:
             -H "Authorization: Bearer $POSTHOG_API_KEY" \
             "https://us.posthog.com/api/projects/${{ github.event.client_payload.posthog_project_id }}/annotations/" \
             -d "$(jq -n \
-              --arg content "iOS ${{ needs.prepare.outputs.version }} submitted to App Store" \
+              --arg content "iOS ${{ needs.build.outputs.version }} submitted to App Store" \
               --arg date "$(date -u +%Y-%m-%dT%H:%M:%S%z)" \
               '{content: $content, date_marker: $date, scope: "project"}')"
 
@@ -255,17 +223,25 @@ jobs:
         with:
           app-id: ${{ secrets.CI_APP_ID }}
           private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
-          owner: ${{ needs.prepare.outputs.owner }}
-          repositories: ${{ needs.prepare.outputs.name }}
+          owner: ${{ needs.build.outputs.owner }}
+          repositories: ${{ needs.build.outputs.name }}
 
-      - name: Create GitHub Release
-        env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+      - name: Increment version
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ github.event.client_payload.repo }}
+          ref: refs/heads/${{ github.event.client_payload.branch }}
+          token: ${{ steps.app-token.outputs.token }}
+          fetch-depth: 1
+
+      - name: Bump version and push
         run: |
-          gh release create "v${{ needs.prepare.outputs.version }}" \
-            --repo "${{ github.event.client_payload.repo }}" \
-            --title "v${{ needs.prepare.outputs.version }}" \
-            --generate-notes
+          bash increment_version.sh
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add *.xcodeproj/project.pbxproj
+          git commit -m "[skip ci] Increment version to $(grep 'MARKETING_VERSION' *.xcodeproj/project.pbxproj | grep -v '1.0' | head -1 | sed 's/.*= //;s/;//;s/ //g')"
+          git push origin HEAD:${{ github.event.client_payload.branch }}
 
       - name: Notify Telegram (success)
         env:
@@ -279,8 +255,8 @@ jobs:
             -d text="$(cat <<MSG
           <b>iOS build submitted to App Store</b>
 
-          <b>App:</b> ${{ needs.prepare.outputs.app_name }}
-          <b>Version:</b> ${{ needs.prepare.outputs.version }}
+          <b>App:</b> ${{ needs.build.outputs.app_name }}
+          <b>Version:</b> ${{ needs.build.outputs.version }}
           MSG
           )"
 
@@ -298,7 +274,7 @@ jobs:
             -d text="$(cat <<MSG
           <b>App Store publish failed</b>
 
-          <b>App:</b> ${{ needs.prepare.outputs.app_name }}
+          <b>App:</b> ${{ needs.build.outputs.app_name }}
           <b>Repo:</b> <code>${{ github.event.client_payload.repo }}</code>
 
           <a href="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}">View logs</a>
