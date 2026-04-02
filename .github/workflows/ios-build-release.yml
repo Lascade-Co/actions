@@ -36,7 +36,6 @@ jobs:
           app-id: ${{ secrets.CI_APP_ID }}
           private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
           owner: ${{ steps.repo.outputs.owner }}
-          repositories: ${{ steps.repo.outputs.name }}
 
       - name: Checkout target repo @ branch
         uses: actions/checkout@v6
@@ -45,6 +44,9 @@ jobs:
           ref: refs/heads/${{ github.event.client_payload.branch }}
           token: ${{ steps.app-token.outputs.token }}
           fetch-depth: 0
+
+      - name: Configure git for private SPM dependencies
+        run: git config --global url."https://x-access-token:${{ steps.app-token.outputs.token }}@github.com/".insteadOf "https://github.com/"
 
       - name: Extract version and app metadata
         id: version
