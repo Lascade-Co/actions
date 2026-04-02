@@ -118,6 +118,8 @@ jobs:
           fi
 
       - name: Switch Xcode project to manual signing
+        env:
+          PBXPROJ_PATH: ${{ steps.detect.outputs.project }}/project.pbxproj
         run: curl -sSL https://raw.githubusercontent.com/Lascade-Co/actions/main/scripts/fix_ios_signing.py | python3 -
 
       - name: Generate ExportOptions.plist
