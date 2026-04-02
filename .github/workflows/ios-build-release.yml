@@ -14,7 +14,7 @@ concurrency:
 jobs:
   build:
     runs-on: macos-latest
-    timeout-minutes: 60
+    timeout-minutes: 120
     outputs:
       version: ${{ steps.version.outputs.version }}
       owner: ${{ steps.repo.outputs.owner }}
@@ -138,6 +138,15 @@ jobs:
           if [ -n "${{ env.SHARE_EXT_PROFILE_UUID }}" ]; then
             /usr/libexec/PlistBuddy -c "Add :provisioningProfiles:${{ env.IOS_BUNDLE_ID }}.MapLinkShareExtension string ${{ env.SHARE_EXT_PROFILE_UUID }}" ExportOptions.plist
           fi
+
+      - name: Cache SPM packages
+        uses: actions/cache@v5
+        with:
+          path: SourcePackages
+          key: spm-${{ runner.os }}-${{ steps.xcode-version.outputs.cache-key }}-${{ hashFiles('*.xcodeproj/project.pbxproj', '**/Package.resolved') }}
+          restore-keys: |
+            spm-${{ runner.os }}-${{ steps.xcode-version.outputs.cache-key }}-
+            spm-${{ runner.os }}-
 
       - name: Resolve SPM packages
         run: |
