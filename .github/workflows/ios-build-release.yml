@@ -1,0 +1,306 @@
+name: Central Build & Release iOS
+
+on:
+  repository_dispatch:
+    types: [release-ios]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-ios-${{ github.event.client_payload.repo }}
+  cancel-in-progress: true
+
+jobs:
+  prepare:
+    runs-on: macos-latest
+    outputs:
+      version: ${{ steps.increment_version.outputs.new_version }}
+      owner: ${{ steps.repo.outputs.owner }}
+      name: ${{ steps.repo.outputs.name }}
+      app_name: ${{ steps.app_meta.outputs.app_name }}
+      commit_sha: ${{ steps.push.outputs.commit_sha }}
+    steps:
+      - name: Extract owner/repo
+        id: repo
+        shell: bash
+        run: |
+          FULL="${{ github.event.client_payload.repo }}"
+          echo "owner=${FULL%%/*}" >> "$GITHUB_OUTPUT"
+          echo "name=${FULL#*/}"   >> "$GITHUB_OUTPUT"
+
+      - name: Mint GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ secrets.CI_APP_ID }}
+          private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
+          owner: ${{ steps.repo.outputs.owner }}
+          repositories: ${{ steps.repo.outputs.name }}
+
+      - name: Checkout target repo @ branch
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ github.event.client_payload.repo }}
+          ref: refs/heads/${{ github.event.client_payload.branch }}
+          token: ${{ steps.app-token.outputs.token }}
+          fetch-depth: 0
+
+      - name: Increment version
+        id: increment_version
+        run: bash increment_version.sh
+
+      - name: Extract app metadata
+        id: app_meta
+        shell: bash
+        run: |
+          APP_NAME=$(grep -m1 'PRODUCT_NAME' *.xcodeproj/project.pbxproj | sed 's/.*= //;s/;//;s/"//g;s/ //g' || echo "TravelRoute")
+          echo "app_name=$APP_NAME" >> "$GITHUB_OUTPUT"
+
+      - name: Commit version bump and push
+        id: push
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add *.xcodeproj/project.pbxproj
+          git commit -m "[skip ci] Increment version to ${{ steps.increment_version.outputs.new_version }}" || echo "No changes"
+          git push origin HEAD:${{ github.event.client_payload.branch }}
+          echo "commit_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: prepare
+    runs-on: macos-latest
+    timeout-minutes: 60
+    steps:
+      - name: Mint GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ secrets.CI_APP_ID }}
+          private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
+          owner: ${{ needs.prepare.outputs.owner }}
+          repositories: ${{ needs.prepare.outputs.name }}
+
+      - name: Checkout target repo @ version-bumped commit
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ github.event.client_payload.repo }}
+          ref: ${{ needs.prepare.outputs.commit_sha }}
+          token: ${{ steps.app-token.outputs.token }}
+
+      - name: Capture Xcode version
+        id: xcode-version
+        shell: bash
+        run: |
+          version="$(xcodebuild -version | tr '\n' ' ' | sed 's/[[:space:]]\+/ /g; s/ $//')"
+          key="$(printf '%s' "$version" | shasum -a 256 | cut -d' ' -f1)"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "cache-key=$key"   >> "$GITHUB_OUTPUT"
+
+      - name: Fetch build secrets from Infisical
+        uses: Infisical/secrets-action@v1.0.15
+        with:
+          method: universal
+          client-id: ${{ secrets.INFISICAL_CLIENT_ID }}
+          client-secret: ${{ secrets.INFISICAL_CLIENT_SECRET }}
+          project-slug: ${{ github.event.client_payload.project_slug }}
+          env-slug: "prod"
+          domain: ${{ secrets.INFISICAL_DOMAIN }}
+          secret-path: /Build
+          export-type: env
+
+      - name: Detect Xcode project
+        id: detect
+        shell: bash
+        run: |
+          XCODEPROJ=$(find . -maxdepth 1 -name "*.xcodeproj" | head -1 | sed 's|^\./||')
+          SCHEME=$(echo "$XCODEPROJ" | sed 's/.xcodeproj//')
+          echo "project=$XCODEPROJ" >> "$GITHUB_OUTPUT"
+          echo "scheme=$SCHEME"     >> "$GITHUB_OUTPUT"
+
+      - name: Decode GoogleService-Info.plist
+        shell: bash
+        run: |
+          # Find the GoogleService-Info.plist location from .gitignore or use default
+          PLIST_PATH=$(find . -path "*/GoogleService-Info.plist" -not -path "*/Pods/*" -not -path "*/.build/*" 2>/dev/null | head -1)
+          if [ -z "$PLIST_PATH" ]; then
+            # Default location based on scheme name
+            PLIST_PATH="${{ steps.detect.outputs.scheme }}/GoogleService-Info.plist"
+          fi
+          echo "${{ env.SERVICE_PLIST_BASE64 }}" | base64 --decode > "$PLIST_PATH"
+
+      - name: Install Apple certificate and provisioning profiles
+        run: curl -sSL https://raw.githubusercontent.com/Lascade-Co/actions/main/scripts/install_apple_cert.sh | bash
+
+      - name: Install additional provisioning profiles
+        shell: bash
+        run: |
+          PROFILES_DIR="$HOME/Library/MobileDevice/Provisioning Profiles"
+          # Install share extension profile if provided
+          if [ -n "$IOS_SHARE_EXT_PROVISION_PROFILE_BASE64" ]; then
+            TEMP_PROFILE=$(mktemp)
+            echo "$IOS_SHARE_EXT_PROVISION_PROFILE_BASE64" | base64 --decode > "$TEMP_PROFILE"
+            UUID=$(/usr/libexec/PlistBuddy -c "Print UUID" /dev/stdin \
+              <<< "$(security cms -D -i "$TEMP_PROFILE")")
+            cp "$TEMP_PROFILE" "$PROFILES_DIR/$UUID.mobileprovision"
+            rm -f "$TEMP_PROFILE"
+            echo "SHARE_EXT_PROFILE_UUID=$UUID" >> "$GITHUB_ENV"
+            echo "Installed share extension profile with UUID $UUID"
+          fi
+
+      - name: Switch Xcode project to manual signing
+        run: curl -sSL https://raw.githubusercontent.com/Lascade-Co/actions/main/scripts/fix_ios_signing.py | python3 -
+
+      - name: Generate ExportOptions.plist
+        shell: bash
+        run: |
+          /usr/libexec/PlistBuddy -c "Clear dict" ExportOptions.plist
+          /usr/libexec/PlistBuddy -c "Add :method string app-store-connect" ExportOptions.plist
+          /usr/libexec/PlistBuddy -c "Add :teamID string ${{ env.IOS_TEAM_ID }}" ExportOptions.plist
+          /usr/libexec/PlistBuddy -c "Add :signingStyle string manual" ExportOptions.plist
+          /usr/libexec/PlistBuddy -c "Add :uploadSymbols bool true" ExportOptions.plist
+          /usr/libexec/PlistBuddy -c "Add :provisioningProfiles dict" ExportOptions.plist
+          /usr/libexec/PlistBuddy -c "Add :provisioningProfiles:${{ env.IOS_BUNDLE_ID }} string ${{ env.APP_PROFILE_UUID }}" ExportOptions.plist
+          /usr/libexec/PlistBuddy -c "Add :provisioningProfiles:${{ env.IOS_BUNDLE_ID }}.OneSignalNotificationServiceExtension string ${{ env.NSE_PROFILE_UUID }}" ExportOptions.plist
+          if [ -n "${{ env.SHARE_EXT_PROFILE_UUID }}" ]; then
+            /usr/libexec/PlistBuddy -c "Add :provisioningProfiles:${{ env.IOS_BUNDLE_ID }}.MapLinkShareExtension string ${{ env.SHARE_EXT_PROFILE_UUID }}" ExportOptions.plist
+          fi
+
+      - name: Resolve SPM packages
+        run: |
+          xcodebuild -resolvePackageDependencies \
+            -project "${{ steps.detect.outputs.project }}" \
+            -scheme "${{ steps.detect.outputs.scheme }}" \
+            -clonedSourcePackagesDirPath SourcePackages
+
+      - name: Archive
+        run: |
+          set -o pipefail
+          xcodebuild archive \
+            -project "${{ steps.detect.outputs.project }}" \
+            -scheme "${{ steps.detect.outputs.scheme }}" \
+            -configuration Release \
+            -destination "generic/platform=iOS" \
+            -archivePath build/App.xcarchive \
+            -clonedSourcePackagesDirPath SourcePackages \
+            MARKETING_VERSION="${{ needs.prepare.outputs.version }}" \
+            CURRENT_PROJECT_VERSION="${{ github.run_number }}" \
+            CODE_SIGN_STYLE=Manual \
+            | xcpretty
+
+      - name: Export IPA
+        run: |
+          set -o pipefail
+          xcodebuild -exportArchive \
+            -archivePath build/App.xcarchive \
+            -exportPath build/ipa \
+            -exportOptionsPlist ExportOptions.plist \
+            | xcpretty
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: ios-release
+          path: build/ipa/*.ipa
+          if-no-files-found: error
+
+  publish:
+    needs: [prepare, build]
+    runs-on: macos-latest
+    timeout-minutes: 25
+    steps:
+      - name: Download IPA artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: ios-release
+
+      - name: Locate IPA
+        id: assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          IPA=$(find . -maxdepth 2 -name "*.ipa" | head -n 1)
+          : "${IPA:?Missing IPA}"
+          echo "ipa=$IPA" >> "$GITHUB_OUTPUT"
+
+      - name: Upload to App Store Connect
+        run: |
+          mkdir -p ~/private_keys
+          echo "${{ secrets.APPSTORE_API_PRIVATE_KEY }}" > ~/private_keys/AuthKey_${{ secrets.APPSTORE_API_KEY_ID }}.p8
+          xcrun altool --upload-app \
+            -f "${{ steps.assets.outputs.ipa }}" \
+            --type ios \
+            --apiKey "${{ secrets.APPSTORE_API_KEY_ID }}" \
+            --apiIssuer "${{ secrets.APPSTORE_ISSUER_ID }}"
+
+      - name: Create PostHog annotation
+        if: github.event.client_payload.posthog_project_id != ''
+        shell: bash
+        env:
+          POSTHOG_API_KEY: ${{ secrets.POSTHOG_PERSONAL_API_KEY }}
+        run: |
+          set -euo pipefail
+          curl -sf -X POST \
+            -H 'Content-Type: application/json' \
+            -H "Authorization: Bearer $POSTHOG_API_KEY" \
+            "https://us.posthog.com/api/projects/${{ github.event.client_payload.posthog_project_id }}/annotations/" \
+            -d "$(jq -n \
+              --arg content "iOS ${{ needs.prepare.outputs.version }} submitted to App Store" \
+              --arg date "$(date -u +%Y-%m-%dT%H:%M:%S%z)" \
+              '{content: $content, date_marker: $date, scope: "project"}')"
+
+      - name: Mint GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ secrets.CI_APP_ID }}
+          private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
+          owner: ${{ needs.prepare.outputs.owner }}
+          repositories: ${{ needs.prepare.outputs.name }}
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          gh release create "v${{ needs.prepare.outputs.version }}" \
+            --repo "${{ github.event.client_payload.repo }}" \
+            --title "v${{ needs.prepare.outputs.version }}" \
+            --generate-notes
+
+      - name: Notify Telegram (success)
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.SUBSCRIPTION_TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.SUBSCRIPTION_TELEGRAM_TO }}
+        run: |
+          curl -sf -X POST "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage" \
+            -d chat_id="${TELEGRAM_CHAT_ID}" \
+            -d parse_mode=html \
+            -d disable_web_page_preview=true \
+            -d text="$(cat <<MSG
+          <b>iOS build submitted to App Store</b>
+
+          <b>App:</b> ${{ needs.prepare.outputs.app_name }}
+          <b>Version:</b> ${{ needs.prepare.outputs.version }}
+          MSG
+          )"
+
+      - name: Notify Telegram (FAILURE)
+        if: failure()
+        continue-on-error: true
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.SUBSCRIPTION_TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.SUBSCRIPTION_TELEGRAM_TO }}
+        run: |
+          curl -sf -X POST "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage" \
+            -d chat_id="${TELEGRAM_CHAT_ID}" \
+            -d parse_mode=html \
+            -d disable_web_page_preview=true \
+            -d text="$(cat <<MSG
+          <b>App Store publish failed</b>
+
+          <b>App:</b> ${{ needs.prepare.outputs.app_name }}
+          <b>Repo:</b> <code>${{ github.event.client_payload.repo }}</code>
+
+          <a href="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}">View logs</a>
+          MSG
+          )"
