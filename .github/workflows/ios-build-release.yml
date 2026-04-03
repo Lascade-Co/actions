@@ -14,7 +14,7 @@ concurrency:
 jobs:
   build:
     runs-on: macos-latest
-    timeout-minutes: 120
+    timeout-minutes: 30
     outputs:
       version: ${{ steps.version.outputs.version }}
       owner: ${{ steps.repo.outputs.owner }}
@@ -148,7 +148,11 @@ jobs:
             spm-${{ runner.os }}-${{ steps.xcode-version.outputs.cache-key }}-
             spm-${{ runner.os }}-
 
+      - name: Pre-clone SPM packages
+        run: curl -sSL https://raw.githubusercontent.com/Lascade-Co/actions/main/scripts/resolve_spm.py | python3 -
+
       - name: Resolve SPM packages
+        timeout-minutes: 15
         run: |
           xcodebuild -resolvePackageDependencies \
             -project "${{ steps.detect.outputs.project }}" \
