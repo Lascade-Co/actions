@@ -21,17 +21,15 @@ def clone_package(pin, checkout_dir):
 
     checkout_path = checkout_dir / identity
     if checkout_path.exists():
-        return f"[skip] {identity} — already exists"
+        return (True, f"[skip] {identity} — already exists")
 
     try:
-        # Clone with depth 1 for speed
         subprocess.run(
             ["git", "clone", "--depth", "1", location, str(checkout_path)],
             check=True, capture_output=True, text=True, timeout=300,
         )
 
         if revision:
-            # Fetch the exact pinned revision
             subprocess.run(
                 ["git", "-C", str(checkout_path), "fetch", "origin", revision, "--depth", "1"],
                 capture_output=True, text=True, timeout=300,
@@ -47,14 +45,14 @@ def clone_package(pin, checkout_dir):
             )
 
         short = revision[:8] if revision else branch
-        return f"[ok]   {identity} @ {short}"
+        return (True, f"[ok]   {identity} @ {short}")
 
     except subprocess.TimeoutExpired:
-        return f"[timeout] {identity} — clone timed out after 5 min"
+        return (False, f"[timeout] {identity} — clone timed out after 5 min")
     except subprocess.CalledProcessError as e:
-        return f"[err]  {identity} — {e.stderr.strip() if e.stderr else e}"
+        return (False, f"[err]  {identity} — {e.stderr.strip() if e.stderr else e}")
     except Exception as e:
-        return f"[err]  {identity} — {e}"
+        return (False, f"[err]  {identity} — {e}")
 
 
 def main():
@@ -71,10 +69,18 @@ def main():
     checkout_dir = Path("SourcePackages/checkouts")
     checkout_dir.mkdir(parents=True, exist_ok=True)
 
+    failures = 0
     with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
         futures = {pool.submit(clone_package, pin, checkout_dir): pin for pin in pins}
         for f in concurrent.futures.as_completed(futures):
-            print(f.result())
+            ok, msg = f.result()
+            print(msg)
+            if not ok:
+                failures += 1
+
+    if failures:
+        print(f"\n{failures} package(s) failed to clone")
+        sys.exit(1)
 
     print("Pre-clone complete")
 
