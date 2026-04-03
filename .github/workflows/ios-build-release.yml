@@ -151,14 +151,6 @@ jobs:
       - name: Pre-clone SPM packages
         run: curl -sSL https://raw.githubusercontent.com/Lascade-Co/actions/main/scripts/resolve_spm.py | python3 -
 
-      - name: Resolve SPM packages
-        timeout-minutes: 15
-        run: |
-          xcodebuild -resolvePackageDependencies \
-            -project "${{ steps.detect.outputs.project }}" \
-            -scheme "${{ steps.detect.outputs.scheme }}" \
-            -clonedSourcePackagesDirPath SourcePackages
-
       - name: Archive
         run: |
           set -o pipefail
