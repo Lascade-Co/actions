@@ -45,15 +45,13 @@ jobs:
           token: ${{ steps.app-token.outputs.token }}
           fetch-depth: 0
 
-      - name: Configure git for private SPM dependencies
-        run: git config --global url."https://x-access-token:${{ steps.app-token.outputs.token }}@github.com/".insteadOf "https://github.com/"
-
-      - name: Configure .netrc for SPM private dependencies
+      - name: Setup SSH for private SPM dependencies
         run: |
-          echo "machine github.com" > ~/.netrc
-          echo "  login x-access-token" >> ~/.netrc
-          echo "  password ${{ steps.app-token.outputs.token }}" >> ~/.netrc
-          chmod 600 ~/.netrc
+          eval "$(ssh-agent -s)"
+          echo "${{ secrets.SSH_DEPLOY_KEY }}" | ssh-add -
+          mkdir -p ~/.ssh
+          ssh-keyscan github.com >> ~/.ssh/known_hosts
+          git config --global url."git@github.com:".insteadOf "https://github.com/"
 
       - name: Extract version and app metadata
         id: version
@@ -160,7 +158,6 @@ jobs:
           xcodebuild -resolvePackageDependencies \
             -project "${{ steps.detect.outputs.project }}" \
             -scheme "${{ steps.detect.outputs.scheme }}" \
-            -scmProvider system \
             -clonedSourcePackagesDirPath SourcePackages
 
       - name: Archive
@@ -172,7 +169,6 @@ jobs:
             -destination "generic/platform=iOS" \
             -archivePath build/App.xcarchive \
             -clonedSourcePackagesDirPath SourcePackages \
-            -scmProvider system \
             CURRENT_PROJECT_VERSION="${{ github.run_number }}" \
             CODE_SIGN_STYLE=Manual \
 
