@@ -153,7 +153,6 @@ jobs:
 
       - name: Archive
         run: |
-          set -o pipefail
           xcodebuild archive \
             -project "${{ steps.detect.outputs.project }}" \
             -scheme "${{ steps.detect.outputs.scheme }}" \
@@ -163,16 +162,13 @@ jobs:
             -clonedSourcePackagesDirPath SourcePackages \
             CURRENT_PROJECT_VERSION="${{ github.run_number }}" \
             CODE_SIGN_STYLE=Manual \
-            | xcpretty
 
       - name: Export IPA
         run: |
-          set -o pipefail
           xcodebuild -exportArchive \
             -archivePath build/App.xcarchive \
             -exportPath build/ipa \
             -exportOptionsPlist ExportOptions.plist \
-            | xcpretty
 
       - name: Upload dSYMs to Firebase Crashlytics
         shell: bash
