@@ -158,6 +158,10 @@ jobs:
           mkdir -p SourcePackages/checkouts
           TOTAL=$(python3 -c "import json; pins=json.load(open('$RESOLVED'))['pins']; print(len(pins))")
           COUNT=0
+          FETCH_START=$SECONDS
+
+          echo "Started at: $(date '+%Y-%m-%d %H:%M:%S')"
+          echo "---"
 
           python3 -c "
           import json
@@ -173,17 +177,25 @@ jobs:
               continue
             fi
 
+            PKG_START=$SECONDS
             echo "[$COUNT/$TOTAL] Cloning $identity ..."
             if timeout 300 git clone --quiet "$url" "$DEST" 2>&1; then
               if [ -n "$revision" ]; then
                 git -C "$DEST" checkout --quiet "$revision" 2>/dev/null || true
               fi
-              echo "[$COUNT/$TOTAL] ✓ $identity"
+              ELAPSED=$(( SECONDS - PKG_START ))
+              echo "[$COUNT/$TOTAL] ✓ $identity (${ELAPSED}s)"
             else
-              echo "[$COUNT/$TOTAL] ✗ $identity (failed)"
+              ELAPSED=$(( SECONDS - PKG_START ))
+              echo "[$COUNT/$TOTAL] ✗ $identity (failed after ${ELAPSED}s)"
               rm -rf "$DEST"
             fi
           done
+
+          TOTAL_TIME=$(( SECONDS - FETCH_START ))
+          echo "---"
+          echo "Finished at: $(date '+%Y-%m-%d %H:%M:%S')"
+          echo "Total pre-fetch time: ${TOTAL_TIME}s"
 
       - name: Resolve SPM dependencies
         run: |
