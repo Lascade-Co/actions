@@ -1,14 +1,14 @@
-name: Central Build & Release iOS
+name: Central Build & Debug iOS (TestFlight)
 
 on:
   repository_dispatch:
-    types: [release-ios]
+    types: [debug-ios]
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
-  group: release-ios-${{ github.event.client_payload.repo }}
+  group: debug-ios-${{ github.event.client_payload.repo }}
   cancel-in-progress: true
 
 jobs:
@@ -17,8 +17,6 @@ jobs:
     timeout-minutes: 30
     outputs:
       version: ${{ steps.version.outputs.version }}
-      owner: ${{ steps.repo.outputs.owner }}
-      name: ${{ steps.repo.outputs.name }}
       app_name: ${{ steps.app_meta.outputs.app_name }}
     steps:
       - name: Extract owner/repo
@@ -191,7 +189,7 @@ jobs:
       - name: Upload IPA artifact
         uses: actions/upload-artifact@v7
         with:
-          name: ios-release
+          name: ios-debug
           path: build/ipa/*.ipa
           if-no-files-found: error
 
@@ -203,7 +201,7 @@ jobs:
       - name: Download IPA artifact
         uses: actions/download-artifact@v8
         with:
-          name: ios-release
+          name: ios-debug
 
       - name: Locate IPA
         id: assets
@@ -214,7 +212,7 @@ jobs:
           : "${IPA:?Missing IPA}"
           echo "ipa=$IPA" >> "$GITHUB_OUTPUT"
 
-      - name: Upload to App Store Connect
+      - name: Upload to App Store Connect (TestFlight)
         run: |
           mkdir -p ~/private_keys
           echo "${{ secrets.APPSTORE_API_PRIVATE_KEY }}" > ~/private_keys/AuthKey_${{ secrets.APPSTORE_API_KEY_ID }}.p8
@@ -223,48 +221,6 @@ jobs:
             --type ios \
             --apiKey "${{ secrets.APPSTORE_API_KEY_ID }}" \
             --apiIssuer "${{ secrets.APPSTORE_ISSUER_ID }}"
-
-      - name: Create PostHog annotation
-        if: github.event.client_payload.posthog_project_id != ''
-        shell: bash
-        env:
-          POSTHOG_API_KEY: ${{ secrets.POSTHOG_PERSONAL_API_KEY }}
-        run: |
-          set -euo pipefail
-          curl -sf -X POST \
-            -H 'Content-Type: application/json' \
-            -H "Authorization: Bearer $POSTHOG_API_KEY" \
-            "https://us.posthog.com/api/projects/${{ github.event.client_payload.posthog_project_id }}/annotations/" \
-            -d "$(jq -n \
-              --arg content "iOS ${{ needs.build.outputs.version }} submitted to App Store" \
-              --arg date "$(date -u +%Y-%m-%dT%H:%M:%S%z)" \
-              '{content: $content, date_marker: $date, scope: "project"}')"
-
-      - name: Mint GitHub App token
-        id: app-token
-        uses: actions/create-github-app-token@v3
-        with:
-          app-id: ${{ secrets.CI_APP_ID }}
-          private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
-          owner: ${{ needs.build.outputs.owner }}
-          repositories: ${{ needs.build.outputs.name }}
-
-      - name: Increment version
-        uses: actions/checkout@v6
-        with:
-          repository: ${{ github.event.client_payload.repo }}
-          ref: refs/heads/${{ github.event.client_payload.branch }}
-          token: ${{ steps.app-token.outputs.token }}
-          fetch-depth: 1
-
-      - name: Bump version and push
-        run: |
-          bash increment_version.sh
-          git config user.name  "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add *.xcodeproj/project.pbxproj
-          git commit -m "[skip ci] Increment version to $(grep 'MARKETING_VERSION' *.xcodeproj/project.pbxproj | grep -v '1.0' | head -1 | sed 's/.*= //;s/;//;s/ //g')"
-          git push origin HEAD:${{ github.event.client_payload.branch }}
 
       - name: Notify Telegram (success)
         env:
@@ -276,10 +232,11 @@ jobs:
             -d parse_mode=html \
             -d disable_web_page_preview=true \
             -d text="$(cat <<MSG
-          <b>iOS build submitted to App Store</b>
+          <b>iOS build uploaded to TestFlight</b>
 
           <b>App:</b> ${{ needs.build.outputs.app_name }}
           <b>Version:</b> ${{ needs.build.outputs.version }}
+          <b>Branch:</b> ${{ github.event.client_payload.branch }}
           MSG
           )"
 
@@ -295,10 +252,11 @@ jobs:
             -d parse_mode=html \
             -d disable_web_page_preview=true \
             -d text="$(cat <<MSG
-          <b>App Store publish failed</b>
+          <b>TestFlight upload failed</b>
 
           <b>App:</b> ${{ needs.build.outputs.app_name }}
           <b>Repo:</b> <code>${{ github.event.client_payload.repo }}</code>
+          <b>Branch:</b> ${{ github.event.client_payload.branch }}
 
           <a href="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}">View logs</a>
           MSG
