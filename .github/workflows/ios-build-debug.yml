@@ -179,7 +179,7 @@ jobs:
 
             PKG_START=$SECONDS
             echo "[$COUNT/$TOTAL] Cloning $identity ..."
-            if timeout 300 git clone --quiet "$url" "$DEST" 2>&1; then
+            if git clone --quiet "$url" "$DEST" 2>&1; then
               if [ -n "$revision" ]; then
                 git -C "$DEST" checkout --quiet "$revision" 2>/dev/null || true
               fi
