@@ -146,6 +146,45 @@ jobs:
             spm-${{ runner.os }}-${{ steps.xcode-version.outputs.cache-key }}-
             spm-${{ runner.os }}-
 
+      - name: Pre-fetch SPM packages
+        shell: bash
+        run: |
+          RESOLVED=$(find . -path "*/xcshareddata/swiftpm/Package.resolved" | head -1)
+          if [ -z "$RESOLVED" ]; then
+            echo "Package.resolved not found, skipping pre-fetch"
+            exit 0
+          fi
+
+          mkdir -p SourcePackages/checkouts
+          TOTAL=$(python3 -c "import json; pins=json.load(open('$RESOLVED'))['pins']; print(len(pins))")
+          COUNT=0
+
+          python3 -c "
+          import json
+          pins = json.load(open('$RESOLVED'))['pins']
+          for p in pins:
+              print(f\"{p['identity']}|{p['location']}|{p['state'].get('revision','')}\")
+          " | while IFS='|' read -r identity url revision; do
+            COUNT=$((COUNT + 1))
+            DEST="SourcePackages/checkouts/$identity"
+
+            if [ -d "$DEST" ]; then
+              echo "[$COUNT/$TOTAL] ✓ $identity (cached)"
+              continue
+            fi
+
+            echo "[$COUNT/$TOTAL] Cloning $identity ..."
+            if timeout 300 git clone --quiet "$url" "$DEST" 2>&1; then
+              if [ -n "$revision" ]; then
+                git -C "$DEST" checkout --quiet "$revision" 2>/dev/null || true
+              fi
+              echo "[$COUNT/$TOTAL] ✓ $identity"
+            else
+              echo "[$COUNT/$TOTAL] ✗ $identity (failed)"
+              rm -rf "$DEST"
+            fi
+          done
+
       - name: Resolve SPM dependencies
         run: |
           xcodebuild -resolvePackageDependencies \
