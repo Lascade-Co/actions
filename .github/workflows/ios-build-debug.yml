@@ -149,7 +149,7 @@ jobs:
       - name: Pre-fetch SPM packages
         shell: bash
         run: |
-          RESOLVED=$(find . -path "*/xcshareddata/swiftpm/Package.resolved" | head -1)
+          RESOLVED=$(find . -path "*/xcshareddata/swiftpm/Package.resolved" -not -path "*/SourcePackages/*" -not -path "*/.build/*" | head -1)
           if [ -z "$RESOLVED" ]; then
             echo "Package.resolved not found, skipping pre-fetch"
             exit 0
@@ -200,7 +200,8 @@ jobs:
       - name: Generate SPM workspace state
         shell: bash
         run: |
-          RESOLVED=$(find . -path "*/xcshareddata/swiftpm/Package.resolved" | head -1)
+          RESOLVED=$(find . -path "*/xcshareddata/swiftpm/Package.resolved" -not -path "*/SourcePackages/*" -not -path "*/.build/*" | head -1)
+          echo "Using Package.resolved: $RESOLVED"
           python3 -c "
           import json, os
 
