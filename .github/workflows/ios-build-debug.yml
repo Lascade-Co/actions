@@ -146,11 +146,129 @@ jobs:
             spm-${{ runner.os }}-
 
       - name: Resolve SPM dependencies
+        shell: bash
         run: |
-          xcodebuild -resolvePackageDependencies \
-            -project "${{ steps.detect.outputs.project }}" \
-            -scheme "${{ steps.detect.outputs.scheme }}" \
-            -clonedSourcePackagesDirPath SourcePackages
+          RESOLVED=$(find . -path "*/xcshareddata/swiftpm/Package.resolved" -not -path "*/SourcePackages/*" -not -path "*/.build/*" | head -1)
+          echo "Using Package.resolved: $RESOLVED"
+
+          python3 << 'PYSCRIPT'
+          import json, os, subprocess, hashlib, time, sys
+
+          resolved_path = subprocess.check_output(
+              ["find", ".", "-path", "*/xcshareddata/swiftpm/Package.resolved",
+               "-not", "-path", "*/SourcePackages/*", "-not", "-path", "*/.build/*"],
+              text=True
+          ).strip().split("\n")[0]
+
+          resolved = json.load(open(resolved_path))
+          pins = resolved["pins"]
+          total = len(pins)
+
+          os.makedirs("SourcePackages/checkouts", exist_ok=True)
+          os.makedirs("SourcePackages/repositories", exist_ok=True)
+
+          deps = []
+          start_time = time.time()
+          print(f"Started at: {time.strftime('%Y-%m-%d %H:%M:%S')}")
+          print(f"Resolving {total} packages sequentially...")
+          print("---")
+
+          for i, pin in enumerate(pins, 1):
+              identity = pin["identity"]
+              url = pin["location"]
+              kind = pin.get("kind", "remoteSourceControl")
+              state = pin["state"]
+              revision = state.get("revision", "")
+              version = state.get("version")
+              branch = state.get("branch")
+
+              # Compute repository directory name: <basename>-<sha256(url.lower())[:8]>
+              basename = url.rstrip("/").split("/")[-1]
+              if basename.endswith(".git"):
+                  basename = basename[:-4]
+              url_hash = hashlib.sha256(url.lower().encode()).hexdigest()[:8]
+              repo_dir = f"{basename}-{url_hash}"
+
+              checkout_path = f"SourcePackages/checkouts/{identity}"
+              repo_path = f"SourcePackages/repositories/{repo_dir}"
+
+              pkg_start = time.time()
+
+              # Skip if already exists (cache hit)
+              if os.path.isdir(checkout_path) and os.path.isdir(repo_path):
+                  print(f"[{i}/{total}] ✓ {identity} (cached)")
+              else:
+                  print(f"[{i}/{total}] Cloning {identity} ...", flush=True)
+                  try:
+                      # Clone bare repo
+                      if not os.path.isdir(repo_path):
+                          subprocess.run(
+                              ["git", "clone", "--bare", "--quiet", url, repo_path],
+                              check=True, capture_output=True, text=True
+                          )
+
+                      # Clone working copy
+                      if not os.path.isdir(checkout_path):
+                          subprocess.run(
+                              ["git", "clone", "--quiet", url, checkout_path],
+                              check=True, capture_output=True, text=True
+                          )
+
+                      # Checkout pinned revision
+                      if revision:
+                          subprocess.run(
+                              ["git", "-C", checkout_path, "checkout", "--quiet", revision],
+                              capture_output=True, text=True
+                          )
+
+                      elapsed = int(time.time() - pkg_start)
+                      print(f"[{i}/{total}] ✓ {identity} ({elapsed}s)")
+                  except subprocess.CalledProcessError as e:
+                      elapsed = int(time.time() - pkg_start)
+                      print(f"[{i}/{total}] ✗ {identity} (failed after {elapsed}s)")
+                      print(f"    stderr: {e.stderr.strip()}", file=sys.stderr)
+                      continue
+
+              # Build dependency entry for workspace-state.json
+              checkout_state = {"revision": revision}
+              if version:
+                  checkout_state["version"] = version
+              if branch:
+                  checkout_state["branch"] = branch
+
+              deps.append({
+                  "basedOn": None,
+                  "packageRef": {
+                      "identity": identity,
+                      "kind": kind,
+                      "location": url,
+                      "name": identity
+                  },
+                  "state": {
+                      "name": "sourceControlCheckout",
+                      "checkoutState": checkout_state
+                  },
+                  "subpath": identity
+              })
+
+          # Generate workspace-state.json
+          workspace_state = {
+              "version": 7,
+              "object": {
+                  "dependencies": deps,
+                  "artifacts": [],
+                  "prebuilts": []
+              }
+          }
+          with open("SourcePackages/workspace-state.json", "w") as f:
+              json.dump(workspace_state, f, indent=2)
+
+          total_time = int(time.time() - start_time)
+          print("---")
+          print(f"Finished at: {time.strftime('%Y-%m-%d %H:%M:%S')}")
+          print(f"Total time: {total_time}s")
+          print(f"Generated workspace-state.json with {len(deps)} dependencies")
+          PYSCRIPT
 
       - name: Archive
         run: |
@@ -161,6 +279,7 @@ jobs:
             -destination "generic/platform=iOS" \
             -archivePath build/App.xcarchive \
             -clonedSourcePackagesDirPath SourcePackages \
+            -disableAutomaticPackageResolution \
             CURRENT_PROJECT_VERSION="${{ github.run_number }}" \
             CODE_SIGN_STYLE=Manual \
 
