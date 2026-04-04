@@ -221,6 +221,7 @@ jobs:
                   checkout_state['branch'] = pin['state']['branch']
 
               deps.append({
+                  'basedOn': None,
                   'packageRef': {
                       'identity': identity,
                       'kind': pin.get('kind', 'remoteSourceControl'),
