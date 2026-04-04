@@ -197,13 +197,6 @@ jobs:
           echo "Finished at: $(date '+%Y-%m-%d %H:%M:%S')"
           echo "Total pre-fetch time: ${TOTAL_TIME}s"
 
-      - name: Resolve SPM dependencies
-        run: |
-          xcodebuild -resolvePackageDependencies \
-            -project "${{ steps.detect.outputs.project }}" \
-            -scheme "${{ steps.detect.outputs.scheme }}" \
-            -clonedSourcePackagesDirPath SourcePackages
-
       - name: Archive
         run: |
           xcodebuild archive \
@@ -213,6 +206,7 @@ jobs:
             -destination "generic/platform=iOS" \
             -archivePath build/App.xcarchive \
             -clonedSourcePackagesDirPath SourcePackages \
+            -skipPackageUpdates \
             CURRENT_PROJECT_VERSION="${{ github.run_number }}" \
             CODE_SIGN_STYLE=Manual \
 
