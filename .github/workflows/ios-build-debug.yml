@@ -197,6 +197,57 @@ jobs:
           echo "Finished at: $(date '+%Y-%m-%d %H:%M:%S')"
           echo "Total pre-fetch time: ${TOTAL_TIME}s"
 
+      - name: Generate SPM workspace state
+        shell: bash
+        run: |
+          RESOLVED=$(find . -path "*/xcshareddata/swiftpm/Package.resolved" | head -1)
+          python3 -c "
+          import json, os
+
+          resolved = json.load(open('$RESOLVED'))
+          deps = []
+          for pin in resolved['pins']:
+              identity = pin['identity']
+              checkout_dir = f'SourcePackages/checkouts/{identity}'
+              if not os.path.isdir(checkout_dir):
+                  print(f'Warning: {identity} not found in checkouts, skipping')
+                  continue
+
+              checkout_state = {'revision': pin['state'].get('revision', '')}
+              if 'version' in pin['state'] and pin['state']['version']:
+                  checkout_state['version'] = pin['state']['version']
+              if 'branch' in pin['state'] and pin['state']['branch']:
+                  checkout_state['branch'] = pin['state']['branch']
+
+              deps.append({
+                  'packageRef': {
+                      'identity': identity,
+                      'kind': pin.get('kind', 'remoteSourceControl'),
+                      'location': pin['location'],
+                      'name': identity
+                  },
+                  'state': {
+                      'name': 'sourceControlCheckout',
+                      'checkoutState': checkout_state
+                  },
+                  'subpath': identity
+              })
+
+          state = {
+              'version': 7,
+              'object': {
+                  'dependencies': deps,
+                  'artifacts': [],
+                  'prebuilts': []
+              }
+          }
+
+          with open('SourcePackages/workspace-state.json', 'w') as f:
+              json.dump(state, f, indent=2)
+
+          print(f'Generated workspace-state.json with {len(deps)} dependencies')
+          "
+
       - name: Archive
         run: |
           xcodebuild archive \
@@ -206,7 +257,7 @@ jobs:
             -destination "generic/platform=iOS" \
             -archivePath build/App.xcarchive \
             -clonedSourcePackagesDirPath SourcePackages \
-            -skipPackageUpdates \
+            -disableAutomaticPackageResolution \
             CURRENT_PROJECT_VERSION="${{ github.run_number }}" \
             CODE_SIGN_STYLE=Manual \
 
