@@ -14,7 +14,6 @@ concurrency:
 jobs:
   build:
     runs-on: macos-latest
-    timeout-minutes: 30
     outputs:
       version: ${{ steps.version.outputs.version }}
       app_name: ${{ steps.app_meta.outputs.app_name }}
@@ -146,57 +145,6 @@ jobs:
             spm-${{ runner.os }}-${{ steps.xcode-version.outputs.cache-key }}-
             spm-${{ runner.os }}-
 
-      - name: Pre-fetch SPM packages
-        shell: bash
-        run: |
-          RESOLVED=$(find . -path "*/xcshareddata/swiftpm/Package.resolved" -not -path "*/SourcePackages/*" -not -path "*/.build/*" | head -1)
-          if [ -z "$RESOLVED" ]; then
-            echo "Package.resolved not found, skipping pre-fetch"
-            exit 0
-          fi
-
-          mkdir -p SourcePackages/checkouts
-          TOTAL=$(python3 -c "import json; pins=json.load(open('$RESOLVED'))['pins']; print(len(pins))")
-          COUNT=0
-          FETCH_START=$SECONDS
-
-          echo "Started at: $(date '+%Y-%m-%d %H:%M:%S')"
-          echo "---"
-
-          python3 -c "
-          import json
-          pins = json.load(open('$RESOLVED'))['pins']
-          for p in pins:
-              print(f\"{p['identity']}|{p['location']}|{p['state'].get('revision','')}\")
-          " | while IFS='|' read -r identity url revision; do
-            COUNT=$((COUNT + 1))
-            DEST="SourcePackages/checkouts/$identity"
-
-            if [ -d "$DEST" ]; then
-              echo "[$COUNT/$TOTAL] ✓ $identity (cached)"
-              continue
-            fi
-
-            PKG_START=$SECONDS
-            echo "[$COUNT/$TOTAL] Cloning $identity ..."
-            if git clone --quiet "$url" "$DEST" 2>&1; then
-              if [ -n "$revision" ]; then
-                git -C "$DEST" checkout --quiet "$revision" 2>/dev/null || true
-              fi
-              ELAPSED=$(( SECONDS - PKG_START ))
-              echo "[$COUNT/$TOTAL] ✓ $identity (${ELAPSED}s)"
-            else
-              ELAPSED=$(( SECONDS - PKG_START ))
-              echo "[$COUNT/$TOTAL] ✗ $identity (failed after ${ELAPSED}s)"
-              rm -rf "$DEST"
-            fi
-          done
-
-          TOTAL_TIME=$(( SECONDS - FETCH_START ))
-          echo "---"
-          echo "Finished at: $(date '+%Y-%m-%d %H:%M:%S')"
-          echo "Total pre-fetch time: ${TOTAL_TIME}s"
-
       - name: Resolve SPM dependencies
         run: |
           xcodebuild -resolvePackageDependencies \
@@ -213,7 +161,6 @@ jobs:
             -destination "generic/platform=iOS" \
             -archivePath build/App.xcarchive \
             -clonedSourcePackagesDirPath SourcePackages \
-            -disableAutomaticPackageResolution \
             CURRENT_PROJECT_VERSION="${{ github.run_number }}" \
             CODE_SIGN_STYLE=Manual \
 
