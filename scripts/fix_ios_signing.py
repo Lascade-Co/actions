@@ -8,7 +8,8 @@ Required environment variables:
     NSE_PROFILE_NAME  – Provisioning profile name for the NSE target
 
 Optional:
-    PBXPROJ_PATH      – Path to project.pbxproj (default: ios/Runner.xcodeproj/project.pbxproj)
+    LIVE_ACTIVITY_PROFILE_NAME – Provisioning profile name for the LiveActivityWidget target
+    PBXPROJ_PATH               – Path to project.pbxproj (default: ios/Runner.xcodeproj/project.pbxproj)
 
 Usage:
     python3 fix_ios_signing.py
@@ -23,6 +24,7 @@ def main():
     path = os.environ.get("PBXPROJ_PATH", "ios/Runner.xcodeproj/project.pbxproj")
     app_name = os.environ.get("APP_PROFILE_NAME")
     nse_name = os.environ.get("NSE_PROFILE_NAME")
+    live_activity_name = os.environ.get("LIVE_ACTIVITY_PROFILE_NAME")
     team_id = os.environ.get("IOS_TEAM_ID")
 
     if not app_name or not nse_name:
@@ -40,6 +42,7 @@ def main():
     depth = 0
     block = []
     is_nse = False
+    is_live_activity = False
     result = []
 
     for line in lines:
@@ -49,6 +52,7 @@ def main():
                 depth = line.count("{") - line.count("}")
                 block = [line]
                 is_nse = False
+                is_live_activity = False
                 continue
             result.append(line)
         else:
@@ -56,12 +60,22 @@ def main():
             block.append(line)
             if "OneSignalNotificationServiceExtension" in line:
                 is_nse = True
+            if "LiveActivityWidget" in line:
+                is_live_activity = True
             if depth <= 0:
                 # Only modify target build configs (those with PRODUCT_BUNDLE_IDENTIFIER)
                 is_target = any("PRODUCT_BUNDLE_IDENTIFIER" in bl for bl in block)
 
                 if is_target:
-                    name = nse_name if is_nse else app_name
+                    if is_nse:
+                        name = nse_name
+                    elif is_live_activity:
+                        if not live_activity_name:
+                            print("ERROR: LIVE_ACTIVITY_PROFILE_NAME must be set for LiveActivityWidget target", file=sys.stderr)
+                            sys.exit(1)
+                        name = live_activity_name
+                    else:
+                        name = app_name
                     has_specifier = False
                     processed = []
 
