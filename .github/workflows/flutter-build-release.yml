@@ -257,18 +257,20 @@ jobs:
             if [ -n "$b64_value" ]; then
               TEMP_PROFILE=$(mktemp)
               echo "$b64_value" | base64 --decode > "$TEMP_PROFILE"
-              UUID=$(/usr/libexec/PlistBuddy -c "Print UUID" /dev/stdin \
-                <<< "$(security cms -D -i "$TEMP_PROFILE")")
+              DECODED=$(security cms -D -i "$TEMP_PROFILE")
+              UUID=$(echo "$DECODED" | plutil -extract UUID raw -)
+              NAME=$(echo "$DECODED" | plutil -extract Name raw -)
               cp "$TEMP_PROFILE" "$PROFILES_DIR_LEGACY/$UUID.mobileprovision"
               cp "$TEMP_PROFILE" "$PROFILES_DIR_NEW/$UUID.mobileprovision"
               rm -f "$TEMP_PROFILE"
-              echo "${env_var}=$UUID" >> "$GITHUB_ENV"
-              echo "Installed $label profile with UUID $UUID"
+              echo "${env_var}_UUID=$UUID" >> "$GITHUB_ENV"
+              echo "${env_var}_NAME=$NAME" >> "$GITHUB_ENV"
+              echo "Installed $label profile: $NAME ($UUID)"
             fi
           }
 
-          install_extra_profile IOS_SHARE_EXT_PROVISION_PROFILE_BASE64         SHARE_EXT_PROFILE_UUID    "share extension"
-          install_extra_profile IOS_LIVE_ACTIVITY_APPSTORE_PROVISION_PROFILE_BASE64 LIVE_ACTIVITY_PROFILE_UUID "live activity widget"
+          install_extra_profile IOS_SHARE_EXT_PROVISION_PROFILE_BASE64             SHARE_EXT_PROFILE    "share extension"
+          install_extra_profile IOS_LIVE_ACTIVITY_APPSTORE_PROVISION_PROFILE_BASE64 LIVE_ACTIVITY_PROFILE "live activity widget"
 
       - name: Switch Xcode project to manual signing
         run: curl -sSL https://raw.githubusercontent.com/Lascade-Co/actions/main/scripts/fix_ios_signing.py | python3 -
