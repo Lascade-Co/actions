@@ -69,7 +69,10 @@ def main():
                 if is_target:
                     if is_nse:
                         name = nse_name
-                    elif is_live_activity and live_activity_name:
+                    elif is_live_activity:
+                        if not live_activity_name:
+                            print("ERROR: LIVE_ACTIVITY_PROFILE_NAME must be set for LiveActivityWidget target", file=sys.stderr)
+                            sys.exit(1)
                         name = live_activity_name
                     else:
                         name = app_name
