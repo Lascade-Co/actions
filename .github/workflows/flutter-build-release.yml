@@ -244,10 +244,37 @@ jobs:
       - name: Install Apple certificate and provisioning profiles
         run: curl -sSL https://raw.githubusercontent.com/Lascade-Co/actions/main/scripts/install_apple_cert.sh | bash
 
+      - name: Install additional provisioning profiles
+        shell: bash
+        run: |
+          PROFILES_DIR_LEGACY="$HOME/Library/MobileDevice/Provisioning Profiles"
+          PROFILES_DIR_NEW="$HOME/Library/Developer/Xcode/UserData/Provisioning Profiles"
+          mkdir -p "$PROFILES_DIR_LEGACY" "$PROFILES_DIR_NEW"
+
+          install_extra_profile() {
+            local b64_var="$1" env_var="$2" label="$3"
+            local b64_value="${!b64_var:-}"
+            if [ -n "$b64_value" ]; then
+              TEMP_PROFILE=$(mktemp)
+              echo "$b64_value" | base64 --decode > "$TEMP_PROFILE"
+              UUID=$(/usr/libexec/PlistBuddy -c "Print UUID" /dev/stdin \
+                <<< "$(security cms -D -i "$TEMP_PROFILE")")
+              cp "$TEMP_PROFILE" "$PROFILES_DIR_LEGACY/$UUID.mobileprovision"
+              cp "$TEMP_PROFILE" "$PROFILES_DIR_NEW/$UUID.mobileprovision"
+              rm -f "$TEMP_PROFILE"
+              echo "${env_var}=$UUID" >> "$GITHUB_ENV"
+              echo "Installed $label profile with UUID $UUID"
+            fi
+          }
+
+          install_extra_profile IOS_SHARE_EXT_PROVISION_PROFILE_BASE64         SHARE_EXT_PROFILE_UUID    "share extension"
+          install_extra_profile IOS_LIVE_ACTIVITY_APPSTORE_PROVISION_PROFILE_BASE64 LIVE_ACTIVITY_PROFILE_UUID "live activity widget"
+
       - name: Switch Xcode project to manual signing
         run: curl -sSL https://raw.githubusercontent.com/Lascade-Co/actions/main/scripts/fix_ios_signing.py | python3 -
 
       - name: Generate ExportOptions.plist
+        shell: bash
         run: |
           /usr/libexec/PlistBuddy -c "Clear dict" ExportOptions.plist
           /usr/libexec/PlistBuddy -c "Add :method string app-store-connect" ExportOptions.plist
@@ -256,6 +283,12 @@ jobs:
           /usr/libexec/PlistBuddy -c "Add :provisioningProfiles dict" ExportOptions.plist
           /usr/libexec/PlistBuddy -c "Add :provisioningProfiles:${{ env.IOS_BUNDLE_ID }} string ${{ env.APP_PROFILE_UUID }}" ExportOptions.plist
           /usr/libexec/PlistBuddy -c "Add :provisioningProfiles:${{ env.IOS_BUNDLE_ID }}.OneSignalNotificationServiceExtension string ${{ env.NSE_PROFILE_UUID }}" ExportOptions.plist
+          if [ -n "${{ env.SHARE_EXT_PROFILE_UUID }}" ]; then
+            /usr/libexec/PlistBuddy -c "Add :provisioningProfiles:${{ env.IOS_BUNDLE_ID }}.MapLinkShareExtension string ${{ env.SHARE_EXT_PROFILE_UUID }}" ExportOptions.plist
+          fi
+          if [ -n "${{ env.LIVE_ACTIVITY_PROFILE_UUID }}" ]; then
+            /usr/libexec/PlistBuddy -c "Add :provisioningProfiles:${{ env.IOS_BUNDLE_ID }}.LiveActivityWidget string ${{ env.LIVE_ACTIVITY_PROFILE_UUID }}" ExportOptions.plist
+          fi
 
       - name: Set up Flutter
         uses: subosito/flutter-action@v2
