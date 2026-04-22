@@ -1,0 +1,65 @@
+name: Ship Accuracy Report
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 */4 * * *'
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+
+      - name: Download script
+        run: |
+          curl -fsSL -o ship_accuracy_report.py \
+            https://raw.githubusercontent.com/Lascade-Co/actions/main/scripts/ship_accuracy_report.py
+
+      - name: Pick random port
+        id: port
+        run: |
+          declare -A PORTS=(
+            ["Singapore Strait"]="1.1,103.5,1.5,104.1"
+            ["Strait of Malacca"]="1.5,100.5,3.0,102.0"
+            ["Port of Rotterdam"]="51.85,3.8,52.05,4.2"
+            ["Suez Canal"]="29.8,32.2,31.3,32.7"
+            ["Panama Canal"]="8.8,-79.9,9.5,-79.4"
+            ["Strait of Gibraltar"]="35.8,-5.8,36.2,-5.2"
+            ["Port of Shanghai"]="30.5,121.3,31.5,122.3"
+            ["English Channel"]="50.0,-1.5,51.0,1.5"
+            ["Bosphorus"]="40.95,28.9,41.25,29.2"
+            ["Port of Dubai"]="24.9,54.8,25.3,55.3"
+            ["Strait of Hormuz"]="26.0,55.5,26.8,57.0"
+            ["Port of Busan"]="34.9,128.9,35.2,129.2"
+            ["Cape of Good Hope"]="-34.8,17.5,-33.5,18.9"
+            ["Portuguese Coast"]="39.72,-11.69,42.28,-7.93"
+            ["Gulf of Aden"]="11.5,43.0,13.0,45.5"
+            ["St Lawrence River"]="44.0,-76.5,45.6,-73.5"
+          )
+
+          NAMES=("${!PORTS[@]}")
+          SELECTED="${NAMES[$((RANDOM % ${#NAMES[@]}))]}"
+
+          echo "name=${SELECTED}" >> "$GITHUB_OUTPUT"
+          echo "bbox=${PORTS[$SELECTED]}" >> "$GITHUB_OUTPUT"
+          echo "Selected: ${SELECTED} (${PORTS[$SELECTED]})"
+
+      - name: Run accuracy report
+        run: |
+          python3 ship_accuracy_report.py \
+            --bbox="${{ steps.port.outputs.bbox }}" \
+            --output report.html
+
+      - name: Send report to Telegram
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.SUBSCRIPTION_TELEGRAM_TOKEN }}
+        run: |
+          curl -sf -X POST \
+            "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendDocument" \
+            -F chat_id=-5276111353 \
+            -F document=@report.html \
+            -F caption="Ship Accuracy Report — ${{ steps.port.outputs.name }}"
