@@ -3,7 +3,8 @@ name: Ship Accuracy Report
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 */4 * * *'
+    # Every 2 hours, 10:00–20:00 Asia/Muscat (UTC+4) → 06:00–16:00 UTC
+    - cron: '0 6,8,10,12,14,16 * * *'
 
 jobs:
   report:
@@ -62,6 +63,6 @@ jobs:
         run: |
           curl -sf -X POST \
             "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendDocument" \
-            -F chat_id=-5276111353 \
+            -F chat_id=-5117237655 \
             -F document=@report.html \
             -F caption="Ship Accuracy Report — ${{ steps.port.outputs.name }}"
