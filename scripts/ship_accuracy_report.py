@@ -14,8 +14,10 @@ import concurrent.futures
 import html as html_mod
 import json
 import math
+import os
 import statistics
 import struct
+import sys
 import time
 import urllib.error
 import urllib.parse
@@ -31,7 +33,7 @@ VF_USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36"
 )
-LASCADE_SHIP_URL = "https://ship.lascade.com/ships/{mmsi}"
+DATALASTIC_VESSEL_URL = "https://api.datalastic.com/api/v0/vessel_pro"
 EARTH_RADIUS_KM = 6371.0
 COORD_FACTOR = 600_000
 
@@ -272,21 +274,43 @@ def fetch_vf_ships(lat_min, lon_min, lat_max, lon_max, zoom):
 
 
 # ---------------------------------------------------------------------------
-# Lascade API
+# Datalastic API
 # ---------------------------------------------------------------------------
 
+def _datalastic_api_key():
+    key = os.environ.get("DATALASTIC_API_KEY")
+    if not key:
+        sys.exit("DATALASTIC_API_KEY environment variable is required")
+    return key
+
+
 def fetch_lascade_ship(mmsi):
-    url = LASCADE_SHIP_URL.format(mmsi=mmsi)
+    params = urllib.parse.urlencode({"api-key": _datalastic_api_key(), "mmsi": mmsi})
+    url = f"{DATALASTIC_VESSEL_URL}?{params}"
     req = urllib.request.Request(url, headers={"User-Agent": VF_USER_AGENT})
     try:
         with urllib.request.urlopen(req, timeout=10) as resp:
-            return json.loads(resp.read()), None
+            payload = json.loads(resp.read())
     except urllib.error.HTTPError as e:
         if e.code == 404:
             return None, "not_found"
         return None, f"http_{e.code}"
     except (urllib.error.URLError, TimeoutError, OSError):
         return None, "network_error"
+
+    if not payload.get("meta", {}).get("success"):
+        return None, "not_found"
+
+    data = payload.get("data") or {}
+    lat = data.get("lat")
+    lon = data.get("lon")
+    if lat is None or lon is None:
+        return None, "not_found"
+
+    return {
+        "location": {"coordinates": [lon, lat]},
+        "last_position": data.get("last_position_UTC"),
+    }, None
 
 
 # ---------------------------------------------------------------------------

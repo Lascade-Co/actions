@@ -49,6 +49,8 @@ jobs:
           echo "Selected: ${SELECTED} (${PORTS[$SELECTED]})"
 
       - name: Run accuracy report
+        env:
+          DATALASTIC_API_KEY: ${{ secrets.DATALASTIC_API_KEY }}
         run: |
           python3 ship_accuracy_report.py \
             --bbox="${{ steps.port.outputs.bbox }}" \
