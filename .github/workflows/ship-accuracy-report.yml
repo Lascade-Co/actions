@@ -63,6 +63,6 @@ jobs:
         run: |
           curl -sf -X POST \
             "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendDocument" \
-            -F chat_id=-5117237655 \
+            -F chat_id=-1003927562186 \
             -F document=@report.html \
             -F caption="Ship Accuracy Report — ${{ steps.port.outputs.name }}"
