@@ -133,9 +133,18 @@ jobs:
           cache-overwrite-existing: true
           cache-read-only: false
 
+      - name: Read .flutter-version
+        id: flutter-version
+        shell: bash
+        run: |
+          if [ -f .flutter-version ]; then
+            echo "version=$(cat .flutter-version)" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Set up Flutter
         uses: subosito/flutter-action@v2
         with:
+          flutter-version: ${{ steps.flutter-version.outputs.version }}
           channel: stable
           cache: true
 
@@ -292,9 +301,18 @@ jobs:
             /usr/libexec/PlistBuddy -c "Add :provisioningProfiles:${{ env.IOS_BUNDLE_ID }}.LiveActivityWidget string ${{ env.LIVE_ACTIVITY_PROFILE_UUID }}" ExportOptions.plist
           fi
 
+      - name: Read .flutter-version
+        id: flutter-version
+        shell: bash
+        run: |
+          if [ -f .flutter-version ]; then
+            echo "version=$(cat .flutter-version)" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Set up Flutter
         uses: subosito/flutter-action@v2
         with:
+          flutter-version: ${{ steps.flutter-version.outputs.version }}
           channel: stable
           cache: true
 
