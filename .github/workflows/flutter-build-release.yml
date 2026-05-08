@@ -193,7 +193,7 @@ jobs:
 
   build-ios:
     needs: prepare
-    runs-on: macos-latest
+    runs-on: macos-16
     env:
       COCOAPODS_DISABLE_STATS: "true"
     steps:
