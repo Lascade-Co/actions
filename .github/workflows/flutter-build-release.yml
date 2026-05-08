@@ -162,6 +162,7 @@ jobs:
       - name: Build release AAB
         run: flutter build appbundle --release --no-pub --android-project-cache-dir=.gradle
         env:
+          GRADLE_OPTS: "-Dorg.gradle.jvmargs=-Xmx4g -XX:MaxMetaspaceSize=512m"
           STORE_FILE: ${{ github.workspace }}/android/app/keystore.jks
           KEYSTORE_PASSWORD: ${{ env.KEYSTORE_PASSWORD }}
           KEY_ALIAS: ${{ env.KEY_ALIAS }}
@@ -193,7 +194,7 @@ jobs:
 
   build-ios:
     needs: prepare
-    runs-on: macos-16
+    runs-on: macos-26
     env:
       COCOAPODS_DISABLE_STATS: "true"
     steps:
