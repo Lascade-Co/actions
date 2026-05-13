@@ -3,3 +3,4 @@ trigger.sh
 *.env
 .letta/
 .gitnexus
+*.log
