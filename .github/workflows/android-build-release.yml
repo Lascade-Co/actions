@@ -271,8 +271,22 @@ jobs:
           CODEX_AUTH_JSON_BASE_64: ${{ secrets.CODEX_AUTH_JSON_BASE_64 }}
         run: |
           mkdir -p "$HOME/.codex"
-          printf '%s' "$CODEX_AUTH_JSON_BASE_64" | base64 -d > "$HOME/.codex/auth.json"
-          chmod 600 "$HOME/.codex/auth.json"
+          printf '%s' "$CODEX_AUTH_JSON_BASE_64" | tr -d '\n\r ' | base64 -d > "$HOME/.codex/auth.json"
+
+      - name: Install codex & Enable user namespaces for Codex sandbox
+        if: steps.notes.outputs.outdated == 'true'
+        shell: bash
+        run: |
+          npm install -g @openai/codex
+          
+          current_userns="$(sysctl -n kernel.unprivileged_userns_clone 2>/dev/null || true)"
+          if [ -n "$current_userns" ] && [ "$current_userns" != "1" ]; then
+            sudo sysctl -w kernel.unprivileged_userns_clone=1
+          fi
+          current_apparmor="$(sysctl -n kernel.apparmor_restrict_unprivileged_userns 2>/dev/null || true)"
+          if [ -n "$current_apparmor" ] && [ "$current_apparmor" != "0" ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
 
       - name: Build Codex release-notes prompt (inject git diff)
         if: steps.notes.outputs.outdated == 'true'
@@ -292,12 +306,8 @@ jobs:
         id: codex_notes
         continue-on-error: true
         if: steps.notes.outputs.outdated == 'true'
-        uses: openai/codex-action@v1
-        with:
-          codex-home: ~/.codex
-          prompt-file: codex-release-prompt.md
-          sandbox: workspace-write
-          safety-strategy: drop-sudo
+        shell: bash
+        run: codex exec --sandbox workspace-write "$(cat codex-release-prompt.md)"
 
       - name: Create GitHub Release in source repo
         uses: softprops/action-gh-release@v2

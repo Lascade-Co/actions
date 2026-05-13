@@ -202,8 +202,22 @@ jobs:
           CODEX_AUTH_JSON_BASE_64: ${{ secrets.CODEX_AUTH_JSON_BASE_64 }}
         run: |
           mkdir -p "$HOME/.codex"
-          printf '%s' "$CODEX_AUTH_JSON_BASE_64" | base64 -d > "$HOME/.codex/auth.json"
-          chmod 600 "$HOME/.codex/auth.json"
+          printf '%s' "$CODEX_AUTH_JSON_BASE_64" | tr -d '\n\r ' | base64 -d > "$HOME/.codex/auth.json"
+
+      - name: Install Codex CLI and Enable user namespaces for Codex sandbox
+        if: steps.lint.outcome == 'failure' && steps.loopguard.outputs.skip == 'false'
+        shell: bash
+        run: |
+          npm install -g @openai/codex
+          
+          current_userns="$(sysctl -n kernel.unprivileged_userns_clone 2>/dev/null || true)"
+          if [ -n "$current_userns" ] && [ "$current_userns" != "1" ]; then
+            sudo sysctl -w kernel.unprivileged_userns_clone=1
+          fi
+          current_apparmor="$(sysctl -n kernel.apparmor_restrict_unprivileged_userns 2>/dev/null || true)"
+          if [ -n "$current_apparmor" ] && [ "$current_apparmor" != "0" ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
 
       - name: Build Codex prompt from LINT.md (inject lint output only)
         if: steps.lint.outcome == 'failure' && steps.loopguard.outputs.skip == 'false'
@@ -221,12 +235,8 @@ jobs:
         id: codex
         continue-on-error: true
         if: steps.lint.outcome == 'failure' && steps.loopguard.outputs.skip == 'false'
-        uses: openai/codex-action@v1
-        with:
-          codex-home: ~/.codex
-          prompt-file: codex-prompt.md
-          sandbox: workspace-write
-          safety-strategy: drop-sudo
+        shell: bash
+        run: codex exec --sandbox workspace-write "$(cat codex-prompt.md)"
 
       - name: Read Codex report
         id: report
@@ -257,8 +267,8 @@ jobs:
           HEAD_BRANCH: ${{ steps.base.outputs.head }}
           REPO: ${{ github.event.client_payload.repo }}
         run: |
-          git config user.name  "lascade-ci[bot]"
-          git config user.email "lascade-ci[bot]@users.noreply.github.com"
+          git config user.name  "octopoocha"
+          git config user.email "octopoocha@lascade.com"
           rm -f lint-output.txt codex-prompt.md
           if git diff --quiet -- ':!codex-report.md' && git diff --cached --quiet -- ':!codex-report.md'; then
             echo "Codex returned SUCCESS but no diff. Treating as failure."
