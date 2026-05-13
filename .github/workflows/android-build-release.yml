@@ -241,11 +241,63 @@ jobs:
         with:
           name: apk
 
-      - name: Ensure release notes file
+      - name: Check if release notes are outdated
+        id: notes
+        shell: bash
         run: |
-          if [ ! -f releasenotes.txt ]; then
-            printf "Bug fixes and improvements\n" > releasenotes.txt
+          LAST_TAG=$(git tag --sort=-creatordate | head -1 || true)
+          if [ -z "$LAST_TAG" ]; then
+            BASE=$(git rev-list --max-parents=0 HEAD)
+            echo "No tags found; using initial commit ($BASE) as diff base."
+            echo "outdated=true" >> "$GITHUB_OUTPUT"
+            echo "base=$BASE" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
+          TAG_COMMIT=$(git rev-list -1 "$LAST_TAG")
+          echo "Last tag: $LAST_TAG ($TAG_COMMIT)"
+          echo "base=$TAG_COMMIT" >> "$GITHUB_OUTPUT"
+          if [ -f releasenotes.txt ] && [ -n "$(git log "${TAG_COMMIT}..HEAD" --format='%H' -- releasenotes.txt | head -1)" ]; then
+            echo "releasenotes.txt has commits since last tag — fresh."
+            echo "outdated=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "releasenotes.txt is missing or stale — outdated."
+            echo "outdated=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Restore Codex auth.json
+        if: steps.notes.outputs.outdated == 'true'
+        shell: bash
+        env:
+          CODEX_AUTH_JSON_BASE_64: ${{ secrets.CODEX_AUTH_JSON_BASE_64 }}
+        run: |
+          mkdir -p "$HOME/.codex"
+          printf '%s' "$CODEX_AUTH_JSON_BASE_64" | base64 -d > "$HOME/.codex/auth.json"
+          chmod 600 "$HOME/.codex/auth.json"
+
+      - name: Build Codex release-notes prompt (inject git diff)
+        if: steps.notes.outputs.outdated == 'true'
+        shell: bash
+        env:
+          BASE: ${{ steps.notes.outputs.base }}
+        run: |
+          curl -sSL https://raw.githubusercontent.com/Lascade-Co/actions/main/data/RELEASE_NOTES.md > codex-release-prompt.md
+          {
+            echo ""
+            echo '```diff'
+            git diff "$BASE" HEAD
+            echo '```'
+          } >> codex-release-prompt.md
+
+      - name: Run Codex to write release notes
+        id: codex_notes
+        continue-on-error: true
+        if: steps.notes.outputs.outdated == 'true'
+        uses: openai/codex-action@v1
+        with:
+          codex-home: ~/.codex
+          prompt-file: codex-release-prompt.md
+          sandbox: workspace-write
+          safety-strategy: drop-sudo
 
       - name: Create GitHub Release in source repo
         uses: softprops/action-gh-release@v2
