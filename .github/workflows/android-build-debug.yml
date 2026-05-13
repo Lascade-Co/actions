@@ -94,19 +94,22 @@ jobs:
           fetch-depth: 0
         # PR HEAD via refs/pull/<PR>/head (not the merge ref). :contentReference[oaicite:5]{index=5}
 
-      - name: Resolve base branch for diff
+      - name: Resolve base/head branch for diff
         id: base
         uses: actions/github-script@v8
         with:
           github-token: ${{ steps.app-token.outputs.token }}
           script: |
             const pr = "${{ github.event.client_payload.pr }}";
+            const branch = "${{ github.event.client_payload.branch }}";
             if (pr && pr !== "" && pr !== "null") {
               const [owner, repo] = "${{ github.event.client_payload.repo }}".split("/");
               const { data } = await github.rest.pulls.get({ owner, repo, pull_number: Number(pr) });
               core.setOutput("ref", data.base.ref);
+              core.setOutput("head", data.head.ref);
             } else {
               core.setOutput("ref", "main");
+              core.setOutput("head", branch);
             }
 
       # === Infisical: export local.properties file ===
@@ -176,7 +179,37 @@ jobs:
           KEY_ALIAS_DEBUG: ${{ env.KEY_ALIAS }}
           KEY_PASSWORD_DEBUG: ${{ env.KEY_PASSWORD }}
         run: |
-          curl -sSL https://raw.githubusercontent.com/Lascade-Co/actions/main/scripts/lint_android.py | python3 - --run-lint --base-ref ${{ steps.base.outputs.ref }}
+          set -o pipefail
+          curl -sSL https://raw.githubusercontent.com/Lascade-Co/actions/main/scripts/lint_android.py | python3 - --run-lint --base-ref ${{ steps.base.outputs.ref }} | tee lint-output.txt
+
+      - name: Notify Telegram on lint failure
+        if: ${{ failure() && steps.lint.outcome == 'failure' }}
+        shell: bash
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ env.TELEGRAM_BOT_TOKEN }}
+          REPO: ${{ github.event.client_payload.repo }}
+          BRANCH: ${{ steps.base.outputs.head }}
+          PR: ${{ github.event.client_payload.pr }}
+        run: |
+          COUNT="?"
+          ISSUES="(no output captured)"
+          if [ -f lint-output.txt ]; then
+            COUNT=$(grep -oE 'found [0-9]+ issue' lint-output.txt | head -1 | grep -oE '[0-9]+' || echo "?")
+            FOUND=$(grep -E ': (Warning|Error|Fatal): \[' lint-output.txt | head -5 || true)
+            [ -n "$FOUND" ] && ISSUES="$FOUND"
+          fi
+          {
+            echo "Repo: ${REPO}"
+            echo "Branch: ${BRANCH}"
+            echo "PR: ${PR}"
+            echo "Issue: ${COUNT} issues (showing 5):"
+            echo "${ISSUES}"
+            echo ""
+            echo "@lascade_konj_bot Fix the issues using lint-fix skill"
+          } > telegram-message.txt
+          curl -sS -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            --data-urlencode "chat_id=-5073807984" \
+            --data-urlencode "text@telegram-message.txt"
 
       - name: Build Debug APK
         id: build
