@@ -25,7 +25,20 @@ jobs:
           echo "owner=${FULL%%/*}" >> "$GITHUB_OUTPUT"     # Lascade-Co
           echo "name=${FULL#*/}"   >> "$GITHUB_OUTPUT"     # travel-animator-android
 
-      # Mint a GitHub App token scoped to that one repo
+      # Build the list of repos the App token must cover: always the source repo,
+      # plus any submodules the dispatcher declared (comma-separated names, same org).
+      - name: Compute token repositories
+        id: token_repos
+        shell: bash
+        run: |
+          REPOS="${{ steps.repo.outputs.name }}"
+          EXTRA="${{ github.event.client_payload.submodule_repos }}"
+          if [ -n "$EXTRA" ] && [ "$EXTRA" != "null" ]; then
+            REPOS="$REPOS,$EXTRA"
+          fi
+          echo "list=$REPOS" >> "$GITHUB_OUTPUT"
+
+      # Mint a GitHub App token scoped to source + declared submodule repos
       - name: Mint GitHub App token
         id: app-token
         uses: actions/create-github-app-token@v3
@@ -33,7 +46,7 @@ jobs:
           app-id: ${{ secrets.CI_APP_ID }}
           private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
           owner: ${{ steps.repo.outputs.owner }}
-          repositories: ${{ steps.repo.outputs.name }}
+          repositories: ${{ steps.token_repos.outputs.list }}
 
       - name: Purge previous comments from this workflow
         if: ${{ github.event.client_payload.pr && github.event.client_payload.pr != '' && github.event.client_payload.pr != 'null' }}
@@ -92,6 +105,7 @@ jobs:
           ref: ${{ steps.ref.outputs.ref }}
           token: ${{ steps.app-token.outputs.token }}
           fetch-depth: 0
+          submodules: recursive
         # PR HEAD via refs/pull/<PR>/head (not the merge ref). :contentReference[oaicite:5]{index=5}
 
       - name: Resolve base/head branch for diff
