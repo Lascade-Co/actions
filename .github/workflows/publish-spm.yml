@@ -93,6 +93,7 @@ jobs:
         uses: actions/checkout@v6
         with:
           repository: ${{ github.event.client_payload.spm_repo }}
+          ref: ${{ github.event.client_payload.spm_branch || 'main' }}
           token: ${{ steps.spm-token.outputs.token }}
           path: spm-repo
           fetch-depth: 1
@@ -109,4 +110,4 @@ jobs:
           repository: spm-repo
           tag_name: v${{ steps.version.outputs.new_version }}
           commit_message: Update to v${{ steps.version.outputs.new_version }}
-          branch: main
+          branch: ${{ github.event.client_payload.spm_branch || 'main' }}
