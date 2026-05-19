@@ -20,5 +20,7 @@ jobs:
               "repo": ${{ toJSON(github.repository) }},
               "branch": ${{ toJSON(github.ref_name) }},
               "project_slug": "the infisical project slug",
-              "posthog_project_id": ""
+              "posthog_project_id": "",
+              "is_travel_app": ""
             }
+          # is_travel_app: optional — set "true" for travel apps (uploads to GitHub Release instead of Play Store)
