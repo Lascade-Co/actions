@@ -180,6 +180,16 @@ jobs:
           KEY_ALIAS: ${{ env.KEY_ALIAS }}
           KEY_PASSWORD: ${{ env.KEY_PASSWORD }}
 
+      - name: Build release APK
+        if: needs.prepare.outputs.is_travel_app == 'true'
+        run: flutter build apk --release --no-pub --android-project-cache-dir=.gradle
+        env:
+          GRADLE_OPTS: "-Dorg.gradle.jvmargs=-Xmx4g -XX:MaxMetaspaceSize=512m"
+          STORE_FILE: ${{ github.workspace }}/android/app/keystore.jks
+          KEYSTORE_PASSWORD: ${{ env.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ env.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ env.KEY_PASSWORD }}
+
       - name: Zip native debug symbols if not pre-zipped
         run: |
           SYMBOLS_DIR="build/app/intermediates/merged_native_libs/release/mergeReleaseNativeLibs/out/lib"
@@ -201,6 +211,7 @@ jobs:
           path: |
             build/app/outputs/bundle/release/app-release.aab
             build/app/outputs/bundle/release/native-debug-symbols.zip
+            build/app/outputs/flutter-apk/app-release.apk
             releasenotes.txt
           if-no-files-found: error
 
@@ -483,16 +494,19 @@ jobs:
         with:
           name: android-release
 
-      - name: Locate AAB + native debug symbols
+      - name: Locate AAB + APK + native debug symbols
         id: assets
         shell: bash
         run: |
           set -euo pipefail
           AAB=$(find . -name "*.aab" | head -n 1)
+          APK=$(find . -name "*.apk" | head -n 1)
           SYM=$(find . -iname "*native-debug-symbols*.zip" | head -n 1)
           : "${AAB:?Missing AAB}"
+          : "${APK:?Missing APK}"
           : "${SYM:?Missing native debug symbols zip}"
           echo "aab=$AAB" >> "$GITHUB_OUTPUT"
+          echo "apk=$APK" >> "$GITHUB_OUTPUT"
           echo "symbols=$SYM" >> "$GITHUB_OUTPUT"
 
       - name: Read release notes
@@ -521,6 +535,7 @@ jobs:
           body: ${{ steps.notes.outputs.body }}
           files: |
             ${{ steps.assets.outputs.aab }}
+            ${{ steps.assets.outputs.apk }}
             ${{ steps.assets.outputs.symbols }}
 
   publish-ios:
