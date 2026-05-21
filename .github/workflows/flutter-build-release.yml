@@ -133,6 +133,19 @@ jobs:
       - name: Decode google-services.json
         run: echo "${{ env.SERVICE_JSON_BASE64 }}" | base64 --decode > android/app/google-services.json
 
+      - name: Determine build mode (dart-define vs .env)
+        id: build-mode
+        shell: bash
+        run: |
+          if [ -n "${{ env.ENV_JSON_BASE64 }}" ]; then
+            echo "${{ env.ENV_JSON_BASE64 }}" | base64 --decode > env.json
+            echo "dart_define_args=--dart-define-from-file=env.json" >> "$GITHUB_OUTPUT"
+            echo "Using dart-define mode (env.json)"
+          else
+            echo "dart_define_args=" >> "$GITHUB_OUTPUT"
+            echo "Using flutter_dotenv mode (.env)"
+          fi
+
       - name: Set up JDK 21
         uses: actions/setup-java@v5
         with:
@@ -172,7 +185,17 @@ jobs:
         run: flutter pub get
 
       - name: Build release AAB
-        run: flutter build appbundle --release --no-pub --android-project-cache-dir=.gradle
+        run: flutter build appbundle --release --no-pub --android-project-cache-dir=.gradle ${{ steps.build-mode.outputs.dart_define_args }}
+        env:
+          GRADLE_OPTS: "-Dorg.gradle.jvmargs=-Xmx4g -XX:MaxMetaspaceSize=512m"
+          STORE_FILE: ${{ github.workspace }}/android/app/keystore.jks
+          KEYSTORE_PASSWORD: ${{ env.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ env.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ env.KEY_PASSWORD }}
+
+      - name: Build release APK
+        if: needs.prepare.outputs.is_travel_app == 'true'
+        run: flutter build apk --release --no-pub --android-project-cache-dir=.gradle ${{ steps.build-mode.outputs.dart_define_args }}
         env:
           GRADLE_OPTS: "-Dorg.gradle.jvmargs=-Xmx4g -XX:MaxMetaspaceSize=512m"
           STORE_FILE: ${{ github.workspace }}/android/app/keystore.jks
@@ -201,6 +224,7 @@ jobs:
           path: |
             build/app/outputs/bundle/release/app-release.aab
             build/app/outputs/bundle/release/native-debug-symbols.zip
+            build/app/outputs/flutter-apk/app-release.apk
             releasenotes.txt
           if-no-files-found: error
 
@@ -262,6 +286,19 @@ jobs:
 
       - name: Decode GoogleService-Info.plist
         run: echo "${{ env.SERVICE_PLIST_BASE64 }}" | base64 --decode > ios/Runner/GoogleService-Info.plist
+
+      - name: Determine build mode (dart-define vs .env)
+        id: build-mode
+        shell: bash
+        run: |
+          if [ -n "${{ env.ENV_JSON_BASE64 }}" ]; then
+            echo "${{ env.ENV_JSON_BASE64 }}" | base64 --decode > env.json
+            echo "dart_define_args=--dart-define-from-file=env.json" >> "$GITHUB_OUTPUT"
+            echo "Using dart-define mode (env.json)"
+          else
+            echo "dart_define_args=" >> "$GITHUB_OUTPUT"
+            echo "Using flutter_dotenv mode (.env)"
+          fi
 
       - name: Install Apple certificate and provisioning profiles
         run: curl -sSL https://raw.githubusercontent.com/Lascade-Co/actions/main/scripts/install_apple_cert.sh | bash
@@ -345,7 +382,7 @@ jobs:
         run: flutter pub get
 
       - name: Build release IPA
-        run: flutter build ipa --export-options-plist=ExportOptions.plist --no-pub
+        run: flutter build ipa --export-options-plist=ExportOptions.plist --no-pub ${{ steps.build-mode.outputs.dart_define_args }}
 
       - name: Upload IPA artifact
         uses: actions/upload-artifact@v7
@@ -483,16 +520,19 @@ jobs:
         with:
           name: android-release
 
-      - name: Locate AAB + native debug symbols
+      - name: Locate AAB + APK + native debug symbols
         id: assets
         shell: bash
         run: |
           set -euo pipefail
           AAB=$(find . -name "*.aab" | head -n 1)
+          APK=$(find . -name "*.apk" | head -n 1)
           SYM=$(find . -iname "*native-debug-symbols*.zip" | head -n 1)
           : "${AAB:?Missing AAB}"
+          : "${APK:?Missing APK}"
           : "${SYM:?Missing native debug symbols zip}"
           echo "aab=$AAB" >> "$GITHUB_OUTPUT"
+          echo "apk=$APK" >> "$GITHUB_OUTPUT"
           echo "symbols=$SYM" >> "$GITHUB_OUTPUT"
 
       - name: Read release notes
@@ -521,6 +561,7 @@ jobs:
           body: ${{ steps.notes.outputs.body }}
           files: |
             ${{ steps.assets.outputs.aab }}
+            ${{ steps.assets.outputs.apk }}
             ${{ steps.assets.outputs.symbols }}
 
   publish-ios:
