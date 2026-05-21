@@ -583,15 +583,46 @@ jobs:
           : "${IPA:?Missing IPA}"
           mv "$IPA" app-release.ipa
 
+      - name: Fetch TestFlight secrets from Infisical (prod)
+        uses: Infisical/secrets-action@v1.0.15
+        with:
+          method: universal
+          client-id: ${{ secrets.INFISICAL_CLIENT_ID }}
+          client-secret: ${{ secrets.INFISICAL_CLIENT_SECRET }}
+          project-slug: ${{ github.event.client_payload.project_slug }}
+          env-slug: "prod"
+          domain: ${{ secrets.INFISICAL_DOMAIN }}
+          secret-path: /Build
+          export-type: env
+
       - name: Upload to TestFlight
+        env:
+          INFISICAL_KEY_ID: ${{ env.APPSTORE_API_KEY_ID }}
+          INFISICAL_PRIVATE_KEY: ${{ env.APPSTORE_API_PRIVATE_KEY }}
+          INFISICAL_ISSUER_ID: ${{ env.APPSTORE_ISSUER_ID }}
+          FALLBACK_KEY_ID: ${{ secrets.APPSTORE_API_KEY_ID }}
+          FALLBACK_PRIVATE_KEY: ${{ secrets.APPSTORE_API_PRIVATE_KEY }}
+          FALLBACK_ISSUER_ID: ${{ secrets.APPSTORE_ISSUER_ID }}
         run: |
+          set -euo pipefail
+          if [ -n "$INFISICAL_KEY_ID" ] && [ -n "$INFISICAL_PRIVATE_KEY" ] && [ -n "$INFISICAL_ISSUER_ID" ]; then
+            KEY_ID="$INFISICAL_KEY_ID"
+            PRIVATE_KEY="$INFISICAL_PRIVATE_KEY"
+            ISSUER_ID="$INFISICAL_ISSUER_ID"
+            echo "Using TestFlight credentials from Infisical"
+          else
+            KEY_ID="$FALLBACK_KEY_ID"
+            PRIVATE_KEY="$FALLBACK_PRIVATE_KEY"
+            ISSUER_ID="$FALLBACK_ISSUER_ID"
+            echo "Using TestFlight credentials from GitHub Secrets (default)"
+          fi
           mkdir -p ~/private_keys
-          echo "${{ secrets.APPSTORE_API_PRIVATE_KEY }}" > ~/private_keys/AuthKey_${{ secrets.APPSTORE_API_KEY_ID }}.p8
+          echo "$PRIVATE_KEY" > ~/private_keys/AuthKey_${KEY_ID}.p8
           xcrun altool --upload-app \
             -f app-release.ipa \
             --type ios \
-            --apiKey "${{ secrets.APPSTORE_API_KEY_ID }}" \
-            --apiIssuer "${{ secrets.APPSTORE_ISSUER_ID }}"
+            --apiKey "$KEY_ID" \
+            --apiIssuer "$ISSUER_ID"
 
       - name: Notify Telegram (success)
         if: needs.prepare.outputs.is_travel_app != 'true'
