@@ -133,6 +133,19 @@ jobs:
       - name: Decode google-services.json
         run: echo "${{ env.SERVICE_JSON_BASE64 }}" | base64 --decode > android/app/google-services.json
 
+      - name: Determine build mode (dart-define vs .env)
+        id: build-mode
+        shell: bash
+        run: |
+          if [ -n "${{ env.ENV_JSON_BASE64 }}" ]; then
+            echo "${{ env.ENV_JSON_BASE64 }}" | base64 --decode > env.json
+            echo "dart_define_args=--dart-define-from-file=env.json" >> "$GITHUB_OUTPUT"
+            echo "Using dart-define mode (env.json)"
+          else
+            echo "dart_define_args=" >> "$GITHUB_OUTPUT"
+            echo "Using flutter_dotenv mode (.env)"
+          fi
+
       - name: Set up JDK 21
         uses: actions/setup-java@v5
         with:
@@ -172,7 +185,7 @@ jobs:
         run: flutter pub get
 
       - name: Build release AAB
-        run: flutter build appbundle --release --no-pub --android-project-cache-dir=.gradle
+        run: flutter build appbundle --release --no-pub --android-project-cache-dir=.gradle ${{ steps.build-mode.outputs.dart_define_args }}
         env:
           GRADLE_OPTS: "-Dorg.gradle.jvmargs=-Xmx4g -XX:MaxMetaspaceSize=512m"
           STORE_FILE: ${{ github.workspace }}/android/app/keystore.jks
@@ -182,7 +195,7 @@ jobs:
 
       - name: Build release APK
         if: needs.prepare.outputs.is_travel_app == 'true'
-        run: flutter build apk --release --no-pub --android-project-cache-dir=.gradle
+        run: flutter build apk --release --no-pub --android-project-cache-dir=.gradle ${{ steps.build-mode.outputs.dart_define_args }}
         env:
           GRADLE_OPTS: "-Dorg.gradle.jvmargs=-Xmx4g -XX:MaxMetaspaceSize=512m"
           STORE_FILE: ${{ github.workspace }}/android/app/keystore.jks
@@ -274,6 +287,19 @@ jobs:
       - name: Decode GoogleService-Info.plist
         run: echo "${{ env.SERVICE_PLIST_BASE64 }}" | base64 --decode > ios/Runner/GoogleService-Info.plist
 
+      - name: Determine build mode (dart-define vs .env)
+        id: build-mode
+        shell: bash
+        run: |
+          if [ -n "${{ env.ENV_JSON_BASE64 }}" ]; then
+            echo "${{ env.ENV_JSON_BASE64 }}" | base64 --decode > env.json
+            echo "dart_define_args=--dart-define-from-file=env.json" >> "$GITHUB_OUTPUT"
+            echo "Using dart-define mode (env.json)"
+          else
+            echo "dart_define_args=" >> "$GITHUB_OUTPUT"
+            echo "Using flutter_dotenv mode (.env)"
+          fi
+
       - name: Install Apple certificate and provisioning profiles
         run: curl -sSL https://raw.githubusercontent.com/Lascade-Co/actions/main/scripts/install_apple_cert.sh | bash
 
@@ -356,7 +382,7 @@ jobs:
         run: flutter pub get
 
       - name: Build release IPA
-        run: flutter build ipa --export-options-plist=ExportOptions.plist --no-pub
+        run: flutter build ipa --export-options-plist=ExportOptions.plist --no-pub ${{ steps.build-mode.outputs.dart_define_args }}
 
       - name: Upload IPA artifact
         uses: actions/upload-artifact@v7
