@@ -1,0 +1,87 @@
+name: Refresh Codex auth.json
+
+on:
+  schedule:
+    # Mon + Thu 03:00 UTC — well inside the ~8-day Codex staleness window
+    - cron: "0 3 * * 1,4"
+  workflow_dispatch:
+
+concurrency:
+  group: refresh-codex-auth
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Restore Codex auth.json from GH secret
+        shell: bash
+        env:
+          CODEX_AUTH_JSON_BASE_64: ${{ secrets.CODEX_AUTH_JSON_BASE_64 }}
+        run: |
+          mkdir -p "$HOME/.codex"
+          printf '%s' "$CODEX_AUTH_JSON_BASE_64" | tr -d '\n\r ' | base64 -d > "$HOME/.codex/auth.json"
+          jq -r '.tokens.last_refresh // .last_refresh // "unknown"' "$HOME/.codex/auth.json" > /tmp/before_refresh
+
+      - name: Install Codex CLI & enable user namespaces
+        shell: bash
+        run: |
+          npm install -g @openai/codex
+
+          current_userns="$(sysctl -n kernel.unprivileged_userns_clone 2>/dev/null || true)"
+          if [ -n "$current_userns" ] && [ "$current_userns" != "1" ]; then
+            sudo sysctl -w kernel.unprivileged_userns_clone=1
+          fi
+          current_apparmor="$(sysctl -n kernel.apparmor_restrict_unprivileged_userns 2>/dev/null || true)"
+          if [ -n "$current_apparmor" ] && [ "$current_apparmor" != "0" ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+
+      - name: Trigger Codex token refresh
+        shell: bash
+        run: |
+          codex exec --skip-git-repo-check --sandbox read-only \
+            "Reply with exactly one word: refreshed" > /tmp/codex_out 2>&1 || {
+              echo "Codex exec failed:"; cat /tmp/codex_out; exit 1;
+          }
+          cat /tmp/codex_out
+
+      - name: Verify auth.json was refreshed
+        shell: bash
+        run: |
+          test -s "$HOME/.codex/auth.json" || { echo "auth.json missing or empty"; exit 1; }
+          jq empty "$HOME/.codex/auth.json" || { echo "auth.json is not valid JSON"; exit 1; }
+          AFTER=$(jq -r '.tokens.last_refresh // .last_refresh // "unknown"' "$HOME/.codex/auth.json")
+          BEFORE=$(cat /tmp/before_refresh)
+          echo "last_refresh before: $BEFORE"
+          echo "last_refresh after:  $AFTER"
+          if [ "$BEFORE" = "$AFTER" ]; then
+            echo "::warning::last_refresh did not change — token may already have been fresh, continuing"
+          fi
+
+      - name: Install Infisical CLI
+        shell: bash
+        run: |
+          curl -1sLf 'https://artifacts-cli.infisical.com/setup.deb.sh' | sudo -E bash
+          sudo apt-get update && sudo apt-get install -y infisical
+
+      - name: Push refreshed auth.json to Infisical (common/dev)
+        shell: bash
+        env:
+          INFISICAL_CLIENT_ID: ${{ secrets.INFISICAL_CLIENT_ID }}
+          INFISICAL_CLIENT_SECRET: ${{ secrets.INFISICAL_CLIENT_SECRET }}
+          PROJECT_ID: db94ba33-278d-4425-a6c9-a7cf7c9cae88
+        run: |
+          export INFISICAL_TOKEN=$(infisical login \
+            --method=universal-auth \
+            --client-id="$INFISICAL_CLIENT_ID" \
+            --client-secret="$INFISICAL_CLIENT_SECRET" \
+            --silent --plain)
+          NEW_B64=$(base64 -w0 < "$HOME/.codex/auth.json")
+          infisical secrets set "CODEX_AUTH_JSON_BASE_64=$NEW_B64" \
+            --projectId="$PROJECT_ID" \
+            --env=dev \
+            --type=shared \
+            --silent
+          echo "Pushed refreshed auth.json to Infisical (common/dev/CODEX_AUTH_JSON_BASE_64)"

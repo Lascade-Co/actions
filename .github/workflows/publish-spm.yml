@@ -87,12 +87,13 @@ jobs:
         run: bash ./increment_version.sh
 
       - name: Build XCFramework
-        run: ./gradlew :shared:assembleSharedReleaseXCFramework
+        run: ./gradlew assembleTASharedReleaseXCFramework
 
       - name: Checkout SPM repo
         uses: actions/checkout@v6
         with:
           repository: ${{ github.event.client_payload.spm_repo }}
+          ref: ${{ github.event.client_payload.spm_branch || 'main' }}
           token: ${{ steps.spm-token.outputs.token }}
           path: spm-repo
           fetch-depth: 1
@@ -101,7 +102,7 @@ jobs:
         run: rm -rf spm-repo/TAShared.xcframework
 
       - name: Copy XCFramework to SPM repo
-        run: cp -r shared/build/XCFrameworks/release/shared.xcframework spm-repo/TAShared.xcframework
+        run: cp -r build/XCFrameworks/release/TAShared.xcframework spm-repo/TAShared.xcframework
 
       - name: Commit XCFramework
         uses: stefanzweifel/git-auto-commit-action@v7
@@ -109,4 +110,4 @@ jobs:
           repository: spm-repo
           tag_name: v${{ steps.version.outputs.new_version }}
           commit_message: Update to v${{ steps.version.outputs.new_version }}
-          branch: main
+          branch: ${{ github.event.client_payload.spm_branch || 'main' }}

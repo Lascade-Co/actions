@@ -3,4 +3,5 @@ trigger.sh
 *.env
 .letta/
 .gitnexus
+*.log
 .DS_Store

@@ -25,7 +25,20 @@ jobs:
           echo "owner=${FULL%%/*}" >> "$GITHUB_OUTPUT"     # Lascade-Co
           echo "name=${FULL#*/}"   >> "$GITHUB_OUTPUT"     # travel-animator-android
 
-      # Mint a GitHub App token scoped to that one repo
+      # Build the list of repos the App token must cover: always the source repo,
+      # plus any submodules the dispatcher declared (comma-separated names, same org).
+      - name: Compute token repositories
+        id: token_repos
+        shell: bash
+        run: |
+          REPOS="${{ steps.repo.outputs.name }}"
+          EXTRA="${{ github.event.client_payload.submodule_repos }}"
+          if [ -n "$EXTRA" ] && [ "$EXTRA" != "null" ]; then
+            REPOS="$REPOS,$EXTRA"
+          fi
+          echo "list=$REPOS" >> "$GITHUB_OUTPUT"
+
+      # Mint a GitHub App token scoped to source + declared submodule repos
       - name: Mint GitHub App token
         id: app-token
         uses: actions/create-github-app-token@v3
@@ -33,7 +46,7 @@ jobs:
           app-id: ${{ secrets.CI_APP_ID }}
           private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
           owner: ${{ steps.repo.outputs.owner }}
-          repositories: ${{ steps.repo.outputs.name }}
+          repositories: ${{ steps.token_repos.outputs.list }}
 
       - name: Purge previous comments from this workflow
         if: ${{ github.event.client_payload.pr && github.event.client_payload.pr != '' && github.event.client_payload.pr != 'null' }}
@@ -92,21 +105,25 @@ jobs:
           ref: ${{ steps.ref.outputs.ref }}
           token: ${{ steps.app-token.outputs.token }}
           fetch-depth: 0
+          submodules: recursive
         # PR HEAD via refs/pull/<PR>/head (not the merge ref). :contentReference[oaicite:5]{index=5}
 
-      - name: Resolve base branch for diff
+      - name: Resolve base/head branch for diff
         id: base
         uses: actions/github-script@v8
         with:
           github-token: ${{ steps.app-token.outputs.token }}
           script: |
             const pr = "${{ github.event.client_payload.pr }}";
+            const branch = "${{ github.event.client_payload.branch }}";
             if (pr && pr !== "" && pr !== "null") {
               const [owner, repo] = "${{ github.event.client_payload.repo }}".split("/");
               const { data } = await github.rest.pulls.get({ owner, repo, pull_number: Number(pr) });
               core.setOutput("ref", data.base.ref);
+              core.setOutput("head", data.head.ref);
             } else {
               core.setOutput("ref", "main");
+              core.setOutput("head", branch);
             }
 
       # === Infisical: export local.properties file ===
@@ -170,16 +187,141 @@ jobs:
 
       - name: Run Android Lint
         id: lint
+        continue-on-error: true
         shell: bash
         env:
           KEYSTORE_PASSWORD_DEBUG: ${{ env.KEYSTORE_PASSWORD }}
           KEY_ALIAS_DEBUG: ${{ env.KEY_ALIAS }}
           KEY_PASSWORD_DEBUG: ${{ env.KEY_PASSWORD }}
         run: |
-          curl -sSL https://raw.githubusercontent.com/Lascade-Co/actions/main/scripts/lint_android.py | python3 - --run-lint --base-ref ${{ steps.base.outputs.ref }}
+          set -o pipefail
+          curl -sSL https://raw.githubusercontent.com/Lascade-Co/actions/main/scripts/lint_android.py | python3 - --run-lint --base-ref ${{ steps.base.outputs.ref }} | tee lint-output.txt
+
+      - name: Loop guard — skip Codex if HEAD is already a Codex fix
+        id: loopguard
+        if: steps.lint.outcome == 'failure'
+        shell: bash
+        run: |
+          SUBJECT=$(git log -1 --pretty=%s || echo "")
+          if printf '%s' "$SUBJECT" | grep -qE '^lint: Lint fix by Codex'; then
+            echo "skip=true"  >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Restore Codex auth.json
+        if: steps.lint.outcome == 'failure' && steps.loopguard.outputs.skip == 'false'
+        shell: bash
+        env:
+          CODEX_AUTH_JSON_BASE_64: ${{ secrets.CODEX_AUTH_JSON_BASE_64 }}
+        run: |
+          mkdir -p "$HOME/.codex"
+          printf '%s' "$CODEX_AUTH_JSON_BASE_64" | tr -d '\n\r ' | base64 -d > "$HOME/.codex/auth.json"
+
+      - name: Install Codex CLI and Enable user namespaces for Codex sandbox
+        if: steps.lint.outcome == 'failure' && steps.loopguard.outputs.skip == 'false'
+        shell: bash
+        run: |
+          npm install -g @openai/codex
+          
+          current_userns="$(sysctl -n kernel.unprivileged_userns_clone 2>/dev/null || true)"
+          if [ -n "$current_userns" ] && [ "$current_userns" != "1" ]; then
+            sudo sysctl -w kernel.unprivileged_userns_clone=1
+          fi
+          current_apparmor="$(sysctl -n kernel.apparmor_restrict_unprivileged_userns 2>/dev/null || true)"
+          if [ -n "$current_apparmor" ] && [ "$current_apparmor" != "0" ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+
+      - name: Build Codex prompt from LINT.md (inject lint output only)
+        if: steps.lint.outcome == 'failure' && steps.loopguard.outputs.skip == 'false'
+        shell: bash
+        run: |
+          curl -sSL https://raw.githubusercontent.com/Lascade-Co/actions/main/data/LINT.md > codex-prompt.md
+          {
+            echo ""
+            echo '```'
+            cat lint-output.txt
+            echo '```'
+          } >> codex-prompt.md
+
+      - name: Run Codex to apply lint fixes
+        id: codex
+        continue-on-error: true
+        if: steps.lint.outcome == 'failure' && steps.loopguard.outputs.skip == 'false'
+        shell: bash
+        run: codex exec --sandbox workspace-write "$(cat codex-prompt.md)"
+
+      - name: Read Codex report
+        id: report
+        if: steps.lint.outcome == 'failure' && steps.loopguard.outputs.skip == 'false'
+        shell: bash
+        run: |
+          if [ -f codex-report.md ]; then
+            if head -1 codex-report.md | grep -q '^Status: SUCCESS'; then
+              echo "ok=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "ok=false" >> "$GITHUB_OUTPUT"
+            fi
+          else
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+            {
+              echo "Status: FAILURE: Codex did not produce a report."
+              echo ""
+              echo "openai/codex-action@v1 outcome: ${{ steps.codex.outcome }}. See workflow run logs."
+            } > codex-report.md
+          fi
+
+      - name: Commit and push Codex fix to PR head
+        id: push
+        if: steps.lint.outcome == 'failure' && steps.codex.outcome == 'success' && steps.report.outputs.ok == 'true'
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
+          HEAD_BRANCH: ${{ steps.base.outputs.head }}
+          REPO: ${{ github.event.client_payload.repo }}
+        run: |
+          git config user.name  "octopoocha"
+          git config user.email "octopoocha@lascade.com"
+          rm -f lint-output.txt codex-prompt.md
+          if git diff --quiet -- ':!codex-report.md' && git diff --cached --quiet -- ':!codex-report.md'; then
+            echo "Codex returned SUCCESS but no diff. Treating as failure."
+            echo "pushed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          git add -A -- ':!codex-report.md'
+          git commit -m "lint: Lint fix by Codex
+
+          Auto-generated by openai/codex-action@v1 from Lascade-Co/actions.
+          Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          REMOTE="https://x-access-token:${GITHUB_TOKEN}@github.com/${REPO}.git"
+          git push "$REMOTE" "HEAD:${HEAD_BRANCH}"
+          echo "pushed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Update PR comment after Codex push
+        if: steps.push.outputs.pushed == 'true' && github.event.client_payload.pr && github.event.client_payload.pr != '' && github.event.client_payload.pr != 'null'
+        uses: peter-evans/create-or-update-comment@v5
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+          repository: ${{ github.event.client_payload.repo }}
+          issue-number: ${{ github.event.client_payload.pr }}
+          comment-id: ${{ steps.status.outputs.comment-id }}
+          edit-mode: replace
+          body: |
+            <!-- central-build-debug -->
+            🤖 Codex pushed an auto-fix for the Android Lint issues. CI will retrigger on the new commit.
+            Workflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+      - name: Fail job if lint still broken (no push happened)
+        if: steps.lint.outcome == 'failure' && steps.push.outputs.pushed != 'true'
+        shell: bash
+        run: |
+          echo "Lint failed and Codex did not push a fix (skipped=${{ steps.loopguard.outputs.skip }}, codex=${{ steps.codex.outcome }}, report-ok=${{ steps.report.outputs.ok }})."
+          exit 1
 
       - name: Build Debug APK
         id: build
+        if: steps.push.outputs.pushed != 'true'
         run: ./gradlew --no-daemon assembleDebug
         env:
           KEYSTORE_PASSWORD_DEBUG: ${{ env.KEYSTORE_PASSWORD }}
@@ -187,10 +329,12 @@ jobs:
           KEY_PASSWORD_DEBUG: ${{ env.KEY_PASSWORD }}
 
       - name: Upload to Firebase App Distribution
+        if: steps.push.outputs.pushed != 'true'
         run: ./gradlew --no-daemon appDistributionUploadDebug || echo "Failed to upload"
 
       - name: Create Debug Release in source repo
         id: create_release
+        if: steps.push.outputs.pushed != 'true'
         uses: softprops/action-gh-release@v2
         with:
           repository: ${{ github.event.client_payload.repo }}
@@ -202,6 +346,7 @@ jobs:
         # action-gh-release supports cross-repo via repository+token. :contentReference[oaicite:8]{index=8}
 
       - name: Comment on PR with debug APK link
+        if: steps.push.outputs.pushed != 'true'
         uses: peter-evans/create-or-update-comment@v5
         with:
           token: ${{ steps.app-token.outputs.token }}
@@ -212,14 +357,15 @@ jobs:
           body: |
             <!-- central-build-debug -->
             ✅ Debug APK is ready: [Download](${{ steps.create_release.outputs.url }})
-            Workflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}    
+            Workflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
 
       - name: Send Telegram notification
+        if: steps.push.outputs.pushed != 'true'
         continue-on-error: true
         uses: appleboy/telegram-action@v1.0.1
         with:
           to: ${{ env.TELEGRAM_CHAT_ID }}
-          token: ${{ env.TELEGRAM_BOT_TOKEN }}
+          token: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           format: markdown
           message: |
             ✅ *Debug APK Ready*
@@ -234,20 +380,32 @@ jobs:
         with:
           github-token: ${{ steps.app-token.outputs.token }}
           script: |
-            const lintOutcome = "${{ steps.lint.outcome }}";
-            const testOutcome = "${{ steps.test.outcome }}";
+            const fs = require('fs');
+            const lintOutcome  = "${{ steps.lint.outcome }}";
+            const testOutcome  = "${{ steps.test.outcome }}";
             const buildOutcome = "${{ steps.build.outcome }}";
+            const codexOutcome = "${{ steps.codex.outcome }}";
 
             let reason = "Unknown step";
-            if (lintOutcome === "failure") reason = "Android Lint";
-            else if (testOutcome === "failure") reason = "Unit tests";
+            let extra  = "";
+            if (testOutcome === "failure") reason = "Unit tests";
             else if (buildOutcome === "failure") reason = "Build";
+            else if (lintOutcome === "failure") {
+              reason = "Android Lint (Codex auto-fix did not resolve)";
+              const reportPath = "codex-report.md";
+              if (fs.existsSync(reportPath)) {
+                extra = "\n\n---\n\n**Codex report:**\n\n" + fs.readFileSync(reportPath, "utf-8");
+              } else {
+                extra = `\n\n(Codex action outcome: ${codexOutcome}; no report file produced.)`;
+              }
+            }
 
             const [owner, repo] = "${{ github.event.client_payload.repo }}".split("/");
             const body = [
               "<!-- central-build-debug -->",
               `❌ **${reason}** failed.`,
               `[Check logs](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})`,
+              extra,
             ].join("\n");
 
             await github.rest.issues.updateComment({
