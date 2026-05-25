@@ -18,10 +18,12 @@ jobs:
           token: ${{ secrets.CENTRAL_DISPATCH_TOKEN }}
           repository: Lascade-Co/actions
           event-type: build-debug-flutter
+          # dart_define_method: optional — set "true" to use dart-define-from-file=env.json instead of .env
           client-payload: >-
             {
               "repo": ${{ toJSON(github.repository) }},
               "pr": ${{ toJSON(github.event.pull_request.number) }},
               "title": ${{ toJSON(github.event.pull_request.title) }},
-              "project_slug": "the infisical project slug"
+              "project_slug": "the infisical project slug",
+              "dart_define_method": ""
             }

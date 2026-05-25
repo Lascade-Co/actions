@@ -15,12 +15,14 @@ jobs:
           token: ${{ secrets.CENTRAL_DISPATCH_TOKEN }}
           repository: Lascade-Co/actions
           event-type: release-flutter
+          # is_travel_app: optional — set "true" for travel apps (uploads to GitHub Release instead of Play Store)
+          # dart_define_method: optional — set "true" to use dart-define-from-file=env.json instead of .env
           client-payload: >-
             {
               "repo": ${{ toJSON(github.repository) }},
               "branch": ${{ toJSON(github.ref_name) }},
               "project_slug": "the infisical project slug",
               "posthog_project_id": "",
-              "is_travel_app": ""
+              "is_travel_app": "",
+              "dart_define_method": ""
             }
-          # is_travel_app: optional — set "true" for travel apps (uploads to GitHub Release instead of Play Store)
