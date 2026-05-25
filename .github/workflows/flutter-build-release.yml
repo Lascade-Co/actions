@@ -22,6 +22,7 @@ jobs:
       app_name: ${{ steps.app_meta.outputs.app_name }}
       commit_sha: ${{ steps.push.outputs.commit_sha }}
       is_travel_app: ${{ steps.flags.outputs.is_travel_app }}
+      dart_define_method: ${{ steps.flags.outputs.dart_define_method }}
     steps:
       - name: Extract owner/repo
         id: repo
@@ -35,11 +36,18 @@ jobs:
         id: flags
         shell: bash
         run: |
-          RAW="${{ github.event.client_payload.is_travel_app }}"
-          if [ "$RAW" = "true" ]; then
+          RAW_TRAVEL="${{ github.event.client_payload.is_travel_app }}"
+          if [ "$RAW_TRAVEL" = "true" ]; then
             echo "is_travel_app=true" >> "$GITHUB_OUTPUT"
           else
             echo "is_travel_app=false" >> "$GITHUB_OUTPUT"
+          fi
+
+          RAW_DART="${{ github.event.client_payload.dart_define_method }}"
+          if [ "$RAW_DART" = "true" ]; then
+            echo "dart_define_method=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "dart_define_method=false" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Mint GitHub App token
@@ -114,7 +122,21 @@ jobs:
           secret-path: /Build
           export-type: env
 
-      - name: Fetch .env from Infisical (prod)
+      - name: Fetch ENV_JSON_BASE64 from Infisical (dart-define mode)
+        if: needs.prepare.outputs.dart_define_method == 'true'
+        uses: Infisical/secrets-action@v1.0.15
+        with:
+          method: universal
+          client-id: ${{ secrets.INFISICAL_CLIENT_ID }}
+          client-secret: ${{ secrets.INFISICAL_CLIENT_SECRET }}
+          project-slug: ${{ github.event.client_payload.project_slug }}
+          env-slug: "prod"
+          domain: ${{ secrets.INFISICAL_DOMAIN }}
+          secret-path: /App-Env
+          export-type: env
+
+      - name: Fetch .env from Infisical (flutter_dotenv mode)
+        if: needs.prepare.outputs.dart_define_method != 'true'
         uses: Infisical/secrets-action@v1.0.15
         with:
           method: universal
@@ -135,16 +157,12 @@ jobs:
 
       - name: Determine build mode (dart-define vs .env)
         id: build-mode
+        if: needs.prepare.outputs.dart_define_method == 'true'
         shell: bash
         run: |
-          if [ -n "${{ env.ENV_JSON_BASE64 }}" ]; then
-            echo "${{ env.ENV_JSON_BASE64 }}" | base64 --decode > env.json
-            echo "dart_define_args=--dart-define-from-file=env.json" >> "$GITHUB_OUTPUT"
-            echo "Using dart-define mode (env.json)"
-          else
-            echo "dart_define_args=" >> "$GITHUB_OUTPUT"
-            echo "Using flutter_dotenv mode (.env)"
-          fi
+          echo "${{ env.ENV_JSON_BASE64 }}" | base64 --decode > env.json
+          echo "dart_define_args=--dart-define-from-file=env.json" >> "$GITHUB_OUTPUT"
+          echo "Using dart-define mode (env.json)"
 
       - name: Set up JDK 21
         uses: actions/setup-java@v5
@@ -271,7 +289,21 @@ jobs:
           secret-path: /Build
           export-type: env
 
-      - name: Fetch .env from Infisical (prod)
+      - name: Fetch ENV_JSON_BASE64 from Infisical (dart-define mode)
+        if: needs.prepare.outputs.dart_define_method == 'true'
+        uses: Infisical/secrets-action@v1.0.15
+        with:
+          method: universal
+          client-id: ${{ secrets.INFISICAL_CLIENT_ID }}
+          client-secret: ${{ secrets.INFISICAL_CLIENT_SECRET }}
+          project-slug: ${{ github.event.client_payload.project_slug }}
+          env-slug: "prod"
+          domain: ${{ secrets.INFISICAL_DOMAIN }}
+          secret-path: /App-Env
+          export-type: env
+
+      - name: Fetch .env from Infisical (flutter_dotenv mode)
+        if: needs.prepare.outputs.dart_define_method != 'true'
         uses: Infisical/secrets-action@v1.0.15
         with:
           method: universal
@@ -289,16 +321,12 @@ jobs:
 
       - name: Determine build mode (dart-define vs .env)
         id: build-mode
+        if: needs.prepare.outputs.dart_define_method == 'true'
         shell: bash
         run: |
-          if [ -n "${{ env.ENV_JSON_BASE64 }}" ]; then
-            echo "${{ env.ENV_JSON_BASE64 }}" | base64 --decode > env.json
-            echo "dart_define_args=--dart-define-from-file=env.json" >> "$GITHUB_OUTPUT"
-            echo "Using dart-define mode (env.json)"
-          else
-            echo "dart_define_args=" >> "$GITHUB_OUTPUT"
-            echo "Using flutter_dotenv mode (.env)"
-          fi
+          echo "${{ env.ENV_JSON_BASE64 }}" | base64 --decode > env.json
+          echo "dart_define_args=--dart-define-from-file=env.json" >> "$GITHUB_OUTPUT"
+          echo "Using dart-define mode (env.json)"
 
       - name: Install Apple certificate and provisioning profiles
         run: curl -sSL https://raw.githubusercontent.com/Lascade-Co/actions/main/scripts/install_apple_cert.sh | bash
