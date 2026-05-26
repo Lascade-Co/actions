@@ -6,10 +6,16 @@ index inside a checked-out copy of the `catchup` repo.
 
   out-dir/
     daily/YYYY-MM-DD.json   <- {date, repos: [{repo, developers: [...]}]}
-    index.json              <- {"daily": ["daily/YYYY-MM-DD.json", ...]}
+    index.json              <- {"daily":  ["daily/YYYY-MM-DD.json", ...],
+                                 "repos":  ["Lascade-Co/foo", ...],
+                                 "users":  [{"login", "name"}, ...]}
+
+index.json keeps a running registry: the day's repos and developers are
+appended to the `repos` and `users` arrays, deduped against existing entries
+(repos by full-name, users by login or name).
 
 Re-running for the same date overwrites the daily file and leaves index.json
-idempotent (the path is appended only when absent).
+idempotent (paths and registry entries are appended only when absent).
 
 Usage:
     python scripts/catchup_collect.py \
@@ -33,6 +39,38 @@ def load_summaries(artifacts_dir):
             repos.append(data)
     repos.sort(key=lambda r: r["repo"].lower())
     return repos
+
+
+def user_key(user):
+    """Dedup key for a user: login when present, else display name."""
+    return user.get("login") or user.get("name")
+
+
+def merge_registries(index, repos):
+    """Append the day's repos and users to the global index registries.
+
+    Both lists preserve existing order and only gain entries not already
+    present (deduped by repo full-name / user login-or-name).
+    """
+    index.setdefault("repos", [])
+    index.setdefault("users", [])
+
+    known_repos = set(index["repos"])
+    for name in sorted(r["repo"] for r in repos):
+        if name not in known_repos:
+            known_repos.add(name)
+            index["repos"].append(name)
+
+    known_users = {user_key(u) for u in index["users"]}
+    day_users = {}
+    for repo in repos:
+        for dev in repo["developers"]:
+            entry = {"login": dev.get("login"), "name": dev.get("name")}
+            day_users.setdefault(user_key(entry), entry)
+    for key in sorted(day_users, key=lambda k: (k or "").lower()):
+        if key not in known_users:
+            known_users.add(key)
+            index["users"].append(day_users[key])
 
 
 def main():
@@ -70,8 +108,9 @@ def main():
     index.setdefault("daily", [])
     if rel_path not in index["daily"]:
         index["daily"].append(rel_path)
+    merge_registries(index, repos)
     with open(index_path, "w") as fh:
-        json.dump(index, fh, indent=2)
+        json.dump(index, fh, indent=2, ensure_ascii=False)
         fh.write("\n")
 
     print(f"Wrote {rel_path} ({len(repos)} repo(s)) and updated index.json",
