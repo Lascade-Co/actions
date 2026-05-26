@@ -1,0 +1,164 @@
+name: Daily Org Catchup
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '30 0 * * *'   # 00:30 UTC daily — summarise the previous 24h
+
+permissions:
+  contents: read
+
+concurrency:
+  group: daily-catchup
+  cancel-in-progress: false
+
+env:
+  RAW: https://raw.githubusercontent.com/Lascade-Co/actions/main
+
+jobs:
+  discover:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.disc.outputs.matrix }}
+      has_repos: ${{ steps.disc.outputs.has_repos }}
+    steps:
+      - name: Mint org-scoped GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ secrets.CI_APP_ID }}
+          private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
+          owner: Lascade-Co
+
+      - name: Discover repos active in the last 24h
+        id: disc
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          curl -fsSL -o catchup_discover.py "$RAW/scripts/catchup_discover.py"
+          python3 catchup_discover.py --hours 24
+
+  summarize:
+    needs: discover
+    if: needs.discover.outputs.has_repos == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      max-parallel: 5
+      matrix: ${{ fromJson(needs.discover.outputs.matrix) }}
+    steps:
+      - name: Extract owner/repo
+        id: repo
+        run: |
+          FULL="${{ matrix.repo }}"
+          echo "owner=${FULL%%/*}" >> "$GITHUB_OUTPUT"
+          echo "name=${FULL#*/}"   >> "$GITHUB_OUTPUT"
+          echo "safe=${FULL//\//__}" >> "$GITHUB_OUTPUT"
+
+      - name: Mint GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ secrets.CI_APP_ID }}
+          private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
+          owner: ${{ steps.repo.outputs.owner }}
+          repositories: ${{ steps.repo.outputs.name }}
+
+      - name: Restore Codex auth.json
+        shell: bash
+        env:
+          CODEX_AUTH_JSON_BASE_64: ${{ secrets.CODEX_AUTH_JSON_BASE_64 }}
+        run: |
+          mkdir -p "$HOME/.codex"
+          printf '%s' "$CODEX_AUTH_JSON_BASE_64" | tr -d '\n\r ' | base64 -d > "$HOME/.codex/auth.json"
+
+      - name: Install codex & enable user namespaces for Codex sandbox
+        shell: bash
+        run: |
+          npm install -g @openai/codex
+
+          current_userns="$(sysctl -n kernel.unprivileged_userns_clone 2>/dev/null || true)"
+          if [ -n "$current_userns" ] && [ "$current_userns" != "1" ]; then
+            sudo sysctl -w kernel.unprivileged_userns_clone=1
+          fi
+          current_apparmor="$(sysctl -n kernel.apparmor_restrict_unprivileged_userns 2>/dev/null || true)"
+          if [ -n "$current_apparmor" ] && [ "$current_apparmor" != "0" ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+
+      - name: Summarise repo activity with Codex
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          curl -fsSL -o CATCHUP_CLASSIFY.md "$RAW/data/CATCHUP_CLASSIFY.md"
+          curl -fsSL -o CATCHUP_SUMMARY.md  "$RAW/data/CATCHUP_SUMMARY.md"
+          curl -fsSL -o catchup_repo.py     "$RAW/scripts/catchup_repo.py"
+          python3 catchup_repo.py \
+            --repo "${{ matrix.repo }}" \
+            --classify-prompt CATCHUP_CLASSIFY.md \
+            --summary-prompt CATCHUP_SUMMARY.md \
+            --out "summary-${{ steps.repo.outputs.safe }}.json"
+
+      - name: Upload repo summary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: summary-${{ steps.repo.outputs.safe }}
+          path: summary-${{ steps.repo.outputs.safe }}.json
+          if-no-files-found: error
+          retention-days: 7
+
+  collect:
+    needs: [discover, summarize]
+    if: ${{ always() && needs.discover.outputs.has_repos == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Mint GitHub App token (catchup repo)
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ secrets.CI_APP_ID }}
+          private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
+          owner: Lascade-Co
+          repositories: catchup
+
+      - name: Checkout catchup repo
+        uses: actions/checkout@v6
+        with:
+          repository: Lascade-Co/catchup
+          token: ${{ steps.app-token.outputs.token }}
+          path: catchup
+
+      - name: Download all repo summaries
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          pattern: summary-*
+          merge-multiple: true
+
+      - name: Merge into daily file and index
+        id: collect
+        run: |
+          TODAY="$(date -u +%F)"
+          echo "today=$TODAY" >> "$GITHUB_OUTPUT"
+          curl -fsSL -o catchup_collect.py "$RAW/scripts/catchup_collect.py"
+          python3 catchup_collect.py \
+            --artifacts-dir artifacts \
+            --date "$TODAY" \
+            --out-dir catchup
+
+      - name: Commit and push to catchup
+        if: steps.collect.outputs.wrote == 'true'
+        env:
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
+          TODAY: ${{ steps.collect.outputs.today }}
+        run: |
+          cd catchup
+          git config user.name "lascade-ci[bot]"
+          git config user.email "lascade-ci[bot]@users.noreply.github.com"
+          git add "daily/${TODAY}.json" index.json
+          if git diff --cached --quiet; then
+            echo "Nothing to commit."
+            exit 0
+          fi
+          git commit -m "Daily catchup: ${TODAY}"
+          git push "https://x-access-token:${GITHUB_TOKEN}@github.com/Lascade-Co/catchup.git" HEAD:main
