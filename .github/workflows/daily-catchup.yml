@@ -100,7 +100,7 @@ jobs:
             --out "summary-${{ steps.repo.outputs.safe }}.json"
 
       - name: Upload repo summary artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: summary-${{ steps.repo.outputs.safe }}
           path: summary-${{ steps.repo.outputs.safe }}.json
@@ -129,7 +129,7 @@ jobs:
           path: catchup
 
       - name: Download all repo summaries
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: artifacts
           pattern: summary-*
