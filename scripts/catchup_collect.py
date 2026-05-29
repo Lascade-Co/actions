@@ -1,25 +1,32 @@
-"""Merge per-repo catchup artifacts into the daily file and index.
+"""Merge per-repo catchup artifacts into the daily file, and publish it.
 
-Reads every `summary-*.json` produced by the matrix jobs, drops repos with no
-developer activity, and writes the consolidated daily file plus an updated
-index inside a checked-out copy of the `catchup` repo.
+This runs in two modes so the merge (pure function of the day's artifacts) and
+the publish (needs the existing `catchup` repo to keep `index.json` a running
+registry) can live in separate, parallel jobs.
+
+MERGE mode (collect job) — combine every `summary-*.json`, drop repos with no
+developer activity, write ONE consolidated daily file:
+    python scripts/catchup_collect.py \
+        --artifacts-dir ./artifacts --date 2026-05-27 --daily-out ./daily.json
+  Emits wrote=true|false to $GITHUB_OUTPUT; writes nothing when no repo had
+  activity. The daily file is {date, repos: [{repo, developers, prs, branches,
+  version, tags}]} — enrichment fields flow straight through from the artifacts.
+
+PUBLISH mode (commit job) — place the merged daily file inside a checked-out
+copy of the `catchup` repo and update its index:
+    python scripts/catchup_collect.py \
+        --daily ./daily.json --date 2026-05-27 --out-dir ./catchup
 
   out-dir/
-    daily/YYYY-MM-DD.json   <- {date, repos: [{repo, developers: [...]}]}
+    daily/YYYY-MM-DD.json   <- the merged daily file
     index.json              <- {"daily":  ["daily/YYYY-MM-DD.json", ...],
                                  "repos":  ["Lascade-Co/foo", ...],
                                  "users":  [{"login", "name"}, ...]}
 
 index.json keeps a running registry: the day's repos and developers are
 appended to the `repos` and `users` arrays, deduped against existing entries
-(repos by full-name, users by login or name).
-
-Re-running for the same date overwrites the daily file and leaves index.json
-idempotent (paths and registry entries are appended only when absent).
-
-Usage:
-    python scripts/catchup_collect.py \
-        --artifacts-dir ./artifacts --date 2026-05-27 --out-dir ./catchup
+(repos by full-name, users by login or name). Re-running for the same date
+overwrites the daily file and leaves index.json idempotent.
 """
 
 import argparse
@@ -73,30 +80,42 @@ def merge_registries(index, repos):
             index["users"].append(day_users[key])
 
 
-def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--artifacts-dir", required=True)
-    parser.add_argument("--date", required=True, help="YYYY-MM-DD")
-    parser.add_argument("--out-dir", required=True,
-                        help="checked-out catchup repo root")
-    args = parser.parse_args()
+def emit_output(key, value):
+    """Append a key=value line to $GITHUB_OUTPUT when running in Actions."""
+    output = os.environ.get("GITHUB_OUTPUT")
+    if output:
+        with open(output, "a") as fh:
+            fh.write(f"{key}={value}\n")
 
+
+def run_merge(args):
+    """MERGE mode: artifacts -> a single consolidated daily file."""
     repos = load_summaries(args.artifacts_dir)
     if not repos:
         print("No repos with activity; nothing to write.", file=sys.stderr)
-        # Signal "empty" so the workflow can skip the commit step.
-        output = os.environ.get("GITHUB_OUTPUT")
-        if output:
-            with open(output, "a") as fh:
-                fh.write("wrote=false\n")
+        emit_output("wrote", "false")
         return
+
+    os.makedirs(os.path.dirname(os.path.abspath(args.daily_out)), exist_ok=True)
+    with open(args.daily_out, "w") as fh:
+        json.dump({"date": args.date, "repos": repos}, fh, indent=2,
+                  ensure_ascii=False)
+        fh.write("\n")
+    print(f"Wrote {args.daily_out} ({len(repos)} repo(s)).", file=sys.stderr)
+    emit_output("wrote", "true")
+
+
+def run_publish(args):
+    """PUBLISH mode: place the merged daily file + update index.json."""
+    with open(args.daily) as fh:
+        daily = json.load(fh)
+    repos = daily.get("repos", [])
 
     rel_path = f"daily/{args.date}.json"
     daily_path = os.path.join(args.out_dir, rel_path)
     os.makedirs(os.path.dirname(daily_path), exist_ok=True)
     with open(daily_path, "w") as fh:
-        json.dump({"date": args.date, "repos": repos}, fh, indent=2,
-                  ensure_ascii=False)
+        json.dump(daily, fh, indent=2, ensure_ascii=False)
         fh.write("\n")
 
     index_path = os.path.join(args.out_dir, "index.json")
@@ -115,10 +134,27 @@ def main():
 
     print(f"Wrote {rel_path} ({len(repos)} repo(s)) and updated index.json",
           file=sys.stderr)
-    output = os.environ.get("GITHUB_OUTPUT")
-    if output:
-        with open(output, "a") as fh:
-            fh.write("wrote=true\n")
+    emit_output("wrote", "true")
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--date", required=True, help="YYYY-MM-DD")
+    parser.add_argument("--artifacts-dir", help="MERGE mode: summary-*.json dir")
+    parser.add_argument("--daily-out", help="MERGE mode: daily file output path")
+    parser.add_argument("--daily", help="PUBLISH mode: merged daily file input")
+    parser.add_argument("--out-dir", help="PUBLISH mode: checked-out catchup root")
+    args = parser.parse_args()
+
+    if args.daily_out:
+        if not args.artifacts_dir:
+            parser.error("MERGE mode requires --artifacts-dir with --daily-out")
+        run_merge(args)
+    elif args.daily and args.out_dir:
+        run_publish(args)
+    else:
+        parser.error("specify either --daily-out (merge) or "
+                     "--daily + --out-dir (publish)")
 
 
 if __name__ == "__main__":

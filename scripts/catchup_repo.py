@@ -11,9 +11,15 @@ repo it:
   5. Codex pass 2: writes 4-5 emoji bullets per developer (repo-summary.json),
      using clear messages directly and diffs for the vague ones.
   6. Resolves each author's GitHub login and writes the per-repo artifact.
+  7. Enriches with merged PRs, active branches, the in-window version tag, and
+     the repo's GitHub topics (the daily email filters on `tags`).
 
-The published schema (per developer): {login, name, commit_count, bullets}.
-commit_count is authoritative from git, never from Codex.
+The published schema:
+    {repo, developers: [{login, name, commit_count, bullets}],
+     prs: [{number, title, author}], branches: [str], version: str|null,
+     tags: [str]}
+commit_count is authoritative from git, never from Codex. Enrichment fields are
+best-effort: any lookup failure degrades to [] / null without aborting.
 
 Usage:
     GH_TOKEN=... python scripts/catchup_repo.py \
@@ -31,6 +37,7 @@ import os
 import subprocess
 import sys
 import tempfile
+from datetime import datetime, timedelta, timezone
 
 FIELD = "\x1f"   # unit separator between log fields
 RECORD = "\x1e"  # record separator between commits
@@ -206,6 +213,97 @@ def fallback_bullets(dev):
     return bullets
 
 
+# --- Enrichment (best-effort; every helper swallows its own errors so a
+#     missing PR list / tag / topic never aborts the per-repo summary). ---
+
+def gather_prs(repo, cutoff):
+    """Merged PRs since `cutoff` -> [{number, title, author}]."""
+    try:
+        out = run(["gh", "pr", "list", "--repo", repo, "--state", "merged",
+                   "--search", f"merged:>={cutoff.date().isoformat()}",
+                   "--limit", "50",
+                   "--json", "number,title,author"]).stdout
+        prs = []
+        for pr in json.loads(out):
+            author = (pr.get("author") or {})
+            prs.append({"number": pr.get("number"),
+                        "title": pr.get("title", ""),
+                        "author": author.get("login") or author.get("name") or ""})
+        return prs
+    except (subprocess.CalledProcessError, json.JSONDecodeError) as exc:
+        log(f"{repo}: PR lookup failed: {exc}")
+        return []
+
+
+def gather_branches(workdir, cutoff, default_branch):
+    """Remote branch names with a commit at/after `cutoff` (default excluded)."""
+    try:
+        out = run(["git", "-C", workdir, "for-each-ref",
+                   "--format=%(refname:short) %(committerdate:unix)",
+                   "refs/remotes/origin"]).stdout
+        cutoff_unix = int(cutoff.timestamp())
+        branches = []
+        for line in out.splitlines():
+            parts = line.rsplit(" ", 1)
+            if len(parts) != 2 or not parts[1].isdigit():
+                continue
+            name, ts = parts[0], int(parts[1])
+            name = name[len("origin/"):] if name.startswith("origin/") else name
+            if name in ("HEAD", default_branch):
+                continue
+            if ts >= cutoff_unix:
+                branches.append(name)
+        return sorted(set(branches))
+    except subprocess.CalledProcessError as exc:
+        log(f"branch lookup failed: {exc}")
+        return []
+
+
+def gather_version(workdir, cutoff):
+    """Newest tag created at/after `cutoff`, else None."""
+    try:
+        run(["git", "-C", workdir, "fetch", "--tags", "--quiet"])
+    except subprocess.CalledProcessError as exc:
+        log(f"tag fetch failed: {exc}")
+    try:
+        out = run(["git", "-C", workdir, "for-each-ref", "--sort=-creatordate",
+                   "--format=%(refname:short) %(creatordate:unix)",
+                   "refs/tags"]).stdout
+        cutoff_unix = int(cutoff.timestamp())
+        for line in out.splitlines():
+            parts = line.rsplit(" ", 1)
+            if len(parts) != 2 or not parts[1].isdigit():
+                continue
+            if int(parts[1]) >= cutoff_unix:
+                return parts[0]
+        return None
+    except subprocess.CalledProcessError as exc:
+        log(f"tag lookup failed: {exc}")
+        return None
+
+
+def gather_tags(repo):
+    """The repo's GitHub topics -> list of strings (the mail filter reads this)."""
+    try:
+        out = run(["gh", "api", f"repos/{repo}/topics",
+                   "--jq", ".names"]).stdout.strip()
+        names = json.loads(out) if out else []
+        return names if isinstance(names, list) else []
+    except (subprocess.CalledProcessError, json.JSONDecodeError) as exc:
+        log(f"{repo}: topic lookup failed: {exc}")
+        return []
+
+
+def default_branch_name(workdir):
+    """Best-effort default branch (e.g. 'main'); '' if it can't be resolved."""
+    try:
+        ref = run(["git", "-C", workdir, "symbolic-ref", "--short",
+                   "refs/remotes/origin/HEAD"]).stdout.strip()
+        return ref[len("origin/"):] if ref.startswith("origin/") else ref
+    except subprocess.CalledProcessError:
+        return ""
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo", required=True, help="owner/name")
@@ -280,10 +378,23 @@ def main():
             })
 
     developers.sort(key=lambda d: d["commit_count"], reverse=True)
+
+    # Enrichment: merged PRs, active branches, version tag, GitHub topics.
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=args.hours)
+    default_branch = default_branch_name(workdir)
+    result = {
+        "repo": args.repo,
+        "developers": developers,
+        "prs": gather_prs(args.repo, cutoff),
+        "branches": gather_branches(workdir, cutoff, default_branch),
+        "version": gather_version(workdir, cutoff),
+        "tags": gather_tags(args.repo),
+    }
     with open(args.out, "w") as fh:
-        json.dump({"repo": args.repo, "developers": developers}, fh, indent=2,
-                  ensure_ascii=False)
-    log(f"{args.repo}: wrote {args.out} ({len(developers)} developer(s))")
+        json.dump(result, fh, indent=2, ensure_ascii=False)
+    log(f"{args.repo}: wrote {args.out} ({len(developers)} developer(s), "
+        f"{len(result['prs'])} PR(s), {len(result['branches'])} branch(es), "
+        f"version={result['version']}, tags={result['tags']})")
 
 
 if __name__ == "__main__":

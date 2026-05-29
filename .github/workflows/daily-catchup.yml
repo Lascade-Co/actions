@@ -107,9 +107,49 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  # Merge every per-repo summary into ONE daily file and hand it off as an
+  # artifact. No catchup checkout here — committing and emailing run in parallel
+  # downstream, each consuming this artifact.
   collect:
     needs: [discover, summarize]
     if: ${{ always() && needs.discover.outputs.has_repos == 'true' }}
+    runs-on: ubuntu-latest
+    outputs:
+      today: ${{ steps.merge.outputs.today }}
+      wrote: ${{ steps.merge.outputs.wrote }}
+    steps:
+      - name: Download all repo summaries
+        uses: actions/download-artifact@v8
+        with:
+          path: artifacts
+          pattern: summary-*
+          merge-multiple: true
+
+      - name: Merge summaries into the daily file
+        id: merge
+        run: |
+          TODAY="$(date -u +%F)"
+          echo "today=$TODAY" >> "$GITHUB_OUTPUT"
+          curl -fsSL -o catchup_collect.py "$RAW/scripts/catchup_collect.py"
+          python3 catchup_collect.py \
+            --artifacts-dir artifacts \
+            --date "$TODAY" \
+            --daily-out daily.json
+
+      - name: Upload merged daily report
+        if: steps.merge.outputs.wrote == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: daily-report
+          path: daily.json
+          if-no-files-found: error
+          retention-days: 7
+
+  # Publish the merged daily file to Lascade-Co/catchup (placing the file +
+  # updating the running index). Runs in parallel with `email`.
+  commit:
+    needs: collect
+    if: needs.collect.outputs.wrote == 'true'
     runs-on: ubuntu-latest
     steps:
       - name: Mint GitHub App token (catchup repo)
@@ -128,29 +168,23 @@ jobs:
           token: ${{ steps.app-token.outputs.token }}
           path: catchup
 
-      - name: Download all repo summaries
+      - name: Download merged daily report
         uses: actions/download-artifact@v8
         with:
-          path: artifacts
-          pattern: summary-*
-          merge-multiple: true
+          name: daily-report
 
-      - name: Merge into daily file and index
-        id: collect
+      - name: Place daily file and update index
         run: |
-          TODAY="$(date -u +%F)"
-          echo "today=$TODAY" >> "$GITHUB_OUTPUT"
           curl -fsSL -o catchup_collect.py "$RAW/scripts/catchup_collect.py"
           python3 catchup_collect.py \
-            --artifacts-dir artifacts \
-            --date "$TODAY" \
+            --daily daily.json \
+            --date "${{ needs.collect.outputs.today }}" \
             --out-dir catchup
 
       - name: Commit and push to catchup
-        if: steps.collect.outputs.wrote == 'true'
         env:
           GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
-          TODAY: ${{ steps.collect.outputs.today }}
+          TODAY: ${{ needs.collect.outputs.today }}
         run: |
           cd catchup
           git config user.name "lascade-ci[bot]"
@@ -162,3 +196,68 @@ jobs:
           fi
           git commit -m "Daily catchup: ${TODAY}"
           git push "https://x-access-token:${GITHUB_TOKEN}@github.com/Lascade-Co/catchup.git" HEAD:main
+
+  # Build the rich HTML report (Codex prose + deterministic render) for the
+  # repos tagged with the `catchup-mail` topic and email it via Resend. Runs in
+  # parallel with `commit`; an email failure cannot block the data commit.
+  email:
+    needs: collect
+    if: needs.collect.outputs.wrote == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Restore Codex auth.json
+        shell: bash
+        env:
+          CODEX_AUTH_JSON_BASE_64: ${{ secrets.CODEX_AUTH_JSON_BASE_64 }}
+        run: |
+          mkdir -p "$HOME/.codex"
+          printf '%s' "$CODEX_AUTH_JSON_BASE_64" | tr -d '\n\r ' | base64 -d > "$HOME/.codex/auth.json"
+
+      - name: Install codex & enable user namespaces for Codex sandbox
+        shell: bash
+        run: |
+          npm install -g @openai/codex
+
+          current_userns="$(sysctl -n kernel.unprivileged_userns_clone 2>/dev/null || true)"
+          if [ -n "$current_userns" ] && [ "$current_userns" != "1" ]; then
+            sudo sysctl -w kernel.unprivileged_userns_clone=1
+          fi
+          current_apparmor="$(sysctl -n kernel.apparmor_restrict_unprivileged_userns 2>/dev/null || true)"
+          if [ -n "$current_apparmor" ] && [ "$current_apparmor" != "0" ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+
+      - name: Download merged daily report
+        uses: actions/download-artifact@v8
+        with:
+          name: daily-report
+
+      - name: Generate report JSON
+        id: report
+        run: |
+          curl -fsSL -o CATCHUP_REPORT.md "$RAW/data/CATCHUP_REPORT.md"
+          curl -fsSL -o catchup_report.py "$RAW/scripts/catchup_report.py"
+          python3 catchup_report.py \
+            --daily daily.json \
+            --report-prompt CATCHUP_REPORT.md \
+            --out report.json
+
+      - name: Render email HTML
+        if: steps.report.outputs.send == 'true'
+        run: |
+          curl -fsSL -o catchup_render_email.py "$RAW/scripts/catchup_render_email.py"
+          python3 catchup_render_email.py --report report.json --out email.html
+
+      - name: Send via Resend
+        if: steps.report.outputs.send == 'true'
+        env:
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+          TODAY: ${{ needs.collect.outputs.today }}
+        run: |
+          jq -n --rawfile html email.html --arg d "$TODAY" \
+            '{from:"noreply@metrics.lascade.com",
+              to:["cherian@lascade.com","rohit@lascade.com"],
+              subject:"Lascade Daily Report — \($d)", html:$html}' \
+          | curl -fsS -X POST https://api.resend.com/emails \
+              -H "Authorization: Bearer $RESEND_API_KEY" \
+              -H "Content-Type: application/json" --data @-
