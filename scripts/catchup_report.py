@@ -2,22 +2,25 @@
 
 Runs in the `email` job. Steps:
 
-  1. Read the merged daily file and keep only repos carrying the `catchup-mail`
-     GitHub topic (the email's active set). If none, emit send=false and exit.
+  1. Read the merged daily file and drop any repo named in the exclude list
+     (data/catchup_exclude.txt). Everything else is emailed — a repo is included
+     by default. If nothing is left, emit send=false and exit.
   2. Codex pass: hand the active repos to Codex with CATCHUP_REPORT.md, which
-     returns prose + per-repo section structure (report-codex.json).
-  3. Merge Codex's words with AUTHORITATIVE numbers computed here — commit
-     counts, contributor list, PR count, version, branches, org stats — so the
-     figures people read are never the model's invention (same principle as
-     catchup_repo.py trusting Codex only for bullet prose).
+     returns PROSE ONLY — an executive summary, a display name + emoji per repo,
+     and cross-repo patterns (report-codex.json).
+  3. Build the report: the per-repo Published/Testing/Work-in-Progress sections
+     come straight from the deterministic status split upstream; all numbers
+     (commit counts, contributor list, PR count, version, branches, org stats)
+     are computed here. Codex is trusted only for the prose in step 2.
 
-If the Codex pass fails the report degrades to bullet-derived sections so the
-email still sends.
+If the Codex pass fails, the prose is dropped (empty summary/patterns, repo-name
+display names) but the sections and numbers are intact, so the email still sends.
 
 Usage:
     python scripts/catchup_report.py \
         --daily daily.json \
         --report-prompt CATCHUP_REPORT.md \
+        --exclude catchup_exclude.txt \
         --out report.json
 
 Requires: the `codex` CLI on PATH (Codex auth pre-restored).
@@ -30,8 +33,10 @@ import subprocess
 import sys
 import tempfile
 
-TOPIC = "catchup-mail"          # repos carrying this GitHub topic are emailed
 DEFAULT_EMOJI = "📦"
+# Section order in the email; matches the deterministic statuses set upstream
+# in catchup_repo.py (Published / Testing / Work in Progress).
+STATUS_ORDER = ["Published", "Testing", "Work in Progress"]
 
 
 def log(msg):
@@ -61,6 +66,15 @@ def run_codex(prompt_template_path, payload_text, scratch, output_name):
         return json.load(fh)
 
 
+def load_exclude(path):
+    """owner/repo names to omit from the email (blank lines and # ignored)."""
+    if not path:
+        return set()
+    with open(path) as fh:
+        return {line.strip() for line in fh
+                if line.strip() and not line.lstrip().startswith("#")}
+
+
 def dev_key(dev):
     return dev.get("login") or dev.get("name")
 
@@ -73,27 +87,34 @@ def contributors_of(repo):
             for d in devs]
 
 
-def fallback_sections(repo):
-    """Degraded sections from developer bullets when Codex is unavailable."""
-    items = []
+def sections_from_repo(repo):
+    """Deterministic Published/Testing/WIP sections from developer bullets.
+
+    The status split was decided upstream (catchup_repo.py); here we just fan
+    the per-developer, per-status bullets out into ordered email sections.
+    """
+    buckets = {st: [] for st in STATUS_ORDER}
     for dev in repo.get("developers", []):
         author = (dev.get("name") or "").split(" ")[0] or "Team"
-        for bullet in dev.get("bullets", []):
-            text = bullet.lstrip("•").strip()   # strip the existing list marker
-            items.append({"text": text, "author": author})
-    return [{"title": "Updates", "items": items}] if items else []
+        bullets = dev.get("bullets") or {}
+        if not isinstance(bullets, dict):     # legacy flat-list safety
+            bullets = {STATUS_ORDER[-1]: bullets}
+        for status, items in bullets.items():
+            for bullet in items:
+                buckets.setdefault(status, []).append(
+                    {"text": str(bullet).lstrip("•").strip(), "author": author})
+    return [{"title": st, "items": buckets[st]}
+            for st in STATUS_ORDER if buckets.get(st)]
 
 
 def build_codex_payload(date, active):
-    """Trim the active repos to just what Codex needs (prose inputs)."""
+    """Trim the active repos to just what Codex needs for prose."""
     repos = []
     for r in active:
         repos.append({
             "repo": r["repo"],
             "developers": [
-                {"login": d.get("login"), "name": d.get("name"),
-                 "commit_count": d.get("commit_count", 0),
-                 "bullets": d.get("bullets", [])}
+                {"name": d.get("name"), "bullets": d.get("bullets", {})}
                 for d in r.get("developers", [])
             ],
             "prs": r.get("prs", []),
@@ -104,7 +125,7 @@ def build_codex_payload(date, active):
 
 
 def merge(active, codex):
-    """Combine Codex prose with authoritative per-repo and org numbers."""
+    """Combine Codex prose with authoritative numbers and deterministic sections."""
     by_repo = {c.get("repo"): c for c in codex.get("repos", [])}
 
     repos_out = []
@@ -121,7 +142,7 @@ def merge(active, codex):
             "version": r.get("version"),
             "contributors": contributors_of(r),
             "branches": r.get("branches", []),
-            "sections": c.get("sections") or fallback_sections(r),
+            "sections": sections_from_repo(r),
         })
 
     org_contributors = set()
@@ -154,6 +175,7 @@ def main():
     parser.add_argument("--daily", required=True, help="merged daily file")
     parser.add_argument("--report-prompt", required=True,
                         help="CATCHUP_REPORT.md path")
+    parser.add_argument("--exclude", help="repo exclude-list file (owner/repo per line)")
     parser.add_argument("--out", required=True, help="report.json output path")
     args = parser.parse_args()
 
@@ -161,12 +183,13 @@ def main():
         daily = json.load(fh)
     date = daily.get("date")
 
-    active = [r for r in daily.get("repos", [])
-              if TOPIC in (r.get("tags") or [])]
-    log(f"{len(active)} repo(s) tagged '{TOPIC}' out of "
-        f"{len(daily.get('repos', []))} active.")
+    excluded = load_exclude(args.exclude)
+    repos = daily.get("repos", [])
+    active = [r for r in repos if r.get("repo") not in excluded]
+    log(f"{len(active)} repo(s) to email "
+        f"({len(repos)} active, {len(repos) - len(active)} excluded).")
     if not active:
-        log("No tagged repos with activity; skipping email.")
+        log("No repos left after exclusions; skipping email.")
         emit_output("send", "false")
         return
 
@@ -177,7 +200,7 @@ def main():
                           scratch, "report-codex.json")
     except (subprocess.CalledProcessError, json.JSONDecodeError,
             FileNotFoundError) as exc:
-        log(f"Codex report pass failed, using fallback sections: {exc}")
+        log(f"Codex prose pass failed; sections/numbers stand, prose dropped: {exc}")
         codex = {"executive_summary": "", "repos": [], "patterns": []}
 
     report = merge(active, codex)

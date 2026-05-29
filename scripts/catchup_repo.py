@@ -5,21 +5,27 @@ repo it:
 
   1. Shallow-clones every branch within the look-back window.
   2. Collects non-merge commits, dropping bot authors.
-  3. Codex pass 1: classifies each commit message as descriptive or
+  3. Classifies each commit's delivery status DETERMINISTICALLY from branch/PR
+     state: on the default branch -> Published; on a branch with an open PR ->
+     Testing; on a branch with no PR -> Work in Progress.
+  4. Codex pass 1: classifies each commit message as descriptive or
      missing-info (writes classify.json).
-  4. Pulls the git diff only for missing-info commits.
-  5. Codex pass 2: writes 4-5 emoji bullets per developer (repo-summary.json),
-     using clear messages directly and diffs for the vague ones.
-  6. Resolves each author's GitHub login and writes the per-repo artifact.
-  7. Enriches with merged PRs, active branches, the in-window version tag, and
-     the repo's GitHub topics (the daily email filters on `tags`).
+  5. Pulls the git diff only for missing-info commits.
+  6. Codex pass 2: writes emoji bullets per developer, grouped by the status
+     from step 3 (repo-summary.json).
+  7. Resolves each author's GitHub login and writes the per-repo artifact.
+  8. Enriches with merged PRs, active branches, and the in-window version tag.
 
 The published schema:
-    {repo, developers: [{login, name, commit_count, bullets}],
-     prs: [{number, title, author}], branches: [str], version: str|null,
-     tags: [str]}
-commit_count is authoritative from git, never from Codex. Enrichment fields are
-best-effort: any lookup failure degrades to [] / null without aborting.
+    {repo,
+     developers: [{login, name, commit_count,
+                   bullets: {"Published": [str], "Testing": [str],
+                             "Work in Progress": [str]}}],
+     prs: [{number, title, author}], branches: [str], version: str|null}
+`bullets` keys only the statuses that have work. commit_count is authoritative
+from git and the status split is deterministic — Codex is trusted only for the
+bullet prose. Enrichment fields are best-effort: a lookup failure degrades to
+[] / null without aborting.
 
 Usage:
     GH_TOKEN=... python scripts/catchup_repo.py \
@@ -48,6 +54,12 @@ BOT_NAMES = {"dependabot", "dependabot[bot]", "github-actions",
 MAX_DIFF_CHARS = 15000      # cap a single commit diff
 MAX_TOTAL_DIFF_CHARS = 120000  # cap the combined diff payload to Codex
 MAX_COMMITS_PER_DEV = 50    # cap commits sent to Codex (count stays accurate)
+
+# Delivery status of a commit, decided deterministically from branch/PR state.
+STATUS_PUBLISHED = "Published"          # reachable from the default branch
+STATUS_TESTING = "Testing"              # on a branch with an open PR
+STATUS_WIP = "Work in Progress"         # on a branch with no PR
+STATUS_ORDER = [STATUS_PUBLISHED, STATUS_TESTING, STATUS_WIP]
 
 
 def log(msg):
@@ -178,11 +190,62 @@ def get_diff(workdir, sha):
     return out
 
 
-def build_summary_payload(repo, devs, missing_shas, workdir):
+def rev_set(workdir, *args):
+    """SHAs from `git rev-list <args>` as a set (empty on error)."""
+    try:
+        out = run(["git", "-C", workdir, "rev-list", *args]).stdout
+        return {line.strip() for line in out.splitlines() if line.strip()}
+    except subprocess.CalledProcessError:
+        return set()
+
+
+def open_pr_branches(repo):
+    """Head branch names of the repo's currently-open PRs (best effort)."""
+    try:
+        out = run(["gh", "pr", "list", "--repo", repo, "--state", "open",
+                   "--limit", "100", "--json", "headRefName"]).stdout
+        return [pr.get("headRefName") for pr in json.loads(out)
+                if pr.get("headRefName")]
+    except (subprocess.CalledProcessError, json.JSONDecodeError) as exc:
+        log(f"{repo}: open-PR lookup failed: {exc}")
+        return []
+
+
+def classify_status(workdir, repo, hours, default_branch, shas):
+    """Map each in-window sha -> Published / Testing / Work in Progress.
+
+    Published        : reachable from the default branch (landed on main).
+    Testing          : on a branch that has an OPEN PR but not yet on main.
+    Work in Progress : on a branch with no PR.
+
+    Precedence is Published > Testing > WIP, so a commit that has reached main
+    counts as Published even if its branch still exists.
+    """
+    since = [f"--since={hours} hours ago", "--no-merges"]
+    default = default_branch or "main"
+    published = rev_set(workdir, f"origin/{default}", *since)
+    testing = set()
+    for branch in open_pr_branches(repo):
+        testing |= rev_set(workdir, f"origin/{default}..origin/{branch}", *since)
+    testing -= published
+
+    status = {}
+    for sha in shas:
+        if sha in published:
+            status[sha] = STATUS_PUBLISHED
+        elif sha in testing:
+            status[sha] = STATUS_TESTING
+        else:
+            status[sha] = STATUS_WIP
+    return status
+
+
+def build_summary_payload(repo, devs, missing_shas, status_by_sha, workdir):
+    """Per developer, the window's commits grouped by delivery status."""
     total_diff = 0
     payload_devs = []
     for dev in devs:
-        commits_out = []
+        work = {}
         for c in dev["commits"][:MAX_COMMITS_PER_DEV]:
             entry = {"sha": c["sha"], "subject": c["subject"],
                      "body": c["body"]}
@@ -190,31 +253,33 @@ def build_summary_payload(repo, devs, missing_shas, workdir):
                 diff = get_diff(workdir, c["sha"])
                 total_diff += len(diff)
                 entry["diff"] = diff
-            commits_out.append(entry)
+            work.setdefault(status_by_sha.get(c["sha"], STATUS_WIP), []).append(entry)
         payload_devs.append({
             "login": dev.get("login"),
             "name": dev["name"],
             "commit_count": len(dev["commits"]),
-            "commits": commits_out,
+            "work": {st: work[st] for st in STATUS_ORDER if st in work},
         })
     return {"repo": repo, "developers": payload_devs}
 
 
-def fallback_bullets(dev):
-    """Degraded summary from commit subjects when Codex is unavailable."""
-    seen, bullets = set(), []
+def fallback_bullets(dev, status_by_sha):
+    """Degraded status-grouped bullets from commit subjects (no Codex)."""
+    grouped, seen = {}, set()
     for c in dev["commits"]:
         subj = c["subject"].strip()
-        if subj and subj.lower() not in seen:
-            seen.add(subj.lower())
-            bullets.append(f"• {subj}")
-        if len(bullets) >= 5:
-            break
-    return bullets
+        if not subj or subj.lower() in seen:
+            continue
+        seen.add(subj.lower())
+        st = status_by_sha.get(c["sha"], STATUS_WIP)
+        bucket = grouped.setdefault(st, [])
+        if len(bucket) < 5:
+            bucket.append(f"• {subj}")
+    return {st: grouped[st] for st in STATUS_ORDER if st in grouped}
 
 
 # --- Enrichment (best-effort; every helper swallows its own errors so a
-#     missing PR list / tag / topic never aborts the per-repo summary). ---
+#     missing PR list / branch / tag never aborts the per-repo summary). ---
 
 def gather_prs(repo, cutoff):
     """Merged PRs since `cutoff` -> [{number, title, author}]."""
@@ -282,18 +347,6 @@ def gather_version(workdir, cutoff):
         return None
 
 
-def gather_tags(repo):
-    """The repo's GitHub topics -> list of strings (the mail filter reads this)."""
-    try:
-        out = run(["gh", "api", f"repos/{repo}/topics",
-                   "--jq", ".names"]).stdout.strip()
-        names = json.loads(out) if out else []
-        return names if isinstance(names, list) else []
-    except (subprocess.CalledProcessError, json.JSONDecodeError) as exc:
-        log(f"{repo}: topic lookup failed: {exc}")
-        return []
-
-
 def default_branch_name(workdir):
     """Best-effort default branch (e.g. 'main'); '' if it can't be resolved."""
     try:
@@ -331,6 +384,12 @@ def main():
     devs = resolve_logins(args.repo, devs)
     devs = merge_by_login(devs)
 
+    # Deterministic delivery status per commit (Published/Testing/WIP) from
+    # branch + open-PR state — decided here, never by Codex.
+    default_branch = default_branch_name(workdir)
+    status_by_sha = classify_status(workdir, args.repo, args.hours,
+                                     default_branch, [c["sha"] for c in commits])
+
     # Pass 1 — classify commit messages.
     classify_input = json.dumps([
         {"sha": c["sha"], "name": c["name"], "email": c["email"],
@@ -347,8 +406,9 @@ def main():
         log(f"classify pass failed, treating all commits as missing-info: {exc}")
         missing = {c["sha"] for c in commits}
 
-    # Pass 2 — per-developer bullets.
-    payload = build_summary_payload(args.repo, devs, missing, workdir)
+    # Pass 2 — per-developer bullets, grouped by the status above.
+    payload = build_summary_payload(args.repo, devs, missing, status_by_sha,
+                                    workdir)
     developers = []
     try:
         result = run_codex(args.summary_prompt, json.dumps(payload, indent=2),
@@ -356,7 +416,8 @@ def main():
         bullets_by_key = {}
         for d in result.get("developers", []):
             key = d.get("login") or d.get("name")
-            bullets_by_key[key] = d.get("bullets", [])
+            b = d.get("bullets")
+            bullets_by_key[key] = b if isinstance(b, dict) else None
         # Rebuild from authoritative dev list; trust Codex only for bullets.
         for dev in devs:
             key = dev.get("login") or dev["name"]
@@ -364,7 +425,8 @@ def main():
                 "login": dev.get("login"),
                 "name": dev["name"],
                 "commit_count": len(dev["commits"]),
-                "bullets": bullets_by_key.get(key) or fallback_bullets(dev),
+                "bullets": bullets_by_key.get(key)
+                or fallback_bullets(dev, status_by_sha),
             })
     except (subprocess.CalledProcessError, json.JSONDecodeError,
             FileNotFoundError) as exc:
@@ -374,27 +436,25 @@ def main():
                 "login": dev.get("login"),
                 "name": dev["name"],
                 "commit_count": len(dev["commits"]),
-                "bullets": fallback_bullets(dev),
+                "bullets": fallback_bullets(dev, status_by_sha),
             })
 
     developers.sort(key=lambda d: d["commit_count"], reverse=True)
 
-    # Enrichment: merged PRs, active branches, version tag, GitHub topics.
+    # Enrichment: merged PRs, active branches, version tag.
     cutoff = datetime.now(timezone.utc) - timedelta(hours=args.hours)
-    default_branch = default_branch_name(workdir)
     result = {
         "repo": args.repo,
         "developers": developers,
         "prs": gather_prs(args.repo, cutoff),
         "branches": gather_branches(workdir, cutoff, default_branch),
         "version": gather_version(workdir, cutoff),
-        "tags": gather_tags(args.repo),
     }
     with open(args.out, "w") as fh:
         json.dump(result, fh, indent=2, ensure_ascii=False)
     log(f"{args.repo}: wrote {args.out} ({len(developers)} developer(s), "
         f"{len(result['prs'])} PR(s), {len(result['branches'])} branch(es), "
-        f"version={result['version']}, tags={result['tags']})")
+        f"version={result['version']})")
 
 
 if __name__ == "__main__":

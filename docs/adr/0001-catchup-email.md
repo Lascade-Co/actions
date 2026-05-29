@@ -2,20 +2,26 @@
 
 Three decisions made when adding the daily email to `daily-catchup.yml`:
 
-**1. Email-only tag filter via a per-repo `tags` field.** Every active repo is still
-summarised and committed to the `catchup` data repo (full historical record). The *email*
-is scoped to repos carrying the `catchup-mail` GitHub topic. We carry each repo's topics in
-the merged daily file (`tags`) rather than computing a tagged set in `discover`, so the
-filter lives entirely in the email step. Consequence: the email cannot list tagged-but-quiet
-repos (they produce no summary), so there is no "Inactive Repositories" section.
+**1. Email scope via a checked-in exclude list, not repo tags.** Every active repo is still
+summarised and committed to the `catchup` data repo (full historical record). The *email* is
+scoped by `data/catchup_exclude.txt` (fetched at runtime via the `$RAW` URL): a repo is
+included by default and listed in that file to opt out. We started with a topic allow-list
+(`catchup-mail`) but switched to a deny-list because new repos should appear without anyone
+remembering to tag them, and a reviewable file beats GitHub topic state. The file was seeded
+once from the repos lacking the topic, then maintained by hand; the runtime no longer reads
+topics. Consequence: the email can't list quiet repos (they produce no summary), so there is
+no "Inactive Repositories" section.
 
-**2. Codex → structured JSON → deterministic Python renderer.** Codex emits prose and
-section structure only (`report.json`); `catchup_render_email.py` turns that into the email
-HTML. We deliberately do **not** let the LLM emit raw HTML — email markup must be
-Outlook/Gmail/dark-mode safe and reproducible, and the renderer is unit-testable without an
-LLM or network. All numbers (commit counts, versions, PR counts, stats) are injected
-deterministically, never trusted from Codex — the same principle `catchup_repo.py` already
-applies to bullets.
+**2. Codex → structured JSON → deterministic Python renderer, with deterministic
+classification.** Codex emits **prose only** (bullets, executive summary, display names,
+patterns); `catchup_render_email.py` turns the merged `report.json` into the email HTML. We
+deliberately do **not** let the LLM emit raw HTML (email markup must be Outlook/Gmail/
+dark-mode safe and reproducible, and the renderer is unit-testable without an LLM), and we
+do **not** let the LLM categorise work. A commit's status — **Published** (on the default
+branch), **Testing** (branch with an open PR), **Work in Progress** (branch with no PR) — is
+decided deterministically in the per-repo step from branch/PR state, and those statuses are
+the email's sections. All numbers (commit counts, versions, PR counts, stats) are likewise
+computed, never trusted from Codex.
 
 **3. Split `commit` and `email` into parallel jobs after a merge-only `collect`.** `collect`
 produces the daily file and uploads it as an artifact; `commit` (publish to `catchup`) and

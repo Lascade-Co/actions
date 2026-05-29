@@ -197,9 +197,9 @@ jobs:
           git commit -m "Daily catchup: ${TODAY}"
           git push "https://x-access-token:${GITHUB_TOKEN}@github.com/Lascade-Co/catchup.git" HEAD:main
 
-  # Build the rich HTML report (Codex prose + deterministic render) for the
-  # repos tagged with the `catchup-mail` topic and email it via Resend. Runs in
-  # parallel with `commit`; an email failure cannot block the data commit.
+  # Build the rich HTML report (Codex prose + deterministic render) for all
+  # active repos except those in data/catchup_exclude.txt, and email it via
+  # Resend. Runs in parallel with `commit`; an email failure can't block the commit.
   email:
     needs: collect
     if: needs.collect.outputs.wrote == 'true'
@@ -236,10 +236,12 @@ jobs:
         id: report
         run: |
           curl -fsSL -o CATCHUP_REPORT.md "$RAW/data/CATCHUP_REPORT.md"
+          curl -fsSL -o catchup_exclude.txt "$RAW/data/catchup_exclude.txt"
           curl -fsSL -o catchup_report.py "$RAW/scripts/catchup_report.py"
           python3 catchup_report.py \
             --daily daily.json \
             --report-prompt CATCHUP_REPORT.md \
+            --exclude catchup_exclude.txt \
             --out report.json
 
       - name: Render email HTML
