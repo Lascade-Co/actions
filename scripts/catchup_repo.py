@@ -282,10 +282,11 @@ def fallback_bullets(dev, status_by_sha):
 #     missing PR list / branch / tag never aborts the per-repo summary). ---
 
 def gather_prs(repo, cutoff):
-    """Merged PRs since `cutoff` -> [{number, title, author}]."""
+    """Merged PRs since exact UTC `cutoff` -> [{number, title, author}]."""
+    cutoff_iso = cutoff.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     try:
         out = run(["gh", "pr", "list", "--repo", repo, "--state", "merged",
-                   "--search", f"merged:>={cutoff.date().isoformat()}",
+                   "--search", f"merged:>={cutoff_iso}",
                    "--limit", "50",
                    "--json", "number,title,author"]).stdout
         prs = []
