@@ -3,7 +3,7 @@ name: Daily Org Catchup
 on:
   workflow_dispatch:
   schedule:
-    - cron: '30 0 * * *'   # 00:30 UTC daily — summarise the previous 24h
+    - cron: '0 14 * * *'   # 14:00 UTC daily = 06:00 PST — summarise the previous 24h
 
 permissions:
   contents: read
