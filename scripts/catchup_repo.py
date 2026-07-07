@@ -67,7 +67,10 @@ def log(msg):
 
 
 def run(cmd, **kw):
-    return subprocess.run(cmd, check=True, capture_output=True, text=True, **kw)
+    # errors="replace": diffs can contain bytes that aren't valid UTF-8
+    # (e.g. latin-1 source files git treats as text) — decode instead of crash.
+    return subprocess.run(cmd, check=True, capture_output=True, text=True,
+                          errors="replace", **kw)
 
 
 def is_bot(name, email):
