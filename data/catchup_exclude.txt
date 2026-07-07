@@ -255,7 +255,6 @@ Lascade-Co/pa
 Lascade-Co/pixel-travelanimator
 Lascade-Co/plant-ai-server
 Lascade-Co/plant-identification-flutter
-Lascade-Co/product-intelligence
 Lascade-Co/proxies
 Lascade-Co/rate-analysis-server
 Lascade-Co/react-email-templates
