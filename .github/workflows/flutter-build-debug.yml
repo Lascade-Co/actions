@@ -363,14 +363,25 @@ jobs:
           /usr/libexec/PlistBuddy -c "Add :teamID string ${{ env.IOS_TEAM_ID }}" ExportOptions.plist
           /usr/libexec/PlistBuddy -c "Add :signingStyle string manual" ExportOptions.plist
           /usr/libexec/PlistBuddy -c "Add :provisioningProfiles dict" ExportOptions.plist
-          /usr/libexec/PlistBuddy -c "Add :provisioningProfiles:${{ env.IOS_BUNDLE_ID }} string ${{ env.APP_PROFILE_UUID }}" ExportOptions.plist
-          /usr/libexec/PlistBuddy -c "Add :provisioningProfiles:${{ env.IOS_BUNDLE_ID }}.OneSignalNotificationServiceExtension string ${{ env.NSE_PROFILE_UUID }}" ExportOptions.plist
-          if [ -n "${{ env.SHARE_EXT_PROFILE_UUID }}" ]; then
-            /usr/libexec/PlistBuddy -c "Add :provisioningProfiles:${{ env.IOS_BUNDLE_ID }}.MapLinkShareExtension string ${{ env.SHARE_EXT_PROFILE_UUID }}" ExportOptions.plist
-          fi
-          if [ -n "${{ env.LIVE_ACTIVITY_PROFILE_UUID }}" ]; then
-            /usr/libexec/PlistBuddy -c "Add :provisioningProfiles:${{ env.IOS_BUNDLE_ID }}.LiveActivityWidget string ${{ env.LIVE_ACTIVITY_PROFILE_UUID }}" ExportOptions.plist
-          fi
+          # Map each installed profile to its real bundle id (read from the
+          # profile's application-identifier). Generic + app-agnostic: existing
+          # apps derive the same bundle ids they had hardcoded; widget/watch and
+          # any future extension are handled automatically. Empty UUID -> skipped.
+          PROFILE_DIR="$HOME/Library/MobileDevice/Provisioning Profiles"
+          add_pp() {
+            local uuid="$1"; [ -z "$uuid" ] && return 0
+            local appid bundle
+            appid=$(security cms -D -i "$PROFILE_DIR/$uuid.mobileprovision" | plutil -extract Entitlements.application-identifier raw -)
+            bundle="${appid#*.}"   # strip "TEAMID." prefix
+            /usr/libexec/PlistBuddy -c "Add :provisioningProfiles:${bundle} string ${uuid}" ExportOptions.plist
+            echo "Mapped $bundle -> $uuid"
+          }
+          add_pp "${{ env.APP_PROFILE_UUID }}"
+          add_pp "${{ env.NSE_PROFILE_UUID }}"
+          add_pp "${{ env.SHARE_EXT_PROFILE_UUID }}"
+          add_pp "${{ env.LIVE_ACTIVITY_PROFILE_UUID }}"
+          add_pp "${{ env.WIDGET_PROFILE_UUID }}"
+          add_pp "${{ env.WATCH_PROFILE_UUID }}"
 
 
       - name: Read .flutter-version
