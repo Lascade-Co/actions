@@ -24,6 +24,8 @@
 set -euo pipefail
 
 # --- Decode cert ---
+# Guarantee the decoded .p12 is removed even if a later step fails / exits early.
+trap 'rm -f certificate.p12' EXIT
 echo "$IOS_CERTIFICATE_BASE64" | base64 --decode > certificate.p12
 
 # --- Create temporary keychain ---
@@ -78,4 +80,4 @@ install_profile "${IOS_WIDGET_PROVISION_PROFILE_BASE64:-}" WIDGET optional
 install_profile "${IOS_WATCH_PROVISION_PROFILE_BASE64:-}"  WATCH  optional
 
 # --- Cleanup ---
-rm -f certificate.p12
+# certificate.p12 is removed by the EXIT trap above.

@@ -70,8 +70,12 @@ def main():
         return app_name  # main app + test targets
 
     def defines(bl, key):
-        """True if line `bl` defines `key` (plain, quoted, or KEY[sdk=...] form)."""
-        return re.search(rf'(^|\s|"){re.escape(key)}(\[[^\]]*\])?"?\s*=', bl)
+        """True if line `bl` defines `key` (plain, quoted, or KEY[sdk=...] form).
+
+        Anchored at line start (allowing leading indent / opening quote) so it
+        never matches the key inside a value or a commented-out setting.
+        """
+        return re.match(rf'\s*"?{re.escape(key)}(\[[^\]]*\])?"?\s*=', bl)
 
     with open(path) as f:
         lines = f.readlines()
@@ -98,7 +102,7 @@ def main():
 
         # Block complete — only touch target build configs (those with a bundle id).
         text = "".join(block)
-        m = re.search(r'PRODUCT_BUNDLE_IDENTIFIER = "?([^";]+)"?;', text)
+        m = re.search(r'PRODUCT_BUNDLE_IDENTIFIER\s*=\s*"?([^";]+)"?;', text)
         if not m:
             result.extend(block)
             in_settings = False
@@ -120,7 +124,9 @@ def main():
         for bl in block:
             for key, val in desired.items():
                 if key not in seen and defines(bl, key):
-                    bl = re.sub(r"=\s*[^;]*;", f"= {val};", bl, count=1)
+                    # lambda replacement so backslashes / group refs (e.g. \1)
+                    # in profile names or team ids are treated literally.
+                    bl = re.sub(r"=\s*[^;]*;", lambda _m: f"= {val};", bl, count=1)
                     seen.add(key)
                     break
             processed.append(bl)
