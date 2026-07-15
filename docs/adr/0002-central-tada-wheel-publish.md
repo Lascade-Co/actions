@@ -14,8 +14,10 @@ the shared PAT was the motivating trade-off.
 
 **What we gave up.** The old workflow also ran on `pull_request`, gating merges with the test
 suite, wheel build, and credential scan. A `repository_dispatch` run happens in another repo and
-cannot act as a native required PR status check, so we dropped PR-time validation: the central
-runner is **publish-only on `main`** (plus manual `workflow_dispatch`). Validation still runs —
+cannot act as a native required PR status check, so we dropped PR-time validation. The central
+runner responds only to `repository_dispatch` (never `pull_request`); the thin `tada` trigger
+fires it on push to `main` and on manual `workflow_dispatch`, so it is **publish-only on `main`**
+plus on-demand re-runs. Validation still runs —
 tests, wheel build, metadata/credential/bundle checks — but only on the push that publishes,
 not before merge. If a pre-merge gate is needed later, it would have to be reinstated as an
 in-repo `tada` workflow (which would reintroduce a shared-repo token for that path).
