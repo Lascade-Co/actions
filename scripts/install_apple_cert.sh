@@ -47,7 +47,8 @@ mkdir -p "$PROFILE_DIR_LEGACY" "$PROFILE_DIR_NEW"
 # install_profile <base64> <PREFIX> <required|optional>
 install_profile() {
   local b64="${1:-}" prefix="$2" required="$3"
-  local file="${prefix}.mobileprovision"
+  # Write to RUNNER_TEMP so partial runs never leave profiles in the workspace.
+  local file="$RUNNER_TEMP/${prefix}.mobileprovision"
 
   if [ -z "$b64" ]; then
     if [ "$required" = "required" ]; then

@@ -87,22 +87,24 @@ def main():
 
     for line in lines:
         if not in_settings:
-            if "buildSettings = {" in line:
-                in_settings = True
-                depth = line.count("{") - line.count("}")
-                block = [line]
-            else:
+            if "buildSettings = {" not in line:
                 result.append(line)
-            continue
-
-        depth += line.count("{") - line.count("}")
-        block.append(line)
-        if depth > 0:
-            continue
+                continue
+            in_settings = True
+            depth = line.count("{") - line.count("}")
+            block = [line]
+            if depth > 0:
+                continue
+            # single-line block (e.g. "buildSettings = {};") — process below.
+        else:
+            depth += line.count("{") - line.count("}")
+            block.append(line)
+            if depth > 0:
+                continue
 
         # Block complete — only touch target build configs (those with a bundle id).
         text = "".join(block)
-        m = re.search(r'PRODUCT_BUNDLE_IDENTIFIER\s*=\s*"?([^";]+)"?;', text)
+        m = re.search(r'PRODUCT_BUNDLE_IDENTIFIER(?:\[[^\]]*\])?\s*=\s*"?([^";]+)"?;', text)
         if not m:
             result.extend(block)
             in_settings = False
