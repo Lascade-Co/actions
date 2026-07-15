@@ -5,9 +5,9 @@ provisioning profiles, selecting the profile by PRODUCT_BUNDLE_IDENTIFIER.
 
 Required environment variables:
     APP_PROFILE_NAME  – Provisioning profile name for the main app target
-    NSE_PROFILE_NAME  – Provisioning profile name for the NSE target
 
-Optional (used only when the matching target exists):
+Optional (each required only when the matching target exists in the project):
+    NSE_PROFILE_NAME           – Profile for the OneSignal NSE target
     WIDGET_PROFILE_NAME        – Profile for a widget / live-activity extension
     LIVE_ACTIVITY_PROFILE_NAME – Legacy alias for WIDGET_PROFILE_NAME (backward compat)
     WATCH_PROFILE_NAME         – Profile for a watchOS companion app
@@ -38,8 +38,8 @@ def main():
     )
     watch_name = os.environ.get("WATCH_PROFILE_NAME")
 
-    if not app_name or not nse_name:
-        print("ERROR: APP_PROFILE_NAME and NSE_PROFILE_NAME must be set", file=sys.stderr)
+    if not app_name:
+        print("ERROR: APP_PROFILE_NAME must be set", file=sys.stderr)
         sys.exit(1)
 
     if not os.path.isfile(path):
@@ -49,6 +49,9 @@ def main():
     def profile_for(bundle):
         """Choose a provisioning profile name from the target's bundle id."""
         if bundle.endswith(".OneSignalNotificationServiceExtension"):
+            if not nse_name:
+                print(f"ERROR: NSE_PROFILE_NAME required for target {bundle}", file=sys.stderr)
+                sys.exit(1)
             return nse_name
         if ".watchkit" in bundle:  # watch app or watch extension
             if not watch_name:

@@ -6,12 +6,12 @@
 #   IOS_CERTIFICATE_BASE64            – Base64-encoded .p12 certificate
 #   IOS_CERTIFICATE_PASSWORD          – Password for the .p12
 #   IOS_PROVISION_PROFILE_BASE64      – Base64-encoded main app provisioning profile
-#   IOS_NSE_PROVISION_PROFILE_BASE64  – Base64-encoded NSE provisioning profile
 #   RUNNER_TEMP                       – Temp directory (set by GitHub Actions)
 #   GITHUB_ENV                        – Env file path  (set by GitHub Actions)
 #
 # Optional environment variables (installed only when set — apps that don't set
 # them are completely unaffected):
+#   IOS_NSE_PROVISION_PROFILE_BASE64    – NSE (OneSignal) provisioning profile
 #   IOS_WIDGET_PROVISION_PROFILE_BASE64 – Widget extension profile
 #   IOS_WATCH_PROVISION_PROFILE_BASE64  – Watch app profile
 #
@@ -73,7 +73,7 @@ install_profile() {
 }
 
 install_profile "${IOS_PROVISION_PROFILE_BASE64:-}"        APP    required
-install_profile "${IOS_NSE_PROVISION_PROFILE_BASE64:-}"    NSE    required
+install_profile "${IOS_NSE_PROVISION_PROFILE_BASE64:-}"    NSE    optional
 install_profile "${IOS_WIDGET_PROVISION_PROFILE_BASE64:-}" WIDGET optional
 install_profile "${IOS_WATCH_PROVISION_PROFILE_BASE64:-}"  WATCH  optional
 
