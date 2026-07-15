@@ -1,15 +1,22 @@
 #!/usr/bin/env python3
 """
 Switch an Xcode project to manual code signing and assign per-target
-provisioning profiles.
+provisioning profiles, selecting the profile by PRODUCT_BUNDLE_IDENTIFIER.
 
 Required environment variables:
     APP_PROFILE_NAME  – Provisioning profile name for the main app target
     NSE_PROFILE_NAME  – Provisioning profile name for the NSE target
 
-Optional:
-    LIVE_ACTIVITY_PROFILE_NAME – Provisioning profile name for the LiveActivityWidget target
-    PBXPROJ_PATH               – Path to project.pbxproj (default: ios/Runner.xcodeproj/project.pbxproj)
+Optional (used only when the matching target exists):
+    WIDGET_PROFILE_NAME        – Profile for a widget / live-activity extension
+    LIVE_ACTIVITY_PROFILE_NAME – Legacy alias for WIDGET_PROFILE_NAME (backward compat)
+    WATCH_PROFILE_NAME         – Profile for a watchOS companion app
+    IOS_TEAM_ID                – Development team; rewritten on every target when set
+    PBXPROJ_PATH               – Path to project.pbxproj
+                                 (default: ios/Runner.xcodeproj/project.pbxproj)
+
+Behaviour is backward compatible: apps whose project has no widget/watch targets
+never reference WIDGET_/WATCH_ vars, so existing pipelines are unaffected.
 
 Usage:
     python3 fix_ios_signing.py
@@ -22,10 +29,14 @@ import sys
 
 def main():
     path = os.environ.get("PBXPROJ_PATH", "ios/Runner.xcodeproj/project.pbxproj")
+    team_id = os.environ.get("IOS_TEAM_ID")
+
     app_name = os.environ.get("APP_PROFILE_NAME")
     nse_name = os.environ.get("NSE_PROFILE_NAME")
-    live_activity_name = os.environ.get("LIVE_ACTIVITY_PROFILE_NAME")
-    team_id = os.environ.get("IOS_TEAM_ID")
+    widget_name = os.environ.get("WIDGET_PROFILE_NAME") or os.environ.get(
+        "LIVE_ACTIVITY_PROFILE_NAME"
+    )
+    watch_name = os.environ.get("WATCH_PROFILE_NAME")
 
     if not app_name or not nse_name:
         print("ERROR: APP_PROFILE_NAME and NSE_PROFILE_NAME must be set", file=sys.stderr)
@@ -35,15 +46,37 @@ def main():
         print(f"ERROR: {path} not found", file=sys.stderr)
         sys.exit(1)
 
+    def profile_for(bundle):
+        """Choose a provisioning profile name from the target's bundle id."""
+        if bundle.endswith(".OneSignalNotificationServiceExtension"):
+            return nse_name
+        if ".watchkit" in bundle:  # watch app or watch extension
+            if not watch_name:
+                print(f"ERROR: WATCH_PROFILE_NAME required for target {bundle}", file=sys.stderr)
+                sys.exit(1)
+            return watch_name
+        if bundle.endswith("Widget") or "Widget" in bundle or "LiveActivity" in bundle:
+            if not widget_name:
+                print(
+                    f"ERROR: WIDGET_PROFILE_NAME (or LIVE_ACTIVITY_PROFILE_NAME) "
+                    f"required for target {bundle}",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+            return widget_name
+        return app_name  # main app + test targets
+
+    def defines(bl, key):
+        """True if line `bl` defines `key` (plain, quoted, or KEY[sdk=...] form)."""
+        return re.search(rf'(^|\s|"){re.escape(key)}(\[[^\]]*\])?"?\s*=', bl)
+
     with open(path) as f:
         lines = f.readlines()
 
+    result = []
+    block = []
     in_settings = False
     depth = 0
-    block = []
-    is_nse = False
-    is_live_activity = False
-    result = []
 
     for line in lines:
         if not in_settings:
@@ -51,86 +84,60 @@ def main():
                 in_settings = True
                 depth = line.count("{") - line.count("}")
                 block = [line]
-                is_nse = False
-                is_live_activity = False
-                continue
-            result.append(line)
-        else:
-            depth += line.count("{") - line.count("}")
-            block.append(line)
-            if "OneSignalNotificationServiceExtension" in line:
-                is_nse = True
-            if "LiveActivityWidget" in line:
-                is_live_activity = True
-            if depth <= 0:
-                # Only modify target build configs (those with PRODUCT_BUNDLE_IDENTIFIER)
-                is_target = any("PRODUCT_BUNDLE_IDENTIFIER" in bl for bl in block)
+            else:
+                result.append(line)
+            continue
 
-                if is_target:
-                    if is_nse:
-                        name = nse_name
-                    elif is_live_activity:
-                        if not live_activity_name:
-                            print("ERROR: LIVE_ACTIVITY_PROFILE_NAME must be set for LiveActivityWidget target", file=sys.stderr)
-                            sys.exit(1)
-                        name = live_activity_name
-                    else:
-                        name = app_name
-                    has_specifier = False
-                    processed = []
+        depth += line.count("{") - line.count("}")
+        block.append(line)
+        if depth > 0:
+            continue
 
-                    for bl in block:
-                        # Replace CODE_SIGN_STYLE
-                        if "CODE_SIGN_STYLE" in bl:
-                            bl = re.sub(
-                                r"CODE_SIGN_STYLE = \w+",
-                                "CODE_SIGN_STYLE = Manual",
-                                bl,
-                            )
-                        # Replace CODE_SIGN_IDENTITY (handle any existing value)
-                        if "CODE_SIGN_IDENTITY" in bl:
-                            bl = re.sub(
-                                r'CODE_SIGN_IDENTITY = ".*?"',
-                                'CODE_SIGN_IDENTITY = "Apple Distribution"',
-                                bl,
-                            )
-                        # Replace DEVELOPMENT_TEAM if IOS_TEAM_ID is set
-                        if "DEVELOPMENT_TEAM" in bl and team_id:
-                            bl = re.sub(
-                                r"DEVELOPMENT_TEAM = \w+",
-                                f"DEVELOPMENT_TEAM = {team_id}",
-                                bl,
-                            )
-                        # Replace PROVISIONING_PROFILE_SPECIFIER
-                        if "PROVISIONING_PROFILE_SPECIFIER" in bl:
-                            has_specifier = True
-                            bl = re.sub(
-                                r'PROVISIONING_PROFILE_SPECIFIER = ".*?"',
-                                f'PROVISIONING_PROFILE_SPECIFIER = "{name}"',
-                                bl,
-                            )
-                        processed.append(bl)
+        # Block complete — only touch target build configs (those with a bundle id).
+        text = "".join(block)
+        m = re.search(r'PRODUCT_BUNDLE_IDENTIFIER = "?([^";]+)"?;', text)
+        if not m:
+            result.extend(block)
+            in_settings = False
+            block = []
+            continue
 
-                    if not has_specifier:
-                        # Detect indentation from existing settings
-                        indent = "\t\t\t\t"
-                        for bl in processed:
-                            m = re.match(r"^(\s+)\w", bl)
-                            if m and "buildSettings" not in bl:
-                                indent = m.group(1)
-                                break
-                        closing = processed.pop()
-                        processed.append(
-                            f'{indent}PROVISIONING_PROFILE_SPECIFIER = "{name}";\n'
-                        )
-                        processed.append(closing)
+        name = profile_for(m.group(1).strip())
 
-                    result.extend(processed)
-                else:
-                    result.extend(block)
+        desired = {
+            "CODE_SIGN_STYLE": "Manual",
+            "CODE_SIGN_IDENTITY": '"Apple Distribution"',
+            "PROVISIONING_PROFILE_SPECIFIER": f'"{name}"',
+        }
+        if team_id:
+            desired["DEVELOPMENT_TEAM"] = team_id
 
-                in_settings = False
-                block = []
+        seen = set()
+        processed = []
+        for bl in block:
+            for key, val in desired.items():
+                if key not in seen and defines(bl, key):
+                    bl = re.sub(r"=\s*[^;]*;", f"= {val};", bl, count=1)
+                    seen.add(key)
+                    break
+            processed.append(bl)
+
+        # Add any settings that were absent, before the closing brace.
+        missing = [k for k in desired if k not in seen]
+        if missing:
+            indent = "\t\t\t\t"
+            for bl in processed:
+                mm = re.match(r"^(\s+)\S", bl)
+                if mm and "buildSettings" not in bl:
+                    indent = mm.group(1)
+                    break
+            closing = processed.pop()
+            processed.extend(f"{indent}{k} = {desired[k]};\n" for k in missing)
+            processed.append(closing)
+
+        result.extend(processed)
+        in_settings = False
+        block = []
 
     result.extend(block)
 
