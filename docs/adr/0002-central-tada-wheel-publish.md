@@ -22,10 +22,17 @@ tests, wheel build, metadata/credential/bundle checks — but only on the push t
 not before merge. If a pre-merge gate is needed later, it would have to be reinstated as an
 in-repo `tada` workflow (which would reintroduce a shared-repo token for that path).
 
-**Package ownership.** The `ghcr.io/lascade-co/tada-wheel` package stays linked to the `tada`
-repo. That link is what lets a CI App token scoped only to `tada` push `:latest` and prune every
-prior version through the org container API — no org-wide package admin required. The CI App must
-have the `Packages: read & write` permission enabled for this to work.
+**Package ownership & GHCR auth.** The `ghcr.io/lascade-co/tada-wheel` package is created,
+pushed, and pruned by the **`actions` repo's own `GITHUB_TOKEN`** (the runner executes in
+`Lascade-Co/actions`, and `permissions: packages: write` lets that token create/write/delete the
+package, which auto-links to `Lascade-Co/actions`). We first tried a `tada`-scoped CI App token,
+but a GitHub App **installation** is forbidden from *creating* an org package *and* from *writing*
+one even after connecting it to `tada` — both confirmed with `403`. GHCR's "connect
+repository"/"Manage Actions access" grants apply to a repo's `GITHUB_TOKEN`, not to
+app-installation tokens. The App token is still used for the private `travel-animator-shared`
+checkout and the stale-main guard (both need `tada` read access), so `SHARED_REPO_TOKEN` stays
+eliminated — only the GHCR steps moved to `GITHUB_TOKEN`. Consequence: the package links to
+`Lascade-Co/actions`, not `tada`; the pull path `ghcr.io/lascade-co/tada-wheel` is unchanged.
 
 **Identity remapping.** Because the build now runs in the `actions` repo, ambient `GITHUB_*`
 variables refer to `actions`, not `tada`. The published artifact's identity — build-metadata

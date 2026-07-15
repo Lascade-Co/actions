@@ -144,6 +144,7 @@ jobs:
       cancel-in-progress: false
     permissions:
       contents: read
+      packages: write
     steps:
       - name: Extract owner/repo
         id: repo
@@ -198,11 +199,15 @@ jobs:
           version: 1.3.2
 
       - name: Log in to GHCR
+        # GHCR write uses the actions repo's own GITHUB_TOKEN (the runner lives in
+        # Lascade-Co/actions, so its token can create/push/prune this package). A tada-scoped
+        # App-installation token is forbidden from writing org packages (see ADR 0002).
         env:
-          GHCR_TOKEN: ${{ steps.app-token.outputs.token }}
+          GHCR_TOKEN: ${{ github.token }}
+          GHCR_USER: ${{ github.actor }}
         run: |
           printf '%s' "$GHCR_TOKEN" | oras login ghcr.io \
-            --username x-access-token \
+            --username "$GHCR_USER" \
             --password-stdin
 
       - name: Push release bundle as latest
@@ -217,7 +222,7 @@ jobs:
 
       - name: Delete every previous package version
         env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          GH_TOKEN: ${{ github.token }}
           CURRENT_DIGEST: ${{ steps.push.outputs.digest }}
           OWNER: ${{ steps.repo.outputs.owner }}
           PACKAGE: tada-wheel
