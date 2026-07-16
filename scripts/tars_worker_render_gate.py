@@ -527,7 +527,8 @@ def render_variant(
         timeout_seconds=60,
     )
     if probe.returncode != 0:
-        raise RenderGateError(f"ffprobe rejected the {name} output")
+        details = probe.stderr.decode("utf-8", errors="replace")
+        raise RenderGateError(f"ffprobe rejected the {name} output: {details}")
     validate_ffprobe(probe.stdout, OUTPUT_DIMENSIONS[name])
     return size
 
