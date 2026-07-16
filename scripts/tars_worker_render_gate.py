@@ -492,7 +492,8 @@ def render_variant(
     finally:
         force_remove_container(container)
     if rendered.returncode != 0:
-        raise RenderGateError(f"{name} renderer exited with status {rendered.returncode}")
+        details = rendered.stderr.decode("utf-8", errors="replace")
+        raise RenderGateError(f"{name} renderer exited with status {rendered.returncode}. Stderr:\n{details}")
 
     # Do not change ownership of the persistent cache between variants: the
     # worker's uid 10001 must be able to reuse it for the 4K pass.
