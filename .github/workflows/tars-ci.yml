@@ -58,26 +58,24 @@ jobs:
           repositories: TARS
           permission-contents: read
 
-      - name: Check out the current pull request merge
+      - name: Check out the exact pull request head with full base history
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           repository: ${{ steps.payload.outputs.repo }}
-          ref: ${{ format('refs/pull/{0}/merge', steps.payload.outputs.pr) }}
+          ref: ${{ steps.payload.outputs.head_sha }}
           token: ${{ steps.read-token.outputs.token }}
           path: source
-          fetch-depth: 2
+          fetch-depth: 0
           persist-credentials: false
 
-      - name: Confirm the merge contains the dispatched head
+      - name: Merge current main for collaboration tests
         working-directory: source
         env:
           EXPECTED_HEAD_SHA: ${{ steps.payload.outputs.head_sha }}
         run: |
-          actual_head_sha="$(git rev-parse 'HEAD^2')"
-          if [ "$actual_head_sha" != "$EXPECTED_HEAD_SHA" ]; then
-            echo "pull request head changed after dispatch; waiting for the newer run" >&2
-            exit 1
-          fi
+          test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD_SHA"
+          git -c user.name='TARS CI' -c user.email='ci@lascade.com' \
+            merge --no-commit --no-ff origin/main
 
       - name: Install Go
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6

@@ -824,14 +824,15 @@ class WorkflowContractTest(unittest.TestCase):
         self.assertEqual(workflow.count("context='TARS Central CI'"), 1)
         self.assertNotIn("TARS Central CI tree", workflow)
 
-    def test_ci_binds_live_merge_to_dispatched_head_without_custom_attestation(self) -> None:
+    def test_ci_merges_current_main_into_the_exact_dispatched_head(self) -> None:
         workflow = (self.ROOT / ".github/workflows/tars-ci.yml").read_text(
             encoding="utf-8"
         )
-        self.assertIn("refs/pull/{0}/merge", workflow)
-        self.assertIn("fetch-depth: 2", workflow)
-        self.assertIn("git rev-parse 'HEAD^2'", workflow)
+        self.assertIn("ref: ${{ steps.payload.outputs.head_sha }}", workflow)
+        self.assertIn("fetch-depth: 0", workflow)
+        self.assertIn("merge --no-commit --no-ff origin/main", workflow)
         self.assertIn("EXPECTED_HEAD_SHA", workflow)
+        self.assertNotIn("refs/pull/{0}/merge", workflow)
         self.assertNotIn("tars_tree_attestation.py", workflow)
 
     def test_ci_separates_status_credentials_from_pull_request_execution(self) -> None:
