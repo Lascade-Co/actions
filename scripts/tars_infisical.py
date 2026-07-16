@@ -44,7 +44,14 @@ def _json_request(request: urllib.request.Request, *, opener: Open) -> dict[str,
         with opener(request, timeout=30) as response:
             raw = response.read()
     except urllib.error.HTTPError as error:
-        raise InfisicalError(f"Infisical request failed with HTTP {error.code}") from error
+        try:
+            error_body = error.read().decode("utf-8", errors="replace")
+        except Exception:
+            error_body = ""
+        msg = f"Infisical request failed with HTTP {error.code}"
+        if error_body:
+            msg += f": {error_body}"
+        raise InfisicalError(msg) from error
     except urllib.error.URLError as error:
         raise InfisicalError("Infisical request failed at the network boundary") from error
     try:
