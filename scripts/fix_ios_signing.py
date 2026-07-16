@@ -58,7 +58,11 @@ def main():
                 print(f"ERROR: WATCH_PROFILE_NAME required for target {bundle}", file=sys.stderr)
                 sys.exit(1)
             return watch_name
-        if bundle.endswith("Widget") or "Widget" in bundle or "LiveActivity" in bundle:
+        # Extension bundle ids append the extension name as the final component,
+        # so match on that alone — never on the full id (avoids false positives
+        # like a main app id of com.example.WidgetApp).
+        last = bundle.split(".")[-1]
+        if last.endswith("Widget") or "LiveActivity" in last:
             if not widget_name:
                 print(
                     f"ERROR: WIDGET_PROFILE_NAME (or LIVE_ACTIVITY_PROFILE_NAME) "
@@ -125,10 +129,20 @@ def main():
         processed = []
         for bl in block:
             for key, val in desired.items():
-                if key not in seen and defines(bl, key):
-                    # lambda replacement so backslashes / group refs (e.g. \1)
-                    # in profile names or team ids are treated literally.
-                    bl = re.sub(r"=\s*[^;]*;", lambda _m: f"= {val};", bl, count=1)
+                # No `key not in seen` guard: a block may hold both the plain
+                # setting and an SDK-conditional variant (e.g. CODE_SIGN_STYLE and
+                # "CODE_SIGN_STYLE[sdk=iphoneos*]") — both must be rewritten.
+                if defines(bl, key):
+                    # Capture the LHS (key + any [sdk=...] conditional + optional
+                    # quote) so we replace the value after *its* `=`, never an `=`
+                    # inside the brackets. lambda replacement keeps backslashes /
+                    # group refs in profile names / team ids literal.
+                    bl = re.sub(
+                        rf'(\s*"?{re.escape(key)}(?:\[[^\]]*\])?"?)\s*=\s*[^;]*;',
+                        lambda m: f"{m.group(1)} = {val};",
+                        bl,
+                        count=1,
+                    )
                     seen.add(key)
                     break
             processed.append(bl)

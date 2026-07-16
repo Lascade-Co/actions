@@ -23,6 +23,11 @@
 
 set -euo pipefail
 
+# Default RUNNER_TEMP so the script also runs locally / on non-GitHub CI under
+# `set -u` (GitHub Actions always provides it). Used for the keychain and the
+# temporary provisioning files below.
+: "${RUNNER_TEMP:=/tmp}"
+
 # --- Decode cert ---
 # Guarantee the decoded .p12 is removed even if a later step fails / exits early.
 trap 'rm -f certificate.p12' EXIT
