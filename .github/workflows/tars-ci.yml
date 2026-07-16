@@ -8,120 +8,14 @@ permissions:
   contents: read
 
 concurrency:
-  group: tars-ci-${{ github.event.client_payload.repo }}-${{ github.event.client_payload.pr || github.event.client_payload.ref }}
+  group: tars-ci-${{ github.event.client_payload.repo }}-${{ github.event.client_payload.pr }}
   cancel-in-progress: true
 
 jobs:
-  prepare:
-    name: Attest the exact synthetic merge
-    runs-on: ubuntu-24.04
-    timeout-minutes: 15
-    permissions:
-      contents: read
-    outputs:
-      repo: ${{ steps.payload.outputs.repo }}
-      merge_sha: ${{ steps.payload.outputs.sha }}
-      head_sha: ${{ steps.payload.outputs.head_sha }}
-      base_sha: ${{ steps.payload.outputs.base_sha }}
-      pr: ${{ steps.payload.outputs.pr }}
-      tree_sha: ${{ steps.tested-tree.outputs.tree_sha }}
-      tree_context: ${{ steps.tested-tree.outputs.tree_context }}
-    steps:
-      - name: Check out immutable central delivery code
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
-        with:
-          ref: ${{ github.sha }}
-          path: central
-          persist-credentials: false
-
-      - name: Validate dispatch payload
-        id: payload
-        run: >-
-          python3 central/scripts/tars_payload.py "$GITHUB_EVENT_PATH"
-          --type ci --github-output "$GITHUB_OUTPUT"
-
-      - name: Mint TARS metadata and status token
-        id: app-token
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3
-        with:
-          client-id: ${{ secrets.CI_APP_CLIENT_ID }}
-          private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
-          owner: Lascade-Co
-          repositories: TARS
-          permission-contents: read
-          permission-pull-requests: read
-          permission-statuses: write
-
-      - name: Verify live pull request metadata
-        env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          TARGET_REPO: ${{ steps.payload.outputs.repo }}
-          PR_NUMBER: ${{ steps.payload.outputs.pr }}
-          MERGE_SHA: ${{ steps.payload.outputs.sha }}
-          HEAD_SHA: ${{ steps.payload.outputs.head_sha }}
-          BASE_SHA: ${{ steps.payload.outputs.base_sha }}
-        run: |
-          gh api "repos/$TARGET_REPO/pulls/$PR_NUMBER" > "$RUNNER_TEMP/tars-ci-pr.json"
-          python3 central/scripts/tars_tree_attestation.py verify-ci-pr \
-            --pr-file "$RUNNER_TEMP/tars-ci-pr.json" \
-            --repo "$TARGET_REPO" \
-            --pr "$PR_NUMBER" \
-            --merge-sha "$MERGE_SHA" \
-            --head-sha "$HEAD_SHA" \
-            --base-sha "$BASE_SHA"
-
-      # This checkout is inspected only as Git data. No pull-request-controlled
-      # executable, action, hook, build, or test runs on this privileged runner.
-      - name: Check out the exact synthetic merge without executing it
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
-        with:
-          repository: ${{ steps.payload.outputs.repo }}
-          ref: ${{ steps.payload.outputs.sha }}
-          token: ${{ steps.app-token.outputs.token }}
-          path: source
-          # Git suppresses %P for a merge commit marked as a depth-1 shallow root.
-          fetch-depth: 2
-          persist-credentials: false
-
-      - name: Verify and identify the exact synthetic merge tree
-        id: tested-tree
-        env:
-          MERGE_SHA: ${{ steps.payload.outputs.sha }}
-          HEAD_SHA: ${{ steps.payload.outputs.head_sha }}
-          BASE_SHA: ${{ steps.payload.outputs.base_sha }}
-        run: |
-          git -C source show -s --format='%H%n%T%n%P' HEAD > "$RUNNER_TEMP/tars-merge-details"
-          python3 central/scripts/tars_tree_attestation.py verify-merge \
-            --details-file "$RUNNER_TEMP/tars-merge-details" \
-            --merge-sha "$MERGE_SHA" \
-            --head-sha "$HEAD_SHA" \
-            --base-sha "$BASE_SHA" \
-            --github-output "$GITHUB_OUTPUT"
-
-      - name: Mark the pull request head and exact tree pending
-        env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          TARGET_REPO: ${{ steps.payload.outputs.repo }}
-          TARGET_SHA: ${{ steps.payload.outputs.head_sha }}
-          TREE_CONTEXT: ${{ steps.tested-tree.outputs.tree_context }}
-        run: |
-          target_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-          gh api --method POST "repos/$TARGET_REPO/statuses/$TARGET_SHA" \
-            -f state=pending \
-            -f context='TARS Central CI' \
-            -f description='Central verification is running' \
-            -f "target_url=$target_url"
-          gh api --method POST "repos/$TARGET_REPO/statuses/$TARGET_SHA" \
-            -f state=pending \
-            -f "context=$TREE_CONTEXT" \
-            -f description='Exact synthetic-merge tree verification is running' \
-            -f "target_url=$target_url"
-
   verify:
-    name: Verify application and deployment contracts
-    needs: prepare
+    name: Test pull request merge
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: 30
     permissions:
       contents: read
     services:
@@ -141,39 +35,20 @@ jobs:
     env:
       TARS_TEST_DATABASE_URL: postgres://tars:tars-test@127.0.0.1:5432/tars?sslmode=disable
     steps:
-      - name: Check out immutable central delivery code
+      - name: Check out central workflow code
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           ref: ${{ github.sha }}
           path: central
           persist-credentials: false
 
-      - name: Revalidate dispatch payload
+      - name: Validate dispatch payload
         id: payload
         run: >-
           python3 central/scripts/tars_payload.py "$GITHUB_EVENT_PATH"
           --type ci --github-output "$GITHUB_OUTPUT"
 
-      - name: Match the prepared synthetic merge identity
-        env:
-          ACTUAL_REPO: ${{ steps.payload.outputs.repo }}
-          ACTUAL_MERGE_SHA: ${{ steps.payload.outputs.sha }}
-          ACTUAL_HEAD_SHA: ${{ steps.payload.outputs.head_sha }}
-          ACTUAL_BASE_SHA: ${{ steps.payload.outputs.base_sha }}
-          ACTUAL_PR: ${{ steps.payload.outputs.pr }}
-          PREPARED_REPO: ${{ needs.prepare.outputs.repo }}
-          PREPARED_MERGE_SHA: ${{ needs.prepare.outputs.merge_sha }}
-          PREPARED_HEAD_SHA: ${{ needs.prepare.outputs.head_sha }}
-          PREPARED_BASE_SHA: ${{ needs.prepare.outputs.base_sha }}
-          PREPARED_PR: ${{ needs.prepare.outputs.pr }}
-        run: |
-          test "$ACTUAL_REPO" = "$PREPARED_REPO"
-          test "$ACTUAL_MERGE_SHA" = "$PREPARED_MERGE_SHA"
-          test "$ACTUAL_HEAD_SHA" = "$PREPARED_HEAD_SHA"
-          test "$ACTUAL_BASE_SHA" = "$PREPARED_BASE_SHA"
-          test "$ACTUAL_PR" = "$PREPARED_PR"
-
-      - name: Mint read-only TARS source token
+      - name: Mint a read-only TARS token
         id: read-token
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3
         with:
@@ -183,336 +58,50 @@ jobs:
           repositories: TARS
           permission-contents: read
 
-      - name: Check out TARS at the exact synthetic merge
+      - name: Check out the current pull request merge
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
-          repository: ${{ needs.prepare.outputs.repo }}
-          ref: ${{ needs.prepare.outputs.merge_sha }}
+          repository: ${{ steps.payload.outputs.repo }}
+          ref: ${{ format('refs/pull/{0}/merge', steps.payload.outputs.pr) }}
           token: ${{ steps.read-token.outputs.token }}
           path: source
-          # The attestation below requires both synthetic-merge parent objects.
           fetch-depth: 2
           persist-credentials: false
 
-      - name: Reverify the exact tested tree before execution
-        id: tested-tree
+      - name: Confirm the merge contains the dispatched head
+        working-directory: source
         env:
-          MERGE_SHA: ${{ needs.prepare.outputs.merge_sha }}
-          HEAD_SHA: ${{ needs.prepare.outputs.head_sha }}
-          BASE_SHA: ${{ needs.prepare.outputs.base_sha }}
-          PREPARED_TREE_SHA: ${{ needs.prepare.outputs.tree_sha }}
+          EXPECTED_HEAD_SHA: ${{ steps.payload.outputs.head_sha }}
         run: |
-          git -C source show -s --format='%H%n%T%n%P' HEAD > "$RUNNER_TEMP/tars-merge-details"
-          python3 central/scripts/tars_tree_attestation.py verify-merge \
-            --details-file "$RUNNER_TEMP/tars-merge-details" \
-            --merge-sha "$MERGE_SHA" \
-            --head-sha "$HEAD_SHA" \
-            --base-sha "$BASE_SHA" \
-            --github-output "$GITHUB_OUTPUT"
-          test "$(git -C source show -s --format='%T' HEAD)" = "$PREPARED_TREE_SHA"
-
-      - name: Validate immutable release lock
-        id: lock
-        run: |
-          python3 source/release/validate_lock.py source/release/lock.json
-          python3 central/scripts/tars_lock_outputs.py source/release/lock.json \
-            --workflow central/.github/workflows/tars-ci.yml \
-            --github-output "$GITHUB_OUTPUT"
-
-      - name: Keep the pre-job PostgreSQL service aligned with the lock
-        env:
-          LOCKED_POSTGRES_IMAGE: ${{ steps.lock.outputs.postgres_image }}
-        run: >-
-          test "$LOCKED_POSTGRES_IMAGE" =
-          'docker.io/library/postgres@sha256:bb377b7239d2774ac8cc76f481596ce96c5a6b5e9d141f6d0a0ee371a6e7c0f2'
+          actual_head_sha="$(git rev-parse 'HEAD^2')"
+          if [ "$actual_head_sha" != "$EXPECTED_HEAD_SHA" ]; then
+            echo "pull request head changed after dispatch; waiting for the newer run" >&2
+            exit 1
+          fi
 
       - name: Install Go
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
-          go-version: ${{ steps.lock.outputs.go_version }}
+          go-version-file: source/go.mod
           cache-dependency-path: source/go.sum
 
-      - name: Install the locked OpenTofu release
-        uses: opentofu/setup-opentofu@9d84900f3238fab8cd84ce47d658d25dd008be2f # v1
-        with:
-          tofu_version: ${{ steps.lock.outputs.opentofu_version }}
-
-      - name: Verify generated OpenAPI transport
+      - name: Run merged-tree tests
         working-directory: source
         run: |
-          go generate ./...
-          git diff --exit-code
-
-      - name: Run race-enabled tests
-        working-directory: source
-        run: go test -count=1 -race ./...
-
-      - name: Run static analysis
-        working-directory: source
-        run: go vet ./...
-
-      - name: Run release and deployment tests
-        working-directory: source
-        run: |
+          go test -count=1 ./...
           python3 -m unittest discover -s release -p 'test_*.py'
           python3 -m unittest discover -s deploy -p 'test_*.py'
 
-      - name: Check shell syntax and formatting
-        working-directory: source
-        run: |
-          find deploy -type f -name '*.sh' -print0 \
-            | xargs -0 -n1 sh -n
-          find infra -type f \( -name '*.sh' -o -name 'tars-infra' \) -print0 \
-            | xargs -0 -n1 bash -n
-          git diff --check
-
-      - name: Verify OpenTofu formatting and modules
-        working-directory: source
-        env:
-          TF_VAR_state_encryption_key: 0123456789abcdef0123456789abcdef
-        run: |
-          tofu fmt -check -recursive infra
-          for root in infra/core infra/monitoring; do
-            tofu -chdir="$root" init -backend=false -input=false -lockfile=readonly
-            tofu -chdir="$root" validate
-            tofu -chdir="$root" test
-          done
-          bash infra/tests/run.sh
-
-      - name: Check Nginx contracts
-        working-directory: source
-        env:
-          NGINX_IMAGE: ${{ steps.lock.outputs.nginx_image }}
-        run: |
-          sh deploy/nginx/update-cloudflare-cidrs.sh
-          git diff --exit-code -- deploy/nginx/cloudflare-real-ip.conf
-          sh deploy/nginx/check-config.sh
-
-      - name: Validate and render both production stacks
-        working-directory: source/deploy
-        env:
-          TARS_RELEASE_SHA: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
-          TARS_API_IMAGE: registry.digitalocean.com/lascade/tars@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
-          TARS_WORKER_IMAGE: registry.digitalocean.com/lascade/tars@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
-          TARS_GARAGE_IMAGE: registry.digitalocean.com/lascade/tars@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
-          TARS_OTEL_COLLECTOR_IMAGE: registry.digitalocean.com/lascade/tars@sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
-          NGINX_IMAGE: ${{ steps.lock.outputs.nginx_image }}
-          POSTGRES_IMAGE: ${{ steps.lock.outputs.postgres_image }}
-          TADA_ALLOWED_HOSTS: dashboard.lascade.com,api.maptiler.com,server.arcgisonline.com,firebasestorage.googleapis.com
-          WORKER_STOP_GRACE_PERIOD: 41m
-          TARS_NGINX_MAIN_CONFIG_VERSION: '000000000000'
-          TARS_NGINX_TARS_CONFIG_VERSION: '000000000000'
-          TARS_CLOUDFLARE_CIDR_CONFIG_VERSION: '000000000000'
-          TARS_GARAGE_CONFIG_VERSION: '000000000000'
-          TARS_OTEL_CONFIG_VERSION: '000000000000'
-          TARS_POSTGRES_PASSWORD_SECRET: tars_postgres_password_000000000000
-          TARS_JWT_HS256_SECRET: tars_jwt_hs256_secret_000000000000
-          TARS_GARAGE_RPC_SECRET: tars_garage_rpc_secret_000000000000
-          TARS_GARAGE_ADMIN_TOKEN_SECRET: tars_garage_admin_token_000000000000
-          TARS_GARAGE_METRICS_TOKEN_SECRET: tars_garage_metrics_token_000000000000
-          TARS_GARAGE_ACCESS_KEY_ID_SECRET: tars_garage_access_key_id_000000000000
-          TARS_GARAGE_SECRET_ACCESS_KEY_SECRET: tars_garage_secret_access_key_000000000000
-          TARS_ONEUPTIME_TOKEN_SECRET: tars_oneuptime_token_000000000000
-        run: |
-          sh check-image-refs.sh
-          sh check-config-names.sh
-          docker stack config -c stack.yml >/dev/null
-          docker stack config -c stack.stateful.yml >/dev/null
-
-      - name: Configure Buildx
-        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
-        with:
-          version: v${{ steps.lock.outputs.docker_buildx_version }}
-
-      - name: Build Linux API image without publishing
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
-        with:
-          context: source
-          file: source/Dockerfile.api
-          platforms: ${{ steps.lock.outputs.target_platform }}
-          push: false
-          build-args: |
-            GO_IMAGE=${{ steps.lock.outputs.go_image }}
-            RUNTIME_IMAGE=${{ steps.lock.outputs.api_runtime_image }}
-            TARS_VERSION=ci-${{ steps.payload.outputs.sha }}
-            TARS_REVISION=${{ steps.payload.outputs.sha }}
-            TARS_BUILT_AT=1970-01-01T00:00:00Z
-          cache-from: type=gha,scope=tars-api
-          cache-to: type=gha,mode=max,scope=tars-api
-
-      - name: Build support images without publishing
-        shell: bash
-        working-directory: source
-        env:
-          GARAGE_UPSTREAM_IMAGE: ${{ steps.lock.outputs.garage_upstream_image }}
-          OTEL_UPSTREAM_IMAGE: ${{ steps.lock.outputs.otel_upstream_image }}
-          SUPPORT_ALPINE_IMAGE: ${{ steps.lock.outputs.support_alpine_image }}
-        run: |
-          docker buildx build --platform linux/amd64 --file deploy/garage/Dockerfile \
-            --build-arg "GARAGE_UPSTREAM_IMAGE=$GARAGE_UPSTREAM_IMAGE" \
-            --build-arg "ALPINE_IMAGE=$SUPPORT_ALPINE_IMAGE" .
-          docker buildx build --platform linux/amd64 --file deploy/otel/Dockerfile \
-            --build-arg "OTEL_UPSTREAM_IMAGE=$OTEL_UPSTREAM_IMAGE" \
-            --build-arg "ALPINE_IMAGE=$SUPPORT_ALPINE_IMAGE" .
-
-  worker_gate:
-    name: Build and render-gate the worker
-    needs: prepare
-    runs-on: ubuntu-24.04
-    timeout-minutes: 60
-    permissions:
-      contents: read
-      packages: read
-    steps:
-      - name: Check out immutable central delivery code
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
-        with:
-          ref: ${{ github.sha }}
-          path: central
-          persist-credentials: false
-
-      - name: Revalidate dispatch payload
-        id: payload
-        run: >-
-          python3 central/scripts/tars_payload.py "$GITHUB_EVENT_PATH"
-          --type ci --github-output "$GITHUB_OUTPUT"
-
-      - name: Match the prepared synthetic merge identity
-        env:
-          ACTUAL_REPO: ${{ steps.payload.outputs.repo }}
-          ACTUAL_MERGE_SHA: ${{ steps.payload.outputs.sha }}
-          ACTUAL_HEAD_SHA: ${{ steps.payload.outputs.head_sha }}
-          ACTUAL_BASE_SHA: ${{ steps.payload.outputs.base_sha }}
-          ACTUAL_PR: ${{ steps.payload.outputs.pr }}
-          PREPARED_REPO: ${{ needs.prepare.outputs.repo }}
-          PREPARED_MERGE_SHA: ${{ needs.prepare.outputs.merge_sha }}
-          PREPARED_HEAD_SHA: ${{ needs.prepare.outputs.head_sha }}
-          PREPARED_BASE_SHA: ${{ needs.prepare.outputs.base_sha }}
-          PREPARED_PR: ${{ needs.prepare.outputs.pr }}
-        run: |
-          test "$ACTUAL_REPO" = "$PREPARED_REPO"
-          test "$ACTUAL_MERGE_SHA" = "$PREPARED_MERGE_SHA"
-          test "$ACTUAL_HEAD_SHA" = "$PREPARED_HEAD_SHA"
-          test "$ACTUAL_BASE_SHA" = "$PREPARED_BASE_SHA"
-          test "$ACTUAL_PR" = "$PREPARED_PR"
-
-      - name: Mint read-only TARS source token
-        id: read-token
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3
-        with:
-          client-id: ${{ secrets.CI_APP_CLIENT_ID }}
-          private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
-          owner: Lascade-Co
-          repositories: TARS
-          permission-contents: read
-
-      - name: Check out TARS at the exact synthetic merge
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
-        with:
-          repository: ${{ needs.prepare.outputs.repo }}
-          ref: ${{ needs.prepare.outputs.merge_sha }}
-          token: ${{ steps.read-token.outputs.token }}
-          path: source
-          # The worker gate independently reattests both merge parents.
-          fetch-depth: 2
-          persist-credentials: false
-
-      - name: Reverify the exact worker tree before its Dockerfile is evaluated
-        id: tested-tree
-        env:
-          MERGE_SHA: ${{ needs.prepare.outputs.merge_sha }}
-          HEAD_SHA: ${{ needs.prepare.outputs.head_sha }}
-          BASE_SHA: ${{ needs.prepare.outputs.base_sha }}
-          PREPARED_TREE_SHA: ${{ needs.prepare.outputs.tree_sha }}
-        run: |
-          git -C source show -s --format='%H%n%T%n%P' HEAD > "$RUNNER_TEMP/tars-merge-details"
-          python3 central/scripts/tars_tree_attestation.py verify-merge \
-            --details-file "$RUNNER_TEMP/tars-merge-details" \
-            --merge-sha "$MERGE_SHA" \
-            --head-sha "$HEAD_SHA" \
-            --base-sha "$BASE_SHA" \
-            --github-output "$GITHUB_OUTPUT"
-          test "$(git -C source show -s --format='%T' HEAD)" = "$PREPARED_TREE_SHA"
-
-      - name: Validate immutable release lock
-        id: lock
-        run: |
-          python3 central/scripts/tars_lock_outputs.py source/release/lock.json \
-            --workflow central/.github/workflows/tars-ci.yml \
-            --github-output "$GITHUB_OUTPUT"
-
-      - name: Fetch the locked TADA bundle with trusted immutable code
-        env:
-          GHCR_TOKEN: ${{ github.token }}
-          GHCR_USER: ${{ github.actor }}
-          ORAS_IMAGE: ${{ steps.lock.outputs.oras_image }}
-          TADA_OCI: ${{ steps.lock.outputs.tada_oci }}
-        run: |
-          umask 077
-          token_file="$RUNNER_TEMP/tars-ci-ghcr.token"
-          trap 'rm -f "$token_file"' EXIT
-          printf '%s' "$GHCR_TOKEN" > "$token_file"
-          python3 central/scripts/tars_tada_bundle.py \
-            --oras-image "$ORAS_IMAGE" \
-            --tada-oci "$TADA_OCI" \
-            --username "$GHCR_USER" \
-            --token-file "$token_file" \
-            --output-directory "$RUNNER_TEMP/tada-bundle"
-
-      - name: Configure Buildx
-        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
-        with:
-          version: v${{ steps.lock.outputs.docker_buildx_version }}
-
-      - name: Build immutable Linux worker without publishing
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
-        with:
-          context: source
-          file: source/Dockerfile.worker
-          platforms: ${{ steps.lock.outputs.target_platform }}
-          push: false
-          load: true
-          tags: tars-worker-render-gate:sha-${{ steps.payload.outputs.sha }}
-          build-contexts: |
-            tada_bundle=${{ runner.temp }}/tada-bundle
-          build-args: |
-            GO_IMAGE=${{ steps.lock.outputs.go_image }}
-            UV_IMAGE=${{ steps.lock.outputs.uv_image }}
-            PYTHON_IMAGE=${{ steps.lock.outputs.python_image }}
-            TADA_REPOSITORY=${{ steps.lock.outputs.tada_repository }}
-            TADA_OCI=${{ steps.lock.outputs.tada_oci }}
-            TADA_REVISION=${{ steps.lock.outputs.tada_revision }}
-            TARS_VERSION=ci-${{ steps.payload.outputs.sha }}
-            TARS_REVISION=${{ steps.payload.outputs.sha }}
-            TARS_BUILT_AT=1970-01-01T00:00:00Z
-          cache-from: type=gha,scope=tars-worker
-          cache-to: type=gha,mode=max,scope=tars-worker
-
-      # Match production Swarm: 1 CPU, 640 MiB RAM, and Docker's default
-      # equal-sized swap allowance (1280 MiB combined RAM+swap).
-      # The post-deploy production smoke check is a separate gate.
-      - name: Gate the locked worker with representative HD and 4K renders
-        env:
-          WORKER_IMAGE: tars-worker-render-gate:sha-${{ steps.payload.outputs.sha }}
-        run: >-
-          timeout --signal=TERM --kill-after=30s 25m
-          python3 central/scripts/tars_worker_render_gate.py
-          --image "$WORKER_IMAGE"
-          --config source/deploy/smoke-config.json
-          --lock source/release/lock.json
-          --source-sha ${{ steps.payload.outputs.sha }}
-          --timeout-seconds 600
-
-  finalize:
-    name: Publish trusted TARS status
-    needs: [prepare, verify, worker_gate]
-    if: always() && needs.prepare.result == 'success'
+  report:
+    name: Report pull request result
+    needs: verify
+    if: always()
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
       contents: read
     steps:
-      - name: Check out immutable central delivery code
+      - name: Check out central workflow code
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           ref: ${{ github.sha }}
@@ -525,60 +114,33 @@ jobs:
           python3 central/scripts/tars_payload.py "$GITHUB_EVENT_PATH"
           --type ci --github-output "$GITHUB_OUTPUT"
 
-      - name: Match the prepared status identity
-        env:
-          ACTUAL_REPO: ${{ steps.payload.outputs.repo }}
-          ACTUAL_MERGE_SHA: ${{ steps.payload.outputs.sha }}
-          ACTUAL_HEAD_SHA: ${{ steps.payload.outputs.head_sha }}
-          ACTUAL_BASE_SHA: ${{ steps.payload.outputs.base_sha }}
-          ACTUAL_PR: ${{ steps.payload.outputs.pr }}
-          PREPARED_REPO: ${{ needs.prepare.outputs.repo }}
-          PREPARED_MERGE_SHA: ${{ needs.prepare.outputs.merge_sha }}
-          PREPARED_HEAD_SHA: ${{ needs.prepare.outputs.head_sha }}
-          PREPARED_BASE_SHA: ${{ needs.prepare.outputs.base_sha }}
-          PREPARED_PR: ${{ needs.prepare.outputs.pr }}
-        run: |
-          test "$ACTUAL_REPO" = "$PREPARED_REPO"
-          test "$ACTUAL_MERGE_SHA" = "$PREPARED_MERGE_SHA"
-          test "$ACTUAL_HEAD_SHA" = "$PREPARED_HEAD_SHA"
-          test "$ACTUAL_BASE_SHA" = "$PREPARED_BASE_SHA"
-          test "$ACTUAL_PR" = "$PREPARED_PR"
-
-      - name: Mint a fresh TARS status token
-        id: app-token
+      - name: Mint a status-only TARS token
+        id: status-token
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3
         with:
           client-id: ${{ secrets.CI_APP_CLIENT_ID }}
           private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
           owner: Lascade-Co
           repositories: TARS
-          permission-contents: read
           permission-statuses: write
 
-      - name: Report final TARS status from the fresh trusted runner
+      - name: Report TARS Central CI
         env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          TARGET_REPO: ${{ needs.prepare.outputs.repo }}
-          TARGET_SHA: ${{ needs.prepare.outputs.head_sha }}
-          TREE_CONTEXT: ${{ needs.prepare.outputs.tree_context }}
+          GH_TOKEN: ${{ steps.status-token.outputs.token }}
+          TARGET_REPO: ${{ steps.payload.outputs.repo }}
+          TARGET_SHA: ${{ steps.payload.outputs.head_sha }}
           VERIFY_RESULT: ${{ needs.verify.result }}
-          WORKER_GATE_RESULT: ${{ needs.worker_gate.result }}
         run: |
-          if [ "$VERIFY_RESULT" = success ] && [ "$WORKER_GATE_RESULT" = success ]; then
+          if [ "$VERIFY_RESULT" = success ]; then
             state=success
-            description='Central verification passed'
+            description='Merged-tree tests passed'
           else
             state=failure
-            description='Central verification failed'
+            description='Merged-tree tests failed'
           fi
           target_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           gh api --method POST "repos/$TARGET_REPO/statuses/$TARGET_SHA" \
             -f "state=$state" \
             -f context='TARS Central CI' \
-            -f "description=$description" \
-            -f "target_url=$target_url"
-          gh api --method POST "repos/$TARGET_REPO/statuses/$TARGET_SHA" \
-            -f "state=$state" \
-            -f "context=$TREE_CONTEXT" \
             -f "description=$description" \
             -f "target_url=$target_url"

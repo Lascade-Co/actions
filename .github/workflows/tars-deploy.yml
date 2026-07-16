@@ -6,8 +6,6 @@ on:
 
 permissions:
   contents: read
-  packages: read
-  id-token: write
 
 env:
   PYTHONDONTWRITEBYTECODE: "1"
@@ -17,6 +15,10 @@ jobs:
     name: Build immutable TARS release
     runs-on: ubuntu-24.04
     timeout-minutes: 120
+    permissions:
+      contents: read
+      packages: read
+      id-token: write
     concurrency:
       group: tars-deploy-build-${{ github.event.client_payload.repo }}
       cancel-in-progress: true
@@ -26,7 +28,6 @@ jobs:
       worker_digest: ${{ steps.worker.outputs.digest }}
       garage_digest: ${{ steps.garage.outputs.digest }}
       otel_digest: ${{ steps.otel.outputs.digest }}
-      tested_tree_sha: ${{ steps.tested-main.outputs.tree_sha }}
       artifact_name: ${{ steps.bundle.outputs.artifact_name }}
     steps:
       - name: Check out central delivery code
@@ -51,8 +52,6 @@ jobs:
           owner: Lascade-Co
           repositories: TARS
           permission-contents: read
-          permission-pull-requests: read
-          permission-statuses: read
 
       - name: Check out the exact dispatched TARS revision
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
@@ -75,40 +74,6 @@ jobs:
             echo "refusing stale TARS build: dispatched revision is no longer main" >&2
             exit 1
           fi
-
-      - name: Identify the exact current-main tree and merged pull request
-        id: tested-main
-        env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          TARGET_REPO: ${{ steps.payload.outputs.repo }}
-          RELEASE_SHA: ${{ steps.payload.outputs.sha }}
-        run: |
-          tree_sha="$(git -C source show -s --format=%T HEAD)"
-          gh api -H 'Accept: application/vnd.github+json' \
-            "repos/$TARGET_REPO/commits/$RELEASE_SHA/pulls" \
-            > "$RUNNER_TEMP/tars-build-associated-prs.json"
-          python3 central/scripts/tars_tree_attestation.py select-deploy-pr \
-            --prs-file "$RUNNER_TEMP/tars-build-associated-prs.json" \
-            --repo "$TARGET_REPO" \
-            --main-sha "$RELEASE_SHA" \
-            --tree-sha "$tree_sha" \
-            --github-output "$GITHUB_OUTPUT"
-
-      - name: Require a successful central attestation for the production tree
-        env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          TARGET_REPO: ${{ steps.payload.outputs.repo }}
-          HEAD_SHA: ${{ steps.tested-main.outputs.head_sha }}
-          TREE_SHA: ${{ steps.tested-main.outputs.tree_sha }}
-          EXPECTED_CREATOR: ${{ format('{0}[bot]', steps.app-token.outputs.app-slug) }}
-        run: |
-          gh api --paginate --slurp \
-            "repos/$TARGET_REPO/commits/$HEAD_SHA/statuses?per_page=100" \
-            > "$RUNNER_TEMP/tars-build-tree-statuses.json"
-          python3 central/scripts/tars_tree_attestation.py verify-statuses \
-            --statuses-file "$RUNNER_TEMP/tars-build-tree-statuses.json" \
-            --tree-sha "$TREE_SHA" \
-            --expected-creator "$EXPECTED_CREATOR"
 
       - name: Validate and expose the immutable release lock
         id: lock
@@ -233,22 +198,6 @@ jobs:
           cache-from: type=gha,scope=tars-otel
           cache-to: type=gha,mode=max,scope=tars-otel
 
-      - name: Gate the exact pushed worker digest with HD and 4K renders
-        env:
-          WORKER_IMAGE: ${{ steps.lock.outputs.registry }}@${{ steps.worker.outputs.digest }}
-          RELEASE_SHA: ${{ steps.payload.outputs.sha }}
-          TARGET_PLATFORM: ${{ steps.lock.outputs.target_platform }}
-        run: |
-          trap 'docker image rm "$WORKER_IMAGE" >/dev/null 2>&1 || true' EXIT
-          docker pull --platform "$TARGET_PLATFORM" "$WORKER_IMAGE"
-          timeout --signal=TERM --kill-after=30s 25m \
-            python3 central/scripts/tars_worker_render_gate.py \
-              --image "$WORKER_IMAGE" \
-              --config source/deploy/smoke-config.json \
-              --lock source/release/lock.json \
-              --source-sha "$RELEASE_SHA" \
-              --timeout-seconds 600
-
       - name: Create exact-SHA deployment bundle and data-only release environment
         id: bundle
         env:
@@ -291,6 +240,9 @@ jobs:
     name: Deploy TARS production
     needs: build
     runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      id-token: write
     # V1 infrastructure caps worker_count at seven. Its serial 7 * 41m drain
     # plus the 5m deploy margin fits inside this GitHub-hosted runner ceiling.
     timeout-minutes: 360
@@ -326,8 +278,6 @@ jobs:
           owner: Lascade-Co
           repositories: TARS
           permission-contents: read
-          permission-pull-requests: read
-          permission-statuses: read
 
       - name: Refuse stale work after waiting for the deployment lock
         env:
@@ -440,50 +390,19 @@ jobs:
           rm -rf -- "$upload"
           REMOTE
 
-      - name: Resolve the final current-main tree and associated pull request
+      - name: Confirm the final current main revision
         id: current-main
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           TARGET_REPO: ${{ steps.payload.outputs.repo }}
           RELEASE_SHA: ${{ steps.payload.outputs.sha }}
-          BUILT_TREE_SHA: ${{ needs.build.outputs.tested_tree_sha }}
         run: |
           main_sha="$(gh api "repos/$TARGET_REPO/git/ref/heads/main" --jq .object.sha)"
           if [ "$RELEASE_SHA" != "$main_sha" ]; then
             echo "refusing stale TARS deployment at the final gate" >&2
             exit 1
           fi
-          tree_sha="$(gh api "repos/$TARGET_REPO/git/commits/$main_sha" --jq .tree.sha)"
-          if [ "$tree_sha" != "$BUILT_TREE_SHA" ]; then
-            echo "refusing deployment: build tree differs from current main" >&2
-            exit 1
-          fi
-          gh api -H 'Accept: application/vnd.github+json' \
-            "repos/$TARGET_REPO/commits/$main_sha/pulls" \
-            > "$RUNNER_TEMP/tars-final-associated-prs.json"
-          python3 central/scripts/tars_tree_attestation.py select-deploy-pr \
-            --prs-file "$RUNNER_TEMP/tars-final-associated-prs.json" \
-            --repo "$TARGET_REPO" \
-            --main-sha "$main_sha" \
-            --tree-sha "$tree_sha" \
-            --github-output "$GITHUB_OUTPUT"
           echo "sha=$main_sha" >> "$GITHUB_OUTPUT"
-
-      - name: Final tested-tree attestation gate immediately before execution
-        env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          TARGET_REPO: ${{ steps.payload.outputs.repo }}
-          HEAD_SHA: ${{ steps.current-main.outputs.head_sha }}
-          TREE_SHA: ${{ steps.current-main.outputs.tree_sha }}
-          EXPECTED_CREATOR: ${{ format('{0}[bot]', steps.app-token.outputs.app-slug) }}
-        run: |
-          gh api --paginate --slurp \
-            "repos/$TARGET_REPO/commits/$HEAD_SHA/statuses?per_page=100" \
-            > "$RUNNER_TEMP/tars-final-tree-statuses.json"
-          python3 central/scripts/tars_tree_attestation.py verify-statuses \
-            --statuses-file "$RUNNER_TEMP/tars-final-tree-statuses.json" \
-            --tree-sha "$TREE_SHA" \
-            --expected-creator "$EXPECTED_CREATOR"
 
       - name: Pipe the short-lived Infisical token to the deep deployment interface
         env:

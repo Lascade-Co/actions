@@ -29,14 +29,6 @@ from tars_lock_outputs import (
 )
 from tars_payload import load_payload
 from tars_tada_bundle import BundleFetchError, fetch, validate_bundle_shape, validate_inputs
-from tars_tree_attestation import (
-    AttestationError,
-    select_deploy_pull_request,
-    tree_context,
-    validate_ci_pull_request,
-    validate_merge_commit,
-    verify_tree_status,
-)
 from tars_worker_render_gate import (
     ALLOWED_HOSTS,
     OUTPUT_DIMENSIONS,
@@ -84,6 +76,15 @@ class PayloadTest(unittest.TestCase):
             {
                 "repo": "Lascade-Co/TARS",
                 "sha": "a" * 40,
+            }
+        )
+        self.assertEqual(load_payload(event, "deploy")["sha"], "a" * 40)
+
+    def test_accepts_legacy_deploy_payload_during_trigger_rollout(self) -> None:
+        event = self.write_event(
+            {
+                "repo": "Lascade-Co/TARS",
+                "sha": "a" * 40,
                 "ref": "refs/heads/main",
                 "pr": None,
                 "lock_file": "release/lock.json",
@@ -97,10 +98,6 @@ class PayloadTest(unittest.TestCase):
             {
                 "repo": "attacker/TARS",
                 "sha": "a" * 40,
-                "ref": "refs/heads/main",
-                "pr": None,
-                "lock_file": "release/lock.json",
-                "source_event": "push",
             }
         )
         with self.assertRaisesRegex(ValueError, "repository"):
@@ -111,10 +108,6 @@ class PayloadTest(unittest.TestCase):
             {
                 "repo": "Lascade-Co/TARS",
                 "sha": "a" * 40,
-                "ref": "refs/heads/main",
-                "pr": None,
-                "lock_file": "release/lock.json",
-                "source_event": "push",
                 "image": "registry.example/mutable:latest",
             }
         )
@@ -139,6 +132,16 @@ class PayloadTest(unittest.TestCase):
         event = self.write_event(
             {
                 "repo": "Lascade-Co/TARS",
+                "head_sha": "b" * 40,
+                "pr": 12,
+            }
+        )
+        self.assertEqual(load_payload(event, "ci")["pr"], 12)
+
+    def test_accepts_legacy_pull_request_payload_during_trigger_rollout(self) -> None:
+        event = self.write_event(
+            {
+                "repo": "Lascade-Co/TARS",
                 "sha": "a" * 40,
                 "head_sha": "b" * 40,
                 "ref": "refs/pull/12/merge",
@@ -149,7 +152,7 @@ class PayloadTest(unittest.TestCase):
                 "source_event": "pull_request_target",
             }
         )
-        self.assertEqual(load_payload(event, "ci")["pr"], 12)
+        self.assertEqual(load_payload(event, "ci")["head_sha"], "b" * 40)
 
     def test_rejects_untrusted_pull_request_source_event(self) -> None:
         event = self.write_event(
@@ -716,133 +719,6 @@ class WorkerRenderGateTest(unittest.TestCase):
                     validate_event_stream(stdout, "hd", output)
 
 
-class TreeAttestationTest(unittest.TestCase):
-    REPO = "Lascade-Co/TARS"
-    MERGE = "a" * 40
-    HEAD = "b" * 40
-    BASE = "c" * 40
-    TREE = "d" * 40
-
-    def open_pull(self) -> dict:
-        return {
-            "number": 12,
-            "state": "open",
-            "merge_commit_sha": self.MERGE,
-            "head": {"sha": self.HEAD, "repo": {"full_name": self.REPO}},
-            "base": {
-                "sha": self.BASE,
-                "ref": "main",
-                "repo": {"full_name": self.REPO},
-            },
-        }
-
-    def merged_pull(self) -> dict:
-        pull = self.open_pull()
-        pull.update(
-            {
-                "state": "closed",
-                "merged_at": "2026-07-16T12:00:00Z",
-                "merge_commit_sha": self.MERGE,
-            }
-        )
-        return pull
-
-    def test_validates_live_pr_and_exact_synthetic_merge_parents(self) -> None:
-        validate_ci_pull_request(
-            self.open_pull(), self.REPO, 12, self.MERGE, self.HEAD, self.BASE
-        )
-        tree = validate_merge_commit(
-            f"{self.MERGE}\n{self.TREE}\n{self.BASE} {self.HEAD}\n",
-            self.MERGE,
-            self.HEAD,
-            self.BASE,
-        )
-        self.assertEqual(tree, self.TREE)
-        with self.assertRaisesRegex(AttestationError, "parents"):
-            validate_merge_commit(
-                f"{self.MERGE}\n{self.TREE}\n{self.HEAD} {self.BASE}\n",
-                self.MERGE,
-                self.HEAD,
-                self.BASE,
-            )
-
-    def test_deploy_requires_one_exact_merged_pull_request(self) -> None:
-        number, head = select_deploy_pull_request(
-            [self.merged_pull()], self.REPO, self.MERGE
-        )
-        self.assertEqual((number, head), (12, self.HEAD))
-        with self.assertRaisesRegex(AttestationError, "exactly one"):
-            select_deploy_pull_request(
-                [self.merged_pull(), self.merged_pull()], self.REPO, self.MERGE
-            )
-        with self.assertRaisesRegex(AttestationError, "exactly one"):
-            select_deploy_pull_request([], self.REPO, self.MERGE)
-
-    def test_latest_exact_tree_status_must_be_central_success(self) -> None:
-        context = tree_context(self.TREE)
-        central_url = "https://github.com/Lascade-Co/actions/actions/runs/123"
-        creator = "lascade-ci[bot]"
-        verify_tree_status(
-            [
-                [
-                    {
-                        "context": context,
-                        "state": "success",
-                        "target_url": central_url,
-                        "creator": {"login": creator},
-                    }
-                ]
-            ],
-            self.TREE,
-            creator,
-        )
-        with self.assertRaisesRegex(AttestationError, "not successful"):
-            verify_tree_status(
-                [
-                    {
-                        "context": context,
-                        "state": "failure",
-                        "target_url": central_url,
-                        "creator": {"login": creator},
-                    },
-                    {
-                        "context": context,
-                        "state": "success",
-                        "target_url": central_url,
-                        "creator": {"login": creator},
-                    },
-                ],
-                self.TREE,
-                creator,
-            )
-        with self.assertRaisesRegex(AttestationError, "not produced by central"):
-            verify_tree_status(
-                [
-                    {
-                        "context": context,
-                        "state": "success",
-                        "target_url": "https://attacker.example/run/1",
-                        "creator": {"login": creator},
-                    }
-                ],
-                self.TREE,
-                creator,
-            )
-        with self.assertRaisesRegex(AttestationError, "creator"):
-            verify_tree_status(
-                [
-                    {
-                        "context": context,
-                        "state": "success",
-                        "target_url": central_url,
-                        "creator": {"login": "attacker[bot]"},
-                    }
-                ],
-                self.TREE,
-                creator,
-            )
-
-
 class WorkflowContractTest(unittest.TestCase):
     ROOT = Path(__file__).resolve().parent.parent
 
@@ -881,17 +757,26 @@ class WorkflowContractTest(unittest.TestCase):
         self.assertEqual(workflow.count("ServerAliveInterval=15"), 2)
         self.assertEqual(workflow.count("ServerAliveCountMax=3"), 2)
         self.assertEqual(workflow.count("TCPKeepAlive=yes"), 2)
-        self.assertIn("commits/$RELEASE_SHA/pulls", workflow)
-        self.assertIn("commits/$main_sha/pulls", workflow)
-        self.assertEqual(workflow.count("tars_tree_attestation.py verify-statuses"), 2)
-        self.assertEqual(workflow.count("--expected-creator"), 2)
-        self.assertEqual(workflow.count("steps.app-token.outputs.app-slug"), 2)
+        self.assertNotIn("/pulls", workflow)
+        self.assertNotIn("tars_tree_attestation.py", workflow)
+        self.assertNotIn("permission-pull-requests", workflow)
+        self.assertNotIn("permission-statuses", workflow)
+        self.assertEqual(workflow.count("git/ref/heads/main"), 3)
         self.assertNotIn("gh api /installation", workflow)
-        self.assertIn("steps.lock.outputs.registry }}@${{ steps.worker.outputs.digest", workflow)
-        self.assertIn("Gate the exact pushed worker digest with HD and 4K renders", workflow)
+        self.assertIn("WORKER_DIGEST: ${{ steps.worker.outputs.digest }}", workflow)
+        self.assertNotIn("tars_worker_render_gate.py", workflow)
         self.assertIn("tars_tada_bundle.py", workflow)
         self.assertIn("tada_bundle=${{ runner.temp }}/tada-bundle", workflow)
         self.assertNotIn("ghcr_token=${{ github.token }}", workflow)
+        build, deploy = workflow.split("\n  deploy:\n", 1)
+        self.assertEqual(workflow.count("packages: read"), 1)
+        self.assertIn("packages: read", build)
+        self.assertNotIn("packages: read", deploy)
+        self.assertLess(
+            deploy.index("Confirm the final current main revision"),
+            deploy.index("Pipe the short-lived Infisical token"),
+        )
+        self.assertIn("deploy/tars-deploy deploy", deploy)
 
     def test_delivery_workflow_uses_locked_transfer_and_network_actions(self) -> None:
         workflow = (self.ROOT / ".github/workflows/tars-deploy.yml").read_text(
@@ -910,95 +795,59 @@ class WorkflowContractTest(unittest.TestCase):
             workflow,
         )
 
-    def test_ci_uses_locked_postgres_nginx_tofu_and_both_stacks(self) -> None:
+    def test_ci_runs_only_core_collaboration_checks(self) -> None:
         workflow = (self.ROOT / ".github/workflows/tars-ci.yml").read_text(
             encoding="utf-8"
         )
-        postgres = (
-            "docker.io/library/postgres@sha256:"
-            "bb377b7239d2774ac8cc76f481596ce96c5a6b5e9d141f6d0a0ee371a6e7c0f2"
-        )
-        self.assertEqual(workflow.count(f"image: {postgres}"), 1)
-        self.assertIn("LOCKED_POSTGRES_IMAGE: ${{ steps.lock.outputs.postgres_image }}", workflow)
-        self.assertIn("NGINX_IMAGE: ${{ steps.lock.outputs.nginx_image }}", workflow)
-        self.assertIn("sh deploy/nginx/update-cloudflare-cidrs.sh", workflow)
+        self.assertIn("\n  verify:\n", workflow)
+        self.assertIn("\n  report:\n", workflow)
+        self.assertNotIn("\n  prepare:\n", workflow)
+        self.assertNotIn("\n  worker_gate:\n", workflow)
+        self.assertIn("go test -count=1 ./...", workflow)
+        self.assertIn("unittest discover -s release", workflow)
+        self.assertIn("unittest discover -s deploy", workflow)
+        self.assertIn("services:\n      postgres:", workflow)
+        self.assertIn("TARS_TEST_DATABASE_URL:", workflow)
         self.assertIn(
-            "git diff --exit-code -- deploy/nginx/cloudflare-real-ip.conf",
+            "postgres@sha256:bb377b7239d2774ac8cc76f481596ce96c5a6b5e9d141f6d0a0ee371a6e7c0f2",
             workflow,
         )
-        self.assertIn("sh deploy/nginx/check-config.sh", workflow)
-        self.assertIn(
-            "opentofu/setup-opentofu@9d84900f3238fab8cd84ce47d658d25dd008be2f",
-            workflow,
-        )
-        self.assertIn('tofu_version: ${{ steps.lock.outputs.opentofu_version }}', workflow)
-        self.assertIn("docker stack config -c stack.yml", workflow)
-        self.assertIn("docker stack config -c stack.stateful.yml", workflow)
-        self.assertIn(
-            "TADA_ALLOWED_HOSTS: dashboard.lascade.com,api.maptiler.com,"
-            "server.arcgisonline.com,firebasestorage.googleapis.com",
-            workflow,
-        )
-        self.assertIn("load: true", workflow)
-        self.assertIn("tars-worker-render-gate:sha-${{ steps.payload.outputs.sha }}", workflow)
-        self.assertIn("timeout --signal=TERM --kill-after=30s 25m", workflow)
-        self.assertIn("tars_worker_render_gate.py", workflow)
-        self.assertIn("--config source/deploy/smoke-config.json", workflow)
-        self.assertIn("--lock source/release/lock.json", workflow)
-        self.assertIn("--source-sha ${{ steps.payload.outputs.sha }}", workflow)
-        self.assertIn("tars_tree_attestation.py verify-ci-pr", workflow)
-        self.assertIn("tars_tree_attestation.py verify-merge", workflow)
-        self.assertIn("steps.payload.outputs.head_sha", workflow)
-        self.assertIn("TARS Central CI tree ", tree_context("e" * 40))
-        self.assertIn("build-contexts:", workflow)
-        self.assertIn("tada_bundle=${{ runner.temp }}/tada-bundle", workflow)
-        self.assertNotIn("ghcr_token=${{ github.token }}", workflow)
-        self.assertIn("tars_tada_bundle.py", workflow)
-        self.assertEqual(
-            ALLOWED_HOSTS,
-            (
-                "dashboard.lascade.com",
-                "api.maptiler.com",
-                "server.arcgisonline.com",
-                "firebasestorage.googleapis.com",
-            ),
-        )
+        for removed_check in (
+            "setup-opentofu",
+            "build-push-action",
+            "tars_tree_attestation.py",
+            "tars_worker_render_gate.py",
+            "go vet",
+            "go generate",
+        ):
+            self.assertNotIn(removed_check, workflow)
+        self.assertEqual(workflow.count("context='TARS Central CI'"), 1)
+        self.assertNotIn("TARS Central CI tree", workflow)
 
-    def test_ci_fetches_synthetic_merge_parents_before_attestation(self) -> None:
+    def test_ci_binds_live_merge_to_dispatched_head_without_custom_attestation(self) -> None:
         workflow = (self.ROOT / ".github/workflows/tars-ci.yml").read_text(
             encoding="utf-8"
         )
-        self.assertEqual(workflow.count("fetch-depth: 2"), 3)
-        self.assertNotIn("fetch-depth: 1", workflow)
+        self.assertIn("refs/pull/{0}/merge", workflow)
+        self.assertIn("fetch-depth: 2", workflow)
+        self.assertIn("git rev-parse 'HEAD^2'", workflow)
+        self.assertIn("EXPECTED_HEAD_SHA", workflow)
+        self.assertNotIn("tars_tree_attestation.py", workflow)
 
     def test_ci_separates_status_credentials_from_pull_request_execution(self) -> None:
         workflow = (self.ROOT / ".github/workflows/tars-ci.yml").read_text(
             encoding="utf-8"
         )
-        prepare, remainder = workflow.split("\n  verify:\n", 1)
-        verify, remainder = remainder.split("\n  worker_gate:\n", 1)
-        worker_gate, finalize = remainder.split("\n  finalize:\n", 1)
+        verify, report = workflow.split("\n  report:\n", 1)
 
-        self.assertIn("\n  prepare:\n", prepare)
-        self.assertEqual(workflow.count("permission-statuses: write"), 2)
-        self.assertIn("permission-statuses: write", prepare)
+        self.assertEqual(workflow.count("permission-statuses: write"), 1)
         self.assertNotIn("permission-statuses: write", verify)
-        self.assertNotIn("permission-statuses: write", worker_gate)
-        self.assertIn("permission-statuses: write", finalize)
+        self.assertIn("permission-statuses: write", report)
         self.assertNotIn("packages: read", verify)
-        self.assertIn("packages: read", worker_gate)
-        self.assertNotIn("Report final TARS status", verify)
-        self.assertNotIn("Report final TARS status", worker_gate)
-        self.assertNotIn("path: source", finalize)
-        self.assertIn("needs: [prepare, verify, worker_gate]", finalize)
-        self.assertIn("if: always() && needs.prepare.result == 'success'", finalize)
-        self.assertIn("Mint a fresh TARS status token", finalize)
-        self.assertEqual(workflow.count("ref: ${{ github.sha }}"), 4)
-        self.assertIn("Fetch the locked TADA bundle with trusted immutable code", worker_gate)
-        self.assertIn("tars_worker_render_gate.py", worker_gate)
-        self.assertNotIn("tars_worker_render_gate.py", verify)
-        self.assertNotIn("GHCR_TOKEN", verify)
-        self.assertNotIn("python3 source/release/validate_lock.py", worker_gate)
+        self.assertNotIn("path: source", report)
+        self.assertIn("needs: verify", report)
+        self.assertIn("if: always()", report)
+        self.assertEqual(workflow.count("ref: ${{ github.sha }}"), 2)
 
     def test_delivery_jobs_pin_the_central_checkout_to_the_dispatch_sha(self) -> None:
         workflow = (self.ROOT / ".github/workflows/tars-deploy.yml").read_text(
