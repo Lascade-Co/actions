@@ -114,18 +114,14 @@ class PayloadTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "unexpected image"):
             load_payload(event, "deploy")
 
-    def test_rejects_manual_production_dispatch(self) -> None:
+    def test_rejects_invalid_deploy_sha(self) -> None:
         event = self.write_event(
             {
                 "repo": "Lascade-Co/TARS",
-                "sha": "a" * 40,
-                "ref": "refs/heads/main",
-                "pr": None,
-                "lock_file": "release/lock.json",
-                "source_event": "workflow_dispatch",
+                "sha": "main",
             }
         )
-        with self.assertRaisesRegex(ValueError, "must be push"):
+        with self.assertRaisesRegex(ValueError, "dispatch sha"):
             load_payload(event, "deploy")
 
     def test_accepts_exact_pull_request_payload(self) -> None:
@@ -142,7 +138,7 @@ class PayloadTest(unittest.TestCase):
         event = self.write_event(
             {
                 "repo": "Lascade-Co/TARS",
-                "sha": "a" * 40,
+                "sha": None,
                 "head_sha": "b" * 40,
                 "ref": "refs/pull/12/merge",
                 "pr": 12,
@@ -154,21 +150,15 @@ class PayloadTest(unittest.TestCase):
         )
         self.assertEqual(load_payload(event, "ci")["head_sha"], "b" * 40)
 
-    def test_rejects_untrusted_pull_request_source_event(self) -> None:
+    def test_rejects_invalid_pull_request_head(self) -> None:
         event = self.write_event(
             {
                 "repo": "Lascade-Co/TARS",
-                "sha": "a" * 40,
-                "head_sha": "b" * 40,
-                "ref": "refs/pull/12/merge",
+                "head_sha": None,
                 "pr": 12,
-                "base_ref": "main",
-                "base_sha": "c" * 40,
-                "lock_file": "release/lock.json",
-                "source_event": "pull_request",
             }
         )
-        with self.assertRaisesRegex(ValueError, "pull_request_target"):
+        with self.assertRaisesRegex(ValueError, "head_sha"):
             load_payload(event, "ci")
 
 
