@@ -61,8 +61,6 @@ jobs:
             echo "env_slug=staging" >> "$GITHUB_OUTPUT"
           fi
 
-      # Build-time env only, scoped to /Build (public NUXT_PUBLIC_* etc). Cloudflare deploy creds
-      # live in actions-repo secrets, not here, so the client build_command cannot read them.
       - name: Import build env from Infisical
         uses: Infisical/secrets-action@v1.0.16
         with:
@@ -72,7 +70,7 @@ jobs:
           project-slug: ${{ github.event.client_payload.project_slug }}
           env-slug: ${{ steps.prepare.outputs.env_slug }}
           domain: ${{ secrets.INFISICAL_DOMAIN }}
-          secret-path: /Build
+          secret-path: /
           export-type: env
 
       - name: Mint GitHub App token
