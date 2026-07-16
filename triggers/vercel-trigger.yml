@@ -30,5 +30,6 @@ jobs:
               "repo":${{ toJSON(github.repository) }}, 
               "branch":${{ toJSON(github.ref_name) }},
               "pr_number":${{ toJSON(steps.pr.outputs.number) }},
-              "project_slug":"your project slug"
+              "project_slug":"your project slug",
+              "submodule_repos": "flight-helper-vue"
             }
