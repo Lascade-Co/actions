@@ -382,11 +382,11 @@ jobs:
           test "${#sha}" -eq 40
           upload="$HOME/.tars-upload-$sha"
           bundle="/srv/tars/incoming/$sha"
-          sudo -n rm -rf -- "$bundle"
-          sudo -n install -d -m 0750 "$bundle"
-          sudo -n tar -xzf "$upload/tars-source.tar.gz" -C "$bundle"
-          sudo -n install -m 0600 "$upload/release.env" "$bundle/.release.env"
-          test "$(sudo -n cat "$bundle/.tars-release-sha")" = "$sha"
+          rm -rf -- "$bundle"
+          install -d -m 0750 "$bundle"
+          tar -xzf "$upload/tars-source.tar.gz" -C "$bundle"
+          install -m 0600 "$upload/release.env" "$bundle/.release.env"
+          test "$(cat "$bundle/.tars-release-sha")" = "$sha"
           rm -rf -- "$upload"
           REMOTE
 
@@ -423,7 +423,7 @@ jobs:
           )
           target="$SSH_USER@$SSH_HOST"
           bundle="/srv/tars/incoming/$RELEASE_SHA"
-          remote_command="sudo -n /bin/sh -c 'IFS= read -r INFISICAL_TOKEN || exit 64; export INFISICAL_TOKEN; exec $bundle/deploy/tars-deploy deploy --release-env $bundle/.release.env --release-sha $RELEASE_SHA --current-main-sha $CURRENT_MAIN_SHA --bundle-dir $bundle'"
+          remote_command="/bin/sh -c 'IFS= read -r INFISICAL_TOKEN || exit 64; export INFISICAL_TOKEN; if docker service inspect tars_postgres >/dev/null 2>&1 || docker service inspect tars_garage >/dev/null 2>&1; then docker service inspect tars_postgres tars_garage >/dev/null 2>&1 || { echo partial-stateful-bootstrap-requires-operator-repair >&2; exit 1; }; else $bundle/deploy/tars-deploy stateful --release-env $bundle/.release.env --release-sha $RELEASE_SHA --current-main-sha $CURRENT_MAIN_SHA --bundle-dir $bundle --confirm stateful:$RELEASE_SHA || exit; fi; exec $bundle/deploy/tars-deploy deploy --release-env $bundle/.release.env --release-sha $RELEASE_SHA --current-main-sha $CURRENT_MAIN_SHA --bundle-dir $bundle'"
           # The validated SHA-only command is intentionally assembled locally.
           # shellcheck disable=SC2029
           {

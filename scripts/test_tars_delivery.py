@@ -743,6 +743,7 @@ class WorkflowContractTest(unittest.TestCase):
         self.assertNotIn("infisical export", workflow)
         self.assertNotIn("Infisical/secrets-action", workflow)
         self.assertNotIn("ssh-keyscan", workflow)
+        self.assertNotIn("sudo -n", workflow)
         self.assertNotIn(":latest", workflow)
         self.assertEqual(workflow.count("ServerAliveInterval=15"), 2)
         self.assertEqual(workflow.count("ServerAliveCountMax=3"), 2)
@@ -767,6 +768,9 @@ class WorkflowContractTest(unittest.TestCase):
             deploy.index("Pipe the short-lived Infisical token"),
         )
         self.assertIn("deploy/tars-deploy deploy", deploy)
+        self.assertIn("docker service inspect tars_postgres tars_garage", deploy)
+        self.assertIn("deploy/tars-deploy stateful", deploy)
+        self.assertIn("partial-stateful-bootstrap-requires-operator-repair", deploy)
 
     def test_delivery_workflow_uses_locked_transfer_and_network_actions(self) -> None:
         workflow = (self.ROOT / ".github/workflows/tars-deploy.yml").read_text(
