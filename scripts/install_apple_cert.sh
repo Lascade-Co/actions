@@ -29,6 +29,17 @@ set -euo pipefail
 : "${RUNNER_TEMP:=/tmp}"
 : "${GITHUB_ENV:=/dev/null}"
 
+# Fail fast with a clear message if required secrets are missing, rather than
+# with a cryptic base64/security error later.
+if [ -z "${IOS_CERTIFICATE_BASE64:-}" ]; then
+  echo "ERROR: IOS_CERTIFICATE_BASE64 is required but empty or unset" >&2
+  exit 1
+fi
+if [ -z "${IOS_CERTIFICATE_PASSWORD:-}" ]; then
+  echo "ERROR: IOS_CERTIFICATE_PASSWORD is required but empty or unset" >&2
+  exit 1
+fi
+
 # --- Decode cert ---
 # Guarantee the decoded .p12 is removed even if a later step fails / exits early.
 trap 'rm -f certificate.p12' EXIT

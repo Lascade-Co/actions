@@ -64,7 +64,9 @@ def main():
         last = bundle.split(".")[-1].lower()  # case-insensitive suffix match
         if (
             last.endswith("widget")
-            or last.endswith("widgetextension")  # Xcode default target name
+            # ...Widget / WidgetExtension / widget-extension / widget_extension —
+            # a "widget" component ending in "extension" (never plain "widgetapp").
+            or ("widget" in last and last.endswith("extension"))
             or "liveactivity" in last
         ):
             if not widget_name:
@@ -85,7 +87,7 @@ def main():
         """
         return re.match(rf'\s*"?{re.escape(key)}(\[[^\]]*\])?"?\s*=', bl)
 
-    with open(path) as f:
+    with open(path, encoding="utf-8") as f:
         lines = f.readlines()
 
     result = []
@@ -182,7 +184,7 @@ def main():
 
     result.extend(block)
 
-    with open(path, "w") as f:
+    with open(path, "w", encoding="utf-8") as f:
         f.writelines(result)
 
     print(f"Updated signing in {path}")
