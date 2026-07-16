@@ -161,9 +161,20 @@ def main():
                 if mm and "buildSettings" not in bl:
                     indent = mm.group(1)
                     break
-            closing = processed.pop()
-            processed.extend(f"{indent}{k} = {desired[k]};\n" for k in missing)
-            processed.append(closing)
+            if len(processed) > 1:
+                # Multi-line block: insert each setting on its own line before "};".
+                closing = processed.pop()
+                processed.extend(f"{indent}{k} = {desired[k]};\n" for k in missing)
+                processed.append(closing)
+            else:
+                # Single-line block (e.g. "buildSettings = { … };"): inject the
+                # settings inside the braces so they stay within the block.
+                settings_str = " ".join(f"{k} = {desired[k]};" for k in missing)
+                processed[0] = re.sub(
+                    r"\s*\}\s*;\s*$",
+                    f" {settings_str} }};\n",
+                    processed[0],
+                )
 
         result.extend(processed)
         in_settings = False

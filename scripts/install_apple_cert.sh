@@ -36,6 +36,9 @@ printf '%s' "$IOS_CERTIFICATE_BASE64" | base64 --decode > certificate.p12
 
 # --- Create temporary keychain ---
 KEYCHAIN_PATH="$RUNNER_TEMP/build.keychain-db"
+# Remove a leftover keychain from a previous local run so create-keychain
+# doesn't fail (GitHub Actions always starts with a clean RUNNER_TEMP).
+rm -f "$KEYCHAIN_PATH"
 security create-keychain -p "temp_password" "$KEYCHAIN_PATH"
 security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
 security unlock-keychain -p "temp_password" "$KEYCHAIN_PATH"
