@@ -4,9 +4,11 @@ import json
 import os
 import stat
 import struct
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 from urllib.parse import parse_qs, urlparse
 
 from tars_infisical import (
@@ -26,7 +28,7 @@ from tars_lock_outputs import (
     write_release_environment,
 )
 from tars_payload import load_payload
-from tars_tada_bundle import BundleFetchError, validate_bundle_shape, validate_inputs
+from tars_tada_bundle import BundleFetchError, fetch, validate_bundle_shape, validate_inputs
 from tars_tree_attestation import (
     AttestationError,
     select_deploy_pull_request,
@@ -289,6 +291,46 @@ class LockOutputTest(unittest.TestCase):
 
 
 class TrustedBundleFetchTest(unittest.TestCase):
+    def test_attaches_token_stdin_only_to_the_oras_login_container(self) -> None:
+        oras_image = "ghcr.io/oras-project/oras@sha256:" + "a" * 64
+        tada_oci = "ghcr.io/lascade-co/tada-wheel@sha256:" + "b" * 64
+        calls: list[tuple[list[str], bytes | None]] = []
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            token_file = root / "ghcr-token"
+            token_file.write_bytes(b"test-token")
+            output = root / "bundle"
+
+            def fake_run(
+                command: list[str], *, stdin: bytes | None = None
+            ) -> subprocess.CompletedProcess[bytes]:
+                calls.append((command, stdin))
+                if "pull" in command:
+                    for name in (
+                        "SHA256SUMS",
+                        "pylock.toml",
+                        "build-metadata.json",
+                        "tada-0.1.0-py3-none-any.whl",
+                    ):
+                        (output / name).write_text("data", encoding="utf-8")
+                return subprocess.CompletedProcess(command, 0, b"", b"")
+
+            with mock.patch("tars_tada_bundle.run", side_effect=fake_run):
+                fetch(oras_image, tada_oci, "github-actions", token_file, output)
+
+        self.assertEqual(len(calls), 3)
+        login_command, login_stdin = calls[0]
+        self.assertLess(
+            login_command.index("--interactive"), login_command.index(oras_image)
+        )
+        self.assertEqual(login_stdin, b"test-token")
+        for command, stdin in calls[1:]:
+            self.assertNotIn("--interactive", command)
+            self.assertIsNone(stdin)
+        for command, _stdin in calls:
+            self.assertNotIn("test-token", command)
+
     def test_accepts_only_locked_official_refs_and_exact_bundle_shape(self) -> None:
         validate_inputs(
             "ghcr.io/oras-project/oras@sha256:" + "a" * 64,

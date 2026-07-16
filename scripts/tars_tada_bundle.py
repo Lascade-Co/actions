@@ -91,8 +91,12 @@ def fetch(
     ]
     try:
         login = run(
-            oras_command
+            docker_prefix
             + [
+                "--interactive",
+                "--entrypoint",
+                "/bin/oras",
+                oras_image,
                 "login",
                 "ghcr.io",
                 "--username",
