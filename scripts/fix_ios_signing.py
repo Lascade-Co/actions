@@ -61,8 +61,8 @@ def main():
         # Extension bundle ids append the extension name as the final component,
         # so match on that alone — never on the full id (avoids false positives
         # like a main app id of com.example.WidgetApp).
-        last = bundle.split(".")[-1]
-        if last.endswith("Widget") or "LiveActivity" in last:
+        last = bundle.split(".")[-1].lower()  # case-insensitive suffix match
+        if last.endswith("widget") or "liveactivity" in last:
             if not widget_name:
                 print(
                     f"ERROR: WIDGET_PROFILE_NAME (or LIVE_ACTIVITY_PROFILE_NAME) "
