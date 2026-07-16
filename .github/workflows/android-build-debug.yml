@@ -1,4 +1,5 @@
 name: Central Build Debug APK
+run-name: "${{ github.event.client_payload.repo }} · ${{ github.event.client_payload.branch || format('PR #{0}', github.event.client_payload.pr) }}"
 
 on:
   repository_dispatch:

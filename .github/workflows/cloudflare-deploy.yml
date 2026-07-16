@@ -12,6 +12,7 @@
 # Cloudflare DEPLOY creds are actions-repo secrets (CLOUDFLARE_API_TOKEN / CLOUDFLARE_ACCOUNT_ID),
 # NOT pulled from Infisical, so the client build_command can never read them.
 name: Cloudflare Pages Deploy
+run-name: "${{ github.event.client_payload.repo }} · ${{ github.event.client_payload.branch || format('PR #{0}', github.event.client_payload.pr_number) }}"
 
 on:
   repository_dispatch:

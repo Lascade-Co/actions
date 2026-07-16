@@ -1,4 +1,5 @@
 name: Central Build & Release iOS
+run-name: "${{ github.event.client_payload.repo }} · ${{ github.event.client_payload.branch }}"
 
 on:
   repository_dispatch:

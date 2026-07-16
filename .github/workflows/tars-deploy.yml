@@ -1,4 +1,5 @@
 name: Central TARS Production Delivery
+run-name: "${{ github.event.client_payload.repo }}"
 
 on:
   repository_dispatch:
