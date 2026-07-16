@@ -34,5 +34,6 @@ jobs:
               "pr_number":${{ toJSON(steps.pr.outputs.number) }},
               "project_slug":"your-infisical-project-slug",
               "cf_project":"your-cloudflare-pages-project",
-              "build_command":"pnpm build"
+              "build_command":"pnpm build",
+              "submodule_repos":"optional-comma-separated-submodule-repos"
             }
