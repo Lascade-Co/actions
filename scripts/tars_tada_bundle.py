@@ -123,7 +123,8 @@ def fetch(
             ]
         )
         if pull.returncode != 0:
-            raise BundleFetchError("ORAS could not pull the locked TADA artifact")
+            details = pull.stderr.decode("utf-8", errors="replace")
+            raise BundleFetchError(f"ORAS could not pull the locked TADA artifact: {details}")
         validate_bundle_shape(output_directory)
     finally:
         run(
