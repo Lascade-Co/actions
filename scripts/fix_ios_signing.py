@@ -138,7 +138,8 @@ def main():
                     # inside the brackets. lambda replacement keeps backslashes /
                     # group refs in profile names / team ids literal.
                     bl = re.sub(
-                        rf'(\s*"?{re.escape(key)}(?:\[[^\]]*\])?"?)\s*=\s*[^;]*;',
+                        rf'(\s*"?{re.escape(key)}(?:\[[^\]]*\])?"?)\s*=\s*'
+                        r'(?:"[^"\\]*(?:\\.[^"\\]*)*"|[^;]*);',
                         lambda m: f"{m.group(1)} = {val};",
                         bl,
                         count=1,

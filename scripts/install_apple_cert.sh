@@ -32,7 +32,7 @@ set -euo pipefail
 # --- Decode cert ---
 # Guarantee the decoded .p12 is removed even if a later step fails / exits early.
 trap 'rm -f certificate.p12' EXIT
-echo "$IOS_CERTIFICATE_BASE64" | base64 --decode > certificate.p12
+printf '%s' "$IOS_CERTIFICATE_BASE64" | base64 --decode > certificate.p12
 
 # --- Create temporary keychain ---
 KEYCHAIN_PATH="$RUNNER_TEMP/build.keychain-db"
@@ -65,7 +65,7 @@ install_profile() {
     return 0
   fi
 
-  echo "$b64" | base64 --decode > "$file"
+  printf '%s' "$b64" | base64 --decode > "$file"
 
   local uuid name
   uuid=$(security cms -D -i "$file" | plutil -extract UUID raw -)
