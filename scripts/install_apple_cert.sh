@@ -41,12 +41,15 @@ if [ -z "${IOS_CERTIFICATE_PASSWORD:-}" ]; then
 fi
 
 # --- Decode cert ---
-# Guarantee the decoded .p12 is removed even if a later step fails / exits early.
-trap 'rm -f certificate.p12' EXIT
+KEYCHAIN_PATH="$RUNNER_TEMP/build.keychain-db"
+# Remove the decoded .p12 and the temporary keychain (which holds the private
+# key, protected only by a hardcoded password) on exit, so they never persist
+# on self-hosted runners even if a later step fails. Single-quoted so
+# KEYCHAIN_PATH is expanded when the trap fires (it is set just above).
+trap 'rm -f certificate.p12 "$KEYCHAIN_PATH"' EXIT
 printf '%s' "$IOS_CERTIFICATE_BASE64" | base64 --decode > certificate.p12
 
 # --- Create temporary keychain ---
-KEYCHAIN_PATH="$RUNNER_TEMP/build.keychain-db"
 # Remove a leftover keychain from a previous local run so create-keychain
 # doesn't fail (GitHub Actions always starts with a clean RUNNER_TEMP).
 rm -f "$KEYCHAIN_PATH"
@@ -101,4 +104,4 @@ install_profile "${IOS_WIDGET_PROVISION_PROFILE_BASE64:-}" WIDGET optional
 install_profile "${IOS_WATCH_PROVISION_PROFILE_BASE64:-}"  WATCH  optional
 
 # --- Cleanup ---
-# certificate.p12 is removed by the EXIT trap above.
+# certificate.p12 and the temporary keychain are removed by the EXIT trap above.
