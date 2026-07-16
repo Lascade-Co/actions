@@ -79,7 +79,8 @@ jobs:
           ref: ${{ steps.payload.outputs.sha }}
           token: ${{ steps.app-token.outputs.token }}
           path: source
-          fetch-depth: 1
+          # Git suppresses %P for a merge commit marked as a depth-1 shallow root.
+          fetch-depth: 2
           persist-credentials: false
 
       - name: Verify and identify the exact synthetic merge tree
@@ -189,7 +190,8 @@ jobs:
           ref: ${{ needs.prepare.outputs.merge_sha }}
           token: ${{ steps.read-token.outputs.token }}
           path: source
-          fetch-depth: 1
+          # The attestation below requires both synthetic-merge parent objects.
+          fetch-depth: 2
           persist-credentials: false
 
       - name: Reverify the exact tested tree before execution
@@ -411,7 +413,8 @@ jobs:
           ref: ${{ needs.prepare.outputs.merge_sha }}
           token: ${{ steps.read-token.outputs.token }}
           path: source
-          fetch-depth: 1
+          # The worker gate independently reattests both merge parents.
+          fetch-depth: 2
           persist-credentials: false
 
       - name: Reverify the exact worker tree before its Dockerfile is evaluated

@@ -922,6 +922,13 @@ class WorkflowContractTest(unittest.TestCase):
             ),
         )
 
+    def test_ci_fetches_synthetic_merge_parents_before_attestation(self) -> None:
+        workflow = (self.ROOT / ".github/workflows/tars-ci.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertEqual(workflow.count("fetch-depth: 2"), 3)
+        self.assertNotIn("fetch-depth: 1", workflow)
+
     def test_ci_separates_status_credentials_from_pull_request_execution(self) -> None:
         workflow = (self.ROOT / ".github/workflows/tars-ci.yml").read_text(
             encoding="utf-8"
