@@ -82,8 +82,10 @@ jobs:
           owner: ${{ steps.prepare.outputs.owner }}
           repositories: ${{ steps.prepare.outputs.repositories }}
 
-      # submodules are fetched here while the token is active; persist-credentials: false then
-      # strips it from .git/config so the untrusted build_command (later) can't read it.
+      # persist-credentials stays default (true): checkout's submodule auth-teardown is
+      # incompatible with persist-credentials:false and fails cleanup with exit 1. The app
+      # token (contents:read + PR-write, ~1h) is then readable by build_command, but the
+      # high-value Cloudflare deploy creds are repo secrets and never enter the build env.
       # Private submodules must be same-owner and listed in submodule_repos (token scope).
       - name: Checkout target repo @ branch
         uses: actions/checkout@v6
@@ -92,7 +94,6 @@ jobs:
           ref: ${{ steps.prepare.outputs.branch }}
           token: ${{ steps.app-token.outputs.token }}
           submodules: recursive
-          persist-credentials: false
           fetch-depth: 0
 
       - name: Setup pnpm
