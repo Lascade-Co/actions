@@ -5,7 +5,7 @@ issues (deduplication via HTML marker), assigns new issues to the developer
 identified by git blame, and sends a Telegram summary.
 
 Usage:
-    python scripts/crashlytics_blame.py \
+    python scripts/crashlytics/crashlytics_blame.py \
         --crashes crashes.json \
         --repo Lascade-Co/travel-animator-android \
         --telegram-chat-id "-100123456"

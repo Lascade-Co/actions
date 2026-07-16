@@ -46,7 +46,7 @@ jobs:
       - name: Validate dispatch payload
         id: payload
         run: >-
-          python3 central/scripts/tars_payload.py "$GITHUB_EVENT_PATH"
+          python3 central/scripts/tars/tars_payload.py "$GITHUB_EVENT_PATH"
           --type ci --github-output "$GITHUB_OUTPUT"
 
       - name: Mint a read-only TARS token
@@ -110,7 +110,7 @@ jobs:
       - name: Revalidate dispatch payload
         id: payload
         run: >-
-          python3 central/scripts/tars_payload.py "$GITHUB_EVENT_PATH"
+          python3 central/scripts/tars/tars_payload.py "$GITHUB_EVENT_PATH"
           --type ci --github-output "$GITHUB_OUTPUT"
 
       - name: Mint a status-only TARS token

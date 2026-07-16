@@ -98,17 +98,17 @@ jobs:
           TADA_REPOSITORY: ${{ github.event.client_payload.repo }}
           TADA_REVISION: ${{ github.event.client_payload.sha }}
         run: |
-          curl -sSfL https://raw.githubusercontent.com/Lascade-Co/actions/main/scripts/build_tada_wheel.sh -o "$RUNNER_TEMP/build_tada_wheel.sh"
+          curl -sSfL https://raw.githubusercontent.com/Lascade-Co/actions/main/scripts/tada-wheel/build_tada_wheel.sh -o "$RUNNER_TEMP/build_tada_wheel.sh"
           bash "$RUNNER_TEMP/build_tada_wheel.sh"
 
       - name: Verify wheel metadata and pylock resolution
         run: |
-          curl -sSfL https://raw.githubusercontent.com/Lascade-Co/actions/main/scripts/verify_wheel_install.sh -o "$RUNNER_TEMP/verify_wheel_install.sh"
+          curl -sSfL https://raw.githubusercontent.com/Lascade-Co/actions/main/scripts/tada-wheel/verify_wheel_install.sh -o "$RUNNER_TEMP/verify_wheel_install.sh"
           bash "$RUNNER_TEMP/verify_wheel_install.sh"
 
       - name: Verify wheel contents contain no credential files
         run: |
-          curl -sSfL https://raw.githubusercontent.com/Lascade-Co/actions/main/scripts/verify_tada_wheel.py -o "$RUNNER_TEMP/verify_tada_wheel.py"
+          curl -sSfL https://raw.githubusercontent.com/Lascade-Co/actions/main/scripts/tada-wheel/verify_tada_wheel.py -o "$RUNNER_TEMP/verify_tada_wheel.py"
           uv run --locked python "$RUNNER_TEMP/verify_tada_wheel.py"
 
       - name: Verify release bundle
@@ -217,7 +217,7 @@ jobs:
           TARGET_SHA: ${{ github.event.client_payload.sha }}
           TARGET_REPO: ${{ github.event.client_payload.repo }}
         run: |
-          curl -sSfL https://raw.githubusercontent.com/Lascade-Co/actions/main/scripts/push_ghcr_bundle.sh -o "$RUNNER_TEMP/push_ghcr_bundle.sh"
+          curl -sSfL https://raw.githubusercontent.com/Lascade-Co/actions/main/scripts/tada-wheel/push_ghcr_bundle.sh -o "$RUNNER_TEMP/push_ghcr_bundle.sh"
           digest="$(bash "$RUNNER_TEMP/push_ghcr_bundle.sh")"
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
 
@@ -228,7 +228,7 @@ jobs:
           OWNER: ${{ steps.repo.outputs.owner }}
           PACKAGE: tada-wheel
         run: |
-          curl -sSfL https://raw.githubusercontent.com/Lascade-Co/actions/main/scripts/prune_ghcr_versions.sh -o "$RUNNER_TEMP/prune_ghcr_versions.sh"
+          curl -sSfL https://raw.githubusercontent.com/Lascade-Co/actions/main/scripts/tada-wheel/prune_ghcr_versions.sh -o "$RUNNER_TEMP/prune_ghcr_versions.sh"
           bash "$RUNNER_TEMP/prune_ghcr_versions.sh"
 
       - name: Log out of GHCR

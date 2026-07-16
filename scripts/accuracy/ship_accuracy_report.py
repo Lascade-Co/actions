@@ -5,8 +5,8 @@ compares them against Lascade's ship API, and generates a self-contained
 HTML report with per-ship deviations, time delays, and aggregate stats.
 
 Usage:
-    python3 scripts/ship_accuracy_report.py --bbox 39.72,-11.69,42.28,-7.93
-    python3 scripts/ship_accuracy_report.py --bbox 39.72,-11.69,42.28,-7.93 --zoom 8 --output report.html
+    python3 scripts/accuracy/ship_accuracy_report.py --bbox 39.72,-11.69,42.28,-7.93
+    python3 scripts/accuracy/ship_accuracy_report.py --bbox 39.72,-11.69,42.28,-7.93 --zoom 8 --output report.html
 """
 
 import argparse

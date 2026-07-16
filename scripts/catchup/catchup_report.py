@@ -17,7 +17,7 @@ If the Codex pass fails, the prose is dropped (empty summary/patterns, repo-name
 display names) but the sections and numbers are intact, so the email still sends.
 
 Usage:
-    python scripts/catchup_report.py \
+    python scripts/catchup/catchup_report.py \
         --daily daily.json \
         --report-prompt CATCHUP_REPORT.md \
         --exclude catchup_exclude.txt \

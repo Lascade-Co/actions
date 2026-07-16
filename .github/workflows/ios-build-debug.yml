@@ -100,7 +100,7 @@ jobs:
           echo "${{ env.SERVICE_PLIST_BASE64 }}" | base64 --decode > "$PLIST_PATH"
 
       - name: Install Apple certificate and provisioning profiles
-        run: curl -sSL https://raw.githubusercontent.com/Lascade-Co/actions/main/scripts/install_apple_cert.sh | bash
+        run: curl -sSL https://raw.githubusercontent.com/Lascade-Co/actions/main/scripts/ios/install_apple_cert.sh | bash
 
       - name: Install additional provisioning profiles
         shell: bash
@@ -120,7 +120,7 @@ jobs:
       - name: Switch Xcode project to manual signing
         env:
           PBXPROJ_PATH: ${{ steps.detect.outputs.project }}/project.pbxproj
-        run: curl -sSL https://raw.githubusercontent.com/Lascade-Co/actions/main/scripts/fix_ios_signing.py | python3 -
+        run: curl -sSL https://raw.githubusercontent.com/Lascade-Co/actions/main/scripts/ios/fix_ios_signing.py | python3 -
 
       - name: Generate ExportOptions.plist
         shell: bash

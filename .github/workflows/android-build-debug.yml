@@ -196,7 +196,7 @@ jobs:
           KEY_PASSWORD_DEBUG: ${{ env.KEY_PASSWORD }}
         run: |
           set -o pipefail
-          curl -sSL https://raw.githubusercontent.com/Lascade-Co/actions/main/scripts/lint_android.py | python3 - --run-lint --base-ref ${{ steps.base.outputs.ref }} | tee lint-output.txt
+          curl -sSL https://raw.githubusercontent.com/Lascade-Co/actions/main/scripts/android/lint_android.py | python3 - --run-lint --base-ref ${{ steps.base.outputs.ref }} | tee lint-output.txt
 
       - name: Loop guard — skip Codex if HEAD is already a Codex fix
         id: loopguard

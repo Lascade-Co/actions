@@ -6,7 +6,7 @@ report.json and open the result in a browser. The markup follows the cream
 tables, dark-mode `class=` hooks).
 
 Usage:
-    python scripts/catchup_render_email.py --report report.json --out email.html
+    python scripts/catchup/catchup_render_email.py --report report.json --out email.html
 """
 
 import argparse

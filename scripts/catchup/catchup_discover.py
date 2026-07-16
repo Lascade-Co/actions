@@ -9,8 +9,8 @@ active repo (or skip the day entirely when nothing happened).
 Forks are intentionally kept; archived repos are dropped.
 
 Usage:
-    GH_TOKEN=$(gh auth token) python scripts/catchup_discover.py
-    GH_TOKEN=... python scripts/catchup_discover.py --hours 24
+    GH_TOKEN=$(gh auth token) python scripts/catchup/catchup_discover.py
+    GH_TOKEN=... python scripts/catchup/catchup_discover.py --hours 24
 
 Requires: the `gh` CLI authenticated via the GH_TOKEN environment variable.
 Writes `matrix=` and `has_repos=` to $GITHUB_OUTPUT when set, else stdout.

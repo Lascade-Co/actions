@@ -35,7 +35,7 @@ jobs:
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
-          curl -fsSL -o catchup_discover.py "$RAW/scripts/catchup_discover.py"
+          curl -fsSL -o catchup_discover.py "$RAW/scripts/catchup/catchup_discover.py"
           python3 catchup_discover.py --hours 24
 
   summarize:
@@ -92,7 +92,7 @@ jobs:
         run: |
           curl -fsSL -o CATCHUP_CLASSIFY.md "$RAW/data/CATCHUP_CLASSIFY.md"
           curl -fsSL -o CATCHUP_SUMMARY.md  "$RAW/data/CATCHUP_SUMMARY.md"
-          curl -fsSL -o catchup_repo.py     "$RAW/scripts/catchup_repo.py"
+          curl -fsSL -o catchup_repo.py     "$RAW/scripts/catchup/catchup_repo.py"
           python3 catchup_repo.py \
             --repo "${{ matrix.repo }}" \
             --classify-prompt CATCHUP_CLASSIFY.md \
@@ -130,7 +130,7 @@ jobs:
         run: |
           TODAY="$(date -u +%F)"
           echo "today=$TODAY" >> "$GITHUB_OUTPUT"
-          curl -fsSL -o catchup_collect.py "$RAW/scripts/catchup_collect.py"
+          curl -fsSL -o catchup_collect.py "$RAW/scripts/catchup/catchup_collect.py"
           python3 catchup_collect.py \
             --artifacts-dir artifacts \
             --date "$TODAY" \
@@ -175,7 +175,7 @@ jobs:
 
       - name: Place daily file and update index
         run: |
-          curl -fsSL -o catchup_collect.py "$RAW/scripts/catchup_collect.py"
+          curl -fsSL -o catchup_collect.py "$RAW/scripts/catchup/catchup_collect.py"
           python3 catchup_collect.py \
             --daily daily.json \
             --date "${{ needs.collect.outputs.today }}" \
@@ -237,7 +237,7 @@ jobs:
         run: |
           curl -fsSL -o CATCHUP_REPORT.md "$RAW/data/CATCHUP_REPORT.md"
           curl -fsSL -o catchup_exclude.txt "$RAW/data/catchup_exclude.txt"
-          curl -fsSL -o catchup_report.py "$RAW/scripts/catchup_report.py"
+          curl -fsSL -o catchup_report.py "$RAW/scripts/catchup/catchup_report.py"
           python3 catchup_report.py \
             --daily daily.json \
             --report-prompt CATCHUP_REPORT.md \
@@ -247,7 +247,7 @@ jobs:
       - name: Render email HTML
         if: steps.report.outputs.send == 'true'
         run: |
-          curl -fsSL -o catchup_render_email.py "$RAW/scripts/catchup_render_email.py"
+          curl -fsSL -o catchup_render_email.py "$RAW/scripts/catchup/catchup_render_email.py"
           python3 catchup_render_email.py --report report.json --out email.html
 
       - name: Send via Resend

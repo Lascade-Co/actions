@@ -710,7 +710,7 @@ class WorkerRenderGateTest(unittest.TestCase):
 
 
 class WorkflowContractTest(unittest.TestCase):
-    ROOT = Path(__file__).resolve().parent.parent
+    ROOT = Path(__file__).resolve().parent.parent.parent
 
     def test_deploy_workflow_has_immutable_and_non_cancelled_deploy_contract(self) -> None:
         import re

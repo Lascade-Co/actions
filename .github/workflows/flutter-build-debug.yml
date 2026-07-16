@@ -323,7 +323,7 @@ jobs:
           echo "Using dart-define mode (env.json)"
 
       - name: Install Apple certificate and provisioning profiles
-        run: curl -sSL https://raw.githubusercontent.com/Lascade-Co/actions/main/scripts/install_apple_cert.sh | bash
+        run: curl -sSL https://raw.githubusercontent.com/Lascade-Co/actions/main/scripts/ios/install_apple_cert.sh | bash
 
       - name: Install additional provisioning profiles
         shell: bash
@@ -354,7 +354,7 @@ jobs:
           install_extra_profile IOS_LIVE_ACTIVITY_PROVISION_PROFILE_BASE64 LIVE_ACTIVITY_PROFILE "live activity widget"
 
       - name: Switch Xcode project to manual signing
-        run: curl -sSL https://raw.githubusercontent.com/Lascade-Co/actions/main/scripts/fix_ios_signing.py | python3 -
+        run: curl -sSL https://raw.githubusercontent.com/Lascade-Co/actions/main/scripts/ios/fix_ios_signing.py | python3 -
 
       - name: Generate ExportOptions.plist
         shell: bash

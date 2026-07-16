@@ -6,7 +6,7 @@ registry) can live in separate, parallel jobs.
 
 MERGE mode (collect job) — combine every `summary-*.json`, drop repos with no
 developer activity, write ONE consolidated daily file:
-    python scripts/catchup_collect.py \
+    python scripts/catchup/catchup_collect.py \
         --artifacts-dir ./artifacts --date 2026-05-27 --daily-out ./daily.json
   Emits wrote=true|false to $GITHUB_OUTPUT; writes nothing when no repo had
   activity. The daily file is {date, repos: [{repo, developers, prs, branches,
@@ -14,7 +14,7 @@ developer activity, write ONE consolidated daily file:
 
 PUBLISH mode (commit job) — place the merged daily file inside a checked-out
 copy of the `catchup` repo and update its index:
-    python scripts/catchup_collect.py \
+    python scripts/catchup/catchup_collect.py \
         --daily ./daily.json --date 2026-05-27 --out-dir ./catchup
 
   out-dir/

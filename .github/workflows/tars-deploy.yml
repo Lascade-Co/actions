@@ -41,7 +41,7 @@ jobs:
       - name: Validate the exact deployment payload
         id: payload
         run: >-
-          python3 central/scripts/tars_payload.py "$GITHUB_EVENT_PATH"
+          python3 central/scripts/tars/tars_payload.py "$GITHUB_EVENT_PATH"
           --type deploy --github-output "$GITHUB_OUTPUT"
 
       - name: Mint a read-only TARS GitHub App token
@@ -80,7 +80,7 @@ jobs:
         id: lock
         run: |
           python3 source/release/validate_lock.py source/release/lock.json
-          python3 central/scripts/tars_lock_outputs.py source/release/lock.json \
+          python3 central/scripts/tars/tars_lock_outputs.py source/release/lock.json \
             --workflow central/.github/workflows/tars-deploy.yml \
             --github-output "$GITHUB_OUTPUT"
 
@@ -95,7 +95,7 @@ jobs:
           token_file="$RUNNER_TEMP/tars-build-ghcr.token"
           trap 'rm -f "$token_file"' EXIT
           printf '%s' "$GHCR_TOKEN" > "$token_file"
-          python3 central/scripts/tars_tada_bundle.py \
+          python3 central/scripts/tars/tars_tada_bundle.py \
             --oras-image "$ORAS_IMAGE" \
             --tada-oci "$TADA_OCI" \
             --username "$GHCR_USER" \
@@ -106,14 +106,14 @@ jobs:
         run: |
           umask 077
           mkdir -p "$RUNNER_TEMP/tars-build-secrets"
-          python3 central/scripts/tars_infisical.py login \
+          python3 central/scripts/tars/tars_infisical.py login \
             --token-file "$RUNNER_TEMP/tars-build-secrets/infisical.token"
-          python3 central/scripts/tars_infisical.py get \
+          python3 central/scripts/tars/tars_infisical.py get \
             --token-file "$RUNNER_TEMP/tars-build-secrets/infisical.token" \
             --secret-path /deployment \
             --secret-name DOCR_WRITE_TOKEN \
             --output-file "$RUNNER_TEMP/tars-build-secrets/docr.token"
-          python3 central/scripts/tars_infisical.py docker-config \
+          python3 central/scripts/tars/tars_infisical.py docker-config \
             --token-file "$RUNNER_TEMP/tars-build-secrets/docr.token" \
             --output-directory "$RUNNER_TEMP/tars-docker-config"
           echo "DOCKER_CONFIG=$RUNNER_TEMP/tars-docker-config" >> "$GITHUB_ENV"
@@ -210,7 +210,7 @@ jobs:
         run: |
           artifact="$RUNNER_TEMP/tars-release-artifact"
           install -d -m 0700 "$artifact"
-          python3 central/scripts/tars_lock_outputs.py source/release/lock.json \
+          python3 central/scripts/tars/tars_lock_outputs.py source/release/lock.json \
             --release-env "$artifact/release.env" \
             --api-digest "$API_DIGEST" \
             --worker-digest "$WORKER_DIGEST" \
@@ -261,7 +261,7 @@ jobs:
       - name: Revalidate the exact deployment payload
         id: payload
         run: >-
-          python3 central/scripts/tars_payload.py "$GITHUB_EVENT_PATH"
+          python3 central/scripts/tars/tars_payload.py "$GITHUB_EVENT_PATH"
           --type deploy --github-output "$GITHUB_OUTPUT"
 
       - name: Match build output to the dispatched SHA
@@ -314,28 +314,28 @@ jobs:
           umask 077
           secrets_dir="$RUNNER_TEMP/tars-deploy-secrets"
           mkdir -p "$secrets_dir"
-          python3 central/scripts/tars_infisical.py login \
+          python3 central/scripts/tars/tars_infisical.py login \
             --token-file "$secrets_dir/infisical.token"
-          python3 central/scripts/tars_infisical.py get \
+          python3 central/scripts/tars/tars_infisical.py get \
             --token-file "$secrets_dir/infisical.token" --secret-path /deployment \
             --secret-name DEPLOY_SSH_HOST --output-file "$secrets_dir/DEPLOY_SSH_HOST"
-          python3 central/scripts/tars_infisical.py get \
+          python3 central/scripts/tars/tars_infisical.py get \
             --token-file "$secrets_dir/infisical.token" --secret-path /deployment \
             --secret-name DEPLOY_SSH_USER --output-file "$secrets_dir/DEPLOY_SSH_USER"
-          python3 central/scripts/tars_infisical.py get \
+          python3 central/scripts/tars/tars_infisical.py get \
             --token-file "$secrets_dir/infisical.token" --secret-path /deployment \
             --secret-name DEPLOY_SSH_PRIVATE_KEY --output-file "$secrets_dir/DEPLOY_SSH_PRIVATE_KEY"
-          python3 central/scripts/tars_infisical.py get \
+          python3 central/scripts/tars/tars_infisical.py get \
             --token-file "$secrets_dir/infisical.token" --secret-path /deployment \
             --secret-name DEPLOY_SSH_KNOWN_HOSTS --output-file "$secrets_dir/DEPLOY_SSH_KNOWN_HOSTS"
-          python3 central/scripts/tars_infisical.py get \
+          python3 central/scripts/tars/tars_infisical.py get \
             --token-file "$secrets_dir/infisical.token" --secret-path /deployment \
             --secret-name WIREGUARD_CONFIG --output-file "$secrets_dir/WIREGUARD_CONFIG"
 
       - name: Validate private connection material
         id: connection
         run: >-
-          python3 central/scripts/tars_infisical.py deploy-outputs
+          python3 central/scripts/tars/tars_infisical.py deploy-outputs
           --secrets-directory "$RUNNER_TEMP/tars-deploy-secrets"
           --github-output "$GITHUB_OUTPUT"
 

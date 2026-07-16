@@ -28,7 +28,7 @@ bullet prose. Enrichment fields are best-effort: a lookup failure degrades to
 [] / null without aborting.
 
 Usage:
-    GH_TOKEN=... python scripts/catchup_repo.py \
+    GH_TOKEN=... python scripts/catchup/catchup_repo.py \
         --repo Lascade-Co/example \
         --classify-prompt CATCHUP_CLASSIFY.md \
         --summary-prompt CATCHUP_SUMMARY.md \

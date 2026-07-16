@@ -18,7 +18,7 @@ jobs:
       - name: Download script
         run: |
           curl -fsSL -o ship_accuracy_report.py \
-            https://raw.githubusercontent.com/Lascade-Co/actions/main/scripts/ship_accuracy_report.py
+            https://raw.githubusercontent.com/Lascade-Co/actions/main/scripts/accuracy/ship_accuracy_report.py
 
       - name: Pick random port
         id: port

@@ -6,8 +6,8 @@ issue's title, subtitle, stack frames, affected session count, and
 a direct link to the Crashlytics console.
 
 Usage:
-    python scripts/crashlytics_report.py --project travelanimator-c8542 --app com.travelanimator.routemap
-    python scripts/crashlytics_report.py --project travelanimator-c8542 --app com.travelanimator.routemap --limit 10
+    python scripts/crashlytics/crashlytics_report.py --project travelanimator-c8542 --app com.travelanimator.routemap
+    python scripts/crashlytics/crashlytics_report.py --project travelanimator-c8542 --app com.travelanimator.routemap --limit 10
 """
 
 import argparse
