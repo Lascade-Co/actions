@@ -1,0 +1,38 @@
+# Copy this workflow into whichever repo you want to deploy to Cloudflare Pages, and set
+# secrets.CENTRAL_DISPATCH_TOKEN (a token that can dispatch to Lascade-Co/actions).
+# Fill in project_slug (Infisical), cf_project (Cloudflare Pages project) and build_command.
+# If the repo has private submodules in the SAME org, add a "submodule_repos" field to the
+# payload, e.g. "submodule_repos":"flight-helper-vue" (comma-separated for multiple).
+
+name: Request Central Cloudflare Pages Deployment
+
+on:
+  push:
+
+permissions:
+  pull-requests: read
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Find open PR for this branch
+        id: pr
+        uses: jwalton/gh-find-current-pr@v1
+
+      - name: Dispatch to central repo
+        uses: peter-evans/repository-dispatch@v4
+        with:
+          token: ${{ secrets.CENTRAL_DISPATCH_TOKEN }}
+          repository: Lascade-Co/actions
+          event-type: cloudflare-commit
+          client-payload: >-
+            {
+              "repo":${{ toJSON(github.repository) }},
+              "branch":${{ toJSON(github.ref_name) }},
+              "pr_number":${{ toJSON(steps.pr.outputs.number) }},
+              "project_slug":"your-infisical-project-slug",
+              "cf_project":"your-cloudflare-pages-project",
+              "build_command":"pnpm build"
+            }

@@ -1,0 +1,154 @@
+# Central Cloudflare Pages deploy runner (invoked via repository_dispatch from org repos).
+# Required client_payload: repo, branch, project_slug, cf_project, build_command. Optional: pr_number.
+#   repo          e.g. Lascade-Co/airlines70   target repo to checkout & deploy
+#   branch        e.g. main                     ref to checkout; passed to wrangler --branch
+#   project_slug  e.g. airlines70               Infisical project slug (build-time env)
+#   cf_project    e.g. airlines70-nuxt          Cloudflare Pages project name
+#   build_command e.g. pnpm build               build command run in the target repo
+# Optional client_payload:
+#   pr_number       e.g. 42                      if set, deploy URL is commented on the PR
+#   submodule_repos e.g. flight-helper-vue       comma-separated private submodule repo name(s) in
+#                                                the SAME owner; added to the checkout token scope
+# Cloudflare DEPLOY creds are actions-repo secrets (CLOUDFLARE_API_TOKEN / CLOUDFLARE_ACCOUNT_ID),
+# NOT pulled from Infisical, so the client build_command can never read them.
+name: Cloudflare Pages Deploy
+
+on:
+  repository_dispatch:
+    types: [cloudflare-commit]
+
+concurrency:
+  group: cloudflare-commit-${{ github.event.client_payload.repo }}-${{ github.event.client_payload.branch }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  cloudflare-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      # Payload reaches bash via env (never inlined into the script) and is validated against
+      # strict charsets, so a crafted dispatch can't inject shell or extra wrangler commands.
+      - name: Determine repo, branch & env-slug
+        id: prepare
+        env:
+          REPO: ${{ github.event.client_payload.repo }}
+          BRANCH: ${{ github.event.client_payload.branch }}
+          CF_PROJECT: ${{ github.event.client_payload.cf_project }}
+          SUBMODULE_REPOS: ${{ github.event.client_payload.submodule_repos }}
+        run: |
+          set -euo pipefail
+          [[ "$REPO" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]] || { echo "::error::invalid repo: $REPO"; exit 1; }
+          [[ "$BRANCH" =~ ^[A-Za-z0-9._/-]+$ ]]            || { echo "::error::invalid branch: $BRANCH"; exit 1; }
+          [[ "$CF_PROJECT" =~ ^[a-z0-9-]+$ ]]              || { echo "::error::invalid cf_project: $CF_PROJECT"; exit 1; }
+          NAME="${REPO#*/}"
+          # App-token scope = target repo (+ any declared same-owner private submodule repos).
+          REPOSITORIES="$NAME"
+          if [[ -n "${SUBMODULE_REPOS:-}" ]]; then
+            [[ "$SUBMODULE_REPOS" =~ ^[A-Za-z0-9._-]+(,[A-Za-z0-9._-]+)*$ ]] || { echo "::error::invalid submodule_repos: $SUBMODULE_REPOS"; exit 1; }
+            REPOSITORIES="$NAME,$SUBMODULE_REPOS"
+          fi
+          echo "repo=$REPO" >> "$GITHUB_OUTPUT"
+          echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
+          echo "cf_project=$CF_PROJECT" >> "$GITHUB_OUTPUT"
+          echo "owner=${REPO%%/*}" >> "$GITHUB_OUTPUT"
+          echo "name=$NAME" >> "$GITHUB_OUTPUT"
+          echo "repositories=$REPOSITORIES" >> "$GITHUB_OUTPUT"
+          if [[ "$BRANCH" == "main" || "$BRANCH" == "master" ]]; then
+            echo "env_slug=prod" >> "$GITHUB_OUTPUT"
+          else
+            echo "env_slug=staging" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Build-time env only, scoped to /Build (public NUXT_PUBLIC_* etc). Cloudflare deploy creds
+      # live in actions-repo secrets, not here, so the client build_command cannot read them.
+      - name: Import build env from Infisical
+        uses: Infisical/secrets-action@v1.0.16
+        with:
+          method: universal
+          client-id: ${{ secrets.INFISICAL_CLIENT_ID }}
+          client-secret: ${{ secrets.INFISICAL_CLIENT_SECRET }}
+          project-slug: ${{ github.event.client_payload.project_slug }}
+          env-slug: ${{ steps.prepare.outputs.env_slug }}
+          domain: ${{ secrets.INFISICAL_DOMAIN }}
+          secret-path: /Build
+          export-type: env
+
+      - name: Mint GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ secrets.CI_APP_CLIENT_ID }}
+          private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
+          owner: ${{ steps.prepare.outputs.owner }}
+          repositories: ${{ steps.prepare.outputs.repositories }}
+
+      # submodules are fetched here while the token is active; persist-credentials: false then
+      # strips it from .git/config so the untrusted build_command (later) can't read it.
+      # Private submodules must be same-owner and listed in submodule_repos (token scope).
+      - name: Checkout target repo @ branch
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ steps.prepare.outputs.repo }}
+          ref: ${{ steps.prepare.outputs.branch }}
+          token: ${{ steps.app-token.outputs.token }}
+          submodules: recursive
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # NITRO_PRESET forces Nuxt/Nitro to emit the Cloudflare Pages bundle into ./dist.
+      # build_command is intentional client-supplied shell (run via env, not inlined, per GH
+      # hardening); it only ever sees the public /Build env — no deploy creds are in scope.
+      - name: Build
+        env:
+          NODE_OPTIONS: --max-old-space-size=8192
+          NITRO_PRESET: cloudflare_pages
+          BUILD_COMMAND: ${{ github.event.client_payload.build_command }}
+        run: eval "$BUILD_COMMAND"
+
+      - name: Verify build output
+        run: test -d dist || { echo "::error::Build did not produce ./dist (is NITRO_PRESET=cloudflare_pages honored?)"; exit 1; }
+
+      # project-name/branch come from the validated prepare outputs (charset-checked above),
+      # so they can't inject additional newline-separated wrangler commands.
+      - name: Deploy to Cloudflare Pages
+        id: deploy
+        uses: cloudflare/wrangler-action@v4
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: pages deploy dist --project-name ${{ steps.prepare.outputs.cf_project }} --branch ${{ steps.prepare.outputs.branch }}
+
+      - name: Comment on PR (if applicable)
+        if: ${{ github.event.client_payload.pr_number }}
+        uses: actions/github-script@v8
+        env:
+          PR_NUMBER: ${{ github.event.client_payload.pr_number }}
+          DEPLOY_URL: ${{ steps.deploy.outputs.deployment-url }}
+          OWNER: ${{ steps.prepare.outputs.owner }}
+          REPO_NAME: ${{ steps.prepare.outputs.name }}
+        with:
+          github-token: ${{ steps.app-token.outputs.token }}
+          script: |
+            const pr = Number(process.env.PR_NUMBER);
+            const url = process.env.DEPLOY_URL;
+            if (!pr || !url) return;
+            await github.rest.issues.createComment({
+              owner: process.env.OWNER,
+              repo: process.env.REPO_NAME,
+              issue_number: pr,
+              body: `🚀 **Cloudflare Pages Preview**: [View](${url})`,
+            });
