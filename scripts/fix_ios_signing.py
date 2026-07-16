@@ -108,7 +108,7 @@ def main():
 
         # Block complete — only touch target build configs (those with a bundle id).
         text = "".join(block)
-        m = re.search(r'PRODUCT_BUNDLE_IDENTIFIER(?:\[[^\]]*\])?\s*=\s*"?([^";]+)"?;', text)
+        m = re.search(r'"?PRODUCT_BUNDLE_IDENTIFIER(?:\[[^\]]*\])?"?\s*=\s*"?([^";]+)"?;', text)
         if not m:
             result.extend(block)
             in_settings = False

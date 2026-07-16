@@ -23,10 +23,11 @@
 
 set -euo pipefail
 
-# Default RUNNER_TEMP so the script also runs locally / on non-GitHub CI under
-# `set -u` (GitHub Actions always provides it). Used for the keychain and the
-# temporary provisioning files below.
+# Default GitHub-Actions-provided vars so the script also runs locally / on
+# non-GitHub CI under `set -u`. RUNNER_TEMP holds the keychain + temporary
+# profiles; GITHUB_ENV is where profile UUID/NAME outputs are exported.
 : "${RUNNER_TEMP:=/tmp}"
+: "${GITHUB_ENV:=/dev/null}"
 
 # --- Decode cert ---
 # Guarantee the decoded .p12 is removed even if a later step fails / exits early.
