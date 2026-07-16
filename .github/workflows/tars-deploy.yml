@@ -1,0 +1,518 @@
+name: Central TARS Production Delivery
+
+on:
+  repository_dispatch:
+    types: [tars-deploy]
+
+permissions:
+  contents: read
+  packages: read
+  id-token: write
+
+env:
+  PYTHONDONTWRITEBYTECODE: "1"
+
+jobs:
+  build:
+    name: Build immutable TARS release
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    concurrency:
+      group: tars-deploy-build-${{ github.event.client_payload.repo }}
+      cancel-in-progress: true
+    outputs:
+      release_sha: ${{ steps.payload.outputs.sha }}
+      api_digest: ${{ steps.api.outputs.digest }}
+      worker_digest: ${{ steps.worker.outputs.digest }}
+      garage_digest: ${{ steps.garage.outputs.digest }}
+      otel_digest: ${{ steps.otel.outputs.digest }}
+      tested_tree_sha: ${{ steps.tested-main.outputs.tree_sha }}
+      artifact_name: ${{ steps.bundle.outputs.artifact_name }}
+    steps:
+      - name: Check out central delivery code
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          ref: ${{ github.sha }}
+          path: central
+          persist-credentials: false
+
+      - name: Validate the exact deployment payload
+        id: payload
+        run: >-
+          python3 central/scripts/tars_payload.py "$GITHUB_EVENT_PATH"
+          --type deploy --github-output "$GITHUB_OUTPUT"
+
+      - name: Mint a read-only TARS GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3
+        with:
+          client-id: ${{ secrets.CI_APP_CLIENT_ID }}
+          private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
+          owner: Lascade-Co
+          repositories: TARS
+          permission-contents: read
+          permission-pull-requests: read
+          permission-statuses: read
+
+      - name: Check out the exact dispatched TARS revision
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          repository: ${{ steps.payload.outputs.repo }}
+          ref: ${{ steps.payload.outputs.sha }}
+          token: ${{ steps.app-token.outputs.token }}
+          path: source
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Refuse a stale main build
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          TARGET_REPO: ${{ steps.payload.outputs.repo }}
+          RELEASE_SHA: ${{ steps.payload.outputs.sha }}
+        run: |
+          main_sha="$(gh api "repos/$TARGET_REPO/git/ref/heads/main" --jq .object.sha)"
+          if [ "$RELEASE_SHA" != "$main_sha" ]; then
+            echo "refusing stale TARS build: dispatched revision is no longer main" >&2
+            exit 1
+          fi
+
+      - name: Identify the exact current-main tree and merged pull request
+        id: tested-main
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          TARGET_REPO: ${{ steps.payload.outputs.repo }}
+          RELEASE_SHA: ${{ steps.payload.outputs.sha }}
+        run: |
+          tree_sha="$(git -C source show -s --format=%T HEAD)"
+          gh api -H 'Accept: application/vnd.github+json' \
+            "repos/$TARGET_REPO/commits/$RELEASE_SHA/pulls" \
+            > "$RUNNER_TEMP/tars-build-associated-prs.json"
+          python3 central/scripts/tars_tree_attestation.py select-deploy-pr \
+            --prs-file "$RUNNER_TEMP/tars-build-associated-prs.json" \
+            --repo "$TARGET_REPO" \
+            --main-sha "$RELEASE_SHA" \
+            --tree-sha "$tree_sha" \
+            --github-output "$GITHUB_OUTPUT"
+
+      - name: Require a successful central attestation for the production tree
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          TARGET_REPO: ${{ steps.payload.outputs.repo }}
+          HEAD_SHA: ${{ steps.tested-main.outputs.head_sha }}
+          TREE_SHA: ${{ steps.tested-main.outputs.tree_sha }}
+          EXPECTED_CREATOR: ${{ format('{0}[bot]', steps.app-token.outputs.app-slug) }}
+        run: |
+          gh api --paginate --slurp \
+            "repos/$TARGET_REPO/commits/$HEAD_SHA/statuses?per_page=100" \
+            > "$RUNNER_TEMP/tars-build-tree-statuses.json"
+          python3 central/scripts/tars_tree_attestation.py verify-statuses \
+            --statuses-file "$RUNNER_TEMP/tars-build-tree-statuses.json" \
+            --tree-sha "$TREE_SHA" \
+            --expected-creator "$EXPECTED_CREATOR"
+
+      - name: Validate and expose the immutable release lock
+        id: lock
+        run: |
+          python3 source/release/validate_lock.py source/release/lock.json
+          python3 central/scripts/tars_lock_outputs.py source/release/lock.json \
+            --workflow central/.github/workflows/tars-deploy.yml \
+            --github-output "$GITHUB_OUTPUT"
+
+      - name: Fetch the locked TADA bundle outside the source build context
+        env:
+          GHCR_TOKEN: ${{ github.token }}
+          GHCR_USER: ${{ github.actor }}
+          ORAS_IMAGE: ${{ steps.lock.outputs.oras_image }}
+          TADA_OCI: ${{ steps.lock.outputs.tada_oci }}
+        run: |
+          umask 077
+          token_file="$RUNNER_TEMP/tars-build-ghcr.token"
+          trap 'rm -f "$token_file"' EXIT
+          printf '%s' "$GHCR_TOKEN" > "$token_file"
+          python3 central/scripts/tars_tada_bundle.py \
+            --oras-image "$ORAS_IMAGE" \
+            --tada-oci "$TADA_OCI" \
+            --username "$GHCR_USER" \
+            --token-file "$token_file" \
+            --output-directory "$RUNNER_TEMP/tada-bundle"
+
+      - name: Authenticate to Infisical with GitHub OIDC and fetch only the DOCR write token
+        run: |
+          umask 077
+          mkdir -p "$RUNNER_TEMP/tars-build-secrets"
+          python3 central/scripts/tars_infisical.py login \
+            --token-file "$RUNNER_TEMP/tars-build-secrets/infisical.token"
+          python3 central/scripts/tars_infisical.py get \
+            --token-file "$RUNNER_TEMP/tars-build-secrets/infisical.token" \
+            --secret-path /deployment \
+            --secret-name DOCR_WRITE_TOKEN \
+            --output-file "$RUNNER_TEMP/tars-build-secrets/docr.token"
+          python3 central/scripts/tars_infisical.py docker-config \
+            --token-file "$RUNNER_TEMP/tars-build-secrets/docr.token" \
+            --output-directory "$RUNNER_TEMP/tars-docker-config"
+          echo "DOCKER_CONFIG=$RUNNER_TEMP/tars-docker-config" >> "$GITHUB_ENV"
+
+      - name: Configure Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
+        with:
+          version: v${{ steps.lock.outputs.docker_buildx_version }}
+
+      - name: Capture build metadata
+        id: metadata
+        run: echo "built_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push API
+        id: api
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        with:
+          context: source
+          file: source/Dockerfile.api
+          platforms: ${{ steps.lock.outputs.target_platform }}
+          push: true
+          tags: ${{ steps.lock.outputs.registry }}:api-sha-${{ steps.payload.outputs.sha }}
+          build-args: |
+            GO_IMAGE=${{ steps.lock.outputs.go_image }}
+            RUNTIME_IMAGE=${{ steps.lock.outputs.api_runtime_image }}
+            TARS_VERSION=sha-${{ steps.payload.outputs.sha }}
+            TARS_REVISION=${{ steps.payload.outputs.sha }}
+            TARS_BUILT_AT=${{ steps.metadata.outputs.built_at }}
+          cache-from: type=gha,scope=tars-api
+          cache-to: type=gha,mode=max,scope=tars-api
+
+      - name: Build and push worker with the locked private TADA bundle
+        id: worker
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        with:
+          context: source
+          file: source/Dockerfile.worker
+          platforms: ${{ steps.lock.outputs.target_platform }}
+          push: true
+          tags: ${{ steps.lock.outputs.registry }}:worker-sha-${{ steps.payload.outputs.sha }}
+          build-contexts: |
+            tada_bundle=${{ runner.temp }}/tada-bundle
+          build-args: |
+            GO_IMAGE=${{ steps.lock.outputs.go_image }}
+            UV_IMAGE=${{ steps.lock.outputs.uv_image }}
+            PYTHON_IMAGE=${{ steps.lock.outputs.python_image }}
+            TADA_REPOSITORY=${{ steps.lock.outputs.tada_repository }}
+            TADA_OCI=${{ steps.lock.outputs.tada_oci }}
+            TADA_REVISION=${{ steps.lock.outputs.tada_revision }}
+            TARS_VERSION=sha-${{ steps.payload.outputs.sha }}
+            TARS_REVISION=${{ steps.payload.outputs.sha }}
+            TARS_BUILT_AT=${{ steps.metadata.outputs.built_at }}
+          cache-from: type=gha,scope=tars-worker
+          cache-to: type=gha,mode=max,scope=tars-worker
+
+      - name: Build and push Garage wrapper
+        id: garage
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        with:
+          context: source
+          file: source/deploy/garage/Dockerfile
+          platforms: ${{ steps.lock.outputs.target_platform }}
+          push: true
+          tags: ${{ steps.lock.outputs.registry }}:garage-sha-${{ steps.payload.outputs.sha }}
+          build-args: |
+            GARAGE_UPSTREAM_IMAGE=${{ steps.lock.outputs.garage_upstream_image }}
+            ALPINE_IMAGE=${{ steps.lock.outputs.support_alpine_image }}
+          cache-from: type=gha,scope=tars-garage
+          cache-to: type=gha,mode=max,scope=tars-garage
+
+      - name: Build and push OpenTelemetry wrapper
+        id: otel
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        with:
+          context: source
+          file: source/deploy/otel/Dockerfile
+          platforms: ${{ steps.lock.outputs.target_platform }}
+          push: true
+          tags: ${{ steps.lock.outputs.registry }}:otel-sha-${{ steps.payload.outputs.sha }}
+          build-args: |
+            OTEL_UPSTREAM_IMAGE=${{ steps.lock.outputs.otel_upstream_image }}
+            ALPINE_IMAGE=${{ steps.lock.outputs.support_alpine_image }}
+          cache-from: type=gha,scope=tars-otel
+          cache-to: type=gha,mode=max,scope=tars-otel
+
+      - name: Gate the exact pushed worker digest with HD and 4K renders
+        env:
+          WORKER_IMAGE: ${{ steps.lock.outputs.registry }}@${{ steps.worker.outputs.digest }}
+          RELEASE_SHA: ${{ steps.payload.outputs.sha }}
+          TARGET_PLATFORM: ${{ steps.lock.outputs.target_platform }}
+        run: |
+          trap 'docker image rm "$WORKER_IMAGE" >/dev/null 2>&1 || true' EXIT
+          docker pull --platform "$TARGET_PLATFORM" "$WORKER_IMAGE"
+          timeout --signal=TERM --kill-after=30s 25m \
+            python3 central/scripts/tars_worker_render_gate.py \
+              --image "$WORKER_IMAGE" \
+              --config source/deploy/smoke-config.json \
+              --lock source/release/lock.json \
+              --source-sha "$RELEASE_SHA" \
+              --timeout-seconds 600
+
+      - name: Create exact-SHA deployment bundle and data-only release environment
+        id: bundle
+        env:
+          RELEASE_SHA: ${{ steps.payload.outputs.sha }}
+          API_DIGEST: ${{ steps.api.outputs.digest }}
+          WORKER_DIGEST: ${{ steps.worker.outputs.digest }}
+          GARAGE_DIGEST: ${{ steps.garage.outputs.digest }}
+          OTEL_DIGEST: ${{ steps.otel.outputs.digest }}
+        run: |
+          artifact="$RUNNER_TEMP/tars-release-artifact"
+          install -d -m 0700 "$artifact"
+          python3 central/scripts/tars_lock_outputs.py source/release/lock.json \
+            --release-env "$artifact/release.env" \
+            --api-digest "$API_DIGEST" \
+            --worker-digest "$WORKER_DIGEST" \
+            --garage-digest "$GARAGE_DIGEST" \
+            --otel-digest "$OTEL_DIGEST"
+          printf '%s\n' "$RELEASE_SHA" > source/.tars-release-sha
+          tar -C source --exclude=.git -czf "$artifact/tars-source.tar.gz" .
+          artifact_name="tars-release-$RELEASE_SHA"
+          echo "artifact_name=$artifact_name" >> "$GITHUB_OUTPUT"
+
+      - name: Upload the immutable deployment interface
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: ${{ steps.bundle.outputs.artifact_name }}
+          path: ${{ runner.temp }}/tars-release-artifact/
+          if-no-files-found: error
+          include-hidden-files: false
+          retention-days: 1
+          compression-level: 0
+
+      - name: Remove build credentials
+        if: always()
+        run: |
+          docker logout registry.digitalocean.com >/dev/null 2>&1 || true
+          rm -rf "${DOCKER_CONFIG:-$RUNNER_TEMP/tars-docker-config}" "$RUNNER_TEMP/tars-build-secrets"
+
+  deploy:
+    name: Deploy TARS production
+    needs: build
+    runs-on: ubuntu-24.04
+    # V1 infrastructure caps worker_count at seven. Its serial 7 * 41m drain
+    # plus the 5m deploy margin fits inside this GitHub-hosted runner ceiling.
+    timeout-minutes: 360
+    concurrency:
+      group: tars-production-deploy
+      cancel-in-progress: false
+    steps:
+      - name: Check out central delivery code
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          ref: ${{ github.sha }}
+          path: central
+          persist-credentials: false
+
+      - name: Revalidate the exact deployment payload
+        id: payload
+        run: >-
+          python3 central/scripts/tars_payload.py "$GITHUB_EVENT_PATH"
+          --type deploy --github-output "$GITHUB_OUTPUT"
+
+      - name: Match build output to the dispatched SHA
+        env:
+          PAYLOAD_SHA: ${{ steps.payload.outputs.sha }}
+          BUILT_SHA: ${{ needs.build.outputs.release_sha }}
+        run: test "$PAYLOAD_SHA" = "$BUILT_SHA"
+
+      - name: Mint a fresh read-only TARS GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3
+        with:
+          client-id: ${{ secrets.CI_APP_CLIENT_ID }}
+          private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
+          owner: Lascade-Co
+          repositories: TARS
+          permission-contents: read
+          permission-pull-requests: read
+          permission-statuses: read
+
+      - name: Refuse stale work after waiting for the deployment lock
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          TARGET_REPO: ${{ steps.payload.outputs.repo }}
+          RELEASE_SHA: ${{ steps.payload.outputs.sha }}
+        run: |
+          main_sha="$(gh api "repos/$TARGET_REPO/git/ref/heads/main" --jq .object.sha)"
+          if [ "$RELEASE_SHA" != "$main_sha" ]; then
+            echo "refusing stale TARS deployment after serialization wait" >&2
+            exit 1
+          fi
+
+      - name: Download the exact build output
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: ${{ needs.build.outputs.artifact_name }}
+          path: ${{ runner.temp }}/tars-release-artifact
+
+      - name: Verify the local artifact interface
+        env:
+          RELEASE_SHA: ${{ steps.payload.outputs.sha }}
+        run: |
+          verify="$RUNNER_TEMP/tars-release-verify"
+          install -d -m 0700 "$verify"
+          tar -xzf "$RUNNER_TEMP/tars-release-artifact/tars-source.tar.gz" -C "$verify"
+          test "$(cat "$verify/.tars-release-sha")" = "$RELEASE_SHA"
+          test -x "$verify/deploy/tars-deploy"
+          test -s "$RUNNER_TEMP/tars-release-artifact/release.env"
+
+      - name: Authenticate with a fresh OIDC token and fetch exact connection secrets
+        run: |
+          umask 077
+          secrets_dir="$RUNNER_TEMP/tars-deploy-secrets"
+          mkdir -p "$secrets_dir"
+          python3 central/scripts/tars_infisical.py login \
+            --token-file "$secrets_dir/infisical.token"
+          python3 central/scripts/tars_infisical.py get \
+            --token-file "$secrets_dir/infisical.token" --secret-path /deployment \
+            --secret-name DEPLOY_SSH_HOST --output-file "$secrets_dir/DEPLOY_SSH_HOST"
+          python3 central/scripts/tars_infisical.py get \
+            --token-file "$secrets_dir/infisical.token" --secret-path /deployment \
+            --secret-name DEPLOY_SSH_USER --output-file "$secrets_dir/DEPLOY_SSH_USER"
+          python3 central/scripts/tars_infisical.py get \
+            --token-file "$secrets_dir/infisical.token" --secret-path /deployment \
+            --secret-name DEPLOY_SSH_PRIVATE_KEY --output-file "$secrets_dir/DEPLOY_SSH_PRIVATE_KEY"
+          python3 central/scripts/tars_infisical.py get \
+            --token-file "$secrets_dir/infisical.token" --secret-path /deployment \
+            --secret-name DEPLOY_SSH_KNOWN_HOSTS --output-file "$secrets_dir/DEPLOY_SSH_KNOWN_HOSTS"
+          python3 central/scripts/tars_infisical.py get \
+            --token-file "$secrets_dir/infisical.token" --secret-path /deployment \
+            --secret-name WIREGUARD_CONFIG --output-file "$secrets_dir/WIREGUARD_CONFIG"
+
+      - name: Validate private connection material
+        id: connection
+        run: >-
+          python3 central/scripts/tars_infisical.py deploy-outputs
+          --secrets-directory "$RUNNER_TEMP/tars-deploy-secrets"
+          --github-output "$GITHUB_OUTPUT"
+
+      - name: Connect the runner to the TARS private route
+        uses: rohittp0/wiregaurd@e6a265873578a2ccbc5ffa73657ce0991b36e650 # v3
+        with:
+          config: ${{ steps.connection.outputs.wireguard_config }}
+          ips: ${{ steps.connection.outputs.host }}
+
+      - name: Install the pinned SSH identity and known-host set
+        run: |
+          install -d -m 0700 "$HOME/.ssh"
+          install -m 0600 "$RUNNER_TEMP/tars-deploy-secrets/DEPLOY_SSH_PRIVATE_KEY" "$HOME/.ssh/tars_key"
+          install -m 0600 "$RUNNER_TEMP/tars-deploy-secrets/DEPLOY_SSH_KNOWN_HOSTS" "$HOME/.ssh/tars_known_hosts"
+
+      - name: Upload and expand the exact source bundle on the control node
+        env:
+          SSH_HOST: ${{ steps.connection.outputs.host }}
+          SSH_USER: ${{ steps.connection.outputs.user }}
+          RELEASE_SHA: ${{ steps.payload.outputs.sha }}
+        run: |
+          ssh_options=(
+            -i "$HOME/.ssh/tars_key"
+            -o BatchMode=yes
+            -o IdentitiesOnly=yes
+            -o StrictHostKeyChecking=yes
+            -o ServerAliveInterval=15
+            -o ServerAliveCountMax=3
+            -o TCPKeepAlive=yes
+            -o "UserKnownHostsFile=$HOME/.ssh/tars_known_hosts"
+          )
+          target="$SSH_USER@$SSH_HOST"
+          upload_dir=".tars-upload-$RELEASE_SHA"
+          # The validated SHA-derived path is intentionally expanded locally.
+          # shellcheck disable=SC2029
+          ssh "${ssh_options[@]}" "$target" "install -d -m 0700 '$upload_dir'"
+          scp "${ssh_options[@]}" \
+            "$RUNNER_TEMP/tars-release-artifact/tars-source.tar.gz" \
+            "$RUNNER_TEMP/tars-release-artifact/release.env" \
+            "$target:$upload_dir/"
+          ssh "${ssh_options[@]}" "$target" /bin/sh -s -- "$RELEASE_SHA" <<'REMOTE'
+          set -eu
+          sha=$1
+          case "$sha" in *[!0-9a-f]*|'') exit 64 ;; esac
+          test "${#sha}" -eq 40
+          upload="$HOME/.tars-upload-$sha"
+          bundle="/srv/tars/incoming/$sha"
+          sudo -n rm -rf -- "$bundle"
+          sudo -n install -d -m 0750 "$bundle"
+          sudo -n tar -xzf "$upload/tars-source.tar.gz" -C "$bundle"
+          sudo -n install -m 0600 "$upload/release.env" "$bundle/.release.env"
+          test "$(sudo -n cat "$bundle/.tars-release-sha")" = "$sha"
+          rm -rf -- "$upload"
+          REMOTE
+
+      - name: Resolve the final current-main tree and associated pull request
+        id: current-main
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          TARGET_REPO: ${{ steps.payload.outputs.repo }}
+          RELEASE_SHA: ${{ steps.payload.outputs.sha }}
+          BUILT_TREE_SHA: ${{ needs.build.outputs.tested_tree_sha }}
+        run: |
+          main_sha="$(gh api "repos/$TARGET_REPO/git/ref/heads/main" --jq .object.sha)"
+          if [ "$RELEASE_SHA" != "$main_sha" ]; then
+            echo "refusing stale TARS deployment at the final gate" >&2
+            exit 1
+          fi
+          tree_sha="$(gh api "repos/$TARGET_REPO/git/commits/$main_sha" --jq .tree.sha)"
+          if [ "$tree_sha" != "$BUILT_TREE_SHA" ]; then
+            echo "refusing deployment: build tree differs from current main" >&2
+            exit 1
+          fi
+          gh api -H 'Accept: application/vnd.github+json' \
+            "repos/$TARGET_REPO/commits/$main_sha/pulls" \
+            > "$RUNNER_TEMP/tars-final-associated-prs.json"
+          python3 central/scripts/tars_tree_attestation.py select-deploy-pr \
+            --prs-file "$RUNNER_TEMP/tars-final-associated-prs.json" \
+            --repo "$TARGET_REPO" \
+            --main-sha "$main_sha" \
+            --tree-sha "$tree_sha" \
+            --github-output "$GITHUB_OUTPUT"
+          echo "sha=$main_sha" >> "$GITHUB_OUTPUT"
+
+      - name: Final tested-tree attestation gate immediately before execution
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          TARGET_REPO: ${{ steps.payload.outputs.repo }}
+          HEAD_SHA: ${{ steps.current-main.outputs.head_sha }}
+          TREE_SHA: ${{ steps.current-main.outputs.tree_sha }}
+          EXPECTED_CREATOR: ${{ format('{0}[bot]', steps.app-token.outputs.app-slug) }}
+        run: |
+          gh api --paginate --slurp \
+            "repos/$TARGET_REPO/commits/$HEAD_SHA/statuses?per_page=100" \
+            > "$RUNNER_TEMP/tars-final-tree-statuses.json"
+          python3 central/scripts/tars_tree_attestation.py verify-statuses \
+            --statuses-file "$RUNNER_TEMP/tars-final-tree-statuses.json" \
+            --tree-sha "$TREE_SHA" \
+            --expected-creator "$EXPECTED_CREATOR"
+
+      - name: Pipe the short-lived Infisical token to the deep deployment interface
+        env:
+          SSH_HOST: ${{ steps.connection.outputs.host }}
+          SSH_USER: ${{ steps.connection.outputs.user }}
+          RELEASE_SHA: ${{ steps.payload.outputs.sha }}
+          CURRENT_MAIN_SHA: ${{ steps.current-main.outputs.sha }}
+        run: |
+          ssh_options=(
+            -i "$HOME/.ssh/tars_key"
+            -o BatchMode=yes
+            -o IdentitiesOnly=yes
+            -o StrictHostKeyChecking=yes
+            -o ServerAliveInterval=15
+            -o ServerAliveCountMax=3
+            -o TCPKeepAlive=yes
+            -o "UserKnownHostsFile=$HOME/.ssh/tars_known_hosts"
+          )
+          target="$SSH_USER@$SSH_HOST"
+          bundle="/srv/tars/incoming/$RELEASE_SHA"
+          remote_command="sudo -n /bin/sh -c 'IFS= read -r INFISICAL_TOKEN || exit 64; export INFISICAL_TOKEN; exec $bundle/deploy/tars-deploy deploy --release-env $bundle/.release.env --release-sha $RELEASE_SHA --current-main-sha $CURRENT_MAIN_SHA --bundle-dir $bundle'"
+          # The validated SHA-only command is intentionally assembled locally.
+          # shellcheck disable=SC2029
+          {
+            cat "$RUNNER_TEMP/tars-deploy-secrets/infisical.token"
+            printf '\n'
+          } | ssh "${ssh_options[@]}" "$target" "$remote_command"
+
+      - name: Remove runner-side deployment credentials
+        if: always()
+        run: |
+          rm -rf "$RUNNER_TEMP/tars-deploy-secrets" "$HOME/.ssh/tars_key" "$HOME/.ssh/tars_known_hosts"
