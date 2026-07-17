@@ -32,7 +32,7 @@ jobs:
       artifact_name: ${{ steps.bundle.outputs.artifact_name }}
     steps:
       - name: Check out central delivery code
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        uses: actions/checkout@v7.0.0
         with:
           ref: ${{ github.sha }}
           path: central
@@ -46,7 +46,7 @@ jobs:
 
       - name: Mint a read-only TARS GitHub App token
         id: app-token
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3
+        uses: actions/create-github-app-token@v3.2.0
         with:
           client-id: ${{ secrets.CI_APP_CLIENT_ID }}
           private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
@@ -55,7 +55,7 @@ jobs:
           permission-contents: read
 
       - name: Check out the exact dispatched TARS revision
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        uses: actions/checkout@v7.0.0
         with:
           repository: ${{ steps.payload.outputs.repo }}
           ref: ${{ steps.payload.outputs.sha }}
@@ -76,11 +76,12 @@ jobs:
             exit 1
           fi
 
-      - name: Validate and expose the immutable release lock
+      - name: Validate and expose the production release lock
         id: lock
         run: |
           python3 source/release/validate_lock.py source/release/lock.json
           python3 central/scripts/tars/tars_lock_outputs.py source/release/lock.json \
+            --workflow central/.github/workflows/tars-ci.yml \
             --workflow central/.github/workflows/tars-deploy.yml \
             --github-output "$GITHUB_OUTPUT"
 
@@ -102,24 +103,30 @@ jobs:
             --token-file "$token_file" \
             --output-directory "$RUNNER_TEMP/tada-bundle"
 
-      - name: Authenticate to Infisical with GitHub OIDC and fetch only the DOCR write token
+      - name: Fetch deployment secrets from Infisical
+        uses: Infisical/secrets-action@v1.0.16
+        with:
+          method: oidc
+          identity-id: 2d56cdc0-25e8-4afb-9ccc-c8885e98b5ae
+          oidc-audience: https://github.com/Lascade-Co
+          project-slug: tars
+          env-slug: prod
+          domain: https://secrets.lascade.com
+          secret-path: /deployment
+          include-imports: "false"
+          recursive: "false"
+          export-type: env
+
+      - name: Capture the DOCR write credential and clear runner exports
         run: |
           umask 077
-          mkdir -p "$RUNNER_TEMP/tars-build-secrets"
-          python3 central/scripts/tars/tars_infisical.py login \
-            --token-file "$RUNNER_TEMP/tars-build-secrets/infisical.token"
-          python3 central/scripts/tars/tars_infisical.py get \
-            --token-file "$RUNNER_TEMP/tars-build-secrets/infisical.token" \
-            --secret-path /deployment \
-            --secret-name DOCR_WRITE_TOKEN \
-            --output-file "$RUNNER_TEMP/tars-build-secrets/docr.token"
-          python3 central/scripts/tars/tars_infisical.py docker-config \
-            --token-file "$RUNNER_TEMP/tars-build-secrets/docr.token" \
-            --output-directory "$RUNNER_TEMP/tars-docker-config"
+          python3 central/scripts/tars/tars_runner_secrets.py capture-build \
+            --output-directory "$RUNNER_TEMP/tars-docker-config" \
+            --github-env "$GITHUB_ENV"
           echo "DOCKER_CONFIG=$RUNNER_TEMP/tars-docker-config" >> "$GITHUB_ENV"
 
       - name: Configure Buildx
-        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
+        uses: docker/setup-buildx-action@v4.2.0
         with:
           version: v${{ steps.lock.outputs.docker_buildx_version }}
 
@@ -129,7 +136,7 @@ jobs:
 
       - name: Build and push API
         id: api
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        uses: docker/build-push-action@v7.3.0
         with:
           context: source
           file: source/Dockerfile.api
@@ -147,7 +154,7 @@ jobs:
 
       - name: Build and push worker with the locked private TADA bundle
         id: worker
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        uses: docker/build-push-action@v7.3.0
         with:
           context: source
           file: source/Dockerfile.worker
@@ -171,7 +178,7 @@ jobs:
 
       - name: Build and push Garage wrapper
         id: garage
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        uses: docker/build-push-action@v7.3.0
         with:
           context: source
           file: source/deploy/garage/Dockerfile
@@ -186,7 +193,7 @@ jobs:
 
       - name: Build and push OpenTelemetry wrapper
         id: otel
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        uses: docker/build-push-action@v7.3.0
         with:
           context: source
           file: source/deploy/otel/Dockerfile
@@ -222,7 +229,7 @@ jobs:
           echo "artifact_name=$artifact_name" >> "$GITHUB_OUTPUT"
 
       - name: Upload the immutable deployment interface
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@v7.0.1
         with:
           name: ${{ steps.bundle.outputs.artifact_name }}
           path: ${{ runner.temp }}/tars-release-artifact/
@@ -235,7 +242,7 @@ jobs:
         if: always()
         run: |
           docker logout registry.digitalocean.com >/dev/null 2>&1 || true
-          rm -rf "${DOCKER_CONFIG:-$RUNNER_TEMP/tars-docker-config}" "$RUNNER_TEMP/tars-build-secrets"
+          rm -rf "${DOCKER_CONFIG:-$RUNNER_TEMP/tars-docker-config}"
 
   deploy:
     name: Deploy TARS production
@@ -252,7 +259,7 @@ jobs:
       cancel-in-progress: false
     steps:
       - name: Check out central delivery code
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        uses: actions/checkout@v7.0.0
         with:
           ref: ${{ github.sha }}
           path: central
@@ -272,7 +279,7 @@ jobs:
 
       - name: Mint a fresh read-only TARS GitHub App token
         id: app-token
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3
+        uses: actions/create-github-app-token@v3.2.0
         with:
           client-id: ${{ secrets.CI_APP_CLIENT_ID }}
           private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
@@ -293,7 +300,7 @@ jobs:
           fi
 
       - name: Download the exact build output
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@v8.0.1
         with:
           name: ${{ needs.build.outputs.artifact_name }}
           path: ${{ runner.temp }}/tars-release-artifact
@@ -309,38 +316,45 @@ jobs:
           test -x "$verify/deploy/tars-deploy"
           test -s "$RUNNER_TEMP/tars-release-artifact/release.env"
 
-      - name: Authenticate with a fresh OIDC token and fetch exact connection secrets
+      - name: Fetch deployment secrets from Infisical
+        uses: Infisical/secrets-action@v1.0.16
+        with:
+          method: oidc
+          identity-id: 2d56cdc0-25e8-4afb-9ccc-c8885e98b5ae
+          oidc-audience: https://github.com/Lascade-Co
+          project-slug: tars
+          env-slug: prod
+          domain: https://secrets.lascade.com
+          secret-path: /deployment
+          include-imports: "false"
+          recursive: "false"
+          export-type: env
+
+      - name: Fetch runtime secrets from Infisical
+        uses: Infisical/secrets-action@v1.0.16
+        with:
+          method: oidc
+          identity-id: 2d56cdc0-25e8-4afb-9ccc-c8885e98b5ae
+          oidc-audience: https://github.com/Lascade-Co
+          project-slug: tars
+          env-slug: prod
+          domain: https://secrets.lascade.com
+          secret-path: /runtime
+          include-imports: "false"
+          recursive: "false"
+          export-type: env
+
+      - name: Validate and capture delegated deployment secrets
+        id: connection
         run: |
           umask 077
-          secrets_dir="$RUNNER_TEMP/tars-deploy-secrets"
-          mkdir -p "$secrets_dir"
-          python3 central/scripts/tars/tars_infisical.py login \
-            --token-file "$secrets_dir/infisical.token"
-          python3 central/scripts/tars/tars_infisical.py get \
-            --token-file "$secrets_dir/infisical.token" --secret-path /deployment \
-            --secret-name DEPLOY_SSH_HOST --output-file "$secrets_dir/DEPLOY_SSH_HOST"
-          python3 central/scripts/tars/tars_infisical.py get \
-            --token-file "$secrets_dir/infisical.token" --secret-path /deployment \
-            --secret-name DEPLOY_SSH_USER --output-file "$secrets_dir/DEPLOY_SSH_USER"
-          python3 central/scripts/tars/tars_infisical.py get \
-            --token-file "$secrets_dir/infisical.token" --secret-path /deployment \
-            --secret-name DEPLOY_SSH_PRIVATE_KEY --output-file "$secrets_dir/DEPLOY_SSH_PRIVATE_KEY"
-          python3 central/scripts/tars/tars_infisical.py get \
-            --token-file "$secrets_dir/infisical.token" --secret-path /deployment \
-            --secret-name DEPLOY_SSH_KNOWN_HOSTS --output-file "$secrets_dir/DEPLOY_SSH_KNOWN_HOSTS"
-          python3 central/scripts/tars/tars_infisical.py get \
-            --token-file "$secrets_dir/infisical.token" --secret-path /deployment \
-            --secret-name WIREGUARD_CONFIG --output-file "$secrets_dir/WIREGUARD_CONFIG"
-
-      - name: Validate private connection material
-        id: connection
-        run: >-
-          python3 central/scripts/tars/tars_infisical.py deploy-outputs
-          --secrets-directory "$RUNNER_TEMP/tars-deploy-secrets"
-          --github-output "$GITHUB_OUTPUT"
+          python3 central/scripts/tars/tars_runner_secrets.py capture-deploy \
+            --output-directory "$RUNNER_TEMP/tars-deploy-secrets" \
+            --github-output "$GITHUB_OUTPUT" \
+            --github-env "$GITHUB_ENV"
 
       - name: Connect the runner to the TARS private route
-        uses: rohittp0/wiregaurd@e6a265873578a2ccbc5ffa73657ce0991b36e650 # v3
+        uses: rohittp0/wiregaurd@v3
         with:
           config: ${{ steps.connection.outputs.wireguard_config }}
           ips: ${{ steps.connection.outputs.host }}
@@ -405,7 +419,7 @@ jobs:
           fi
           echo "sha=$main_sha" >> "$GITHUB_OUTPUT"
 
-      - name: Pipe the short-lived Infisical token to the deep deployment interface
+      - name: Pass delegated runtime secrets to the deployment interface
         env:
           SSH_HOST: ${{ steps.connection.outputs.host }}
           SSH_USER: ${{ steps.connection.outputs.user }}
@@ -423,14 +437,35 @@ jobs:
             -o "UserKnownHostsFile=$HOME/.ssh/tars_known_hosts"
           )
           target="$SSH_USER@$SSH_HOST"
-          bundle="/srv/tars/incoming/$RELEASE_SHA"
-          remote_command="/bin/sh -c 'IFS= read -r INFISICAL_TOKEN || exit 64; export INFISICAL_TOKEN; if docker service inspect tars_postgres >/dev/null 2>&1 || docker service inspect tars_garage >/dev/null 2>&1; then docker service inspect tars_postgres tars_garage >/dev/null 2>&1 || { echo partial-stateful-bootstrap-requires-operator-repair >&2; exit 1; }; else $bundle/deploy/tars-deploy stateful --release-env $bundle/.release.env --release-sha $RELEASE_SHA --current-main-sha $CURRENT_MAIN_SHA --bundle-dir $bundle --confirm stateful:$RELEASE_SHA || exit; fi; exec $bundle/deploy/tars-deploy deploy --release-env $bundle/.release.env --release-sha $RELEASE_SHA --current-main-sha $CURRENT_MAIN_SHA --bundle-dir $bundle'"
-          # The validated SHA-only command is intentionally assembled locally.
-          # shellcheck disable=SC2029
           {
-            cat "$RUNNER_TEMP/tars-deploy-secrets/infisical.token"
-            printf '\n'
-          } | ssh "${ssh_options[@]}" "$target" "$remote_command"
+            cat "$RUNNER_TEMP/tars-deploy-secrets/remote-secrets.sh"
+            cat <<'REMOTE'
+          set -euo pipefail
+          release_sha=$1
+          current_main_sha=$2
+          bundle="/srv/tars/incoming/$release_sha"
+          if docker service inspect tars_postgres >/dev/null 2>&1 || \
+             docker service inspect tars_garage >/dev/null 2>&1; then
+            docker service inspect tars_postgres tars_garage >/dev/null 2>&1 || {
+              echo partial-stateful-bootstrap-requires-operator-repair >&2
+              exit 1
+            }
+          else
+            "$bundle/deploy/tars-deploy" stateful \
+              --release-env "$bundle/.release.env" \
+              --release-sha "$release_sha" \
+              --current-main-sha "$current_main_sha" \
+              --bundle-dir "$bundle" \
+              --confirm "stateful:$release_sha" || exit
+          fi
+          exec "$bundle/deploy/tars-deploy" deploy \
+            --release-env "$bundle/.release.env" \
+            --release-sha "$release_sha" \
+            --current-main-sha "$current_main_sha" \
+            --bundle-dir "$bundle"
+          REMOTE
+          } | ssh "${ssh_options[@]}" "$target" /bin/bash -s -- \
+            "$RELEASE_SHA" "$CURRENT_MAIN_SHA"
 
       - name: Remove runner-side deployment credentials
         if: always()

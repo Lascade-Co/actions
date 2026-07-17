@@ -26,7 +26,7 @@ scripts/
   catchup/     catchup_collect.py, catchup_discover.py, catchup_render_email.py,
                catchup_repo.py, catchup_report.py
   crashlytics/ crashlytics_blame.py, crashlytics_report.py
-  tars/        tars_infisical.py, tars_lock_outputs.py, tars_payload.py,
+  tars/        tars_runner_secrets.py, tars_lock_outputs.py, tars_payload.py,
                tars_tada_bundle.py, tars_worker_render_gate.py,
                test_tars_delivery.py
   tada-wheel/  build_tada_wheel.sh, verify_tada_wheel.py, verify_wheel_install.sh,
@@ -42,7 +42,7 @@ form one pipeline → `tada-wheel/`.
 ## Correctness constraints (must not break)
 
 1. **All six `tars/` files stay co-located.** `test_tars_delivery.py` does
-   top-level `from tars_infisical import …`, `from tars_lock_outputs import …`,
+   top-level `from tars_runner_secrets import …`, `from tars_lock_outputs import …`,
    `from tars_payload import …`, `from tars_tada_bundle import …`,
    `from tars_worker_render_gate import …`. Relative imports only resolve if the
    modules remain siblings. The grouping keeps them together.
@@ -56,7 +56,7 @@ form one pipeline → `tada-wheel/`.
    `scripts/tars/` makes it two levels deep, so the ROOT must become
    `.parent.parent.parent`. This is the only required content edit. Its workflow
    assertions match script **basenames** (`assertIn("tars_tada_bundle.py")`,
-   `count("tars_infisical.py login") == 2`), so they stay green after the paths
+   `count("tars_runner_secrets.py capture-deploy") == 1`), so they stay green after the paths
    gain a `tars/` prefix. Verified: `catchup_collect.py` and `lint_android.py`
    resolve paths from arguments/`os.getcwd()`, not `__file__`, and no bash script
    resolves its own dir — so nothing else breaks on relocation.
@@ -90,7 +90,7 @@ forms.
 | tars-deploy.yml | 44, 264 | tars_payload.py → `tars/` |
 | tars-deploy.yml | 83, 213 | tars_lock_outputs.py → `tars/` |
 | tars-deploy.yml | 98 | tars_tada_bundle.py → `tars/` |
-| tars-deploy.yml | 109, 111, 116, 317, 319, 322, 325, 328, 331, 338 | tars_infisical.py → `tars/` |
+| tars-deploy.yml | build and deploy secret-capture steps | tars_runner_secrets.py → `tars/` |
 
 ### Scripts with no workflow references (moved only, no usage to update)
 

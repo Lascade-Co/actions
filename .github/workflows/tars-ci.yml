@@ -37,7 +37,7 @@ jobs:
       TARS_TEST_DATABASE_URL: postgres://tars:tars-test@127.0.0.1:5432/tars?sslmode=disable
     steps:
       - name: Check out central workflow code
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        uses: actions/checkout@v7.0.0
         with:
           ref: ${{ github.sha }}
           path: central
@@ -51,7 +51,7 @@ jobs:
 
       - name: Mint a read-only TARS token
         id: read-token
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3
+        uses: actions/create-github-app-token@v3.2.0
         with:
           client-id: ${{ secrets.CI_APP_CLIENT_ID }}
           private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
@@ -60,7 +60,7 @@ jobs:
           permission-contents: read
 
       - name: Check out the exact pull request head with full base history
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        uses: actions/checkout@v7.0.0
         with:
           repository: ${{ steps.payload.outputs.repo }}
           ref: ${{ steps.payload.outputs.head_sha }}
@@ -79,7 +79,7 @@ jobs:
             merge --no-commit --no-ff origin/main
 
       - name: Install Go
-        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        uses: actions/setup-go@v6.4.0
         with:
           go-version-file: source/go.mod
           cache-dependency-path: source/go.sum
@@ -101,7 +101,7 @@ jobs:
       contents: read
     steps:
       - name: Check out central workflow code
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        uses: actions/checkout@v7.0.0
         with:
           ref: ${{ github.sha }}
           path: central
@@ -115,7 +115,7 @@ jobs:
 
       - name: Mint a status-only TARS token
         id: status-token
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3
+        uses: actions/create-github-app-token@v3.2.0
         with:
           client-id: ${{ secrets.CI_APP_CLIENT_ID }}
           private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}

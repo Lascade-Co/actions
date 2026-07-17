@@ -1,5 +1,4 @@
 import base64
-import io
 import json
 import os
 import stat
@@ -9,25 +8,22 @@ import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
-from urllib.parse import parse_qs, urlparse
-
-from tars_infisical import (
-    AUDIENCE,
-    IDENTITY_ID,
-    PROJECT_ID,
-    append_deploy_outputs,
-    get_secret,
-    login_with_oidc,
-    write_docker_config,
-    write_private,
-)
 from tars_lock_outputs import (
     release_values,
-    validate_action_pins,
+    validate_action_versions,
     values,
     write_release_environment,
 )
 from tars_payload import load_payload
+from tars_runner_secrets import (
+    BUILD_KEYS,
+    DEPLOY_KEYS,
+    DEPLOYMENT_KEYS,
+    RUNTIME_KEYS,
+    RunnerSecretError,
+    capture_build,
+    capture_deploy,
+)
 from tars_tada_bundle import BundleFetchError, fetch, validate_bundle_shape, validate_inputs
 from tars_worker_render_gate import (
     ALLOWED_HOSTS,
@@ -44,24 +40,6 @@ from tars_worker_render_gate import (
     validate_schema_v2_event,
     validate_worker_labels,
 )
-
-
-class FakeResponse(io.BytesIO):
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *_args):
-        self.close()
-
-
-class FakeOpener:
-    def __init__(self, responses: list[dict]) -> None:
-        self.responses = list(responses)
-        self.requests = []
-
-    def __call__(self, request, *, timeout):
-        self.requests.append((request, timeout))
-        return FakeResponse(json.dumps(self.responses.pop(0)).encode("utf-8"))
 
 
 class PayloadTest(unittest.TestCase):
@@ -251,8 +229,7 @@ class LockOutputTest(unittest.TestCase):
                 {"api": "latest", "worker": "latest", "garage": "latest", "otel": "latest"},
             )
 
-    def test_central_action_pins_must_match_source_release_lock(self) -> None:
-        locked_commit = "a" * 40
+    def test_central_action_versions_must_match_source_release_lock(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             lock = root / "lock.json"
@@ -263,7 +240,7 @@ class LockOutputTest(unittest.TestCase):
                         "actions": {
                             "checkout": {
                                 "repository": "actions/checkout",
-                                "commit": locked_commit,
+                                "version": "v7.0.0",
                             }
                         }
                     }
@@ -271,16 +248,16 @@ class LockOutputTest(unittest.TestCase):
                 encoding="utf-8",
             )
             workflow.write_text(
-                f"steps:\n  - uses: actions/checkout@{locked_commit}\n",
+                "steps:\n  - uses: actions/checkout@v7.0.0\n",
                 encoding="utf-8",
             )
-            validate_action_pins(lock, [workflow])
+            validate_action_versions(lock, [workflow])
             workflow.write_text(
                 "steps:\n  - uses: actions/checkout@v6\n",
                 encoding="utf-8",
             )
-            with self.assertRaisesRegex(ValueError, "does not match locked commit"):
-                validate_action_pins(lock, [workflow])
+            with self.assertRaisesRegex(ValueError, "does not match locked version"):
+                validate_action_versions(lock, [workflow])
 
 
 class TrustedBundleFetchTest(unittest.TestCase):
@@ -358,75 +335,141 @@ class TrustedBundleFetchTest(unittest.TestCase):
             )
 
 
-class InfisicalTest(unittest.TestCase):
-    def test_oidc_login_uses_github_audience_and_official_endpoint(self) -> None:
-        opener = FakeOpener([{"value": "github-jwt"}, {"accessToken": "infisical-token"}])
-        token = login_with_oidc(
-            {
-                "ACTIONS_ID_TOKEN_REQUEST_URL": "https://oidc.actions.example/token?api-version=2.0",
-                "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "request-token",
-            },
-            opener=opener,
-        )
-        self.assertEqual(token, "infisical-token")
-        oidc_request = opener.requests[0][0]
-        self.assertEqual(parse_qs(urlparse(oidc_request.full_url).query)["audience"], [AUDIENCE])
-        self.assertEqual(oidc_request.get_header("Authorization"), "Bearer request-token")
-        login_request = opener.requests[1][0]
-        self.assertEqual(
-            login_request.full_url,
-            "https://secrets.lascade.com/api/v1/auth/oidc-auth/login",
-        )
-        self.assertEqual(
-            json.loads(login_request.data),
-            {"identityId": IDENTITY_ID, "jwt": "github-jwt"},
-        )
+class RunnerSecretsTest(unittest.TestCase):
+    def environment(self) -> dict[str, str]:
+        wireguard = base64.b64encode(
+            b"[Interface]\nPrivateKey = wireguard-secret\n"
+        ).decode()
+        return {
+            "DOCR_READ_USERNAME": "registry-reader",
+            "DOCR_READ_PASSWORD": "registry password with spaces",
+            "DOCR_WRITE_TOKEN": "write-token",
+            "DEPLOY_SSH_HOST": "10.20.30.40",
+            "DEPLOY_SSH_USER": "ubuntu",
+            "DEPLOY_SSH_PRIVATE_KEY": "-----BEGIN OPENSSH PRIVATE KEY-----\nkey\n",
+            "DEPLOY_SSH_KNOWN_HOSTS": "10.20.30.40 ssh-ed25519 key\n",
+            "WIREGUARD_CONFIG": wireguard,
+            "POSTGRES_PASSWORD": "a" * 64,
+            "TARS_JWT_HS256_SECRET": "issuer 'secret' with spaces",
+            "GARAGE_RPC_SECRET": "b" * 64,
+            "GARAGE_ADMIN_TOKEN": "c" * 64,
+            "GARAGE_METRICS_TOKEN": "d" * 64,
+            "GARAGE_ACCESS_KEY_ID": "GK" + "e" * 32,
+            "GARAGE_SECRET_ACCESS_KEY": "f" * 64,
+            "ONEUPTIME_TOKEN": "oneuptime-token",
+        }
 
-    def test_get_secret_uses_exact_v4_read_not_list_or_export(self) -> None:
-        opener = FakeOpener(
-            [{"secret": {"secretKey": "DOCR_WRITE_TOKEN", "secretValue": "write-token"}}]
-        )
-        value = get_secret(
-            "access-token",
-            "/deployment",
-            "DOCR_WRITE_TOKEN",
-            opener=opener,
-        )
-        self.assertEqual(value, "write-token")
-        request = opener.requests[0][0]
-        parsed = urlparse(request.full_url)
-        self.assertEqual(parsed.path, "/api/v4/secrets/DOCR_WRITE_TOKEN")
-        query = parse_qs(parsed.query)
-        self.assertEqual(query["projectId"], [PROJECT_ID])
-        self.assertEqual(query["environment"], ["prod"])
-        self.assertEqual(query["secretPath"], ["/deployment"])
-        self.assertEqual(query["expandSecretReferences"], ["false"])
-        self.assertEqual(request.get_header("Authorization"), "Bearer access-token")
-
-    def test_docker_config_keeps_token_out_of_process_arguments(self) -> None:
+    def test_build_capture_writes_private_docker_config_and_clears_exports(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            token_file = root / "token"
-            write_private(token_file, "secret-token")
-            config_path = write_docker_config(token_file, root / "docker")
+            github_env = root / "github-env"
+            capture_build(self.environment(), root / "docker", github_env)
+            config_path = root / "docker" / "config.json"
             config = json.loads(config_path.read_text(encoding="utf-8"))
             encoded = config["auths"]["registry.digitalocean.com"]["auth"]
-            self.assertEqual(base64.b64decode(encoded), b"secret-token:secret-token")
+            self.assertEqual(base64.b64decode(encoded), b"write-token:write-token")
             self.assertEqual(config_path.stat().st_mode & 0o777, 0o600)
+            cleared = github_env.read_text(encoding="utf-8")
+            self.assertEqual(
+                cleared,
+                "".join(f"{name}=\n" for name in DEPLOYMENT_KEYS),
+            )
 
-    def test_deploy_outputs_validate_host_user_and_wireguard(self) -> None:
+    def test_build_capture_requires_only_the_write_credential(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            write_private(root / "DEPLOY_SSH_HOST", "10.20.30.40")
-            write_private(root / "DEPLOY_SSH_USER", "ubuntu")
-            wireguard = base64.b64encode(b"[Interface]\nPrivateKey = secret\n").decode()
-            write_private(root / "WIREGUARD_CONFIG", wireguard)
-            output = root / "github-output"
-            append_deploy_outputs(root, output)
-            rendered = output.read_text(encoding="utf-8")
+            capture_build(
+                {"DOCR_WRITE_TOKEN": "write-token"},
+                root / "docker",
+                root / "github-env",
+            )
+            self.assertEqual(BUILD_KEYS, ("DOCR_WRITE_TOKEN",))
+
+    def test_build_capture_clears_known_exports_on_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            github_env = root / "github-env"
+            with self.assertRaisesRegex(RunnerSecretError, "DOCR_WRITE_TOKEN"):
+                capture_build({}, root / "docker", github_env)
+            self.assertEqual(
+                github_env.read_text(encoding="utf-8"),
+                "".join(f"{name}=\n" for name in DEPLOYMENT_KEYS),
+            )
+
+    def test_deploy_capture_validates_and_shell_quotes_delegated_values(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            output_directory = root / "captured"
+            github_output = root / "github-output"
+            github_env = root / "github-env"
+            environment = self.environment()
+            capture_deploy(
+                environment, output_directory, github_output, github_env
+            )
+            for name in (
+                "DEPLOY_SSH_PRIVATE_KEY",
+                "DEPLOY_SSH_KNOWN_HOSTS",
+                "remote-secrets.sh",
+            ):
+                self.assertEqual(
+                    (output_directory / name).stat().st_mode & 0o777, 0o600
+                )
+            shell = subprocess.run(
+                [
+                    "/bin/bash",
+                    "-c",
+                    'source "$1"; printf "%s\\0%s\\0%s" "$TARS_SECRET_SOURCE" '
+                    '"$DOCR_READ_PASSWORD" "$TARS_JWT_HS256_SECRET"',
+                    "capture-test",
+                    str(output_directory / "remote-secrets.sh"),
+                ],
+                check=True,
+                capture_output=True,
+            )
+            self.assertEqual(
+                shell.stdout,
+                b"environment\0registry password with spaces\0issuer 'secret' with spaces",
+            )
+            rendered = github_output.read_text(encoding="utf-8")
             self.assertIn("host<<", rendered)
             self.assertIn("10.20.30.40", rendered)
             self.assertIn("wireguard_config<<", rendered)
+            self.assertEqual(
+                github_env.read_text(encoding="utf-8"),
+                "".join(
+                    f"{name}=\n" for name in (*DEPLOYMENT_KEYS, *RUNTIME_KEYS)
+                ),
+            )
+
+    def test_deploy_capture_rejects_invalid_connection_before_writing(self) -> None:
+        environment = self.environment()
+        environment["DEPLOY_SSH_HOST"] = "control.example.com"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with self.assertRaisesRegex(RunnerSecretError, "literal IPv4"):
+                capture_deploy(
+                    environment,
+                    root / "captured",
+                    root / "github-output",
+                    root / "github-env",
+                )
+            self.assertEqual(
+                (root / "github-env").read_text(encoding="utf-8"),
+                "".join(f"{name}=\n" for name in (*DEPLOYMENT_KEYS, *RUNTIME_KEYS)),
+            )
+
+    def test_deploy_capture_does_not_require_registry_write_credential(self) -> None:
+        environment = self.environment()
+        del environment["DOCR_WRITE_TOKEN"]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            capture_deploy(
+                environment,
+                root / "captured",
+                root / "github-output",
+                root / "github-env",
+            )
+        self.assertNotIn("DOCR_WRITE_TOKEN", DEPLOY_KEYS)
 
 
 class WorkerRenderGateTest(unittest.TestCase):
@@ -726,25 +769,23 @@ class WorkflowContractTest(unittest.TestCase):
         self.assertIn("timeout-minutes: 120", workflow)
         self.assertIn(".tars-release-sha", workflow)
         self.assertIn("DEPLOY_SSH_KNOWN_HOSTS", workflow)
-        self.assertEqual(workflow.count("tars_infisical.py login"), 2)
-        self.assertEqual(workflow.count("--secret-name DOCR_WRITE_TOKEN"), 1)
-        self.assertEqual(
-            re.findall(r"--secret-name ([A-Z0-9_]+)", workflow),
-            [
-                "DOCR_WRITE_TOKEN",
-                "DEPLOY_SSH_HOST",
-                "DEPLOY_SSH_USER",
-                "DEPLOY_SSH_PRIVATE_KEY",
-                "DEPLOY_SSH_KNOWN_HOSTS",
-                "WIREGUARD_CONFIG",
-            ],
+        self.assertEqual(workflow.count("Infisical/secrets-action@v1.0.16"), 3)
+        self.assertEqual(workflow.count("oidc-audience: https://github.com/Lascade-Co"), 3)
+        self.assertEqual(workflow.count('include-imports: "false"'), 3)
+        self.assertEqual(workflow.count('recursive: "false"'), 3)
+        self.assertEqual(workflow.count("secret-path: /deployment"), 2)
+        self.assertEqual(workflow.count("secret-path: /runtime"), 1)
+        self.assertEqual(workflow.count("tars_runner_secrets.py capture-build"), 1)
+        self.assertEqual(workflow.count("tars_runner_secrets.py capture-deploy"), 1)
+        self.assertNotIn("tars_infisical.py", workflow)
+        self.assertNotIn("INFISICAL_TOKEN", workflow)
+        self.assertIn(
+            'cat "$RUNNER_TEMP/tars-deploy-secrets/remote-secrets.sh"', workflow
         )
-        self.assertIn("cat \"$RUNNER_TEMP/tars-deploy-secrets/infisical.token\"", workflow)
-        self.assertNotIn("infisical export", workflow)
-        self.assertNotIn("Infisical/secrets-action", workflow)
         self.assertNotIn("ssh-keyscan", workflow)
         self.assertNotIn("sudo -n", workflow)
         self.assertNotIn(":latest", workflow)
+        self.assertNotIn("@latest", workflow)
         self.assertEqual(workflow.count("ServerAliveInterval=15"), 2)
         self.assertEqual(workflow.count("ServerAliveCountMax=3"), 2)
         self.assertEqual(workflow.count("TCPKeepAlive=yes"), 2)
@@ -765,29 +806,28 @@ class WorkflowContractTest(unittest.TestCase):
         self.assertNotIn("packages: read", deploy)
         self.assertLess(
             deploy.index("Confirm the final current main revision"),
-            deploy.index("Pipe the short-lived Infisical token"),
+            deploy.index("Pass delegated runtime secrets"),
         )
-        self.assertIn("deploy/tars-deploy deploy", deploy)
+        self.assertIn('"$bundle/deploy/tars-deploy" deploy', deploy)
         self.assertIn("docker service inspect tars_postgres tars_garage", deploy)
-        self.assertIn("deploy/tars-deploy stateful", deploy)
+        self.assertIn('"$bundle/deploy/tars-deploy" stateful', deploy)
         self.assertIn("partial-stateful-bootstrap-requires-operator-repair", deploy)
 
-    def test_delivery_workflow_uses_locked_transfer_and_network_actions(self) -> None:
+    def test_delivery_workflow_uses_latest_reviewed_action_versions(self) -> None:
         workflow = (self.ROOT / ".github/workflows/tars-deploy.yml").read_text(
             encoding="utf-8"
         )
-        self.assertIn(
-            "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
-            workflow,
-        )
-        self.assertIn(
-            "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c",
-            workflow,
-        )
-        self.assertIn(
-            "rohittp0/wiregaurd@e6a265873578a2ccbc5ffa73657ce0991b36e650",
-            workflow,
-        )
+        for reference in (
+            "actions/checkout@v7.0.0",
+            "actions/create-github-app-token@v3.2.0",
+            "Infisical/secrets-action@v1.0.16",
+            "docker/setup-buildx-action@v4.2.0",
+            "docker/build-push-action@v7.3.0",
+            "actions/upload-artifact@v7.0.1",
+            "actions/download-artifact@v8.0.1",
+            "rohittp0/wiregaurd@v3",
+        ):
+            self.assertIn(reference, workflow)
 
     def test_ci_runs_only_core_collaboration_checks(self) -> None:
         workflow = (self.ROOT / ".github/workflows/tars-ci.yml").read_text(
@@ -850,14 +890,16 @@ class WorkflowContractTest(unittest.TestCase):
         )
         self.assertEqual(workflow.count("ref: ${{ github.sha }}"), 2)
 
-    def test_tars_workflows_pin_every_action_to_a_commit(self) -> None:
-        import re
-
-        for name in ("tars-ci.yml", "tars-deploy.yml"):
-            workflow = (self.ROOT / ".github/workflows" / name).read_text(encoding="utf-8")
-            revisions = re.findall(r"uses:\s*[^@\s]+@([^\s#]+)", workflow)
-            self.assertTrue(revisions)
-            self.assertTrue(all(re.fullmatch(r"[0-9a-f]{40}", revision) for revision in revisions))
+    def test_tars_ci_uses_latest_reviewed_action_versions(self) -> None:
+        workflow = (self.ROOT / ".github/workflows/tars-ci.yml").read_text(
+            encoding="utf-8"
+        )
+        for reference in (
+            "actions/checkout@v7.0.0",
+            "actions/create-github-app-token@v3.2.0",
+            "actions/setup-go@v6.4.0",
+        ):
+            self.assertIn(reference, workflow)
 
 
 if __name__ == "__main__":

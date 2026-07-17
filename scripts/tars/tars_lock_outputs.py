@@ -38,6 +38,7 @@ REGISTRY = re.compile(
 )
 VERSION = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?\Z")
 REPOSITORY = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\Z")
+ACTION_VERSION = re.compile(r"v[0-9]+(?:\.[0-9]+){0,2}(?:[-+][0-9A-Za-z.-]+)?\Z")
 WORKFLOW_ACTION = re.compile(r"^\s*-?\s*uses:\s*([^@\s]+)@([^\s#]+)", re.MULTILINE)
 RELEASE_DIGEST_KEYS = ("api", "worker", "garage", "otel")
 RELEASE_IMAGE_KEYS = {
@@ -48,36 +49,36 @@ RELEASE_IMAGE_KEYS = {
 }
 
 
-def validate_action_pins(lock_path: Path, workflow_paths: list[Path]) -> None:
-    """Require central workflow actions to match the source-owned release lock."""
+def validate_action_versions(lock_path: Path, workflow_paths: list[Path]) -> None:
+    """Require central workflow Action tags to match the source-owned lock."""
 
     lock = json.loads(lock_path.read_text(encoding="utf-8"))
     expected: dict[str, str] = {}
     for action in lock["actions"].values():
         repository = action["repository"]
-        commit = action["commit"]
+        version = action["version"]
         if (
             not isinstance(repository, str)
             or REPOSITORY.fullmatch(repository) is None
-            or not isinstance(commit, str)
-            or SHA.fullmatch(commit) is None
+            or not isinstance(version, str)
+            or ACTION_VERSION.fullmatch(version) is None
         ):
-            raise ValueError("release lock contains an invalid action repository or commit")
-        expected[repository] = commit
+            raise ValueError("release lock contains an invalid action repository or version")
+        expected[repository] = version
     for workflow_path in workflow_paths:
         workflow = workflow_path.read_text(encoding="utf-8")
         for repository, revision in WORKFLOW_ACTION.findall(workflow):
             if repository.startswith("./"):
                 continue
-            locked_revision = expected.get(repository)
-            if locked_revision is None:
+            locked_version = expected.get(repository)
+            if locked_version is None:
                 raise ValueError(
                     f"{workflow_path}: action {repository} is absent from the release lock"
                 )
-            if revision != locked_revision:
+            if revision != locked_version:
                 raise ValueError(
                     f"{workflow_path}: {repository}@{revision} does not match "
-                    f"locked commit {locked_revision}"
+                    f"locked version {locked_version}"
                 )
 
 
@@ -201,7 +202,7 @@ def main() -> None:
     if any(value is not None for value in digest_values.values()):
         parser.error("--*-digest arguments require --release-env")
 
-    validate_action_pins(args.lock, args.workflow)
+    validate_action_versions(args.lock, args.workflow)
 
     rendered = "".join(f"{key}={value}\n" for key, value in values(args.lock).items())
     if args.github_output:
