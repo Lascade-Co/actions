@@ -770,7 +770,14 @@ class WorkflowContractTest(unittest.TestCase):
         self.assertIn(".tars-release-sha", workflow)
         self.assertIn("DEPLOY_SSH_KNOWN_HOSTS", workflow)
         self.assertEqual(workflow.count("Infisical/secrets-action@v1.0.16"), 3)
-        self.assertEqual(workflow.count("oidc-audience: https://github.com/Lascade-Co"), 3)
+        self.assertEqual(workflow.count("method: universal"), 3)
+        self.assertEqual(
+            workflow.count("client-id: ${{ secrets.INFISICAL_CLIENT_ID }}"), 3
+        )
+        self.assertEqual(
+            workflow.count("client-secret: ${{ secrets.INFISICAL_CLIENT_SECRET }}"), 3
+        )
+        self.assertNotIn("oidc-audience:", workflow)
         self.assertEqual(workflow.count('include-imports: "false"'), 3)
         self.assertEqual(workflow.count('recursive: "false"'), 3)
         self.assertEqual(workflow.count("secret-path: /deployment"), 2)
@@ -811,6 +818,11 @@ class WorkflowContractTest(unittest.TestCase):
         self.assertIn('"$bundle/deploy/tars-deploy" deploy', deploy)
         self.assertIn("docker service inspect tars_postgres tars_garage", deploy)
         self.assertIn('"$bundle/deploy/tars-deploy" stateful', deploy)
+        self.assertIn(
+            "stateful_record=/srv/tars/deployment/stateful/current.json", deploy
+        )
+        self.assertIn('if test -f "$stateful_record"', deploy)
+        self.assertIn("resuming-incomplete-stateful-bootstrap", deploy)
         self.assertIn("partial-stateful-bootstrap-requires-operator-repair", deploy)
 
     def test_delivery_workflow_uses_latest_reviewed_action_versions(self) -> None:
