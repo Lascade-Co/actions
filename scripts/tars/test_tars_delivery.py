@@ -815,15 +815,12 @@ class WorkflowContractTest(unittest.TestCase):
             deploy.index("Confirm the final current main revision"),
             deploy.index("Pass delegated runtime secrets"),
         )
-        self.assertIn('"$bundle/deploy/tars-deploy" deploy', deploy)
-        self.assertIn("docker service inspect tars_postgres tars_garage", deploy)
-        self.assertIn('"$bundle/deploy/tars-deploy" stateful', deploy)
-        self.assertIn(
-            "stateful_record=/srv/tars/deployment/stateful/current.json", deploy
-        )
-        self.assertIn('if test -f "$stateful_record"', deploy)
-        self.assertIn("resuming-incomplete-stateful-bootstrap", deploy)
-        self.assertIn("partial-stateful-bootstrap-requires-operator-repair", deploy)
+        bootstrap = deploy.index('"$bundle/deploy/tars-deploy" bootstrap-stateful')
+        application = deploy.index('exec "$bundle/deploy/tars-deploy" deploy')
+        self.assertLess(bootstrap, application)
+        bootstrap_command = deploy[bootstrap:application]
+        self.assertIn('--bundle-dir "$bundle" || exit', bootstrap_command)
+        self.assertNotIn("stateful_record=", deploy)
 
     def test_delivery_workflow_uses_latest_reviewed_action_versions(self) -> None:
         workflow = (self.ROOT / ".github/workflows/tars-deploy.yml").read_text(

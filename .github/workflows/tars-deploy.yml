@@ -444,21 +444,11 @@ jobs:
           release_sha=$1
           current_main_sha=$2
           bundle="/srv/tars/incoming/$release_sha"
-          stateful_record=/srv/tars/deployment/stateful/current.json
-          if test -f "$stateful_record"; then
-            docker service inspect tars_postgres tars_garage >/dev/null 2>&1 || {
-              echo partial-stateful-bootstrap-requires-operator-repair >&2
-              exit 1
-            }
-          else
-            echo resuming-incomplete-stateful-bootstrap
-            "$bundle/deploy/tars-deploy" stateful \
-              --release-env "$bundle/.release.env" \
-              --release-sha "$release_sha" \
-              --current-main-sha "$current_main_sha" \
-              --bundle-dir "$bundle" \
-              --confirm "stateful:$release_sha" || exit
-          fi
+          "$bundle/deploy/tars-deploy" bootstrap-stateful \
+            --release-env "$bundle/.release.env" \
+            --release-sha "$release_sha" \
+            --current-main-sha "$current_main_sha" \
+            --bundle-dir "$bundle" || exit
           exec "$bundle/deploy/tars-deploy" deploy \
             --release-env "$bundle/.release.env" \
             --release-sha "$release_sha" \
