@@ -769,7 +769,7 @@ class WorkflowContractTest(unittest.TestCase):
         self.assertIn("types: [tars-deploy]", workflow)
         self.assertIn("id-token: write", workflow)
         self.assertIn("cancel-in-progress: false", workflow)
-        self.assertIn("caps worker_count at six", workflow)
+        self.assertIn("caps worker_count at three", workflow)
         self.assertIn("timeout-minutes: 360", workflow)
         self.assertIn("timeout-minutes: 120", workflow)
         self.assertIn(".tars-release-sha", workflow)
