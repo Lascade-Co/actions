@@ -251,8 +251,8 @@ jobs:
     permissions:
       contents: read
       id-token: write
-    # V1 caps worker_count at three. Forward + rollback can each drain
-    # 3 * 50m, leaving 50m for bootstrap, migration, smoke, and transport.
+    # V1 caps worker_count at three. Forward + rollback each budget
+    # 3 * 50m + 5m, leaving 50m for bootstrap, migration, smoke, and transport.
     timeout-minutes: 360
     concurrency:
       group: tars-production-deploy
