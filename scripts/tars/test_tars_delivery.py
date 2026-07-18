@@ -217,7 +217,12 @@ class LockOutputTest(unittest.TestCase):
                 "server.arcgisonline.com,firebasestorage.googleapis.com",
                 rendered,
             )
-            self.assertIn("WORKER_STOP_GRACE_PERIOD=41m", rendered)
+            self.assertIn("TADA_ESTIMATE_HD_REALTIME_FACTOR=5.5", rendered)
+            self.assertIn("TADA_ESTIMATE_4K_REALTIME_FACTOR=4.0", rendered)
+            self.assertIn(
+                "TADA_ESTIMATE_MODEL_VERSION=do-s-1vcpu-1gb-hd-v1", rendered
+            )
+            self.assertIn("WORKER_STOP_GRACE_PERIOD=50m", rendered)
             self.assertNotIn("TOKEN", rendered)
 
     def test_rejects_noncanonical_built_digest(self) -> None:
@@ -764,7 +769,7 @@ class WorkflowContractTest(unittest.TestCase):
         self.assertIn("types: [tars-deploy]", workflow)
         self.assertIn("id-token: write", workflow)
         self.assertIn("cancel-in-progress: false", workflow)
-        self.assertIn("caps worker_count at seven", workflow)
+        self.assertIn("caps worker_count at six", workflow)
         self.assertIn("timeout-minutes: 360", workflow)
         self.assertIn("timeout-minutes: 120", workflow)
         self.assertIn(".tars-release-sha", workflow)

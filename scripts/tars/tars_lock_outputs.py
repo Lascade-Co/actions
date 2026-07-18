@@ -155,10 +155,10 @@ def release_values(lock_path: Path, digests: dict[str, str]) -> dict[str, str]:
                 "dashboard.lascade.com,api.maptiler.com,server.arcgisonline.com,"
                 "firebasestorage.googleapis.com"
             ),
-            "TADA_ESTIMATE_HD_REALTIME_FACTOR": "1.0",
+            "TADA_ESTIMATE_HD_REALTIME_FACTOR": "5.5",
             "TADA_ESTIMATE_4K_REALTIME_FACTOR": "4.0",
-            "TADA_ESTIMATE_MODEL_VERSION": "cpu-heuristic-v1",
-            "WORKER_STOP_GRACE_PERIOD": "41m",
+            "TADA_ESTIMATE_MODEL_VERSION": "do-s-1vcpu-1gb-hd-v1",
+            "WORKER_STOP_GRACE_PERIOD": "50m",
         }
     )
     return result

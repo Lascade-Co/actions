@@ -251,8 +251,8 @@ jobs:
     permissions:
       contents: read
       id-token: write
-    # V1 infrastructure caps worker_count at seven. Its serial 7 * 41m drain
-    # plus the 5m deploy margin fits inside this GitHub-hosted runner ceiling.
+    # V1 infrastructure caps worker_count at six. Its serial 6 * 50m drain
+    # leaves migration and smoke margin inside this GitHub-hosted runner ceiling.
     timeout-minutes: 360
     concurrency:
       group: tars-production-deploy
