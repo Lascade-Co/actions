@@ -75,8 +75,27 @@ jobs:
         id: app_meta
         shell: bash
         run: |
-          PACKAGE_NAME=$(grep -oP 'applicationId\s+["'"'"']\K[^"'"'"']+' android/app/build.gradle)
-          APP_NAME=$(grep -oP '^name:\s*\K\S+' pubspec.yaml)
+          if [ -f android/app/build.gradle.kts ]; then
+            GRADLE_FILE=android/app/build.gradle.kts
+          elif [ -f android/app/build.gradle ]; then
+            GRADLE_FILE=android/app/build.gradle
+          else
+            echo "::error::No android/app/build.gradle or build.gradle.kts found"
+            exit 1
+          fi
+          PACKAGE_NAME=$(python3 -c 'import re,sys
+          text=open(sys.argv[1]).read()
+          m=re.search(r"^[ \t]*applicationId(?=[\s=])[^\n]*(?:\n[ \t]*\?:[^\n]*)*", text, re.M)
+          block=m.group(0) if m else ""
+          strings=re.findall(r"[\"\x27]([^\"\x27]+)[\"\x27]", block)
+          pkg=strings[-1] if strings else ""
+          if not re.match(r"^[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z][A-Za-z0-9_]*)+$", pkg): sys.exit("could not extract a valid applicationId from " + sys.argv[1] + " (got: " + repr(pkg) + ")")
+          print(pkg)' "$GRADLE_FILE")
+          APP_NAME=$(grep -oP '^name:\s*\K\S+' pubspec.yaml || true)
+          if [ -z "$APP_NAME" ]; then
+            echo "::error::Could not extract app name from pubspec.yaml"
+            exit 1
+          fi
           echo "package_name=$PACKAGE_NAME" >> "$GITHUB_OUTPUT"
           echo "app_name=$APP_NAME" >> "$GITHUB_OUTPUT"
 
