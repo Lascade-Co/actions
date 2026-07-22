@@ -31,7 +31,12 @@ DEPLOYMENT_KEYS = (
     "DEPLOY_SSH_KNOWN_HOSTS",
     "WIREGUARD_CONFIG",
 )
-BUILD_KEYS = ("DOCR_WRITE_TOKEN",)
+BUILD_KEYS = (
+    "DOCR_WRITE_TOKEN",
+    "DOCR_READ_USERNAME",
+    "DOCR_READ_PASSWORD",
+    "RUNPOD_API_KEY",
+)
 DEPLOY_KEYS = (
     "DOCR_READ_USERNAME",
     "DOCR_READ_PASSWORD",
@@ -50,6 +55,7 @@ RUNTIME_KEYS = (
     "GARAGE_ACCESS_KEY_ID",
     "GARAGE_SECRET_ACCESS_KEY",
     "ONEUPTIME_TOKEN",
+    "RUNPOD_API_KEY",
 )
 REMOTE_KEYS = ("DOCR_READ_USERNAME", "DOCR_READ_PASSWORD", *RUNTIME_KEYS)
 SSH_USER = re.compile(r"[a-z_][a-z0-9_-]{0,31}\Z")
@@ -151,8 +157,10 @@ def capture_build(
     try:
         values = required(environment, BUILD_KEYS)
         write_docker_config(values["DOCR_WRITE_TOKEN"], output_directory)
+        for name in ("DOCR_READ_USERNAME", "DOCR_READ_PASSWORD", "RUNPOD_API_KEY"):
+            write_private(output_directory / name, values[name])
     finally:
-        clear_exports(github_env, DEPLOYMENT_KEYS)
+        clear_exports(github_env, (*DEPLOYMENT_KEYS, *RUNTIME_KEYS))
 
 
 def capture_deploy(
@@ -173,6 +181,7 @@ def capture_deploy(
             output_directory / "DEPLOY_SSH_KNOWN_HOSTS",
             values["DEPLOY_SSH_KNOWN_HOSTS"],
         )
+        write_private(output_directory / "RUNPOD_API_KEY", values["RUNPOD_API_KEY"])
         exports = ["export TARS_SECRET_SOURCE=environment"]
         exports.extend(f"export {name}={shlex.quote(values[name])}" for name in REMOTE_KEYS)
         write_private(output_directory / "remote-secrets.sh", "\n".join(exports) + "\n")
