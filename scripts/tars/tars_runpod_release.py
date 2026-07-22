@@ -114,6 +114,8 @@ class ReleaseAPI(Protocol):
         self, name: str, template_id: str
     ) -> dict[str, Any]: ...
 
+    def configure_endpoint(self, endpoint: Mapping[str, Any]) -> dict[str, Any]: ...
+
     def activate_endpoint(self, endpoint: Mapping[str, Any]) -> dict[str, Any]: ...
 
     def zero_endpoint(self, endpoint: Mapping[str, Any]) -> dict[str, Any]: ...
@@ -461,6 +463,26 @@ class RunpodClient:
     def read_endpoint(self, endpoint_id: str) -> dict[str, Any]:
         return self._get_endpoint(endpoint_id, max_calls=MAX_TRANSIENT_CALLS)
 
+    def configure_endpoint(self, endpoint: Mapping[str, Any]) -> dict[str, Any]:
+        """Reconcile the two deterministic fields absent from GraphQL inventory."""
+
+        endpoint_id = _resource_id(endpoint.get("id"), "endpoint ID")
+        name = _resource_name(endpoint.get("name"), ENDPOINT_NAME, "endpoint name")
+        template_id = _resource_id(endpoint.get("templateId"), "template ID")
+        verify_endpoint(
+            endpoint,
+            expected_name=name,
+            template_id=template_id,
+        )
+        return self._confirmed_endpoint_patch(
+            endpoint_id=endpoint_id,
+            payload={"executionTimeoutMs": ENDPOINT_TIMEOUT_MS, "gpuCount": 1},
+            expected_name=name,
+            template_id=template_id,
+            workers_max=WORKERS_MAX,
+            operation="configure endpoint execution",
+        )
+
     def _confirmed_endpoint_patch(
         self,
         *,
@@ -801,7 +823,7 @@ def verify_endpoint(
     )
 
 
-def verify_endpoint_rest(
+def verify_endpoint_rest_base(
     resource: Mapping[str, Any],
     *,
     endpoint_id: str,
@@ -809,7 +831,7 @@ def verify_endpoint_rest(
     template_id: str,
     workers_max: int = WORKERS_MAX,
 ) -> str:
-    """Verify the fields documented by Runpod's REST endpoint response."""
+    """Verify REST identity and scaling fields that are never self-healed."""
 
     expectations = {
         "id": endpoint_id,
@@ -818,12 +840,35 @@ def verify_endpoint_rest(
         "workersMin": WORKERS_MIN,
         "workersMax": workers_max,
         "computeType": "GPU",
-        "gpuCount": 1,
-        "executionTimeoutMs": ENDPOINT_TIMEOUT_MS,
     }
     for field, expected in expectations.items():
         _expect_equal(resource.get(field), expected, f"REST endpoint {field}")
     return _resource_id(resource.get("id"), "endpoint ID")
+
+
+def verify_endpoint_rest(
+    resource: Mapping[str, Any],
+    *,
+    endpoint_id: str,
+    expected_name: str,
+    template_id: str,
+    workers_max: int = WORKERS_MAX,
+) -> str:
+    """Verify every deterministic field in Runpod's REST endpoint response."""
+
+    verified_id = verify_endpoint_rest_base(
+        resource,
+        endpoint_id=endpoint_id,
+        expected_name=expected_name,
+        template_id=template_id,
+        workers_max=workers_max,
+    )
+    for field, expected in {
+        "gpuCount": 1,
+        "executionTimeoutMs": ENDPOINT_TIMEOUT_MS,
+    }.items():
+        _expect_equal(resource.get(field), expected, f"REST endpoint {field}")
+    return verified_id
 
 
 def _create_or_recover(
@@ -950,8 +995,28 @@ def ensure_release(
         expected_name=endpoint_name,
         template_id=template_id,
     )
+    rest_endpoint = client.read_endpoint(endpoint_id)
+    try:
+        verify_endpoint_rest(
+            rest_endpoint,
+            endpoint_id=endpoint_id,
+            expected_name=endpoint_name,
+            template_id=template_id,
+        )
+    except RunpodReleaseError:
+        # GraphQL does not expose gpuCount or executionTimeoutMs.  If endpoint
+        # creation succeeded but the follow-up REST PATCH did not, exact-name
+        # reuse must reconcile only those two fields.  Any identity, scaling,
+        # or compute drift still fails closed before a mutation is attempted.
+        verify_endpoint_rest_base(
+            rest_endpoint,
+            endpoint_id=endpoint_id,
+            expected_name=endpoint_name,
+            template_id=template_id,
+        )
+        rest_endpoint = client.configure_endpoint(verified_endpoint)
     verify_endpoint_rest(
-        client.read_endpoint(endpoint_id),
+        rest_endpoint,
         endpoint_id=endpoint_id,
         expected_name=endpoint_name,
         template_id=template_id,
@@ -1195,6 +1260,45 @@ def read_previous_endpoint(path: Path) -> str | None:
     return _resource_id(value, "previous endpoint ID")
 
 
+def select_previous_endpoint(
+    *,
+    current_endpoint_id: str | None,
+    target_endpoint_id: str,
+    stored_endpoint_id: str | None,
+) -> tuple[str | None, bool]:
+    """Keep the newest deployed endpoint distinct from the rollout target.
+
+    The current endpoint replaces the stored predecessor immediately before a
+    distinct rollout.  On a retry after that rollout switched production, the
+    current endpoint equals the target, so the stored predecessor is retained.
+    """
+
+    target = _resource_id(target_endpoint_id, "target endpoint ID")
+    current = (
+        _resource_id(current_endpoint_id, "current endpoint ID")
+        if current_endpoint_id
+        else None
+    )
+    stored = (
+        _resource_id(stored_endpoint_id, "stored previous endpoint ID")
+        if stored_endpoint_id
+        else None
+    )
+    if current is not None and current != target:
+        return current, True
+    if stored is not None and stored != target:
+        return stored, False
+    return None, False
+
+
+def write_endpoint_file(path: Path, endpoint_id: str | None) -> None:
+    try:
+        path.write_text(f"{endpoint_id or ''}\n", encoding="utf-8")
+        path.chmod(0o600)
+    except OSError as error:
+        raise RunpodReleaseError("cannot write the endpoint selection file") from error
+
+
 def append_output(path: Path, name: str, value: str) -> None:
     if "\n" in value or "\r" in value:
         raise RunpodReleaseError("GitHub output contains an invalid value")
@@ -1217,8 +1321,31 @@ def main() -> None:
     prune.add_argument("--current-endpoint", required=True)
     prune.add_argument("--previous-endpoint-file", type=Path, required=True)
     prune.add_argument("--protected-release-sha", required=True)
+    select_previous = commands.add_parser("select-previous")
+    select_previous.add_argument("--current-endpoint-file", type=Path, required=True)
+    select_previous.add_argument("--target-endpoint", required=True)
+    select_previous.add_argument("--stored-endpoint-file", type=Path, required=True)
+    select_previous.add_argument("--selected-endpoint-file", type=Path, required=True)
+    select_previous.add_argument("--store-endpoint-file", type=Path, required=True)
     args = parser.parse_args()
     try:
+        if args.command == "select-previous":
+            selected, should_store = select_previous_endpoint(
+                current_endpoint_id=read_previous_endpoint(
+                    args.current_endpoint_file
+                ),
+                target_endpoint_id=args.target_endpoint,
+                stored_endpoint_id=read_previous_endpoint(
+                    args.stored_endpoint_file
+                ),
+            )
+            write_endpoint_file(args.selected_endpoint_file, selected)
+            write_endpoint_file(
+                args.store_endpoint_file,
+                selected if should_store else None,
+            )
+            print("selected the protected TARS Runpod predecessor")
+            return
         api_key = read_secret(args.api_key_file, "RUNPOD_API_KEY")
         client = RunpodClient(api_key)
         if args.command == "ensure":

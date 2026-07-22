@@ -26,9 +26,11 @@ jobs:
     outputs:
       release_sha: ${{ steps.payload.outputs.sha }}
       api_digest: ${{ steps.api.outputs.digest }}
-      worker_digest: ${{ steps.worker.outputs.digest }}
+      dispatcher_digest: ${{ steps.dispatcher.outputs.digest }}
+      gpu_digest: ${{ steps.gpu.outputs.digest }}
       garage_digest: ${{ steps.garage.outputs.digest }}
       otel_digest: ${{ steps.otel.outputs.digest }}
+      runpod_endpoint_id: ${{ steps.runpod.outputs.endpoint_id }}
       artifact_name: ${{ steps.bundle.outputs.artifact_name }}
     steps:
       - name: Check out central delivery code
@@ -117,7 +119,21 @@ jobs:
           recursive: "false"
           export-type: env
 
-      - name: Capture the DOCR write credential and clear runner exports
+      - name: Fetch the Runpod release secret from Infisical
+        uses: Infisical/secrets-action@v1.0.16
+        with:
+          method: universal
+          client-id: ${{ secrets.INFISICAL_CLIENT_ID }}
+          client-secret: ${{ secrets.INFISICAL_CLIENT_SECRET }}
+          domain: ${{ secrets.INFISICAL_DOMAIN }}
+          project-slug: tars
+          env-slug: prod
+          secret-path: /runtime
+          include-imports: "false"
+          recursive: "false"
+          export-type: env
+
+      - name: Capture build credentials in owner-only files and clear runner exports
         run: |
           umask 077
           python3 central/scripts/tars/tars_runner_secrets.py capture-build \
@@ -152,15 +168,15 @@ jobs:
           cache-from: type=gha,scope=tars-api
           cache-to: type=gha,mode=max,scope=tars-api
 
-      - name: Build and push worker with the locked private TADA bundle
-        id: worker
+      - name: Build and push dispatcher with the locked private TADA bundle
+        id: dispatcher
         uses: docker/build-push-action@v7.3.0
         with:
           context: source
-          file: source/Dockerfile.worker
+          file: source/Dockerfile.dispatcher
           platforms: ${{ steps.lock.outputs.target_platform }}
           push: true
-          tags: ${{ steps.lock.outputs.registry }}:worker-sha-${{ steps.payload.outputs.sha }}
+          tags: ${{ steps.lock.outputs.registry }}:dispatcher-sha-${{ steps.payload.outputs.sha }}
           build-contexts: |
             tada_bundle=${{ runner.temp }}/tada-bundle
           build-args: |
@@ -173,8 +189,31 @@ jobs:
             TARS_VERSION=sha-${{ steps.payload.outputs.sha }}
             TARS_REVISION=${{ steps.payload.outputs.sha }}
             TARS_BUILT_AT=${{ steps.metadata.outputs.built_at }}
-          cache-from: type=gha,scope=tars-worker
-          cache-to: type=gha,mode=max,scope=tars-worker
+          cache-from: type=gha,scope=tars-dispatcher
+          cache-to: type=gha,mode=max,scope=tars-dispatcher
+
+      - name: Build and push Runpod GPU worker with the same TADA bundle
+        id: gpu
+        uses: docker/build-push-action@v7.3.0
+        with:
+          context: source
+          file: source/Dockerfile.gpu
+          platforms: ${{ steps.lock.outputs.target_platform }}
+          push: true
+          tags: ${{ steps.lock.outputs.registry }}:gpu-sha-${{ steps.payload.outputs.sha }}
+          build-contexts: |
+            tada_bundle=${{ runner.temp }}/tada-bundle
+          build-args: |
+            UV_IMAGE=${{ steps.lock.outputs.uv_image }}
+            PYTHON_IMAGE=${{ steps.lock.outputs.python_image }}
+            TADA_REPOSITORY=${{ steps.lock.outputs.tada_repository }}
+            TADA_OCI=${{ steps.lock.outputs.tada_oci }}
+            TADA_REVISION=${{ steps.lock.outputs.tada_revision }}
+            TARS_VERSION=sha-${{ steps.payload.outputs.sha }}
+            TARS_REVISION=${{ steps.payload.outputs.sha }}
+            TARS_BUILT_AT=${{ steps.metadata.outputs.built_at }}
+          cache-from: type=gha,scope=tars-gpu
+          cache-to: type=gha,mode=max,scope=tars-gpu
 
       - name: Build and push Garage wrapper
         id: garage
@@ -206,23 +245,41 @@ jobs:
           cache-from: type=gha,scope=tars-otel
           cache-to: type=gha,mode=max,scope=tars-otel
 
+      - name: Provision or verify the immutable Runpod release
+        id: runpod
+        env:
+          RELEASE_SHA: ${{ steps.payload.outputs.sha }}
+          GPU_IMAGE: ${{ steps.lock.outputs.registry }}@${{ steps.gpu.outputs.digest }}
+        run: |
+          python3 central/scripts/tars/tars_runpod_release.py ensure \
+            --release-sha "$RELEASE_SHA" \
+            --gpu-image "$GPU_IMAGE" \
+            --api-key-file "$RUNNER_TEMP/tars-docker-config/RUNPOD_API_KEY" \
+            --registry-username-file "$RUNNER_TEMP/tars-docker-config/DOCR_READ_USERNAME" \
+            --registry-password-file "$RUNNER_TEMP/tars-docker-config/DOCR_READ_PASSWORD" \
+            --github-output "$GITHUB_OUTPUT"
+
       - name: Create exact-SHA deployment bundle and data-only release environment
         id: bundle
         env:
           RELEASE_SHA: ${{ steps.payload.outputs.sha }}
           API_DIGEST: ${{ steps.api.outputs.digest }}
-          WORKER_DIGEST: ${{ steps.worker.outputs.digest }}
+          DISPATCHER_DIGEST: ${{ steps.dispatcher.outputs.digest }}
+          GPU_DIGEST: ${{ steps.gpu.outputs.digest }}
           GARAGE_DIGEST: ${{ steps.garage.outputs.digest }}
           OTEL_DIGEST: ${{ steps.otel.outputs.digest }}
+          RUNPOD_ENDPOINT_ID: ${{ steps.runpod.outputs.endpoint_id }}
         run: |
           artifact="$RUNNER_TEMP/tars-release-artifact"
           install -d -m 0700 "$artifact"
           python3 central/scripts/tars/tars_lock_outputs.py source/release/lock.json \
             --release-env "$artifact/release.env" \
             --api-digest "$API_DIGEST" \
-            --worker-digest "$WORKER_DIGEST" \
+            --dispatcher-digest "$DISPATCHER_DIGEST" \
+            --gpu-digest "$GPU_DIGEST" \
             --garage-digest "$GARAGE_DIGEST" \
-            --otel-digest "$OTEL_DIGEST"
+            --otel-digest "$OTEL_DIGEST" \
+            --runpod-endpoint-id "$RUNPOD_ENDPOINT_ID"
           printf '%s\n' "$RELEASE_SHA" > source/.tars-release-sha
           tar -C source --exclude=.git -czf "$artifact/tars-source.tar.gz" .
           artifact_name="tars-release-$RELEASE_SHA"
@@ -251,8 +308,6 @@ jobs:
     permissions:
       contents: read
       id-token: write
-    # V1 caps worker_count at three. Forward + rollback each budget
-    # 3 * 50m + 5m, leaving 50m for bootstrap, migration, smoke, and transport.
     timeout-minutes: 360
     concurrency:
       group: tars-production-deploy
@@ -405,6 +460,82 @@ jobs:
           rm -rf -- "$upload"
           REMOTE
 
+      - name: Capture the currently deployed Runpod endpoint before rollout
+        env:
+          SSH_HOST: ${{ steps.connection.outputs.host }}
+          SSH_USER: ${{ steps.connection.outputs.user }}
+          RELEASE_SHA: ${{ steps.payload.outputs.sha }}
+          TARGET_RUNPOD_ENDPOINT: ${{ needs.build.outputs.runpod_endpoint_id }}
+        run: |
+          ssh_options=(
+            -i "$HOME/.ssh/tars_key"
+            -o BatchMode=yes
+            -o IdentitiesOnly=yes
+            -o StrictHostKeyChecking=yes
+            -o ServerAliveInterval=15
+            -o ServerAliveCountMax=3
+            -o TCPKeepAlive=yes
+            -o "UserKnownHostsFile=$HOME/.ssh/tars_known_hosts"
+          )
+          target="$SSH_USER@$SSH_HOST"
+          current="$RUNNER_TEMP/tars-current-runpod-endpoint"
+          stored="$RUNNER_TEMP/tars-stored-runpod-predecessor"
+          previous="$RUNNER_TEMP/tars-previous-runpod-endpoint"
+          store="$RUNNER_TEMP/tars-runpod-predecessor-to-store"
+          # The SHA is payload-validated and identifies the uploaded immutable bundle.
+          # shellcheck disable=SC2029
+          ssh "${ssh_options[@]}" "$target" \
+            "/srv/tars/incoming/$RELEASE_SHA/deploy/tars-deploy current-runpod-endpoint" \
+            > "$current"
+          ssh "${ssh_options[@]}" "$target" /bin/sh -s <<'REMOTE' > "$stored"
+          set -eu
+          state=/srv/tars/deployment/runpod-previous-endpoint
+          if [ -L "$state" ]; then
+            echo "stored Runpod predecessor must not be a symbolic link" >&2
+            exit 1
+          fi
+          if [ -e "$state" ]; then
+            test -f "$state"
+            cat "$state"
+          fi
+          REMOTE
+          chmod 0600 "$current" "$stored"
+          python3 central/scripts/tars/tars_runpod_release.py select-previous \
+            --current-endpoint-file "$current" \
+            --target-endpoint "$TARGET_RUNPOD_ENDPOINT" \
+            --stored-endpoint-file "$stored" \
+            --selected-endpoint-file "$previous" \
+            --store-endpoint-file "$store"
+          if [ -s "$store" ]; then
+            remote_store=".tars-runpod-predecessor-$RELEASE_SHA"
+            scp "${ssh_options[@]}" "$store" "$target:$remote_store"
+            ssh "${ssh_options[@]}" "$target" /bin/sh -s -- "$RELEASE_SHA" <<'REMOTE'
+          set -eu
+          sha=$1
+          case "$sha" in *[!0-9a-f]*|'') exit 64 ;; esac
+          test "${#sha}" -eq 40
+          incoming="$HOME/.tars-runpod-predecessor-$sha"
+          state=/srv/tars/deployment/runpod-previous-endpoint
+          temporary="$state.tmp.$sha"
+          endpoint="$(cat "$incoming")"
+          case "$endpoint" in
+            ""|*[!A-Za-z0-9_-]*)
+              rm -f -- "$incoming"
+              exit 64
+              ;;
+          esac
+          if ! install -m 0600 "$incoming" "$temporary"; then
+            rm -f -- "$incoming" "$temporary"
+            exit 1
+          fi
+          if ! mv -f -- "$temporary" "$state"; then
+            rm -f -- "$incoming" "$temporary"
+            exit 1
+          fi
+          rm -f -- "$incoming"
+          REMOTE
+          fi
+
       - name: Confirm the final current main revision
         id: current-main
         env:
@@ -458,7 +589,52 @@ jobs:
           } | ssh "${ssh_options[@]}" "$target" /bin/bash -s -- \
             "$RELEASE_SHA" "$CURRENT_MAIN_SHA"
 
+      - name: Mint a fresh post-rollout TARS GitHub App token
+        id: prune-app-token
+        uses: actions/create-github-app-token@v3.2.0
+        with:
+          client-id: ${{ secrets.CI_APP_CLIENT_ID }}
+          private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
+          owner: Lascade-Co
+          repositories: TARS
+          permission-contents: read
+
+      - name: Reconfirm current main before Runpod retirement
+        id: prune-main
+        env:
+          GH_TOKEN: ${{ steps.prune-app-token.outputs.token }}
+          TARGET_REPO: ${{ steps.payload.outputs.repo }}
+          RELEASE_SHA: ${{ steps.payload.outputs.sha }}
+        run: |
+          main_sha="$(gh api "repos/$TARGET_REPO/git/ref/heads/main" --jq .object.sha)"
+          echo "sha=$main_sha" >> "$GITHUB_OUTPUT"
+          if [ "$RELEASE_SHA" != "$main_sha" ]; then
+            echo "should_prune=false" >> "$GITHUB_OUTPUT"
+            echo "a newer TARS main revision exists; leaving all Runpod releases untouched"
+            exit 0
+          fi
+          echo "should_prune=true" >> "$GITHUB_OUTPUT"
+
+      - name: Retire expired Runpod releases after successful deployment
+        if: steps.prune-main.outputs.should_prune == 'true'
+        env:
+          CURRENT_RUNPOD_ENDPOINT: ${{ needs.build.outputs.runpod_endpoint_id }}
+          PROTECTED_RELEASE_SHA: ${{ steps.prune-main.outputs.sha }}
+        run: |
+          python3 central/scripts/tars/tars_runpod_release.py prune \
+            --api-key-file "$RUNNER_TEMP/tars-deploy-secrets/RUNPOD_API_KEY" \
+            --current-endpoint "$CURRENT_RUNPOD_ENDPOINT" \
+            --previous-endpoint-file "$RUNNER_TEMP/tars-previous-runpod-endpoint" \
+            --protected-release-sha "$PROTECTED_RELEASE_SHA"
+
       - name: Remove runner-side deployment credentials
         if: always()
         run: |
-          rm -rf "$RUNNER_TEMP/tars-deploy-secrets" "$HOME/.ssh/tars_key" "$HOME/.ssh/tars_known_hosts"
+          rm -rf \
+            "$RUNNER_TEMP/tars-deploy-secrets" \
+            "$RUNNER_TEMP/tars-current-runpod-endpoint" \
+            "$RUNNER_TEMP/tars-previous-runpod-endpoint" \
+            "$RUNNER_TEMP/tars-runpod-predecessor-to-store" \
+            "$RUNNER_TEMP/tars-stored-runpod-predecessor" \
+            "$HOME/.ssh/tars_key" \
+            "$HOME/.ssh/tars_known_hosts"

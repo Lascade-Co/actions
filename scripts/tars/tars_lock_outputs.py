@@ -40,10 +40,11 @@ VERSION = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?\Z")
 REPOSITORY = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\Z")
 ACTION_VERSION = re.compile(r"v[0-9]+(?:\.[0-9]+){0,2}(?:[-+][0-9A-Za-z.-]+)?\Z")
 WORKFLOW_ACTION = re.compile(r"^\s*-?\s*uses:\s*([^@\s]+)@([^\s#]+)", re.MULTILINE)
-RELEASE_DIGEST_KEYS = ("api", "worker", "garage", "otel")
+RELEASE_DIGEST_KEYS = ("api", "dispatcher", "gpu", "garage", "otel")
 RELEASE_IMAGE_KEYS = {
     "api": "TARS_API_IMAGE",
-    "worker": "TARS_WORKER_IMAGE",
+    "dispatcher": "TARS_DISPATCHER_IMAGE",
+    "gpu": "TARS_GPU_IMAGE",
     "garage": "TARS_GARAGE_IMAGE",
     "otel": "TARS_OTEL_COLLECTOR_IMAGE",
 }
@@ -125,11 +126,20 @@ def values(lock_path: Path) -> dict[str, str]:
     return result
 
 
-def release_values(lock_path: Path, digests: dict[str, str]) -> dict[str, str]:
+def release_values(
+    lock_path: Path, digests: dict[str, str], endpoint_id: str
+) -> dict[str, str]:
     """Build the data-only environment consumed by ``deploy/tars-deploy``."""
 
     if set(digests) != set(RELEASE_DIGEST_KEYS):
-        raise ValueError("release digests must contain exactly api, worker, garage, and otel")
+        raise ValueError(
+            "release digests must contain exactly api, dispatcher, gpu, garage, and otel"
+        )
+    if (
+        not isinstance(endpoint_id, str)
+        or re.fullmatch(r"[A-Za-z0-9_-]{1,191}", endpoint_id) is None
+    ):
+        raise ValueError("Runpod endpoint ID is invalid")
     lock = json.loads(lock_path.read_text(encoding="utf-8"))
     registry = lock["registry"]
     if not isinstance(registry, str) or REGISTRY.fullmatch(registry) is None:
@@ -157,8 +167,9 @@ def release_values(lock_path: Path, digests: dict[str, str]) -> dict[str, str]:
             ),
             "TADA_ESTIMATE_HD_REALTIME_FACTOR": "5.5",
             "TADA_ESTIMATE_4K_REALTIME_FACTOR": "4.0",
-            "TADA_ESTIMATE_MODEL_VERSION": "do-s-1vcpu-1gb-hd-v1",
-            "WORKER_STOP_GRACE_PERIOD": "50m",
+            "TADA_ESTIMATE_MODEL_VERSION": "runpod-ampere16-v1",
+            "DISPATCHER_STOP_GRACE_PERIOD": "2h15m",
+            "TARS_RUNPOD_ENDPOINT_ID": endpoint_id,
         }
     )
     return result
@@ -185,6 +196,7 @@ def main() -> None:
     parser.add_argument("lock", type=Path)
     parser.add_argument("--github-output", type=Path)
     parser.add_argument("--release-env", type=Path)
+    parser.add_argument("--runpod-endpoint-id")
     parser.add_argument("--workflow", action="append", type=Path, default=[])
     for component in RELEASE_DIGEST_KEYS:
         parser.add_argument(f"--{component}-digest")
@@ -195,12 +207,24 @@ def main() -> None:
         for component in RELEASE_DIGEST_KEYS
     }
     if args.release_env:
-        if any(value is None for value in digest_values.values()):
-            parser.error("--release-env requires all four --*-digest arguments")
-        write_release_environment(args.release_env, release_values(args.lock, digest_values))
+        if (
+            any(value is None for value in digest_values.values())
+            or args.runpod_endpoint_id is None
+        ):
+            parser.error(
+                "--release-env requires all five --*-digest arguments and "
+                "--runpod-endpoint-id"
+            )
+        write_release_environment(
+            args.release_env,
+            release_values(args.lock, digest_values, args.runpod_endpoint_id),
+        )
         return
-    if any(value is not None for value in digest_values.values()):
-        parser.error("--*-digest arguments require --release-env")
+    if (
+        any(value is not None for value in digest_values.values())
+        or args.runpod_endpoint_id is not None
+    ):
+        parser.error("--*-digest and --runpod-endpoint-id arguments require --release-env")
 
     validate_action_versions(args.lock, args.workflow)
 
