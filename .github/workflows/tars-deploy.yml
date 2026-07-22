@@ -299,7 +299,12 @@ jobs:
         if: always()
         run: |
           docker logout registry.digitalocean.com >/dev/null 2>&1 || true
-          rm -rf "${DOCKER_CONFIG:-$RUNNER_TEMP/tars-docker-config}"
+          config="${DOCKER_CONFIG:-$RUNNER_TEMP/tars-docker-config}"
+          rm -f \
+            "$config/config.json" \
+            "$config/DOCR_READ_USERNAME" \
+            "$config/DOCR_READ_PASSWORD" \
+            "$config/RUNPOD_API_KEY"
 
   deploy:
     name: Deploy TARS production

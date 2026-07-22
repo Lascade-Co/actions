@@ -1689,6 +1689,11 @@ class WorkflowContractTest(unittest.TestCase):
         )
         self.assertEqual(workflow.count("tars_runpod_release.py ensure"), 1)
         self.assertEqual(workflow.count("tars_runpod_release.py prune"), 1)
+        self.assertIn('"$config/RUNPOD_API_KEY"', workflow)
+        self.assertIn('"$config/DOCR_READ_USERNAME"', workflow)
+        self.assertNotIn(
+            'rm -rf "${DOCKER_CONFIG:-$RUNNER_TEMP/tars-docker-config}"', workflow
+        )
         self.assertIn("--protected-release-sha", workflow)
         self.assertIn(
             "if: steps.prune-main.outputs.should_prune == 'true'", workflow
