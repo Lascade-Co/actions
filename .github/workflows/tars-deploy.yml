@@ -249,7 +249,7 @@ jobs:
         id: runpod
         env:
           RELEASE_SHA: ${{ steps.payload.outputs.sha }}
-          GPU_IMAGE: ${{ steps.lock.outputs.registry }}@${{ steps.gpu.outputs.digest }}
+          GPU_IMAGE: ${{ steps.lock.outputs.registry }}:gpu-sha-${{ steps.payload.outputs.sha }}@${{ steps.gpu.outputs.digest }}
         run: |
           python3 central/scripts/tars/tars_runpod_release.py ensure \
             --release-sha "$RELEASE_SHA" \

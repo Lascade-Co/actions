@@ -45,8 +45,9 @@ IDLE_TIMEOUT_SECONDS = 5
 PRUNE_GRACE = timedelta(hours=24)
 
 SHA = re.compile(r"[0-9a-f]{40}\Z")
-DIGEST_IMAGE = re.compile(
-    r"registry\.digitalocean\.com/lascade/tars@sha256:[0-9a-f]{64}\Z"
+IMMUTABLE_GPU_IMAGE = re.compile(
+    r"registry\.digitalocean\.com/lascade/tars:gpu-sha-([0-9a-f]{40})"
+    r"@sha256:([0-9a-f]{64})\Z"
 )
 RESOURCE_ID = re.compile(r"[A-Za-z0-9_-]{1,191}\Z")
 ENDPOINT_NAME = re.compile(r"tars-runpod-endpoint-v1-([0-9a-f]{40})\Z")
@@ -906,8 +907,13 @@ def ensure_release(
     registry_username: str,
     registry_password: str,
 ) -> ReleaseResources:
-    if DIGEST_IMAGE.fullmatch(gpu_image) is None:
-        raise RunpodReleaseError("GPU image must be the immutable TARS DOCR digest")
+    image_match = IMMUTABLE_GPU_IMAGE.fullmatch(gpu_image)
+    if image_match is None:
+        raise RunpodReleaseError(
+            "GPU image must be the immutable TARS DOCR exact-SHA tag and digest"
+        )
+    if image_match.group(1) != release_sha:
+        raise RunpodReleaseError("GPU image tag does not match the release SHA")
     auth_name, template_name, endpoint_name = release_names(
         release_sha, registry_username, registry_password
     )
@@ -1052,7 +1058,10 @@ def _template_release_sha(resource: Mapping[str, Any]) -> str | None:
     match = TEMPLATE_NAME.fullmatch(str(resource.get("name", "")))
     if match is None:
         return None
-    if DIGEST_IMAGE.fullmatch(str(resource.get("imageName", ""))) is None:
+    image_match = IMMUTABLE_GPU_IMAGE.fullmatch(
+        str(resource.get("imageName", ""))
+    )
+    if image_match is None or image_match.group(1) != match.group(1):
         return None
     if (
         resource.get("isServerless") is not True

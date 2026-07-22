@@ -606,8 +606,12 @@ class FakeReleaseAPI:
             {
                 "id": template_id,
                 "name": f"tars-runpod-template-v1-{release_sha}",
-                "imageName": "registry.digitalocean.com/lascade/tars@sha256:"
-                + "a" * 64,
+                "imageName": (
+                    "registry.digitalocean.com/lascade/tars:gpu-sha-"
+                    + release_sha
+                    + "@sha256:"
+                    + "a" * 64
+                ),
                 "isServerless": True,
                 "containerDiskInGb": 20,
                 "volumeInGb": 0,
@@ -666,7 +670,12 @@ class FakeReleaseAPI:
 
 
 class RunpodReleaseTest(unittest.TestCase):
-    IMAGE = "registry.digitalocean.com/lascade/tars@sha256:" + "a" * 64
+    IMAGE = (
+        "registry.digitalocean.com/lascade/tars:gpu-sha-"
+        + "a" * 40
+        + "@sha256:"
+        + "a" * 64
+    )
 
     def test_ensure_is_deterministic_idempotent_and_secret_free(self) -> None:
         api = FakeReleaseAPI()
@@ -694,6 +703,27 @@ class RunpodReleaseTest(unittest.TestCase):
             "a" * 40, "registry-reader", "super-secret-registry-password"
         )
         self.assertNotIn("super-secret-registry-password", " ".join(names))
+
+    def test_ensure_rejects_nonimmutable_or_mismatched_gpu_images(self) -> None:
+        invalid_images = (
+            "registry.digitalocean.com/lascade/tars@sha256:" + "a" * 64,
+            "registry.digitalocean.com/lascade/tars:gpu-sha-" + "a" * 40,
+            (
+                "registry.digitalocean.com/lascade/tars:gpu-sha-"
+                + "b" * 40
+                + "@sha256:"
+                + "a" * 64
+            ),
+        )
+        for image in invalid_images:
+            with self.subTest(image=image), self.assertRaises(RunpodReleaseError):
+                ensure_release(
+                    FakeReleaseAPI(),
+                    release_sha="a" * 40,
+                    gpu_image=image,
+                    registry_username="reader",
+                    registry_password="password",
+                )
 
     def test_ensure_verifies_rest_and_graphql_endpoint_contracts(self) -> None:
         api = FakeReleaseAPI()
@@ -1013,6 +1043,7 @@ class RunpodReleaseTest(unittest.TestCase):
             client.create_template("template", self.IMAGE, "auth1")
         query = graphql.call_args.args[1]
         self.assertEqual(query.count("containerRegistryAuthId"), 1)
+        self.assertIn(f"imageName: {json.dumps(self.IMAGE)}", query)
 
     def test_auth_and_template_create_recover_lost_responses_without_reissuing_mutations(self) -> None:
         release_sha = "a" * 40
@@ -1529,6 +1560,35 @@ class RunpodReleaseTest(unittest.TestCase):
         )
         self.assertIn("auth-partial", {auth["id"] for auth in api.auths})
 
+    def test_prune_rejects_template_image_tag_from_another_release(self) -> None:
+        now = datetime(2026, 7, 21, tzinfo=timezone.utc)
+        api = FakeReleaseAPI()
+        api.seed_release("a" * 40, "current", now)
+        api.seed_release("e" * 40, "mismatch", now - timedelta(days=2))
+        mismatched_template = next(
+            template for template in api.templates if template["id"] == "template-mismatch"
+        )
+        mismatched_template["imageName"] = (
+            "registry.digitalocean.com/lascade/tars:gpu-sha-"
+            + "f" * 40
+            + "@sha256:"
+            + "a" * 64
+        )
+
+        retired = prune_releases(
+            api,
+            current_endpoint_id="endpoint-current",
+            previous_endpoint_id=None,
+            protected_release_sha="a" * 40,
+            now=now,
+        )
+
+        self.assertEqual(retired, 0)
+        self.assertEqual(api.calls, [])
+        self.assertIn(
+            "endpoint-mismatch", {endpoint["id"] for endpoint in api.endpoints}
+        )
+
     def test_prune_protects_the_observed_main_release_sha(self) -> None:
         now = datetime(2026, 7, 21, tzinfo=timezone.utc)
         api = FakeReleaseAPI()
@@ -1689,6 +1749,10 @@ class WorkflowContractTest(unittest.TestCase):
         )
         self.assertEqual(workflow.count("tars_runpod_release.py ensure"), 1)
         self.assertEqual(workflow.count("tars_runpod_release.py prune"), 1)
+        self.assertIn(
+            ":gpu-sha-${{ steps.payload.outputs.sha }}@${{ steps.gpu.outputs.digest }}",
+            workflow,
+        )
         self.assertIn('"$config/RUNPOD_API_KEY"', workflow)
         self.assertIn('"$config/DOCR_READ_USERNAME"', workflow)
         self.assertNotIn(
