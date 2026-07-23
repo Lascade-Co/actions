@@ -702,6 +702,7 @@ class FakeReleaseAPI:
         self.templates: list[dict] = []
         self.auths: list[dict] = []
         self.calls: list[str] = []
+        self.template_env = {"RUNPOD_INIT_TIMEOUT": "1200"}
 
     def inventory(self) -> Inventory:
         return Inventory(tuple(self.endpoints), tuple(self.templates), tuple(self.auths))
@@ -720,6 +721,14 @@ class FakeReleaseAPI:
             "gpuTypeIds": [endpoint["gpuIds"]],
         }
 
+    def read_template(self, template_id: str) -> dict:
+        template = next(item for item in self.templates if item["id"] == template_id)
+        return {
+            "id": template["id"],
+            "name": template["name"],
+            "env": dict(self.template_env),
+        }
+
     def create_auth(self, name: str, username: str, password: str) -> dict:
         self.calls.append("create_auth")
         resource = {"id": f"auth{len(self.auths) + 1}", "name": name}
@@ -736,7 +745,7 @@ class FakeReleaseAPI:
             "containerDiskInGb": 20,
             "volumeInGb": 0,
             "dockerArgs": None,
-            "env": [],
+            "env": [{"key": "RUNPOD_INIT_TIMEOUT"}],
             "containerRegistryAuthId": auth_id,
             "boundEndpointId": None,
         }
@@ -802,7 +811,7 @@ class FakeReleaseAPI:
                 "containerDiskInGb": 20,
                 "volumeInGb": 0,
                 "dockerArgs": None,
-                "env": [],
+                "env": [{"key": "RUNPOD_INIT_TIMEOUT"}],
                 "containerRegistryAuthId": auth_id,
                 "boundEndpointId": endpoint_id,
             }
@@ -935,7 +944,7 @@ class RunpodReleaseTest(unittest.TestCase):
                     registry_password="password",
                 )
 
-    def test_template_verification_requires_explicit_empty_runtime_fields(self) -> None:
+    def test_template_verification_requires_only_reviewed_runtime_fields(self) -> None:
         base = {
             "id": "template1",
             "name": "tars-runpod-template-v1-" + "a" * 40,
@@ -945,31 +954,24 @@ class RunpodReleaseTest(unittest.TestCase):
             "volumeInGb": 0,
             "containerRegistryAuthId": "auth1",
             "dockerArgs": "",
-            "env": [],
+            "env": [{"key": "RUNPOD_INIT_TIMEOUT"}],
         }
         for docker_args in (None, ""):
-            for environment in (None, []):
-                with self.subTest(
-                    docker_args=docker_args, environment=environment
-                ):
-                    resource = {
-                        **base,
-                        "dockerArgs": docker_args,
-                        "env": environment,
-                    }
-                    self.assertEqual(
-                        tars_runpod_release.verify_template(
-                            resource,
-                            expected_name=base["name"],
-                            image=self.IMAGE,
-                            auth_id="auth1",
-                        ),
-                        "template1",
-                    )
-                    self.assertEqual(
-                        tars_runpod_release._template_release_sha(resource),
-                        "a" * 40,
-                    )
+            with self.subTest(docker_args=docker_args):
+                resource = {**base, "dockerArgs": docker_args}
+                self.assertEqual(
+                    tars_runpod_release.verify_template(
+                        resource,
+                        expected_name=base["name"],
+                        image=self.IMAGE,
+                        auth_id="auth1",
+                    ),
+                    "template1",
+                )
+                self.assertEqual(
+                    tars_runpod_release._template_release_sha(resource),
+                    "a" * 40,
+                )
 
         invalid = (
             (
@@ -985,7 +987,29 @@ class RunpodReleaseTest(unittest.TestCase):
                 {key: value for key, value in base.items() if key != "env"},
             ),
             ("nonempty dockerArgs", {**base, "dockerArgs": "python handler.py"}),
-            ("nonempty env", {**base, "env": [{"key": "UNREVIEWED"}]}),
+            ("empty env", {**base, "env": []}),
+            ("null env", {**base, "env": None}),
+            ("unreviewed env", {**base, "env": [{"key": "UNREVIEWED"}]}),
+            (
+                "extra env",
+                {
+                    **base,
+                    "env": [
+                        {"key": "RUNPOD_INIT_TIMEOUT"},
+                        {"key": "UNREVIEWED"},
+                    ],
+                },
+            ),
+            (
+                "duplicate env",
+                {
+                    **base,
+                    "env": [
+                        {"key": "RUNPOD_INIT_TIMEOUT"},
+                        {"key": "RUNPOD_INIT_TIMEOUT"},
+                    ],
+                },
+            ),
         )
         for label, resource in invalid:
             with self.subTest(label=label), self.assertRaises(RunpodReleaseError):
@@ -996,6 +1020,46 @@ class RunpodReleaseTest(unittest.TestCase):
                     auth_id="auth1",
                 )
             self.assertIsNone(tars_runpod_release._template_release_sha(resource))
+
+    def test_template_rest_verification_requires_exact_init_timeout(self) -> None:
+        base = {
+            "id": "template1",
+            "name": "tars-runpod-template-v1-" + "a" * 40,
+            "env": {"RUNPOD_INIT_TIMEOUT": "1200"},
+        }
+        self.assertEqual(
+            tars_runpod_release.verify_template_rest(
+                base,
+                template_id="template1",
+                expected_name=base["name"],
+            ),
+            "template1",
+        )
+        invalid = (
+            ("missing env", {key: value for key, value in base.items() if key != "env"}),
+            ("empty env", {**base, "env": {}}),
+            (
+                "wrong timeout",
+                {**base, "env": {"RUNPOD_INIT_TIMEOUT": "800"}},
+            ),
+            (
+                "extra env",
+                {
+                    **base,
+                    "env": {
+                        "RUNPOD_INIT_TIMEOUT": "1200",
+                        "UNREVIEWED": "value",
+                    },
+                },
+            ),
+        )
+        for label, resource in invalid:
+            with self.subTest(label=label), self.assertRaises(RunpodReleaseError):
+                tars_runpod_release.verify_template_rest(
+                    resource,
+                    template_id="template1",
+                    expected_name=base["name"],
+                )
 
     def test_ensure_verifies_rest_and_graphql_endpoint_contracts(self) -> None:
         api = FakeReleaseAPI()
@@ -1011,6 +1075,22 @@ class RunpodReleaseTest(unittest.TestCase):
             )
 
         read_endpoint.assert_called_with(resources.endpoint_id)
+
+    def test_ensure_rejects_template_env_drift_before_endpoint_creation(self) -> None:
+        api = FakeReleaseAPI()
+        api.template_env = {"RUNPOD_INIT_TIMEOUT": "800"}
+
+        with self.assertRaisesRegex(RunpodReleaseError, "REST template env"):
+            ensure_release(
+                api,
+                release_sha="a" * 40,
+                gpu_image=self.IMAGE,
+                registry_username="registry-reader",
+                registry_password="registry-password",
+            )
+
+        self.assertEqual(api.calls, ["create_auth", "create_template"])
+        self.assertEqual(api.endpoints, [])
 
     def test_exact_rerun_rejects_drift_instead_of_mutating(self) -> None:
         api = FakeReleaseAPI()
@@ -1319,7 +1399,44 @@ class RunpodReleaseTest(unittest.TestCase):
         self.assertEqual(query.count("containerRegistryAuthId"), 1)
         self.assertIn(f"imageName: {json.dumps(self.IMAGE)}", query)
         self.assertEqual(query.count('dockerArgs: ""'), 1)
-        self.assertRegex(query, r"env:\s*\[\]")
+        self.assertEqual(query.count('key: "RUNPOD_INIT_TIMEOUT"'), 1)
+        self.assertEqual(query.count('value: "1200"'), 1)
+        self.assertNotRegex(query, r"env:\s*\[\s*\]")
+
+    def test_template_rest_read_targets_one_bound_template(self) -> None:
+        template = {
+            "id": "template1",
+            "name": "tars-runpod-template-v1-" + "a" * 40,
+            "env": {"RUNPOD_INIT_TIMEOUT": "1200"},
+        }
+        requests: list[urllib.request.Request] = []
+
+        class Response:
+            status = 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self):
+                return json.dumps(template).encode("utf-8")
+
+        def open_request(request, *, timeout):
+            requests.append(request)
+            return Response()
+
+        client = RunpodClient("api-key", opener=open_request)
+        self.assertEqual(client.read_template("template1"), template)
+        self.assertEqual(len(requests), 1)
+        parsed = urllib.parse.urlsplit(requests[0].full_url)
+        self.assertEqual(parsed.path, "/v1/templates/template1")
+        self.assertEqual(
+            urllib.parse.parse_qs(parsed.query),
+            {"includeEndpointBoundTemplates": ["true"]},
+        )
+        self.assertEqual(requests[0].get_header("Authorization"), "Bearer api-key")
 
     def test_auth_and_template_create_recover_lost_responses_without_reissuing_mutations(self) -> None:
         release_sha = "a" * 40
@@ -1334,7 +1451,7 @@ class RunpodReleaseTest(unittest.TestCase):
             "containerDiskInGb": 20,
             "volumeInGb": 0,
             "dockerArgs": None,
-            "env": [],
+            "env": [{"key": "RUNPOD_INIT_TIMEOUT"}],
             "containerRegistryAuthId": "auth1",
             "boundEndpointId": None,
         }
@@ -1947,6 +2064,28 @@ class RunpodReleaseTest(unittest.TestCase):
         )
 
         self.assertEqual(retired, 0)
+        self.assertEqual(api.calls, [])
+        self.assertIn(
+            "endpoint-runtime-drift",
+            {endpoint["id"] for endpoint in api.endpoints},
+        )
+
+    def test_prune_rejects_template_env_value_drift_before_mutation(self) -> None:
+        now = datetime(2026, 7, 21, tzinfo=timezone.utc)
+        api = FakeReleaseAPI()
+        api.seed_release("a" * 40, "current", now)
+        api.seed_release("e" * 40, "runtime-drift", now - timedelta(days=2))
+        api.template_env = {"RUNPOD_INIT_TIMEOUT": "800"}
+
+        with self.assertRaisesRegex(RunpodReleaseError, "REST template env"):
+            prune_releases(
+                api,
+                current_endpoint_id="endpoint-current",
+                previous_endpoint_id=None,
+                protected_release_sha="a" * 40,
+                now=now,
+            )
+
         self.assertEqual(api.calls, [])
         self.assertIn(
             "endpoint-runtime-drift",

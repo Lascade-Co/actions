@@ -42,6 +42,9 @@ WORKERS_MAX = 2
 SCALER_TYPE = "REQUEST_COUNT"
 SCALER_VALUE = 1
 IDLE_TIMEOUT_SECONDS = 5
+RUNPOD_INIT_TIMEOUT_SECONDS = 1_200
+TEMPLATE_ENV_KEYS = [{"key": "RUNPOD_INIT_TIMEOUT"}]
+TEMPLATE_ENV = {"RUNPOD_INIT_TIMEOUT": str(RUNPOD_INIT_TIMEOUT_SECONDS)}
 PRUNE_GRACE = timedelta(hours=24)
 
 SHA = re.compile(r"[0-9a-f]{40}\Z")
@@ -104,6 +107,8 @@ class ReleaseAPI(Protocol):
     def inventory(self) -> Inventory: ...
 
     def read_endpoint(self, endpoint_id: str) -> dict[str, Any]: ...
+
+    def read_template(self, template_id: str) -> dict[str, Any]: ...
 
     def create_auth(self, name: str, username: str, password: str) -> dict[str, Any]: ...
 
@@ -377,7 +382,12 @@ class RunpodClient:
             volumeInGb: 0
             isServerless: true
             dockerArgs: ""
-            env: []
+            env: [
+              {{
+                key: "RUNPOD_INIT_TIMEOUT"
+                value: "{RUNPOD_INIT_TIMEOUT_SECONDS}"
+              }}
+            ]
           }}) {{
             id name
           }}
@@ -466,6 +476,18 @@ class RunpodClient:
 
     def read_endpoint(self, endpoint_id: str) -> dict[str, Any]:
         return self._get_endpoint(endpoint_id, max_calls=MAX_TRANSIENT_CALLS)
+
+    def read_template(self, template_id: str) -> dict[str, Any]:
+        template_id = _resource_id(template_id, "template ID")
+        query = urllib.parse.urlencode({"includeEndpointBoundTemplates": "true"})
+        document = self._request(
+            "GET",
+            f"{REST_BASE_URL}/templates/{template_id}?{query}",
+            operation="read template",
+            max_calls=MAX_TRANSIENT_CALLS,
+            bearer_auth=True,
+        )
+        return _object(document, "template")
 
     def configure_endpoint(self, endpoint: Mapping[str, Any]) -> dict[str, Any]:
         """Reconcile the two deterministic fields absent from GraphQL inventory."""
@@ -788,7 +810,7 @@ def verify_template(
         "",
     ):
         raise RunpodReleaseError("existing Runpod template dockerArgs does not match this release")
-    if "env" not in resource or resource.get("env") not in (None, []):
+    if resource.get("env") != TEMPLATE_ENV_KEYS:
         raise RunpodReleaseError("existing Runpod template env does not match this release")
     return _resource_id(resource.get("id"), "template ID")
 
@@ -882,6 +904,20 @@ def verify_endpoint_rest_base(
             "existing Runpod REST endpoint CPU selectors do not match this release"
         )
     return _resource_id(resource.get("id"), "endpoint ID")
+
+
+def verify_template_rest(
+    resource: Mapping[str, Any],
+    *,
+    template_id: str,
+    expected_name: str,
+) -> str:
+    """Verify the reviewed non-secret env value on one exact template."""
+
+    _expect_equal(resource.get("id"), template_id, "REST template id")
+    _expect_equal(resource.get("name"), expected_name, "REST template name")
+    _expect_equal(resource.get("env"), TEMPLATE_ENV, "REST template env")
+    return _resource_id(resource.get("id"), "template ID")
 
 
 def verify_endpoint_rest(
@@ -991,6 +1027,11 @@ def ensure_release(
     template_id = verify_template(
         template, expected_name=template_name, image=gpu_image, auth_id=auth_id
     )
+    verify_template_rest(
+        client.read_template(template_id),
+        template_id=template_id,
+        expected_name=template_name,
+    )
     endpoint = _create_or_recover(
         client,
         resources=lambda inventory: inventory.endpoints,
@@ -1031,6 +1072,11 @@ def ensure_release(
         expected_name=template_name,
         image=gpu_image,
         auth_id=auth_id,
+    )
+    verify_template_rest(
+        client.read_template(template_id),
+        template_id=template_id,
+        expected_name=template_name,
     )
     verified_endpoint = _one_named(inventory.endpoints, endpoint_name, "endpoint") or {}
     verify_endpoint(
@@ -1106,8 +1152,7 @@ def _template_release_sha(resource: Mapping[str, Any]) -> str | None:
         or resource.get("volumeInGb") != 0
         or "dockerArgs" not in resource
         or resource.get("dockerArgs") not in (None, "")
-        or "env" not in resource
-        or resource.get("env") not in (None, [])
+        or resource.get("env") != TEMPLATE_ENV_KEYS
     ):
         return None
     return match.group(1)
@@ -1240,6 +1285,11 @@ def prune_releases(
             expected_name=str(endpoint.get("name")),
             template_id=template_id,
             workers_max=current_workers_max,
+        )
+        verify_template_rest(
+            client.read_template(template_id),
+            template_id=template_id,
+            expected_name=str(template.get("name")),
         )
         if current_workers_max != 0:
             verify_endpoint_rest(
