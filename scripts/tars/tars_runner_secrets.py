@@ -30,6 +30,9 @@ DEPLOYMENT_KEYS = (
     "DEPLOY_SSH_PRIVATE_KEY",
     "DEPLOY_SSH_KNOWN_HOSTS",
     "WIREGUARD_CONFIG",
+    "RUNPOD_ENDPOINT_ID",
+    "RUNPOD_TEMPLATE_ID",
+    "RUNPOD_REGISTRY_AUTH_ID",
 )
 BUILD_KEYS = ("DOCR_WRITE_TOKEN",)
 CONNECTION_KEYS = (
@@ -43,6 +46,9 @@ DEPLOY_KEYS = (
     "DOCR_READ_USERNAME",
     "DOCR_READ_PASSWORD",
     *CONNECTION_KEYS,
+    "RUNPOD_ENDPOINT_ID",
+    "RUNPOD_TEMPLATE_ID",
+    "RUNPOD_REGISTRY_AUTH_ID",
 )
 RUNTIME_KEYS = (
     "POSTGRES_PASSWORD",
@@ -202,6 +208,12 @@ def capture_deploy(
         values = required(environment, (*DEPLOY_KEYS, *RUNTIME_KEYS))
         write_connection(values, output_directory, github_output)
         write_private(output_directory / "RUNPOD_API_KEY", values["RUNPOD_API_KEY"])
+        for name in (
+            "RUNPOD_ENDPOINT_ID",
+            "RUNPOD_TEMPLATE_ID",
+            "RUNPOD_REGISTRY_AUTH_ID",
+        ):
+            write_private(output_directory / name, values[name])
         exports = ["export TARS_SECRET_SOURCE=environment"]
         exports.extend(f"export {name}={shlex.quote(values[name])}" for name in REMOTE_KEYS)
         write_private(output_directory / "remote-secrets.sh", "\n".join(exports) + "\n")

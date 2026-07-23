@@ -165,7 +165,6 @@ jobs:
           test -x "$bundle/deploy/tars-deploy"
           export TARS_SECRET_SOURCE=environment
           "$bundle/deploy/tars-deploy" unlock --expected-owner "$expected_owner"
-          rm -f -- /srv/tars/deployment/runpod-previous-endpoint
           REMOTE
 
       - name: Remove runner-side recovery credentials

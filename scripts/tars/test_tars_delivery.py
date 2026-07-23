@@ -44,10 +44,7 @@ from tars_runpod_release import (
     RunpodClient,
     RunpodReleaseError,
     _NoRedirectHandler,
-    ensure_release,
-    prune_releases,
     read_secret,
-    release_names,
 )
 from tars_tada_bundle import BundleFetchError, fetch, validate_bundle_shape, validate_inputs
 
@@ -563,6 +560,9 @@ class RunnerSecretsTest(unittest.TestCase):
             "GARAGE_SECRET_ACCESS_KEY": "f" * 64,
             "ONEUPTIME_TOKEN": "oneuptime-token",
             "RUNPOD_API_KEY": "runpod-api-secret",
+            "RUNPOD_ENDPOINT_ID": "stable-endpoint",
+            "RUNPOD_TEMPLATE_ID": "stable-template",
+            "RUNPOD_REGISTRY_AUTH_ID": "stable-auth",
         }
 
     def test_build_capture_writes_private_docker_config_and_clears_exports(self) -> None:
@@ -676,6 +676,9 @@ class RunnerSecretsTest(unittest.TestCase):
                 "DEPLOY_SSH_PRIVATE_KEY",
                 "DEPLOY_SSH_KNOWN_HOSTS",
                 "RUNPOD_API_KEY",
+                "RUNPOD_ENDPOINT_ID",
+                "RUNPOD_TEMPLATE_ID",
+                "RUNPOD_REGISTRY_AUTH_ID",
                 "remote-secrets.sh",
             ):
                 self.assertEqual(
@@ -751,12 +754,21 @@ class FakeReleaseAPI:
         self.template_env_by_id: dict[str, object] = {}
         self.health_by_endpoint: dict[str, list[object]] = {}
         self.health_calls: list[str] = []
+        self.update_observer = None
 
     def inventory(self) -> Inventory:
         return Inventory(tuple(self.endpoints), tuple(self.templates), tuple(self.auths))
 
     def read_endpoint(self, endpoint_id: str) -> dict:
         endpoint = next(item for item in self.endpoints if item["id"] == endpoint_id)
+        template = next(
+            (
+                item
+                for item in self.templates
+                if item["id"] == endpoint["templateId"]
+            ),
+            None,
+        )
         return {
             "id": endpoint["id"],
             "name": endpoint["name"],
@@ -775,14 +787,14 @@ class FakeReleaseAPI:
                 "NVIDIA RTX A5000",
                 "NVIDIA GeForce RTX 3090",
             ],
+            "version": endpoint.get("version", 0),
+            "workers": [dict(worker) for worker in endpoint.get("workers", [])],
+            "template": self._rest_template(template) if template is not None else {},
         }
 
     def read_template(self, template_id: str) -> dict:
         template = next(item for item in self.templates if item["id"] == template_id)
-        resource = {
-            "id": template["id"],
-            "name": template["name"],
-        }
+        resource = self._rest_template(template)
         environment = (
             self.template_env_by_id[template_id]
             if template_id in self.template_env_by_id
@@ -790,7 +802,28 @@ class FakeReleaseAPI:
         )
         if environment is not self.OMIT_TEMPLATE_ENV:
             resource["env"] = environment
+        else:
+            resource.pop("env", None)
         return resource
+
+    @staticmethod
+    def _rest_template(template: dict) -> dict:
+        return {
+            "id": template["id"],
+            "name": template["name"],
+            "imageName": template.get("imageName"),
+            "containerRegistryAuthId": template.get("containerRegistryAuthId"),
+            "containerDiskInGb": template.get("containerDiskInGb"),
+            "volumeInGb": template.get("volumeInGb"),
+            "volumeMountPath": template.get("volumeMountPath", "/workspace"),
+            "dockerEntrypoint": list(template.get("dockerEntrypoint", [])),
+            "dockerStartCmd": list(template.get("dockerStartCmd", [])),
+            "env": {"RUNPOD_INIT_TIMEOUT": "1200"},
+            "isPublic": template.get("isPublic", False),
+            "isServerless": template.get("isServerless"),
+            "ports": list(template.get("ports", [])),
+            "readme": template.get("readme", ""),
+        }
 
     def read_endpoint_health(
         self, endpoint_id: str
@@ -843,6 +876,42 @@ class FakeReleaseAPI:
                 template["boundEndpointId"] = resource["id"]
         return resource
 
+    def update_template(
+        self, template_id: str, name: str, image: str, auth_id: str
+    ) -> dict:
+        self.calls.append(f"update_template:{image}")
+        if self.update_observer is not None:
+            self.update_observer()
+        template = next(item for item in self.templates if item["id"] == template_id)
+        template.update(
+            {
+                "name": name,
+                "imageName": image,
+                "containerRegistryAuthId": auth_id,
+                "containerDiskInGb": 20,
+                "volumeInGb": 0,
+                "volumeMountPath": "/workspace",
+                "dockerEntrypoint": [],
+                "dockerStartCmd": [],
+                "isPublic": False,
+                "isServerless": True,
+                "ports": [],
+                "readme": "",
+            }
+        )
+        for endpoint in self.endpoints:
+            if endpoint["templateId"] == template_id:
+                endpoint["version"] = endpoint.get("version", 0) + 1
+        return self.read_template(template_id)
+
+    def rename_endpoint(self, endpoint_id: str, template_id: str) -> dict:
+        self.calls.append(f"rename_endpoint:{endpoint_id}")
+        endpoint = next(item for item in self.endpoints if item["id"] == endpoint_id)
+        if endpoint["templateId"] != template_id:
+            raise AssertionError("fake endpoint/template mismatch")
+        endpoint["name"] = "tars-runpod-endpoint-v2"
+        return self.read_endpoint(endpoint_id)
+
     @staticmethod
     def endpoint(
         *, endpoint_id: str, name: str, template_id: str, created: datetime
@@ -862,7 +931,46 @@ class FakeReleaseAPI:
             "computeType": "GPU",
             "executionTimeoutMs": 7_200_000,
             "createdAt": created.isoformat().replace("+00:00", "Z"),
+            "version": 0,
+            "pods": [],
+            "workers": [],
         }
+
+    def seed_stable(self, image: str, *, version: int = 7) -> None:
+        self.auths.append(
+            {
+                "id": "stable-auth",
+                "name": "tars-runpod-auth-v2-" + "f" * 12,
+            }
+        )
+        self.templates.append(
+            {
+                "id": "stable-template",
+                "name": "tars-runpod-template-v2",
+                "imageName": image,
+                "isServerless": True,
+                "containerDiskInGb": 20,
+                "volumeInGb": 0,
+                "volumeMountPath": "/workspace",
+                "dockerArgs": None,
+                "dockerEntrypoint": [],
+                "dockerStartCmd": [],
+                "env": [{"key": "RUNPOD_INIT_TIMEOUT"}],
+                "isPublic": False,
+                "ports": [],
+                "readme": "",
+                "containerRegistryAuthId": "stable-auth",
+                "boundEndpointId": "stable-endpoint",
+            }
+        )
+        endpoint = self.endpoint(
+            endpoint_id="stable-endpoint",
+            name="tars-runpod-endpoint-v2",
+            template_id="stable-template",
+            created=datetime.now(timezone.utc),
+        )
+        endpoint["version"] = version
+        self.endpoints.append(endpoint)
 
     def seed_release(self, release_sha: str, suffix: str, created: datetime) -> None:
         auth_id = f"auth-{suffix}"
@@ -909,20 +1017,6 @@ class FakeReleaseAPI:
         stored["workersMax"] = 0
         return self.read_endpoint(stored["id"])
 
-    def activate_endpoint(self, endpoint: dict) -> dict:
-        self.calls.append(f"activate:{endpoint['id']}")
-        stored = next(item for item in self.endpoints if item["id"] == endpoint["id"])
-        stored["workersMin"] = 0
-        stored["workersMax"] = 2
-        return self.read_endpoint(stored["id"])
-
-    def configure_endpoint(self, endpoint: dict) -> dict:
-        self.calls.append(f"configure:{endpoint['id']}")
-        stored = next(item for item in self.endpoints if item["id"] == endpoint["id"])
-        stored["gpuCount"] = 1
-        stored["executionTimeoutMs"] = ENDPOINT_TIMEOUT_MS
-        return self.read_endpoint(stored["id"])
-
     def delete_endpoint(self, endpoint_id: str) -> Inventory:
         self.calls.append(f"delete_endpoint:{endpoint_id}")
         self.endpoints = [item for item in self.endpoints if item["id"] != endpoint_id]
@@ -949,6 +1043,1389 @@ class RunpodReleaseTest(unittest.TestCase):
         + "@sha256:"
         + "a" * 64
     )
+    TARGET_IMAGE = (
+        "registry.digitalocean.com/lascade/tars:gpu-sha-"
+        + "b" * 40
+        + "@sha256:"
+        + "b" * 64
+    )
+    IMAGE_WITH_DIFFERENT_DIGEST = (
+        "registry.digitalocean.com/lascade/tars:gpu-sha-"
+        + "a" * 40
+        + "@sha256:"
+        + "c" * 64
+    )
+
+    @staticmethod
+    def stable_ids() -> tars_runpod_release.StableResourceIDs:
+        return tars_runpod_release.StableResourceIDs(
+            "stable-endpoint", "stable-template", "stable-auth"
+        )
+
+    @classmethod
+    def stable_update_receipt(
+        cls,
+        *,
+        prior_version: int = 7,
+        target_version: int | None = 8,
+    ) -> tars_runpod_release.StableRolloutReceipt:
+        return tars_runpod_release.StableRolloutReceipt(
+            endpoint_id="stable-endpoint",
+            template_id="stable-template",
+            auth_id="stable-auth",
+            baseline="existing",
+            prior_release_sha="a" * 40,
+            prior_app_gpu_image=cls.IMAGE,
+            release_sha="b" * 40,
+            target_image=cls.TARGET_IMAGE,
+            prior_image=cls.IMAGE,
+            prior_version=prior_version,
+            target_version=target_version,
+            mode="update",
+        )
+
+    def test_stable_stage_updates_in_place_and_writes_receipt_before_mutation(
+        self,
+    ) -> None:
+        api = FakeReleaseAPI()
+        api.seed_stable(self.IMAGE, version=7)
+        with tempfile.TemporaryDirectory() as directory:
+            receipt_path = Path(directory) / "rollout.json"
+
+            def verify_prepared_receipt() -> None:
+                receipt = tars_runpod_release.read_rollout_receipt(receipt_path)
+                self.assertEqual(receipt.prior_image, self.IMAGE)
+                self.assertEqual(receipt.prior_version, 7)
+                self.assertIsNone(receipt.target_version)
+
+            api.update_observer = verify_prepared_receipt
+            receipt = tars_runpod_release.stage_stable_release(
+                api,
+                ids=self.stable_ids(),
+                release_sha="b" * 40,
+                gpu_image=self.TARGET_IMAGE,
+                prior_release_sha="a" * 40,
+                prior_app_gpu_image=self.IMAGE,
+                greenfield=False,
+                receipt_path=receipt_path,
+            )
+
+            self.assertEqual(
+                api.calls, [f"update_template:{self.TARGET_IMAGE}"]
+            )
+            self.assertNotIn("create_auth", api.calls)
+            self.assertNotIn("create_template", api.calls)
+            self.assertNotIn("create_endpoint", api.calls)
+            self.assertEqual(receipt.endpoint_id, "stable-endpoint")
+            self.assertEqual(receipt.template_id, "stable-template")
+            self.assertEqual(receipt.auth_id, "stable-auth")
+            self.assertEqual(receipt.target_version, 8)
+            self.assertEqual(receipt_path.stat().st_mode & 0o777, 0o600)
+            stored = tars_runpod_release.read_rollout_receipt(receipt_path)
+            self.assertEqual(stored.prior_image, self.IMAGE)
+            self.assertEqual(stored.target_image, self.TARGET_IMAGE)
+            self.assertEqual(stored.target_version, 8)
+
+    def test_stable_stage_waits_for_standalone_rest_template(self) -> None:
+        class StaleRESTTemplateAPI(FakeReleaseAPI):
+            def read_template(self, template_id: str) -> dict:
+                template = super().read_template(template_id)
+                if template["imageName"] == RunpodReleaseTest.TARGET_IMAGE:
+                    template["imageName"] = RunpodReleaseTest.IMAGE
+                return template
+
+        api = StaleRESTTemplateAPI()
+        api.seed_stable(self.IMAGE, version=7)
+        ticks = iter((0.0, 0.0, 1.0))
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(
+                RunpodReleaseError, "did not converge"
+            ):
+                tars_runpod_release.stage_stable_release(
+                    api,
+                    ids=self.stable_ids(),
+                    release_sha="b" * 40,
+                    gpu_image=self.TARGET_IMAGE,
+                    prior_release_sha="a" * 40,
+                    prior_app_gpu_image=self.IMAGE,
+                    greenfield=False,
+                    receipt_path=Path(directory) / "rollout.json",
+                    timeout_seconds=0.5,
+                    poll_seconds=0.1,
+                    sleeper=lambda _seconds: None,
+                    clock=lambda: next(ticks),
+                )
+        self.assertEqual(
+            api.calls, [f"update_template:{self.TARGET_IMAGE}"]
+        )
+
+    def test_durable_prepared_boundary_recovers_after_runner_receipt_loss(
+        self,
+    ) -> None:
+        api = FakeReleaseAPI()
+        api.seed_stable(self.IMAGE, version=7)
+        with tempfile.TemporaryDirectory() as directory:
+            durable = Path(directory) / "control-boundary.json"
+            runner = Path(directory) / "runner-receipt.json"
+            prepared = tars_runpod_release.prepare_stable_release(
+                api,
+                ids=self.stable_ids(),
+                release_sha="b" * 40,
+                gpu_image=self.TARGET_IMAGE,
+                prior_release_sha="a" * 40,
+                prior_app_gpu_image=self.IMAGE,
+                greenfield=False,
+                receipt_path=durable,
+            )
+            tars_runpod_release.write_rollout_receipt(runner, prepared)
+
+            tars_runpod_release.stage_prepared_stable_release(
+                api,
+                receipt=prepared,
+                receipt_path=runner,
+            )
+            self.assertEqual(api.templates[0]["imageName"], self.TARGET_IMAGE)
+
+            # A replacement runner has only the control-node boundary written
+            # before mutation, not the runner-local post-stage receipt.
+            tars_runpod_release.rollback_stable_release(
+                api,
+                receipt=tars_runpod_release.read_rollout_receipt(durable),
+            )
+
+        self.assertEqual(api.templates[0]["imageName"], self.IMAGE)
+        self.assertEqual(api.endpoints[0]["version"], 9)
+
+    def test_prepare_refuses_live_app_and_provider_image_mismatch(self) -> None:
+        api = FakeReleaseAPI()
+        api.seed_stable(self.IMAGE, version=7)
+        with tempfile.TemporaryDirectory() as directory:
+            boundary = Path(directory) / "boundary.json"
+            with self.assertRaisesRegex(
+                RunpodReleaseError, "live dispatcher"
+            ):
+                tars_runpod_release.prepare_stable_release(
+                    api,
+                    ids=self.stable_ids(),
+                    release_sha="b" * 40,
+                    gpu_image=self.TARGET_IMAGE,
+                    prior_release_sha="b" * 40,
+                    prior_app_gpu_image=self.TARGET_IMAGE,
+                    greenfield=False,
+                    receipt_path=boundary,
+                )
+            self.assertFalse(boundary.exists())
+        self.assertEqual(api.calls, [])
+
+    def test_prepare_refuses_same_release_sha_with_different_gpu_digest(
+        self,
+    ) -> None:
+        api = FakeReleaseAPI()
+        api.seed_stable(self.IMAGE, version=7)
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(
+                RunpodReleaseError, "live dispatcher"
+            ):
+                tars_runpod_release.prepare_stable_release(
+                    api,
+                    ids=self.stable_ids(),
+                    release_sha="b" * 40,
+                    gpu_image=self.TARGET_IMAGE,
+                    prior_release_sha="a" * 40,
+                    prior_app_gpu_image=self.IMAGE_WITH_DIFFERENT_DIGEST,
+                    greenfield=False,
+                    receipt_path=Path(directory) / "boundary.json",
+                )
+        self.assertEqual(api.calls, [])
+
+    def test_stage_refuses_provider_drift_after_boundary_persistence(self) -> None:
+        api = FakeReleaseAPI()
+        api.seed_stable(self.IMAGE, version=7)
+        with tempfile.TemporaryDirectory() as directory:
+            boundary = Path(directory) / "boundary.json"
+            receipt = tars_runpod_release.prepare_stable_release(
+                api,
+                ids=self.stable_ids(),
+                release_sha="b" * 40,
+                gpu_image=self.TARGET_IMAGE,
+                prior_release_sha="a" * 40,
+                prior_app_gpu_image=self.IMAGE,
+                greenfield=False,
+                receipt_path=boundary,
+            )
+            api.templates[0]["imageName"] = self.TARGET_IMAGE
+            api.endpoints[0]["version"] = 8
+            with self.assertRaisesRegex(
+                RunpodReleaseError, "stable template image"
+            ):
+                tars_runpod_release.stage_prepared_stable_release(
+                    api,
+                    receipt=receipt,
+                    receipt_path=boundary,
+                )
+        self.assertEqual(api.calls, [])
+
+    def test_stage_rereads_exact_provider_boundary_after_idle_wait(self) -> None:
+        class DriftingReleaseAPI(FakeReleaseAPI):
+            def read_endpoint_health(
+                self, endpoint_id: str
+            ) -> tars_runpod_release.EndpointHealth:
+                health = super().read_endpoint_health(endpoint_id)
+                if len(self.health_calls) == 2:
+                    self.templates[0]["imageName"] = (
+                        RunpodReleaseTest.IMAGE_WITH_DIFFERENT_DIGEST
+                    )
+                return health
+
+        api = DriftingReleaseAPI()
+        api.seed_stable(self.IMAGE, version=7)
+        with tempfile.TemporaryDirectory() as directory:
+            boundary = Path(directory) / "boundary.json"
+            receipt = tars_runpod_release.prepare_stable_release(
+                api,
+                ids=self.stable_ids(),
+                release_sha="b" * 40,
+                gpu_image=self.TARGET_IMAGE,
+                prior_release_sha="a" * 40,
+                prior_app_gpu_image=self.IMAGE,
+                greenfield=False,
+                receipt_path=boundary,
+            )
+            api.health_by_endpoint["stable-endpoint"] = [
+                tars_runpod_release.EndpointHealth(1, 0),
+                tars_runpod_release.EndpointHealth(0, 0),
+            ]
+            with self.assertRaisesRegex(
+                RunpodReleaseError, "stable template image"
+            ):
+                tars_runpod_release.stage_prepared_stable_release(
+                    api,
+                    receipt=receipt,
+                    receipt_path=boundary,
+                    sleeper=lambda _seconds: None,
+                )
+        self.assertEqual(api.calls, [])
+
+    def test_application_baseline_is_exact_and_owner_only(self) -> None:
+        baseline = tars_runpod_release.ApplicationRolloutBaseline(
+            release_sha="a" * 40,
+            gpu_image=self.IMAGE,
+            endpoint_id="stable-endpoint",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "boundary.json"
+            tars_runpod_release.write_application_baseline(path, baseline)
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(
+                tars_runpod_release.read_application_baseline(path),
+                baseline,
+            )
+            document = json.loads(path.read_text(encoding="utf-8"))
+        self.assertEqual(
+            set(document),
+            {
+                "baseline",
+                "endpoint_id",
+                "gpu_image",
+                "kind",
+                "release_sha",
+                "replicas",
+            },
+        )
+        self.assertEqual(document["kind"], "application")
+        self.assertEqual(document["replicas"], 1)
+
+    def test_boundary_readers_reject_duplicate_json_keys_recursively(self) -> None:
+        baseline = tars_runpod_release.ApplicationRolloutBaseline(
+            release_sha="a" * 40,
+            gpu_image=self.IMAGE,
+            endpoint_id="stable-endpoint",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            application_path = root / "application.json"
+            tars_runpod_release.write_application_baseline(
+                application_path, baseline
+            )
+            application_path.write_text(
+                application_path.read_text(encoding="utf-8").replace(
+                    '"endpoint_id":"stable-endpoint"',
+                    (
+                        '"endpoint_id":"stable-endpoint",'
+                        '"endpoint_id":"shadow-endpoint"'
+                    ),
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(
+                RunpodReleaseError, "duplicate JSON object key"
+            ):
+                tars_runpod_release.read_application_baseline(application_path)
+
+            receipt_path = root / "receipt.json"
+            tars_runpod_release.write_rollout_receipt(
+                receipt_path, self.stable_update_receipt()
+            )
+            receipt_path.write_text(
+                receipt_path.read_text(encoding="utf-8").replace(
+                    '"target_version":8',
+                    '"target_version":{"version":8,"version":9}',
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(
+                RunpodReleaseError, "duplicate JSON object key"
+            ):
+                tars_runpod_release.read_rollout_receipt(receipt_path)
+
+    def test_rollout_receipt_rejects_boolean_versions(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for field, message in (
+                ("prior_version", "invalid prior version"),
+                ("target_version", "invalid target version"),
+            ):
+                with self.subTest(field=field):
+                    path = root / f"{field}.json"
+                    tars_runpod_release.write_rollout_receipt(
+                        path, self.stable_update_receipt()
+                    )
+                    path.write_text(
+                        path.read_text(encoding="utf-8").replace(
+                            f'"{field}":'
+                            + ("7" if field == "prior_version" else "8"),
+                            f'"{field}":true',
+                        ),
+                        encoding="utf-8",
+                    )
+                    with self.assertRaisesRegex(
+                        RunpodReleaseError, message
+                    ):
+                        tars_runpod_release.read_rollout_receipt(path)
+
+    def test_verify_application_accepts_only_the_current_worker_generation(
+        self,
+    ) -> None:
+        api = FakeReleaseAPI()
+        api.seed_stable(self.IMAGE, version=7)
+        api.endpoints[0]["pods"] = [
+            {"id": "historical", "desiredStatus": "EXITED"},
+            {"id": "current", "desiredStatus": "RUNNING"},
+        ]
+        api.endpoints[0]["workers"] = [
+            {
+                "id": "historical",
+                "image": self.TARGET_IMAGE,
+                "containerRegistryAuthId": "old-auth",
+                "slsVersion": 6,
+            },
+            {
+                "id": "current",
+                "image": self.IMAGE,
+                "containerRegistryAuthId": "stable-auth",
+                "slsVersion": 7,
+            },
+        ]
+        baseline = tars_runpod_release.ApplicationRolloutBaseline(
+            release_sha="a" * 40,
+            gpu_image=self.IMAGE,
+            endpoint_id="stable-endpoint",
+        )
+
+        version = tars_runpod_release.verify_application_generation(
+            api,
+            baseline=baseline,
+            ids=self.stable_ids(),
+        )
+
+        self.assertEqual(version, 7)
+        self.assertEqual(api.calls, [])
+
+    def test_verify_application_rejects_endpoint_or_active_worker_drift(
+        self,
+    ) -> None:
+        baseline = tars_runpod_release.ApplicationRolloutBaseline(
+            release_sha="a" * 40,
+            gpu_image=self.IMAGE,
+            endpoint_id="stable-endpoint",
+        )
+        api = FakeReleaseAPI()
+        api.seed_stable(self.IMAGE, version=7)
+        with self.assertRaisesRegex(
+            RunpodReleaseError, "application baseline stable endpoint"
+        ):
+            tars_runpod_release.verify_application_generation(
+                api,
+                baseline=baseline,
+                ids=tars_runpod_release.StableResourceIDs(
+                    "other-endpoint", "stable-template", "stable-auth"
+                ),
+            )
+        self.assertEqual(api.calls, [])
+
+        for field, value, message in (
+            ("image", self.TARGET_IMAGE, "active worker image"),
+            (
+                "containerRegistryAuthId",
+                "old-auth",
+                "active worker registry auth",
+            ),
+            ("slsVersion", 6, "active worker slsVersion"),
+        ):
+            with self.subTest(field=field):
+                api = FakeReleaseAPI()
+                api.seed_stable(self.IMAGE, version=7)
+                api.endpoints[0]["pods"] = [
+                    {"id": "worker", "desiredStatus": "RUNNING"}
+                ]
+                worker = {
+                    "id": "worker",
+                    "image": self.IMAGE,
+                    "containerRegistryAuthId": "stable-auth",
+                    "slsVersion": 7,
+                }
+                worker[field] = value
+                api.endpoints[0]["workers"] = [worker]
+                with self.assertRaisesRegex(RunpodReleaseError, message):
+                    tars_runpod_release.verify_application_generation(
+                        api,
+                        baseline=baseline,
+                        ids=self.stable_ids(),
+                    )
+                self.assertEqual(api.calls, [])
+
+    def test_verify_application_cli_reads_all_stable_ids_without_mutation(
+        self,
+    ) -> None:
+        api = FakeReleaseAPI()
+        api.seed_stable(self.IMAGE, version=7)
+        baseline = tars_runpod_release.ApplicationRolloutBaseline(
+            release_sha="a" * 40,
+            gpu_image=self.IMAGE,
+            endpoint_id="stable-endpoint",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            boundary = root / "application.json"
+            tars_runpod_release.write_application_baseline(boundary, baseline)
+            original_boundary = boundary.read_bytes()
+            secret_values = {
+                "api-key": "runpod-key",
+                "endpoint-id": "stable-endpoint",
+                "template-id": "stable-template",
+                "auth-id": "stable-auth",
+            }
+            secret_paths: dict[str, Path] = {}
+            for name, value in secret_values.items():
+                path = root / name
+                path.write_text(value, encoding="utf-8")
+                path.chmod(0o600)
+                secret_paths[name] = path
+            arguments = [
+                "tars_runpod_release.py",
+                "verify-application",
+                "--api-key-file",
+                str(secret_paths["api-key"]),
+                "--boundary-file",
+                str(boundary),
+                "--endpoint-id-file",
+                str(secret_paths["endpoint-id"]),
+                "--template-id-file",
+                str(secret_paths["template-id"]),
+                "--auth-id-file",
+                str(secret_paths["auth-id"]),
+            ]
+            missing_endpoint_arguments = [
+                argument
+                for index, argument in enumerate(arguments)
+                if index not in (6, 7)
+            ]
+            with (
+                mock.patch("sys.argv", missing_endpoint_arguments),
+                mock.patch("sys.stderr", io.StringIO()),
+                self.assertRaises(SystemExit) as exit_error,
+            ):
+                tars_runpod_release.main()
+            self.assertEqual(exit_error.exception.code, 2)
+            with (
+                mock.patch(
+                    "sys.argv",
+                    arguments,
+                ),
+                mock.patch.object(
+                    tars_runpod_release,
+                    "RunpodClient",
+                    return_value=api,
+                ),
+            ):
+                tars_runpod_release.main()
+
+            self.assertEqual(boundary.read_bytes(), original_boundary)
+        self.assertEqual(api.calls, [])
+
+    def test_greenfield_boundary_requires_bootstrapped_target_and_no_prior_app(
+        self,
+    ) -> None:
+        api = FakeReleaseAPI()
+        api.seed_stable(self.TARGET_IMAGE, version=3)
+        with tempfile.TemporaryDirectory() as directory:
+            boundary = Path(directory) / "boundary.json"
+            receipt = tars_runpod_release.stage_stable_release(
+                api,
+                ids=self.stable_ids(),
+                release_sha="b" * 40,
+                gpu_image=self.TARGET_IMAGE,
+                prior_release_sha=None,
+                prior_app_gpu_image=None,
+                greenfield=True,
+                receipt_path=boundary,
+            )
+            tars_runpod_release.rollback_stable_release(
+                api, receipt=receipt
+            )
+
+        self.assertEqual(receipt.baseline, "greenfield")
+        self.assertEqual(receipt.mode, "noop")
+        self.assertEqual(api.templates[0]["imageName"], self.TARGET_IMAGE)
+        self.assertEqual(api.calls, [])
+
+    def test_stable_stage_missing_configured_resources_never_bootstraps(self) -> None:
+        api = FakeReleaseAPI()
+        with tempfile.TemporaryDirectory() as directory:
+            receipt_path = Path(directory) / "rollout.json"
+            with self.assertRaisesRegex(
+                RunpodReleaseError, "ordinary deployment will not create"
+            ):
+                tars_runpod_release.stage_stable_release(
+                    api,
+                    ids=self.stable_ids(),
+                    release_sha="b" * 40,
+                    gpu_image=self.TARGET_IMAGE,
+                    prior_release_sha="a" * 40,
+                    prior_app_gpu_image=self.IMAGE,
+                    greenfield=False,
+                    receipt_path=receipt_path,
+                )
+            self.assertEqual(api.calls, [])
+            self.assertFalse(receipt_path.exists())
+
+    def test_stable_topology_requires_exclusive_bound_endpoint(self) -> None:
+        api = FakeReleaseAPI()
+        api.seed_stable(self.TARGET_IMAGE, version=11)
+        api.templates[0]["boundEndpointId"] = "different-endpoint"
+        with self.assertRaisesRegex(
+            RunpodReleaseError, "stable template bound endpoint"
+        ):
+            tars_runpod_release.verify_stable_topology(
+                api,
+                ids=self.stable_ids(),
+                expected_image=self.TARGET_IMAGE,
+            )
+
+        api.templates[0]["boundEndpointId"] = "stable-endpoint"
+        shared = FakeReleaseAPI.endpoint(
+            endpoint_id="shared-endpoint",
+            name="unrelated-endpoint",
+            template_id="stable-template",
+            created=datetime.now(timezone.utc),
+        )
+        api.endpoints.append(shared)
+        with self.assertRaisesRegex(
+            RunpodReleaseError, "shared by another endpoint"
+        ):
+            tars_runpod_release.verify_stable_topology(
+                api,
+                ids=self.stable_ids(),
+                expected_image=self.TARGET_IMAGE,
+            )
+
+        api.endpoints.pop()
+        api.templates.append(
+            {
+                **api.templates[0],
+                "id": "shared-template",
+                "name": "unrelated-template",
+                "boundEndpointId": None,
+            }
+        )
+        with self.assertRaisesRegex(
+            RunpodReleaseError, "registry auth is shared"
+        ):
+            tars_runpod_release.verify_stable_topology(
+                api,
+                ids=self.stable_ids(),
+                expected_image=self.TARGET_IMAGE,
+            )
+
+    def test_stable_stage_same_image_is_noop_without_version_bump(self) -> None:
+        api = FakeReleaseAPI()
+        api.seed_stable(self.TARGET_IMAGE, version=11)
+        api.health_by_endpoint["stable-endpoint"] = [
+            tars_runpod_release.EndpointHealth(1, 0),
+            tars_runpod_release.EndpointHealth(0, 0),
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            receipt = tars_runpod_release.stage_stable_release(
+                api,
+                ids=self.stable_ids(),
+                release_sha="b" * 40,
+                gpu_image=self.TARGET_IMAGE,
+                prior_release_sha="b" * 40,
+                prior_app_gpu_image=self.TARGET_IMAGE,
+                greenfield=False,
+                receipt_path=Path(directory) / "rollout.json",
+                sleeper=lambda _seconds: None,
+            )
+        self.assertEqual(receipt.mode, "noop")
+        self.assertEqual(receipt.prior_version, 11)
+        self.assertEqual(receipt.target_version, 11)
+        self.assertEqual(api.calls, [])
+        self.assertEqual(
+            api.health_calls, ["stable-endpoint", "stable-endpoint"]
+        )
+
+    def test_stable_noop_stage_refuses_stale_embedded_template(self) -> None:
+        class StaleEmbeddedTemplateAPI(FakeReleaseAPI):
+            def read_endpoint(self, endpoint_id: str) -> dict:
+                endpoint = super().read_endpoint(endpoint_id)
+                endpoint["template"]["imageName"] = (
+                    RunpodReleaseTest.IMAGE
+                )
+                return endpoint
+
+        api = StaleEmbeddedTemplateAPI()
+        api.seed_stable(self.TARGET_IMAGE, version=11)
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(
+                RunpodReleaseError, "REST template imageName"
+            ):
+                tars_runpod_release.stage_stable_release(
+                    api,
+                    ids=self.stable_ids(),
+                    release_sha="b" * 40,
+                    gpu_image=self.TARGET_IMAGE,
+                    prior_release_sha="b" * 40,
+                    prior_app_gpu_image=self.TARGET_IMAGE,
+                    greenfield=False,
+                    receipt_path=Path(directory) / "rollout.json",
+                )
+        self.assertEqual(api.calls, [])
+
+    def test_stable_rollback_restores_exact_prior_image_and_new_version(self) -> None:
+        api = FakeReleaseAPI()
+        api.seed_stable(self.IMAGE, version=7)
+        with tempfile.TemporaryDirectory() as directory:
+            receipt = tars_runpod_release.stage_stable_release(
+                api,
+                ids=self.stable_ids(),
+                release_sha="b" * 40,
+                gpu_image=self.TARGET_IMAGE,
+                prior_release_sha="a" * 40,
+                prior_app_gpu_image=self.IMAGE,
+                greenfield=False,
+                receipt_path=Path(directory) / "rollout.json",
+            )
+            tars_runpod_release.rollback_stable_release(
+                api, receipt=receipt
+            )
+        self.assertEqual(
+            [call for call in api.calls if call.startswith("update_template:")],
+            [
+                f"update_template:{self.TARGET_IMAGE}",
+                f"update_template:{self.IMAGE}",
+            ],
+        )
+        self.assertEqual(api.templates[0]["imageName"], self.IMAGE)
+        self.assertEqual(api.endpoints[0]["version"], 9)
+
+    def test_stable_rollback_refuses_stale_embedded_prior_template(self) -> None:
+        class StaleEmbeddedTemplateAPI(FakeReleaseAPI):
+            def read_endpoint(self, endpoint_id: str) -> dict:
+                endpoint = super().read_endpoint(endpoint_id)
+                endpoint["template"]["imageName"] = (
+                    RunpodReleaseTest.TARGET_IMAGE
+                )
+                return endpoint
+
+        api = StaleEmbeddedTemplateAPI()
+        api.seed_stable(self.IMAGE, version=9)
+        with self.assertRaisesRegex(
+            RunpodReleaseError, "REST template imageName"
+        ):
+            tars_runpod_release.rollback_stable_release(
+                api,
+                receipt=self.stable_update_receipt(),
+            )
+        self.assertEqual(api.calls, [])
+
+    def test_stable_rollback_refuses_same_sha_with_unrecorded_digest(
+        self,
+    ) -> None:
+        api = FakeReleaseAPI()
+        api.seed_stable(self.IMAGE, version=7)
+        with tempfile.TemporaryDirectory() as directory:
+            receipt = tars_runpod_release.stage_stable_release(
+                api,
+                ids=self.stable_ids(),
+                release_sha="b" * 40,
+                gpu_image=self.TARGET_IMAGE,
+                prior_release_sha="a" * 40,
+                prior_app_gpu_image=self.IMAGE,
+                greenfield=False,
+                receipt_path=Path(directory) / "rollout.json",
+            )
+            api.templates[0]["imageName"] = self.IMAGE_WITH_DIFFERENT_DIGEST
+            with self.assertRaisesRegex(
+                RunpodReleaseError, "drifted after staging"
+            ):
+                tars_runpod_release.rollback_stable_release(
+                    api, receipt=receipt
+                )
+        self.assertEqual(
+            [
+                call
+                for call in api.calls
+                if call.startswith("update_template:")
+            ],
+            [f"update_template:{self.TARGET_IMAGE}"],
+        )
+
+    def test_stable_rollback_refuses_image_drift_during_idle_wait(self) -> None:
+        class DriftingReleaseAPI(FakeReleaseAPI):
+            def read_endpoint_health(
+                self, endpoint_id: str
+            ) -> tars_runpod_release.EndpointHealth:
+                health = super().read_endpoint_health(endpoint_id)
+                if len(self.health_calls) == 2:
+                    self.templates[0]["imageName"] = (
+                        RunpodReleaseTest.IMAGE_WITH_DIFFERENT_DIGEST
+                    )
+                return health
+
+        api = DriftingReleaseAPI()
+        api.seed_stable(self.TARGET_IMAGE, version=8)
+        api.health_by_endpoint["stable-endpoint"] = [
+            tars_runpod_release.EndpointHealth(1, 0),
+            tars_runpod_release.EndpointHealth(0, 0),
+        ]
+        with self.assertRaisesRegex(
+            RunpodReleaseError, "stable template image"
+        ):
+            tars_runpod_release.rollback_stable_release(
+                api,
+                receipt=self.stable_update_receipt(),
+                sleeper=lambda _seconds: None,
+            )
+        self.assertEqual(api.calls, [])
+
+    def test_stable_rollback_refuses_version_drift_during_idle_wait(self) -> None:
+        class DriftingReleaseAPI(FakeReleaseAPI):
+            def read_endpoint_health(
+                self, endpoint_id: str
+            ) -> tars_runpod_release.EndpointHealth:
+                health = super().read_endpoint_health(endpoint_id)
+                if len(self.health_calls) == 2:
+                    self.endpoints[0]["version"] += 1
+                return health
+
+        api = DriftingReleaseAPI()
+        api.seed_stable(self.TARGET_IMAGE, version=8)
+        api.health_by_endpoint["stable-endpoint"] = [
+            tars_runpod_release.EndpointHealth(1, 0),
+            tars_runpod_release.EndpointHealth(0, 0),
+        ]
+        with self.assertRaisesRegex(
+            RunpodReleaseError, "version after drain"
+        ):
+            tars_runpod_release.rollback_stable_release(
+                api,
+                receipt=self.stable_update_receipt(),
+                sleeper=lambda _seconds: None,
+            )
+        self.assertEqual(api.calls, [])
+
+    def test_stable_rollback_requires_recorded_target_version(self) -> None:
+        api = FakeReleaseAPI()
+        api.seed_stable(self.TARGET_IMAGE, version=8)
+        with self.assertRaisesRegex(
+            RunpodReleaseError, "target endpoint version before rollback"
+        ):
+            tars_runpod_release.rollback_stable_release(
+                api,
+                receipt=self.stable_update_receipt(target_version=9),
+            )
+        self.assertEqual(api.calls, [])
+
+    def test_verify_target_rereads_topology_after_the_idle_wait(self) -> None:
+        class DriftingReleaseAPI(FakeReleaseAPI):
+            def read_endpoint_health(
+                self, endpoint_id: str
+            ) -> tars_runpod_release.EndpointHealth:
+                health = super().read_endpoint_health(endpoint_id)
+                if len(self.health_calls) == 2:
+                    self.endpoints[0]["version"] += 1
+                return health
+
+        api = DriftingReleaseAPI()
+        api.seed_stable(self.TARGET_IMAGE, version=3)
+        with tempfile.TemporaryDirectory() as directory:
+            receipt = tars_runpod_release.prepare_stable_release(
+                api,
+                ids=self.stable_ids(),
+                release_sha="b" * 40,
+                gpu_image=self.TARGET_IMAGE,
+                prior_release_sha=None,
+                prior_app_gpu_image=None,
+                greenfield=True,
+                receipt_path=Path(directory) / "boundary.json",
+            )
+            api.health_by_endpoint["stable-endpoint"] = [
+                tars_runpod_release.EndpointHealth(1, 0),
+                tars_runpod_release.EndpointHealth(0, 0),
+            ]
+            with self.assertRaisesRegex(
+                RunpodReleaseError, "version after drain"
+            ):
+                tars_runpod_release.verify_receipt_target(
+                    api,
+                    receipt=receipt,
+                    sleeper=lambda _seconds: None,
+                )
+
+    def test_verify_target_refuses_embedded_template_drift_after_idle(
+        self,
+    ) -> None:
+        class DriftingEmbeddedTemplateAPI(FakeReleaseAPI):
+            def __init__(self) -> None:
+                super().__init__()
+                self.endpoint_reads = 0
+
+            def read_endpoint(self, endpoint_id: str) -> dict:
+                self.endpoint_reads += 1
+                endpoint = super().read_endpoint(endpoint_id)
+                if self.endpoint_reads >= 3:
+                    endpoint["template"]["imageName"] = (
+                        RunpodReleaseTest.IMAGE
+                    )
+                return endpoint
+
+        api = DriftingEmbeddedTemplateAPI()
+        api.seed_stable(self.TARGET_IMAGE, version=8)
+        with self.assertRaisesRegex(
+            RunpodReleaseError, "REST template imageName"
+        ):
+            tars_runpod_release.verify_receipt_target(
+                api,
+                receipt=self.stable_update_receipt(),
+            )
+        self.assertEqual(api.calls, [])
+
+    def test_finalize_allows_inactive_history_and_verifies_active_generation(
+        self,
+    ) -> None:
+        api = FakeReleaseAPI()
+        api.seed_stable(self.IMAGE, version=7)
+        with tempfile.TemporaryDirectory() as directory:
+            receipt = tars_runpod_release.stage_stable_release(
+                api,
+                ids=self.stable_ids(),
+                release_sha="b" * 40,
+                gpu_image=self.TARGET_IMAGE,
+                prior_release_sha="a" * 40,
+                prior_app_gpu_image=self.IMAGE,
+                greenfield=False,
+                receipt_path=Path(directory) / "rollout.json",
+            )
+        api.endpoints[0]["pods"] = [
+            {"id": "exited-worker", "desiredStatus": "EXITED"},
+            {"id": "terminated-worker", "desiredStatus": "TERMINATED"},
+            {"id": "new-worker", "desiredStatus": "RUNNING"},
+        ]
+        api.endpoints[0]["workers"] = [
+            {
+                "id": "exited-worker",
+                "image": self.IMAGE,
+                "containerRegistryAuthId": "stable-auth",
+                "slsVersion": 6,
+            },
+            {
+                "id": "terminated-worker",
+                "image": self.IMAGE,
+                "containerRegistryAuthId": "stable-auth",
+                "slsVersion": 7,
+            },
+            {
+                "id": "new-worker",
+                "image": self.TARGET_IMAGE,
+                "containerRegistryAuthId": "stable-auth",
+                "slsVersion": 8,
+            },
+        ]
+        tars_runpod_release.finalize_stable_release(api, receipt=receipt)
+
+    def test_finalize_rejects_unknown_worker_status(self) -> None:
+        api = FakeReleaseAPI()
+        api.seed_stable(self.TARGET_IMAGE, version=8)
+        api.endpoints[0]["pods"] = [
+            {"id": "unknown-worker", "desiredStatus": "STOPPED"}
+        ]
+        with self.assertRaisesRegex(
+            RunpodReleaseError, "invalid worker status"
+        ):
+            tars_runpod_release.verify_active_worker_generation(
+                api.endpoints[0],
+                api.read_endpoint("stable-endpoint"),
+                image=self.TARGET_IMAGE,
+                auth_id="stable-auth",
+                version=8,
+            )
+
+    def test_finalize_rejects_worker_without_authoritative_status(self) -> None:
+        api = FakeReleaseAPI()
+        api.seed_stable(self.TARGET_IMAGE, version=8)
+        api.endpoints[0]["workers"] = [
+            {
+                "id": "unclassified-worker",
+                "image": self.TARGET_IMAGE,
+                "containerRegistryAuthId": "stable-auth",
+                "slsVersion": 8,
+            }
+        ]
+        with self.assertRaisesRegex(
+            RunpodReleaseError, "authoritative worker status"
+        ):
+            tars_runpod_release.verify_active_worker_generation(
+                api.endpoints[0],
+                api.read_endpoint("stable-endpoint"),
+                image=self.TARGET_IMAGE,
+                auth_id="stable-auth",
+                version=8,
+            )
+
+    def test_finalize_rejects_active_old_sls_version(self) -> None:
+        api = FakeReleaseAPI()
+        api.seed_stable(self.TARGET_IMAGE, version=8)
+        api.endpoints[0]["pods"] = [
+            {"id": "old-worker", "desiredStatus": "RUNNING"}
+        ]
+        api.endpoints[0]["workers"] = [
+            {
+                "id": "old-worker",
+                "image": self.TARGET_IMAGE,
+                "containerRegistryAuthId": "stable-auth",
+                "slsVersion": 7,
+            }
+        ]
+        receipt = tars_runpod_release.StableRolloutReceipt(
+            endpoint_id="stable-endpoint",
+            template_id="stable-template",
+            auth_id="stable-auth",
+            baseline="existing",
+            prior_release_sha="a" * 40,
+            prior_app_gpu_image=self.IMAGE,
+            release_sha="b" * 40,
+            target_image=self.TARGET_IMAGE,
+            prior_image=self.IMAGE,
+            prior_version=7,
+            target_version=8,
+            mode="update",
+        )
+        ticks = iter((0.0, 1.0))
+        with self.assertRaisesRegex(
+            RunpodReleaseError, "active worker slsVersion"
+        ):
+            tars_runpod_release.finalize_stable_release(
+                api,
+                receipt=receipt,
+                timeout_seconds=0.5,
+                poll_seconds=0.1,
+                sleeper=lambda _seconds: None,
+                clock=lambda: next(ticks),
+            )
+
+    def test_explicit_stable_bootstrap_is_only_creation_path(self) -> None:
+        api = FakeReleaseAPI()
+        ids = tars_runpod_release.bootstrap_stable_resources(
+            api,
+            release_sha="a" * 40,
+            gpu_image=self.IMAGE,
+            registry_username="reader",
+            registry_password="password",
+        )
+        self.assertEqual(ids.endpoint_id, "endpoint1")
+        self.assertEqual(ids.template_id, "template1")
+        self.assertEqual(ids.auth_id, "auth1")
+        self.assertEqual(
+            api.calls[:4],
+            [
+                "create_auth",
+                "create_template",
+                f"update_template:{self.IMAGE}",
+                "create_endpoint",
+            ],
+        )
+        self.assertRegex(api.auths[0]["name"], r"^tars-runpod-auth-v2-[0-9a-f]{12}$")
+
+    def test_explicit_migration_adopts_existing_ids_without_creation(self) -> None:
+        api = FakeReleaseAPI()
+        api.seed_release(
+            "a" * 40,
+            "current",
+            datetime.now(timezone.utc) - timedelta(days=1),
+        )
+        ids = tars_runpod_release.StableResourceIDs(
+            "endpoint-current", "template-current", "auth-current"
+        )
+
+        adopted = tars_runpod_release.adopt_existing_stable_resources(
+            api,
+            endpoint_id=ids.endpoint_id,
+            sleeper=lambda _seconds: None,
+        )
+        calls_after_adoption = list(api.calls)
+        repeated = tars_runpod_release.adopt_existing_stable_resources(
+            api,
+            endpoint_id=ids.endpoint_id,
+            sleeper=lambda _seconds: None,
+        )
+
+        self.assertEqual(adopted, ids)
+        self.assertEqual(repeated, ids)
+        self.assertEqual(
+            calls_after_adoption,
+            [
+                f"update_template:{self.IMAGE}",
+                "rename_endpoint:endpoint-current",
+            ],
+        )
+        self.assertEqual(api.calls, calls_after_adoption)
+        self.assertEqual(
+            api.endpoints[0]["name"], "tars-runpod-endpoint-v2"
+        )
+        self.assertEqual(
+            api.templates[0]["name"], "tars-runpod-template-v2"
+        )
+        self.assertEqual(api.endpoints[0]["version"], 1)
+        self.assertFalse(
+            any(call.startswith("create_") for call in api.calls)
+        )
+        self.assertFalse(
+            any(call.startswith("delete_") for call in api.calls)
+        )
+
+    def test_explicit_migration_refuses_stale_embedded_template(self) -> None:
+        class StaleEmbeddedTemplateAPI(FakeReleaseAPI):
+            def read_endpoint(self, endpoint_id: str) -> dict:
+                endpoint = super().read_endpoint(endpoint_id)
+                endpoint["template"]["imageName"] = (
+                    RunpodReleaseTest.TARGET_IMAGE
+                )
+                return endpoint
+
+        api = StaleEmbeddedTemplateAPI()
+        api.seed_release(
+            "a" * 40,
+            "current",
+            datetime.now(timezone.utc) - timedelta(days=1),
+        )
+        with self.assertRaisesRegex(
+            RunpodReleaseError, "REST template imageName"
+        ):
+            tars_runpod_release.adopt_existing_stable_resources(
+                api,
+                endpoint_id="endpoint-current",
+                sleeper=lambda _seconds: None,
+            )
+        self.assertEqual(api.calls, [])
+
+    def test_explicit_migration_resumes_after_template_rename(self) -> None:
+        api = FakeReleaseAPI()
+        api.seed_release(
+            "a" * 40,
+            "partial",
+            datetime.now(timezone.utc) - timedelta(days=1),
+        )
+        api.templates[0]["name"] = "tars-runpod-template-v2"
+        ids = tars_runpod_release.StableResourceIDs(
+            "endpoint-partial", "template-partial", "auth-partial"
+        )
+
+        tars_runpod_release.adopt_existing_stable_resources(
+            api,
+            endpoint_id=ids.endpoint_id,
+            sleeper=lambda _seconds: None,
+        )
+
+        self.assertEqual(
+            api.calls, ["rename_endpoint:endpoint-partial"]
+        )
+        self.assertEqual(
+            api.endpoints[0]["name"], "tars-runpod-endpoint-v2"
+        )
+
+    def test_explicit_migration_refuses_legacy_gpu_contract_before_mutation(
+        self,
+    ) -> None:
+        api = FakeReleaseAPI()
+        api.seed_release(
+            "a" * 40,
+            "legacy-gpu",
+            datetime.now(timezone.utc) - timedelta(days=1),
+        )
+        api.endpoints[0]["gpuIds"] = "AMPERE_16"
+        ids = tars_runpod_release.StableResourceIDs(
+            "endpoint-legacy-gpu",
+            "template-legacy-gpu",
+            "auth-legacy-gpu",
+        )
+
+        with self.assertRaisesRegex(
+            RunpodReleaseError, "endpoint gpuIds"
+        ):
+            tars_runpod_release.adopt_existing_stable_resources(
+                api,
+                endpoint_id=ids.endpoint_id,
+                sleeper=lambda _seconds: None,
+            )
+        self.assertEqual(api.calls, [])
+
+    def test_explicit_migration_drains_active_worker_before_mutation(self) -> None:
+        api = FakeReleaseAPI()
+        api.seed_release(
+            "a" * 40,
+            "busy",
+            datetime.now(timezone.utc) - timedelta(days=1),
+        )
+        api.endpoints[0]["pods"] = [
+            {"id": "busy-worker", "desiredStatus": "RUNNING"}
+        ]
+        api.endpoints[0]["workers"] = [
+            {
+                "id": "busy-worker",
+                "image": self.IMAGE,
+                "containerRegistryAuthId": "auth-busy",
+                "slsVersion": 0,
+            }
+        ]
+        ids = tars_runpod_release.StableResourceIDs(
+            "endpoint-busy", "template-busy", "auth-busy"
+        )
+        ticks = iter((0.0, 1.0))
+
+        with self.assertRaisesRegex(
+            RunpodReleaseError, "did not drain"
+        ):
+            tars_runpod_release.adopt_existing_stable_resources(
+                api,
+                endpoint_id=ids.endpoint_id,
+                timeout_seconds=0.5,
+                poll_seconds=0.1,
+                sleeper=lambda _seconds: None,
+                clock=lambda: next(ticks),
+            )
+        self.assertEqual(api.calls, [])
+
+    def test_stable_template_update_uses_one_official_post_without_blind_retry(
+        self,
+    ) -> None:
+        calls: list[urllib.request.Request] = []
+
+        def lose_update_response(request, *, timeout):
+            calls.append(request)
+            raise urllib.error.URLError("response lost")
+
+        updated = RunpodClient(
+            "api-key", opener=lose_update_response
+        ).update_template(
+            "stable-template",
+            "tars-runpod-template-v2",
+            self.TARGET_IMAGE,
+            "stable-auth",
+        )
+
+        self.assertEqual(updated, {})
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0].method, "POST")
+        self.assertEqual(
+            urllib.parse.urlsplit(calls[0].full_url).path,
+            "/v1/templates/stable-template/update",
+        )
+        self.assertEqual(
+            json.loads(calls[0].data),
+            tars_runpod_release.stable_template_payload(
+                name="tars-runpod-template-v2",
+                image=self.TARGET_IMAGE,
+                auth_id="stable-auth",
+            ),
+        )
+
+    def test_stable_template_update_stops_on_definitive_http_rejection(
+        self,
+    ) -> None:
+        calls = 0
+
+        def reject(request, *, timeout):
+            nonlocal calls
+            calls += 1
+            raise urllib.error.HTTPError(
+                request.full_url,
+                400,
+                "bad request",
+                email.message.Message(),
+                io.BytesIO(b"rejected"),
+            )
+
+        with self.assertRaisesRegex(
+            RunpodReleaseError, "failed with HTTP 400"
+        ):
+            RunpodClient("api-key", opener=reject).update_template(
+                "stable-template",
+                "tars-runpod-template-v2",
+                self.TARGET_IMAGE,
+                "stable-auth",
+            )
+        self.assertEqual(calls, 1)
+
+    def test_stable_endpoint_rename_uses_one_patch_without_blind_retry(
+        self,
+    ) -> None:
+        calls: list[urllib.request.Request] = []
+
+        def lose_rename_response(request, *, timeout):
+            calls.append(request)
+            raise urllib.error.URLError("response lost")
+
+        renamed = RunpodClient(
+            "api-key", opener=lose_rename_response
+        ).rename_endpoint("stable-endpoint", "stable-template")
+
+        self.assertEqual(renamed, {})
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0].method, "PATCH")
+        self.assertEqual(
+            urllib.parse.urlsplit(calls[0].full_url).path,
+            "/v1/endpoints/stable-endpoint",
+        )
+        self.assertEqual(
+            json.loads(calls[0].data),
+            {"name": "tars-runpod-endpoint-v2"},
+        )
+        self.assertEqual(
+            calls[0].get_header("Authorization"), "Bearer api-key"
+        )
+
+    def test_explicit_legacy_retirement_is_exact_idempotent_and_protects_stable(
+        self,
+    ) -> None:
+        api = FakeReleaseAPI()
+        api.seed_stable(self.TARGET_IMAGE, version=8)
+        api.seed_release(
+            "c" * 40, "old-one", datetime.now(timezone.utc) - timedelta(days=2)
+        )
+        api.seed_release(
+            "d" * 40, "old-two", datetime.now(timezone.utc) - timedelta(days=2)
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            plan = Path(directory) / "legacy-plan.json"
+            confirmation = tars_runpod_release.build_legacy_retirement_plan(
+                api, stable_ids=self.stable_ids(), output_path=plan
+            )
+            self.assertEqual(plan.stat().st_mode & 0o777, 0o600)
+            retired = tars_runpod_release.retire_legacy_resources(
+                api,
+                plan_path=plan,
+                confirmation_sha256=confirmation,
+            )
+            repeated = tars_runpod_release.retire_legacy_resources(
+                api,
+                plan_path=plan,
+                confirmation_sha256=confirmation,
+            )
+        self.assertEqual(retired, 2)
+        self.assertEqual(repeated, 0)
+        self.assertEqual(
+            [endpoint["id"] for endpoint in api.endpoints],
+            ["stable-endpoint"],
+        )
+        self.assertEqual(
+            [template["id"] for template in api.templates],
+            ["stable-template"],
+        )
+        self.assertEqual([auth["id"] for auth in api.auths], ["stable-auth"])
+        self.assertIn("zero:endpoint-old-one", api.calls)
+        self.assertIn("zero:endpoint-old-two", api.calls)
+
+    def test_legacy_retirement_refuses_active_non_exited_worker_before_mutation(
+        self,
+    ) -> None:
+        api = FakeReleaseAPI()
+        api.seed_stable(self.TARGET_IMAGE, version=8)
+        api.seed_release(
+            "c" * 40, "busy", datetime.now(timezone.utc) - timedelta(days=2)
+        )
+        legacy = next(
+            endpoint
+            for endpoint in api.endpoints
+            if endpoint["id"] == "endpoint-busy"
+        )
+        legacy["pods"] = [{"id": "busy-worker", "desiredStatus": "RUNNING"}]
+        legacy["workers"] = [
+            {
+                "id": "busy-worker",
+                "image": self.IMAGE,
+                "containerRegistryAuthId": "auth-busy",
+                "slsVersion": 1,
+            }
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            plan = Path(directory) / "legacy-plan.json"
+            confirmation = tars_runpod_release.build_legacy_retirement_plan(
+                api, stable_ids=self.stable_ids(), output_path=plan
+            )
+            with self.assertRaisesRegex(
+                RunpodReleaseError, "active worker work"
+            ):
+                tars_runpod_release.retire_legacy_resources(
+                    api,
+                    plan_path=plan,
+                    confirmation_sha256=confirmation,
+                )
+        self.assertFalse(any(call.startswith("zero:") for call in api.calls))
+        self.assertFalse(
+            any(call.startswith("delete_") for call in api.calls)
+        )
+
+    def test_legacy_retirement_allows_historical_exited_worker_rows(self) -> None:
+        api = FakeReleaseAPI()
+        api.seed_stable(self.TARGET_IMAGE, version=8)
+        api.seed_release(
+            "c" * 40, "exited", datetime.now(timezone.utc) - timedelta(days=2)
+        )
+        legacy = next(
+            endpoint
+            for endpoint in api.endpoints
+            if endpoint["id"] == "endpoint-exited"
+        )
+        legacy["pods"] = [{"id": "old-worker", "desiredStatus": "EXITED"}]
+        legacy["workers"] = [
+            {
+                "id": "old-worker",
+                "image": self.IMAGE,
+                "containerRegistryAuthId": "auth-exited",
+                "slsVersion": 1,
+            }
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            plan = Path(directory) / "legacy-plan.json"
+            confirmation = tars_runpod_release.build_legacy_retirement_plan(
+                api, stable_ids=self.stable_ids(), output_path=plan
+            )
+            retired = tars_runpod_release.retire_legacy_resources(
+                api,
+                plan_path=plan,
+                confirmation_sha256=confirmation,
+            )
+        self.assertEqual(retired, 1)
 
     def test_endpoint_health_uses_official_bearer_api_and_exact_job_counts(
         self,
@@ -1042,399 +2519,6 @@ class RunpodReleaseTest(unittest.TestCase):
                 ):
                     client.read_endpoint_health("endpoint-id")
 
-    def test_ensure_is_deterministic_idempotent_and_secret_free(self) -> None:
-        api = FakeReleaseAPI()
-        resources = ensure_release(
-            api,
-            release_sha="a" * 40,
-            gpu_image=self.IMAGE,
-            registry_username="registry-reader",
-            registry_password="super-secret-registry-password",
-        )
-        first_calls = list(api.calls)
-        repeated = ensure_release(
-            api,
-            release_sha="a" * 40,
-            gpu_image=self.IMAGE,
-            registry_username="registry-reader",
-            registry_password="super-secret-registry-password",
-        )
-        self.assertEqual(resources, repeated)
-        self.assertEqual(
-            first_calls, ["create_auth", "create_template", "create_endpoint"]
-        )
-        self.assertEqual(api.calls, first_calls)
-        names = release_names(
-            "a" * 40, "registry-reader", "super-secret-registry-password"
-        )
-        self.assertNotIn("super-secret-registry-password", " ".join(names))
-
-    def test_same_sha_with_a_different_digest_fails_without_provider_mutation(
-        self,
-    ) -> None:
-        api = FakeReleaseAPI()
-        ensure_release(
-            api,
-            release_sha="a" * 40,
-            gpu_image=self.IMAGE,
-            registry_username="reader",
-            registry_password="password",
-        )
-        calls = list(api.calls)
-        changed_digest = self.IMAGE.rsplit(":", 1)[0] + ":" + "b" * 64
-        with self.assertRaisesRegex(RunpodReleaseError, "imageName"):
-            ensure_release(
-                api,
-                release_sha="a" * 40,
-                gpu_image=changed_digest,
-                registry_username="reader",
-                registry_password="password",
-            )
-        self.assertEqual(api.calls, calls)
-
-    def test_ensure_rejects_nonimmutable_or_mismatched_gpu_images(self) -> None:
-        invalid_images = (
-            "registry.digitalocean.com/lascade/tars@sha256:" + "a" * 64,
-            "registry.digitalocean.com/lascade/tars:gpu-sha-" + "a" * 40,
-            (
-                "registry.digitalocean.com/lascade/tars:gpu-sha-"
-                + "b" * 40
-                + "@sha256:"
-                + "a" * 64
-            ),
-        )
-        for image in invalid_images:
-            with self.subTest(image=image), self.assertRaises(RunpodReleaseError):
-                ensure_release(
-                    FakeReleaseAPI(),
-                    release_sha="a" * 40,
-                    gpu_image=image,
-                    registry_username="reader",
-                    registry_password="password",
-                )
-
-    def test_template_verification_requires_only_reviewed_runtime_fields(self) -> None:
-        base = {
-            "id": "template1",
-            "name": "tars-runpod-template-v1-" + "a" * 40,
-            "imageName": self.IMAGE,
-            "isServerless": True,
-            "containerDiskInGb": 20,
-            "volumeInGb": 0,
-            "containerRegistryAuthId": "auth1",
-            "dockerArgs": "",
-            "env": [{"key": "RUNPOD_INIT_TIMEOUT"}],
-        }
-        for docker_args in (None, ""):
-            with self.subTest(docker_args=docker_args):
-                resource = {**base, "dockerArgs": docker_args}
-                self.assertEqual(
-                    tars_runpod_release.verify_template(
-                        resource,
-                        expected_name=base["name"],
-                        image=self.IMAGE,
-                        auth_id="auth1",
-                    ),
-                    "template1",
-                )
-                self.assertEqual(
-                    tars_runpod_release._template_release_sha(resource),
-                    "a" * 40,
-                )
-
-        invalid = (
-            (
-                "missing dockerArgs",
-                {
-                    key: value
-                    for key, value in base.items()
-                    if key != "dockerArgs"
-                },
-            ),
-            (
-                "missing env",
-                {key: value for key, value in base.items() if key != "env"},
-            ),
-            ("nonempty dockerArgs", {**base, "dockerArgs": "python handler.py"}),
-            ("empty env", {**base, "env": []}),
-            ("null env", {**base, "env": None}),
-            ("unreviewed env", {**base, "env": [{"key": "UNREVIEWED"}]}),
-            (
-                "extra env",
-                {
-                    **base,
-                    "env": [
-                        {"key": "RUNPOD_INIT_TIMEOUT"},
-                        {"key": "UNREVIEWED"},
-                    ],
-                },
-            ),
-            (
-                "duplicate env",
-                {
-                    **base,
-                    "env": [
-                        {"key": "RUNPOD_INIT_TIMEOUT"},
-                        {"key": "RUNPOD_INIT_TIMEOUT"},
-                    ],
-                },
-            ),
-        )
-        for label, resource in invalid:
-            with self.subTest(label=label), self.assertRaises(RunpodReleaseError):
-                tars_runpod_release.verify_template(
-                    resource,
-                    expected_name=base["name"],
-                    image=self.IMAGE,
-                    auth_id="auth1",
-                )
-            self.assertIsNone(tars_runpod_release._template_release_sha(resource))
-
-    def test_template_rest_verification_requires_exact_init_timeout(self) -> None:
-        base = {
-            "id": "template1",
-            "name": "tars-runpod-template-v1-" + "a" * 40,
-            "env": {"RUNPOD_INIT_TIMEOUT": "1200"},
-        }
-        self.assertEqual(
-            tars_runpod_release.verify_template_rest(
-                base,
-                template_id="template1",
-                expected_name=base["name"],
-            ),
-            "template1",
-        )
-        invalid = (
-            ("missing env", {key: value for key, value in base.items() if key != "env"}),
-            ("empty env", {**base, "env": {}}),
-            (
-                "wrong timeout",
-                {**base, "env": {"RUNPOD_INIT_TIMEOUT": "800"}},
-            ),
-            (
-                "extra env",
-                {
-                    **base,
-                    "env": {
-                        "RUNPOD_INIT_TIMEOUT": "1200",
-                        "UNREVIEWED": "value",
-                    },
-                },
-            ),
-        )
-        for label, resource in invalid:
-            with self.subTest(label=label), self.assertRaises(RunpodReleaseError):
-                tars_runpod_release.verify_template_rest(
-                    resource,
-                    template_id="template1",
-                    expected_name=base["name"],
-                )
-
-    def test_ensure_verifies_rest_and_graphql_endpoint_contracts(self) -> None:
-        api = FakeReleaseAPI()
-        with mock.patch.object(
-            api, "read_endpoint", wraps=api.read_endpoint
-        ) as read_endpoint:
-            resources = ensure_release(
-                api,
-                release_sha="a" * 40,
-                gpu_image=self.IMAGE,
-                registry_username="registry-reader",
-                registry_password="registry-password",
-            )
-
-        read_endpoint.assert_called_with(resources.endpoint_id)
-
-    def test_ensure_rejects_template_env_drift_before_endpoint_creation(self) -> None:
-        api = FakeReleaseAPI()
-        api.template_env = {"RUNPOD_INIT_TIMEOUT": "800"}
-
-        with self.assertRaisesRegex(RunpodReleaseError, "REST template env"):
-            ensure_release(
-                api,
-                release_sha="a" * 40,
-                gpu_image=self.IMAGE,
-                registry_username="registry-reader",
-                registry_password="registry-password",
-            )
-
-        self.assertEqual(api.calls, ["create_auth", "create_template"])
-        self.assertEqual(api.endpoints, [])
-
-    def test_exact_rerun_rejects_drift_instead_of_mutating(self) -> None:
-        api = FakeReleaseAPI()
-        ensure_release(
-            api,
-            release_sha="a" * 40,
-            gpu_image=self.IMAGE,
-            registry_username="reader",
-            registry_password="password",
-        )
-        api.endpoints[0]["workersMax"] = 1
-        with self.assertRaisesRegex(RunpodReleaseError, "workersMax"):
-            ensure_release(
-                api,
-                release_sha="a" * 40,
-                gpu_image=self.IMAGE,
-                registry_username="reader",
-                registry_password="password",
-            )
-
-    def test_exact_rerun_rejects_gpu_pool_removal_or_reordering(self) -> None:
-        for selector in ("AMPERE_16", "AMPERE_24,AMPERE_16"):
-            with self.subTest(selector=selector):
-                api = FakeReleaseAPI()
-                ensure_release(
-                    api,
-                    release_sha="a" * 40,
-                    gpu_image=self.IMAGE,
-                    registry_username="reader",
-                    registry_password="password",
-                )
-                calls_before_drift = list(api.calls)
-                api.endpoints[0]["gpuIds"] = selector
-
-                with self.assertRaisesRegex(RunpodReleaseError, "gpuIds"):
-                    ensure_release(
-                        api,
-                        release_sha="a" * 40,
-                        gpu_image=self.IMAGE,
-                        registry_username="reader",
-                        registry_password="password",
-                    )
-
-                self.assertEqual(api.calls, calls_before_drift)
-
-    def test_exact_rerun_repairs_only_deterministic_rest_execution_fields(self) -> None:
-        api = FakeReleaseAPI()
-        expected = ensure_release(
-            api,
-            release_sha="a" * 40,
-            gpu_image=self.IMAGE,
-            registry_username="reader",
-            registry_password="password",
-        )
-        api.endpoints[0]["gpuCount"] = 4
-        api.endpoints[0]["executionTimeoutMs"] = 60_000
-        calls_before_repair = list(api.calls)
-
-        repaired = ensure_release(
-            api,
-            release_sha="a" * 40,
-            gpu_image=self.IMAGE,
-            registry_username="reader",
-            registry_password="password",
-        )
-
-        self.assertEqual(repaired, expected)
-        self.assertEqual(api.endpoints[0]["gpuCount"], 1)
-        self.assertEqual(api.endpoints[0]["executionTimeoutMs"], ENDPOINT_TIMEOUT_MS)
-        self.assertEqual(
-            api.calls, calls_before_repair + ["configure:endpoint1"]
-        )
-
-        calls_after_repair = list(api.calls)
-        self.assertEqual(
-            ensure_release(
-                api,
-                release_sha="a" * 40,
-                gpu_image=self.IMAGE,
-                registry_username="reader",
-                registry_password="password",
-            ),
-            expected,
-        )
-        self.assertEqual(api.calls, calls_after_repair)
-
-    def test_exact_rerun_does_not_repair_rest_identity_drift(self) -> None:
-        api = FakeReleaseAPI()
-        ensure_release(
-            api,
-            release_sha="a" * 40,
-            gpu_image=self.IMAGE,
-            registry_username="reader",
-            registry_password="password",
-        )
-        api.endpoints[0]["computeType"] = "CPU"
-        calls_before = list(api.calls)
-
-        with self.assertRaisesRegex(RunpodReleaseError, "computeType"):
-            ensure_release(
-                api,
-                release_sha="a" * 40,
-                gpu_image=self.IMAGE,
-                registry_username="reader",
-                registry_password="password",
-            )
-
-        self.assertEqual(api.calls, calls_before)
-
-    def test_exact_rerun_restores_only_a_verified_idle_endpoint(self) -> None:
-        api = FakeReleaseAPI()
-        expected = ensure_release(
-            api,
-            release_sha="a" * 40,
-            gpu_image=self.IMAGE,
-            registry_username="reader",
-            registry_password="password",
-        )
-        api.endpoints[0]["workersMax"] = 0
-        calls_before = list(api.calls)
-        actual = ensure_release(
-            api,
-            release_sha="a" * 40,
-            gpu_image=self.IMAGE,
-            registry_username="reader",
-            registry_password="password",
-        )
-        self.assertEqual(actual, expected)
-        self.assertEqual(api.endpoints[0]["workersMax"], 2)
-        self.assertEqual(api.calls, calls_before + ["activate:endpoint1"])
-
-    def test_idle_rerun_rejects_other_drift_before_activation(self) -> None:
-        api = FakeReleaseAPI()
-        ensure_release(
-            api,
-            release_sha="a" * 40,
-            gpu_image=self.IMAGE,
-            registry_username="reader",
-            registry_password="password",
-        )
-        api.endpoints[0]["workersMax"] = 0
-        api.endpoints[0]["scalerValue"] = 2
-        calls_before = list(api.calls)
-        with self.assertRaisesRegex(RunpodReleaseError, "scalerValue"):
-            ensure_release(
-                api,
-                release_sha="a" * 40,
-                gpu_image=self.IMAGE,
-                registry_username="reader",
-                registry_password="password",
-            )
-        self.assertEqual(api.calls, calls_before)
-        self.assertEqual(api.endpoints[0]["workersMax"], 0)
-
-    def test_credential_rotation_for_same_release_fails_before_creating_orphans(self) -> None:
-        api = FakeReleaseAPI()
-        ensure_release(
-            api,
-            release_sha="a" * 40,
-            gpu_image=self.IMAGE,
-            registry_username="reader",
-            registry_password="first-password",
-        )
-        calls = list(api.calls)
-        with self.assertRaisesRegex(RunpodReleaseError, "credential"):
-            ensure_release(
-                api,
-                release_sha="a" * 40,
-                gpu_image=self.IMAGE,
-                registry_username="reader",
-                registry_password="rotated-password",
-            )
-        self.assertEqual(api.calls, calls)
-        self.assertEqual(len(api.auths), 1)
-
     def test_endpoint_creation_splits_documented_graphql_and_rest_fields(self) -> None:
         client = RunpodClient("api-key")
         response = FakeReleaseAPI.endpoint(
@@ -1504,49 +2588,6 @@ class RunpodReleaseTest(unittest.TestCase):
         self.assertNotRegex(query, r"env\s*\{[^}]*\bvalue\b")
         for rest_only_field in ("gpuCount", "computeType", "executionTimeoutMs"):
             self.assertNotIn(rest_only_field, query)
-
-    def test_endpoint_scaling_uses_rest_patch_and_exact_target(self) -> None:
-        client = RunpodClient("api-key")
-        endpoint = FakeReleaseAPI.endpoint(
-            endpoint_id="endpoint1",
-            name="tars-runpod-endpoint-v1-" + "a" * 40,
-            template_id="template1",
-            created=datetime.now(timezone.utc),
-        )
-        zeroed = {**endpoint, "workersMax": 0}
-        with mock.patch.object(
-            client, "_confirmed_endpoint_patch", return_value=zeroed
-        ) as patch_endpoint:
-            self.assertEqual(client.zero_endpoint(endpoint), zeroed)
-        patch_endpoint.assert_called_once_with(
-            endpoint_id="endpoint1",
-            payload={"workersMin": 0, "workersMax": 0},
-            expected_name=endpoint["name"],
-            template_id="template1",
-            workers_max=0,
-            operation="set endpoint workers to zero",
-        )
-
-    def test_endpoint_reconfigure_mutates_only_rest_execution_fields(self) -> None:
-        client = RunpodClient("api-key")
-        endpoint = FakeReleaseAPI.endpoint(
-            endpoint_id="endpoint1",
-            name="tars-runpod-endpoint-v1-" + "a" * 40,
-            template_id="template1",
-            created=datetime.now(timezone.utc),
-        )
-        with mock.patch.object(
-            client, "_confirmed_endpoint_patch", return_value=endpoint
-        ) as patch_endpoint:
-            self.assertEqual(client.configure_endpoint(endpoint), endpoint)
-        patch_endpoint.assert_called_once_with(
-            endpoint_id="endpoint1",
-            payload={"executionTimeoutMs": ENDPOINT_TIMEOUT_MS, "gpuCount": 1},
-            expected_name=endpoint["name"],
-            template_id="template1",
-            workers_max=2,
-            operation="configure endpoint execution",
-        )
 
     def test_endpoint_create_recovers_a_lost_graphql_response_before_rest_patch(self) -> None:
         endpoint = FakeReleaseAPI.endpoint(
@@ -1816,7 +2857,7 @@ class RunpodReleaseTest(unittest.TestCase):
         self.assertEqual(calls[1].method, "GET")
         self.assertEqual(
             urllib.parse.parse_qs(urllib.parse.urlsplit(calls[1].full_url).query),
-            {"includeTemplate": ["true"]},
+            {"includeTemplate": ["true"], "includeWorkers": ["true"]},
         )
         self.assertEqual(calls[0].get_header("Authorization"), "Bearer api-key")
 
@@ -2139,754 +3180,8 @@ class RunpodReleaseTest(unittest.TestCase):
                 read_secret(path, "RUNPOD_API_KEY")
             self.assertNotIn("do-not-print-this", str(caught.exception))
 
-    def test_prune_protects_current_previous_and_only_deletes_owned_expired(self) -> None:
-        now = datetime(2026, 7, 21, tzinfo=timezone.utc)
-        api = FakeReleaseAPI()
-        api.seed_release("a" * 40, "current", now)
-        api.seed_release("b" * 40, "previous", now - timedelta(days=10))
-        api.seed_release("c" * 40, "expired", now - timedelta(days=2))
-        api.seed_release("d" * 40, "young", now - timedelta(hours=2))
-        api.endpoints.append(
-            {
-                **FakeReleaseAPI.endpoint(
-                    endpoint_id="foreign-endpoint",
-                    name="some-other-project",
-                    template_id="foreign-template",
-                    created=now - timedelta(days=30),
-                )
-            }
-        )
-        api.seed_release("e" * 40, "mismatch", now - timedelta(days=30))
-        mismatched_template = next(
-            template for template in api.templates if template["id"] == "template-mismatch"
-        )
-        mismatched_template["name"] = "tars-runpod-template-v1-" + "f" * 40
-        deleted = prune_releases(
-            api,
-            current_endpoint_id="endpoint-current",
-            previous_endpoint_id="endpoint-previous",
-            protected_release_sha="a" * 40,
-            now=now,
-        )
-        self.assertEqual(deleted, 1)
-        self.assertEqual(
-            api.calls,
-            [
-                "zero:endpoint-expired",
-                "delete_endpoint:endpoint-expired",
-                "delete_template:tars-runpod-template-v1-" + "c" * 40,
-                "delete_auth:auth-expired",
-            ],
-        )
-        remaining = {endpoint["id"] for endpoint in api.endpoints}
-        self.assertIn("endpoint-current", remaining)
-        self.assertIn("endpoint-previous", remaining)
-        self.assertIn("endpoint-young", remaining)
-        self.assertIn("endpoint-mismatch", remaining)
-        self.assertIn("foreign-endpoint", remaining)
-
-    def test_prune_skips_endpoint_with_queued_or_running_work(self) -> None:
-        now = datetime(2026, 7, 21, tzinfo=timezone.utc)
-        api = FakeReleaseAPI()
-        api.seed_release("a" * 40, "current", now)
-        api.seed_release("b" * 40, "busy", now - timedelta(days=2))
-        api.health_by_endpoint["endpoint-busy"] = [
-            tars_runpod_release.EndpointHealth(1, 0)
-        ]
-
-        retired = prune_releases(
-            api,
-            current_endpoint_id="endpoint-current",
-            previous_endpoint_id=None,
-            protected_release_sha="a" * 40,
-            now=now,
-        )
-
-        self.assertEqual(retired, 0)
-        self.assertEqual(api.calls, [])
-        self.assertEqual(api.health_calls, ["endpoint-busy"])
-        self.assertIn(
-            "endpoint-busy", {endpoint["id"] for endpoint in api.endpoints}
-        )
-
-    def test_prune_preflights_all_health_before_any_mutation(self) -> None:
-        now = datetime(2026, 7, 21, tzinfo=timezone.utc)
-        api = FakeReleaseAPI()
-        api.seed_release("a" * 40, "current", now)
-        api.seed_release("b" * 40, "first", now - timedelta(days=3))
-        api.seed_release("c" * 40, "second", now - timedelta(days=2))
-        api.health_by_endpoint["endpoint-second"] = [
-            RunpodReleaseError("Runpod endpoint health is unavailable")
-        ]
-
-        with self.assertRaisesRegex(RunpodReleaseError, "health"):
-            prune_releases(
-                api,
-                current_endpoint_id="endpoint-current",
-                previous_endpoint_id=None,
-                protected_release_sha="a" * 40,
-                now=now,
-            )
-
-        self.assertEqual(api.calls, [])
-        self.assertEqual(
-            api.health_calls, ["endpoint-first", "endpoint-second"]
-        )
-        self.assertIn(
-            "endpoint-first", {endpoint["id"] for endpoint in api.endpoints}
-        )
-
-    def test_prune_rechecks_immediately_before_zeroing(self) -> None:
-        now = datetime(2026, 7, 21, tzinfo=timezone.utc)
-        api = FakeReleaseAPI()
-        api.seed_release("a" * 40, "current", now)
-        api.seed_release("b" * 40, "raced", now - timedelta(days=2))
-        api.health_by_endpoint["endpoint-raced"] = [
-            tars_runpod_release.EndpointHealth(0, 0),
-            tars_runpod_release.EndpointHealth(0, 1),
-        ]
-
-        retired = prune_releases(
-            api,
-            current_endpoint_id="endpoint-current",
-            previous_endpoint_id=None,
-            protected_release_sha="a" * 40,
-            now=now,
-        )
-
-        self.assertEqual(retired, 0)
-        self.assertEqual(api.calls, [])
-        self.assertEqual(
-            api.health_calls, ["endpoint-raced", "endpoint-raced"]
-        )
-
-    def test_prune_restores_endpoint_if_work_appears_after_zero(self) -> None:
-        now = datetime(2026, 7, 21, tzinfo=timezone.utc)
-        api = FakeReleaseAPI()
-        api.seed_release("a" * 40, "current", now)
-        api.seed_release("b" * 40, "raced", now - timedelta(days=2))
-        api.health_by_endpoint["endpoint-raced"] = [
-            tars_runpod_release.EndpointHealth(0, 0),
-            tars_runpod_release.EndpointHealth(0, 0),
-            tars_runpod_release.EndpointHealth(1, 0),
-        ]
-
-        with self.assertRaisesRegex(RunpodReleaseError, "received work"):
-            prune_releases(
-                api,
-                current_endpoint_id="endpoint-current",
-                previous_endpoint_id=None,
-                protected_release_sha="a" * 40,
-                now=now,
-            )
-
-        self.assertEqual(
-            api.calls, ["zero:endpoint-raced", "activate:endpoint-raced"]
-        )
-        raced = next(
-            endpoint
-            for endpoint in api.endpoints
-            if endpoint["id"] == "endpoint-raced"
-        )
-        self.assertEqual(raced["workersMax"], 2)
-
-    def test_prune_preserves_preexisting_zero_limit_if_work_appears(self) -> None:
-        now = datetime(2026, 7, 21, tzinfo=timezone.utc)
-        api = FakeReleaseAPI()
-        api.seed_release("a" * 40, "current", now)
-        api.seed_release("b" * 40, "already-zero", now - timedelta(days=2))
-        endpoint = next(
-            endpoint
-            for endpoint in api.endpoints
-            if endpoint["id"] == "endpoint-already-zero"
-        )
-        endpoint["workersMax"] = 0
-        api.health_by_endpoint["endpoint-already-zero"] = [
-            tars_runpod_release.EndpointHealth(0, 0),
-            tars_runpod_release.EndpointHealth(0, 0),
-            tars_runpod_release.EndpointHealth(0, 1),
-        ]
-
-        with self.assertRaisesRegex(RunpodReleaseError, "left unchanged"):
-            prune_releases(
-                api,
-                current_endpoint_id="endpoint-current",
-                previous_endpoint_id=None,
-                protected_release_sha="a" * 40,
-                now=now,
-            )
-
-        self.assertEqual(api.calls, [])
-        self.assertEqual(endpoint["workersMax"], 0)
-        self.assertIn(
-            "endpoint-already-zero",
-            {candidate["id"] for candidate in api.endpoints},
-        )
-
-    def test_prune_restores_endpoint_if_post_zero_health_is_unavailable(
-        self,
-    ) -> None:
-        now = datetime(2026, 7, 21, tzinfo=timezone.utc)
-        api = FakeReleaseAPI()
-        api.seed_release("a" * 40, "current", now)
-        api.seed_release("b" * 40, "unknown", now - timedelta(days=2))
-        api.health_by_endpoint["endpoint-unknown"] = [
-            tars_runpod_release.EndpointHealth(0, 0),
-            tars_runpod_release.EndpointHealth(0, 0),
-            RunpodReleaseError("Runpod endpoint health is unavailable"),
-        ]
-
-        with self.assertRaisesRegex(
-            RunpodReleaseError, "could not be confirmed after workers"
-        ):
-            prune_releases(
-                api,
-                current_endpoint_id="endpoint-current",
-                previous_endpoint_id=None,
-                protected_release_sha="a" * 40,
-                now=now,
-            )
-
-        self.assertEqual(
-            api.calls, ["zero:endpoint-unknown", "activate:endpoint-unknown"]
-        )
-        self.assertNotIn(
-            "delete_endpoint:endpoint-unknown", api.calls
-        )
-
-    def test_prune_retires_only_the_exact_legacy_tars_chain(self) -> None:
-        now = datetime(2026, 7, 21, tzinfo=timezone.utc)
-        api = FakeReleaseAPI()
-        api.seed_release("a" * 40, "current", now)
-        api.seed_release("b" * 40, "legacy", now - timedelta(days=2))
-        legacy_template = next(
-            template
-            for template in api.templates
-            if template["id"] == "template-legacy"
-        )
-        legacy_template["env"] = []
-        api.template_env_by_id["template-legacy"] = FakeReleaseAPI.OMIT_TEMPLATE_ENV
-        legacy_endpoint = next(
-            endpoint
-            for endpoint in api.endpoints
-            if endpoint["id"] == "endpoint-legacy"
-        )
-        legacy_endpoint["gpuIds"] = "AMPERE_16"
-
-        retired = prune_releases(
-            api,
-            current_endpoint_id="endpoint-current",
-            previous_endpoint_id=None,
-            protected_release_sha="a" * 40,
-            now=now,
-            grace=timedelta(0),
-        )
-
-        self.assertEqual(retired, 1)
-        self.assertEqual(
-            api.calls,
-            [
-                "zero:endpoint-legacy",
-                "delete_endpoint:endpoint-legacy",
-                "delete_template:tars-runpod-template-v1-" + "b" * 40,
-                "delete_auth:auth-legacy",
-            ],
-        )
-
-    def test_prune_rejects_mixed_legacy_contracts_without_health_or_mutation(
-        self,
-    ) -> None:
-        now = datetime(2026, 7, 21, tzinfo=timezone.utc)
-        for label, graphql_env, rest_env, gpu_ids in (
-            (
-                "legacy-env-current-gpu",
-                [],
-                None,
-                GPU_POOL_SELECTOR,
-            ),
-            (
-                "current-env-legacy-gpu",
-                [{"key": "RUNPOD_INIT_TIMEOUT"}],
-                {"RUNPOD_INIT_TIMEOUT": "1200"},
-                "AMPERE_16",
-            ),
-        ):
-            with self.subTest(label=label):
-                api = FakeReleaseAPI()
-                api.seed_release("a" * 40, "current", now)
-                api.seed_release("b" * 40, label, now - timedelta(days=2))
-                template_id = f"template-{label}"
-                endpoint_id = f"endpoint-{label}"
-                next(
-                    template
-                    for template in api.templates
-                    if template["id"] == template_id
-                )["env"] = graphql_env
-                api.template_env_by_id[template_id] = rest_env
-                next(
-                    endpoint
-                    for endpoint in api.endpoints
-                    if endpoint["id"] == endpoint_id
-                )["gpuIds"] = gpu_ids
-
-                retired = prune_releases(
-                    api,
-                    current_endpoint_id="endpoint-current",
-                    previous_endpoint_id=None,
-                    protected_release_sha="a" * 40,
-                    now=now,
-                    grace=timedelta(0),
-                )
-
-                self.assertEqual(retired, 0)
-                self.assertEqual(api.calls, [])
-                self.assertEqual(api.health_calls, [])
-
-    def test_prune_rejects_legacy_rest_env_drift_before_mutation(self) -> None:
-        now = datetime(2026, 7, 21, tzinfo=timezone.utc)
-        for rest_environment in (None, {}):
-            with self.subTest(rest_environment=rest_environment):
-                api = FakeReleaseAPI()
-                api.seed_release("a" * 40, "current", now)
-                api.seed_release("b" * 40, "legacy", now - timedelta(days=2))
-                next(
-                    template
-                    for template in api.templates
-                    if template["id"] == "template-legacy"
-                )["env"] = []
-                next(
-                    endpoint
-                    for endpoint in api.endpoints
-                    if endpoint["id"] == "endpoint-legacy"
-                )["gpuIds"] = "AMPERE_16"
-                api.template_env_by_id["template-legacy"] = rest_environment
-
-                with self.assertRaisesRegex(
-                    RunpodReleaseError, "REST template env"
-                ):
-                    prune_releases(
-                        api,
-                        current_endpoint_id="endpoint-current",
-                        previous_endpoint_id=None,
-                        protected_release_sha="a" * 40,
-                        now=now,
-                        grace=timedelta(0),
-                    )
-
-                self.assertEqual(api.calls, [])
-                self.assertEqual(api.health_calls, [])
-
-    def test_pre_prune_cli_empty_current_file_never_contacts_runpod(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            current = root / "current"
-            previous = root / "previous"
-            current.write_text("", encoding="utf-8")
-            previous.write_text("endpoint-previous\n", encoding="utf-8")
-            argv = [
-                "tars_runpod_release.py",
-                "pre-prune",
-                "--api-key-file",
-                str(root / "missing-api-key"),
-                "--current-endpoint-file",
-                str(current),
-                "--previous-endpoint-file",
-                str(previous),
-                "--protected-release-sha",
-                "a" * 40,
-            ]
-
-            with (
-                mock.patch("sys.argv", argv),
-                mock.patch("sys.stdout", new=io.StringIO()) as output,
-                mock.patch.object(
-                    tars_runpod_release, "RunpodClient"
-                ) as client_type,
-                mock.patch.object(
-                    tars_runpod_release, "prune_releases"
-                ) as prune,
-            ):
-                tars_runpod_release.main()
-
-            client_type.assert_not_called()
-            prune.assert_not_called()
-            self.assertIn("retired 0", output.getvalue())
-
-    def test_pre_prune_cli_uses_zero_grace_and_endpoint_files(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            api_key = root / "api-key"
-            current = root / "current"
-            previous = root / "previous"
-            api_key.write_text("api-key\n", encoding="utf-8")
-            api_key.chmod(0o600)
-            current.write_text("endpoint-current\n", encoding="utf-8")
-            previous.write_text("endpoint-previous\n", encoding="utf-8")
-            argv = [
-                "tars_runpod_release.py",
-                "pre-prune",
-                "--api-key-file",
-                str(api_key),
-                "--current-endpoint-file",
-                str(current),
-                "--previous-endpoint-file",
-                str(previous),
-                "--protected-release-sha",
-                "a" * 40,
-            ]
-            client = object()
-
-            with (
-                mock.patch("sys.argv", argv),
-                mock.patch("sys.stdout", new=io.StringIO()),
-                mock.patch.object(
-                    tars_runpod_release,
-                    "RunpodClient",
-                    return_value=client,
-                ),
-                mock.patch.object(
-                    tars_runpod_release,
-                    "prune_releases",
-                    return_value=2,
-                ) as prune,
-            ):
-                tars_runpod_release.main()
-
-            prune.assert_called_once()
-            kwargs = prune.call_args.kwargs
-            self.assertIs(prune.call_args.args[0], client)
-            self.assertEqual(kwargs["current_endpoint_id"], "endpoint-current")
-            self.assertEqual(kwargs["previous_endpoint_id"], "endpoint-previous")
-            self.assertEqual(kwargs["protected_release_sha"], "a" * 40)
-            self.assertEqual(kwargs["grace"], timedelta(0))
-
-    def test_post_prune_cli_uses_zero_grace_without_predecessor_protection(
-        self,
-    ) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            api_key = root / "api-key"
-            api_key.write_text("api-key\n", encoding="utf-8")
-            api_key.chmod(0o600)
-            argv = [
-                "tars_runpod_release.py",
-                "prune",
-                "--api-key-file",
-                str(api_key),
-                "--current-endpoint",
-                "endpoint-current",
-                "--protected-release-sha",
-                "a" * 40,
-            ]
-            client = object()
-
-            with (
-                mock.patch("sys.argv", argv),
-                mock.patch("sys.stdout", new=io.StringIO()) as output,
-                mock.patch.object(
-                    tars_runpod_release,
-                    "RunpodClient",
-                    return_value=client,
-                ),
-                mock.patch.object(
-                    tars_runpod_release,
-                    "prune_releases",
-                    return_value=2,
-                ) as prune,
-                mock.patch.object(
-                    tars_runpod_release,
-                    "verify_no_superseded_tars_endpoints",
-                ) as verify,
-            ):
-                tars_runpod_release.main()
-
-            prune.assert_called_once()
-            kwargs = prune.call_args.kwargs
-            self.assertIs(prune.call_args.args[0], client)
-            self.assertEqual(kwargs["current_endpoint_id"], "endpoint-current")
-            self.assertIsNone(kwargs["previous_endpoint_id"])
-            self.assertEqual(kwargs["protected_release_sha"], "a" * 40)
-            self.assertEqual(kwargs["grace"], timedelta(0))
-            verify.assert_called_once_with(
-                client,
-                current_endpoint_id="endpoint-current",
-            )
-            self.assertIn("retired 2 obsolete", output.getvalue())
-
-    def test_post_prune_fails_if_an_exact_superseded_endpoint_remains(self) -> None:
-        now = datetime(2026, 7, 21, tzinfo=timezone.utc)
-        api = FakeReleaseAPI()
-        api.seed_release("a" * 40, "current", now)
-        api.seed_release("b" * 40, "superseded", now - timedelta(days=1))
-
-        with self.assertRaisesRegex(
-            RunpodReleaseError,
-            "1 superseded TARS Runpod endpoint",
-        ):
-            tars_runpod_release.verify_no_superseded_tars_endpoints(
-                api,
-                current_endpoint_id="endpoint-current",
-            )
-
-        api.endpoints = [
-            endpoint
-            for endpoint in api.endpoints
-            if endpoint["id"] == "endpoint-current"
-        ]
-        tars_runpod_release.verify_no_superseded_tars_endpoints(
-            api,
-            current_endpoint_id="endpoint-current",
-        )
-
-    def test_prune_does_not_delete_unageable_partial_chain_orphans(self) -> None:
-        now = datetime(2026, 7, 21, tzinfo=timezone.utc)
-        api = FakeReleaseAPI()
-        api.seed_release("a" * 40, "current", now)
-        api.seed_release("b" * 40, "partial", now - timedelta(days=2))
-        api.endpoints = [
-            endpoint
-            for endpoint in api.endpoints
-            if endpoint["id"] != "endpoint-partial"
-        ]
-
-        retired = prune_releases(
-            api,
-            current_endpoint_id="endpoint-current",
-            previous_endpoint_id=None,
-            protected_release_sha="a" * 40,
-            now=now,
-        )
-
-        self.assertEqual(retired, 0)
-        self.assertEqual(api.calls, [])
-        self.assertIn(
-            "template-partial", {template["id"] for template in api.templates}
-        )
-        self.assertIn("auth-partial", {auth["id"] for auth in api.auths})
-
-    def test_zero_grace_prune_rejects_malformed_fresh_creation_time(self) -> None:
-        now = datetime(2026, 7, 21, tzinfo=timezone.utc)
-        api = FakeReleaseAPI()
-        api.seed_release("a" * 40, "current", now)
-        api.seed_release("b" * 40, "drifted", now - timedelta(days=2))
-        original_inventory = api.inventory
-        inventory_calls = 0
-
-        def inventory_with_timestamp_drift() -> Inventory:
-            nonlocal inventory_calls
-            inventory_calls += 1
-            if inventory_calls == 2:
-                next(
-                    endpoint
-                    for endpoint in api.endpoints
-                    if endpoint["id"] == "endpoint-drifted"
-                )["createdAt"] = "not-a-timestamp"
-            return original_inventory()
-
-        api.inventory = inventory_with_timestamp_drift  # type: ignore[method-assign]
-
-        retired = prune_releases(
-            api,
-            current_endpoint_id="endpoint-current",
-            previous_endpoint_id=None,
-            protected_release_sha="a" * 40,
-            now=now,
-            grace=timedelta(0),
-        )
-
-        self.assertEqual(retired, 0)
-        self.assertEqual(api.health_calls, [])
-        self.assertEqual(api.calls, [])
-        self.assertIn(
-            "endpoint-drifted", {endpoint["id"] for endpoint in api.endpoints}
-        )
-
-    def test_prune_rejects_template_image_tag_from_another_release(self) -> None:
-        now = datetime(2026, 7, 21, tzinfo=timezone.utc)
-        api = FakeReleaseAPI()
-        api.seed_release("a" * 40, "current", now)
-        api.seed_release("e" * 40, "mismatch", now - timedelta(days=2))
-        mismatched_template = next(
-            template for template in api.templates if template["id"] == "template-mismatch"
-        )
-        mismatched_template["imageName"] = (
-            "registry.digitalocean.com/lascade/tars:gpu-sha-"
-            + "f" * 40
-            + "@sha256:"
-            + "a" * 64
-        )
-
-        retired = prune_releases(
-            api,
-            current_endpoint_id="endpoint-current",
-            previous_endpoint_id=None,
-            protected_release_sha="a" * 40,
-            now=now,
-        )
-
-        self.assertEqual(retired, 0)
-        self.assertEqual(api.calls, [])
-        self.assertIn(
-            "endpoint-mismatch", {endpoint["id"] for endpoint in api.endpoints}
-        )
-
-    def test_prune_rejects_template_with_unproven_runtime_fields(self) -> None:
-        now = datetime(2026, 7, 21, tzinfo=timezone.utc)
-        api = FakeReleaseAPI()
-        api.seed_release("a" * 40, "current", now)
-        api.seed_release("e" * 40, "runtime-drift", now - timedelta(days=2))
-        drifted_template = next(
-            template
-            for template in api.templates
-            if template["id"] == "template-runtime-drift"
-        )
-        del drifted_template["env"]
-
-        retired = prune_releases(
-            api,
-            current_endpoint_id="endpoint-current",
-            previous_endpoint_id=None,
-            protected_release_sha="a" * 40,
-            now=now,
-        )
-
-        self.assertEqual(retired, 0)
-        self.assertEqual(api.calls, [])
-        self.assertIn(
-            "endpoint-runtime-drift",
-            {endpoint["id"] for endpoint in api.endpoints},
-        )
-
-    def test_prune_rejects_template_env_value_drift_before_mutation(self) -> None:
-        now = datetime(2026, 7, 21, tzinfo=timezone.utc)
-        api = FakeReleaseAPI()
-        api.seed_release("a" * 40, "current", now)
-        api.seed_release("e" * 40, "runtime-drift", now - timedelta(days=2))
-        api.template_env = {"RUNPOD_INIT_TIMEOUT": "800"}
-
-        with self.assertRaisesRegex(RunpodReleaseError, "REST template env"):
-            prune_releases(
-                api,
-                current_endpoint_id="endpoint-current",
-                previous_endpoint_id=None,
-                protected_release_sha="a" * 40,
-                now=now,
-            )
-
-        self.assertEqual(api.calls, [])
-        self.assertIn(
-            "endpoint-runtime-drift",
-            {endpoint["id"] for endpoint in api.endpoints},
-        )
-
-    def test_prune_protects_the_observed_main_release_sha(self) -> None:
-        now = datetime(2026, 7, 21, tzinfo=timezone.utc)
-        api = FakeReleaseAPI()
-        api.seed_release("b" * 40, "current", now)
-        api.seed_release("c" * 40, "observed-main", now - timedelta(days=2))
-
-        retired = prune_releases(
-            api,
-            current_endpoint_id="endpoint-current",
-            previous_endpoint_id=None,
-            protected_release_sha="c" * 40,
-            now=now,
-        )
-
-        self.assertEqual(retired, 0)
-        self.assertEqual(api.calls, [])
-        self.assertIn(
-            "endpoint-observed-main", {endpoint["id"] for endpoint in api.endpoints}
-        )
-
-    def test_newer_partial_release_survives_older_release_prune(self) -> None:
-        now = datetime(2026, 7, 21, tzinfo=timezone.utc)
-        api = FakeReleaseAPI()
-        old_sha = "a" * 40
-        deployed_sha = "b" * 40
-        newer_sha = "c" * 40
-        api.seed_release(old_sha, "old", now - timedelta(days=2))
-        api.seed_release(deployed_sha, "current", now)
-        api.seed_release(newer_sha, "newer-partial", now)
-        api.endpoints = [
-            endpoint
-            for endpoint in api.endpoints
-            if endpoint["id"] != "endpoint-newer-partial"
-        ]
-        next(
-            template
-            for template in api.templates
-            if template["id"] == "template-newer-partial"
-        )["boundEndpointId"] = None
-
-        retired = prune_releases(
-            api,
-            current_endpoint_id="endpoint-current",
-            previous_endpoint_id=None,
-            protected_release_sha=newer_sha,
-            now=now,
-        )
-
-        self.assertEqual(retired, 1)
-        self.assertEqual(
-            api.calls,
-            [
-                "zero:endpoint-old",
-                "delete_endpoint:endpoint-old",
-                "delete_template:tars-runpod-template-v1-" + old_sha,
-                "delete_auth:auth-old",
-            ],
-        )
-        remaining_templates = {item["id"] for item in api.templates}
-        self.assertIn("template-newer-partial", remaining_templates)
-        remaining_auths = {auth["id"] for auth in api.auths}
-        self.assertIn("auth-newer-partial", remaining_auths)
-
-
 class WorkflowContractTest(unittest.TestCase):
     ROOT = Path(__file__).resolve().parent.parent.parent
-
-    def test_predecessor_selection_survives_failed_rollout_retry(self) -> None:
-        endpoint_a = "endpoint-a"
-        endpoint_b = "endpoint-b"
-
-        selected, should_store = tars_runpod_release.select_previous_endpoint(
-            current_endpoint_id=endpoint_a,
-            target_endpoint_id=endpoint_b,
-            stored_endpoint_id=None,
-        )
-        self.assertEqual(selected, endpoint_a)
-        self.assertTrue(should_store)
-
-        selected_on_retry, should_store_on_retry = (
-            tars_runpod_release.select_previous_endpoint(
-                current_endpoint_id=endpoint_b,
-                target_endpoint_id=endpoint_b,
-                stored_endpoint_id=selected,
-            )
-        )
-        self.assertEqual(selected_on_retry, endpoint_a)
-        self.assertFalse(should_store_on_retry)
-
-        selected_for_next_release, should_store_for_next_release = (
-            tars_runpod_release.select_previous_endpoint(
-                current_endpoint_id=endpoint_b,
-                target_endpoint_id="endpoint-c",
-                stored_endpoint_id=selected_on_retry,
-            )
-        )
-        self.assertEqual(selected_for_next_release, endpoint_b)
-        self.assertTrue(should_store_for_next_release)
-
-    def test_endpoint_selection_files_are_empty_when_no_endpoint_exists(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "endpoint"
-            tars_runpod_release.write_endpoint_file(path, None)
-            self.assertEqual(path.read_bytes(), b"")
-            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
-
-            tars_runpod_release.write_endpoint_file(path, "endpoint-a")
-            self.assertEqual(path.read_bytes(), b"endpoint-a\n")
 
     def test_deploy_workflow_has_immutable_and_non_cancelled_deploy_contract(self) -> None:
         import re
@@ -2895,7 +3190,7 @@ class WorkflowContractTest(unittest.TestCase):
             encoding="utf-8"
         )
         self.assertIn("types: [tars-deploy]", workflow)
-        self.assertIn("id-token: write", workflow)
+        self.assertNotIn("id-token:", workflow)
         self.assertIn("cancel-in-progress: false", workflow)
         self.assertIn("timeout-minutes: 360", workflow)
         self.assertIn("timeout-minutes: 120", workflow)
@@ -2925,14 +3220,20 @@ class WorkflowContractTest(unittest.TestCase):
         self.assertNotIn("sudo -n", workflow)
         self.assertNotIn(":latest", workflow)
         self.assertNotIn("@latest", workflow)
-        self.assertEqual(workflow.count("ServerAliveInterval=15"), 4)
-        self.assertEqual(workflow.count("ServerAliveCountMax=3"), 4)
-        self.assertEqual(workflow.count("TCPKeepAlive=yes"), 4)
+        ssh_option_blocks = workflow.count("ssh_options=(")
+        self.assertGreaterEqual(ssh_option_blocks, 1)
+        self.assertEqual(
+            workflow.count("ServerAliveInterval=15"), ssh_option_blocks
+        )
+        self.assertEqual(
+            workflow.count("ServerAliveCountMax=3"), ssh_option_blocks
+        )
+        self.assertEqual(workflow.count("TCPKeepAlive=yes"), ssh_option_blocks)
         self.assertNotIn("/pulls", workflow)
         self.assertNotIn("tars_tree_attestation.py", workflow)
         self.assertNotIn("permission-pull-requests", workflow)
         self.assertNotIn("permission-statuses", workflow)
-        self.assertEqual(workflow.count("git/ref/heads/main"), 4)
+        self.assertEqual(workflow.count("git/ref/heads/main"), 3)
         self.assertNotIn("gh api /installation", workflow)
         self.assertNotIn("Dockerfile.worker", workflow)
         self.assertNotIn("TARS_WORKER_IMAGE", workflow)
@@ -2948,9 +3249,18 @@ class WorkflowContractTest(unittest.TestCase):
         self.assertEqual(
             workflow.count("tada_bundle=${{ runner.temp }}/tada-bundle"), 2
         )
-        self.assertEqual(workflow.count("tars_runpod_release.py ensure"), 1)
-        self.assertEqual(workflow.count("tars_runpod_release.py pre-prune"), 1)
-        self.assertEqual(workflow.count("tars_runpod_release.py prune"), 1)
+        self.assertEqual(workflow.count("tars_runpod_release.py prepare"), 1)
+        self.assertEqual(workflow.count("tars_runpod_release.py stage"), 1)
+        self.assertEqual(workflow.count("tars_runpod_release.py rollback"), 2)
+        self.assertEqual(workflow.count("tars_runpod_release.py verify-target"), 2)
+        self.assertEqual(workflow.count("verify-application \\"), 3)
+        self.assertNotIn("tars_runpod_release.py finalize", workflow)
+        self.assertNotIn("tars_runpod_release.py ensure", workflow)
+        self.assertNotIn("tars_runpod_release.py pre-prune", workflow)
+        self.assertNotIn("tars_runpod_release.py prune", workflow)
+        self.assertNotIn("tars_runpod_release.py migrate", workflow)
+        self.assertNotIn("tars_runpod_release.py bootstrap", workflow)
+        self.assertNotIn("tars_runpod_release.py retire-legacy", workflow)
         self.assertEqual(
             workflow.count("--workflow central/.github/workflows/tars-unlock.yml"),
             2,
@@ -2987,15 +3297,13 @@ class WorkflowContractTest(unittest.TestCase):
         self.assertNotIn(
             'rm -rf "${DOCKER_CONFIG:-$RUNNER_TEMP/tars-docker-config}"', workflow
         )
-        self.assertIn("--protected-release-sha", workflow)
-        self.assertIn(
-            "if: steps.prune-main.outputs.should_prune == 'true'", workflow
-        )
-        self.assertIn("current-runpod-endpoint", workflow)
-        self.assertIn("tars_runpod_release.py select-previous", workflow)
-        self.assertIn("/srv/tars/deployment/runpod-previous-endpoint", workflow)
-        self.assertIn(".tars-runpod-predecessor-$RELEASE_SHA", workflow)
-        self.assertIn('mv -f -- "$temporary" "$state"', workflow)
+        self.assertNotIn("--protected-release-sha", workflow)
+        self.assertNotIn("current-runpod-endpoint", workflow)
+        self.assertNotIn("tars_runpod_release.py select-previous", workflow)
+        self.assertNotIn("/srv/tars/deployment/runpod-previous-endpoint", workflow)
+        self.assertIn("RUNPOD_ENDPOINT_ID", workflow)
+        self.assertIn("RUNPOD_TEMPLATE_ID", workflow)
+        self.assertIn("RUNPOD_REGISTRY_AUTH_ID", workflow)
         self.assertIn("--runpod-endpoint-id", workflow)
         self.assertNotIn("ghcr_token=${{ github.token }}", workflow)
         build, deploy = workflow.split("\n  deploy:\n", 1)
@@ -3013,20 +3321,44 @@ class WorkflowContractTest(unittest.TestCase):
             deploy.index("Confirm the final current main revision"),
             deploy.index("Pass delegated runtime secrets"),
         )
-        source_upload = deploy.index(
-            "Upload source and Capture the currently deployed Runpod endpoint"
+        source_upload = deploy.index("Upload the verified source bundle")
+        lock_preflight = deploy.index("Refuse an orphaned deployment lock")
+        final_main = deploy.index("Confirm the final current main revision")
+        pause = deploy.index(
+            "Reconcile any durable boundary before changing application state"
         )
-        lock_preflight = deploy.index(
-            "Refuse Runpod mutation while a deployment lock exists"
+        interrupted_describe = deploy.index(
+            "Describe the interrupted rollback boundary"
         )
-        pre_prune = deploy.index(
-            "Retire obsolete Runpod releases before reserving worker capacity"
+        interrupted_classify = deploy.index(
+            "Classify the interrupted application transaction"
         )
-        ensure = deploy.index("Provision or verify the immutable Runpod release")
+        interrupted_reconcile = deploy.index(
+            "Reconcile the interrupted provider generation"
+        )
+        interrupted_verify = deploy.index(
+            "Verify recovery and retire the interrupted boundary"
+        )
+        baseline = deploy.index("Capture the coupled application baseline")
+        prepare = deploy.index(
+            "Prepare and persist the coupled rollout boundary"
+        )
+        stage = deploy.index(
+            "Stage the immutable image on the stable Runpod template"
+        )
         self.assertLess(source_upload, lock_preflight)
-        self.assertLess(lock_preflight, pre_prune)
-        self.assertLess(pre_prune, ensure)
-        lock_preflight_command = deploy[lock_preflight:pre_prune]
+        self.assertLess(lock_preflight, final_main)
+        self.assertLess(final_main, pause)
+        self.assertLess(pause, interrupted_describe)
+        self.assertLess(interrupted_describe, interrupted_classify)
+        self.assertLess(interrupted_classify, interrupted_reconcile)
+        self.assertLess(interrupted_describe, interrupted_reconcile)
+        self.assertLess(interrupted_reconcile, interrupted_verify)
+        self.assertLess(interrupted_verify, baseline)
+        self.assertLess(baseline, prepare)
+        self.assertLess(prepare, stage)
+        self.assertLess(pause, stage)
+        lock_preflight_command = deploy[lock_preflight:final_main]
         self.assertIn("docker config inspect tars_deploy_lock", lock_preflight_command)
         self.assertIn(
             "Run 'Manual TARS deployment-lock recovery'",
@@ -3034,44 +3366,171 @@ class WorkflowContractTest(unittest.TestCase):
         )
         self.assertIn("expected_owner=$owner", lock_preflight_command)
         self.assertIn("recovery_sha=$recovery_sha", lock_preflight_command)
+        initial_boundary = deploy[pause:interrupted_describe]
+        self.assertIn("exit 42", initial_boundary)
+        self.assertIn(
+            "the durable Runpod boundary is invalid or unreadable",
+            initial_boundary,
+        )
+        self.assertIn("stat -c '%a'", initial_boundary)
+        self.assertIn("stat -c '%u'", initial_boundary)
+        self.assertIn("describe-boundary", initial_boundary)
+        self.assertIn('if [ "$kind" = application ]', initial_boundary)
+        self.assertIn("verify-application", initial_boundary)
         self.assertLess(
-            ensure,
+            initial_boundary.index("verify-application"),
+            initial_boundary.index(
+                'docker service scale "tars_dispatcher=$replicas"'
+            ),
+        )
+        self.assertLess(
+            initial_boundary.index(
+                'docker service scale "tars_dispatcher=$replicas"'
+            ),
+            initial_boundary.index('rm -f "$boundary"'),
+        )
+        interrupted_verification = deploy[interrupted_verify:baseline]
+        self.assertIn("verify-application", interrupted_verification)
+        self.assertIn("TARS_GPU_IMAGE_DIGEST", interrupted_verification)
+        self.assertIn("TARS_RUNPOD_ENDPOINT_ID", interrupted_verification)
+        self.assertIn(
+            "docker service scale tars_dispatcher=1",
+            interrupted_verification,
+        )
+        self.assertLess(
+            interrupted_verification.index("verify-application"),
+            interrupted_verification.index(
+                "docker service scale tars_dispatcher=1"
+            ),
+        )
+        self.assertLess(
+            interrupted_verification.index(
+                'test "$live_endpoint" = "$expected_endpoint"'
+            ),
+            interrupted_verification.rindex('rm -f "$boundary"'),
+        )
+        prepare_command = deploy[prepare:stage]
+        self.assertIn("--prior-release-sha", prepare_command)
+        self.assertIn("--prior-gpu-image", prepare_command)
+        self.assertIn("--greenfield", prepare_command)
+        self.assertIn("install -m 0600", prepare_command)
+        self.assertIn("stat -c '%u'", prepare_command)
+        self.assertLess(
+            prepare_command.index("tars_runpod_release.py prepare"),
+            prepare_command.index("install -m 0600"),
+        )
+        self.assertLess(
+            prepare_command.index("install -m 0600"),
+            prepare_command.index('mv -f "$temporary" "$boundary"'),
+        )
+        baseline_command = deploy[baseline:prepare]
+        self.assertIn("prepare-application", baseline_command)
+        self.assertIn("tars-application-boundary.json", baseline_command)
+        self.assertIn(
+            'if [ "$replicas" != 1 ]',
+            baseline_command,
+        )
+        self.assertLess(
+            baseline_command.index("prepare-application"),
+            baseline_command.index("install -m 0600"),
+        )
+        self.assertLess(
+            baseline_command.index('mv -f "$temporary" "$boundary"'),
+            baseline_command.index(
+                "docker service scale tars_dispatcher=0"
+            ),
+        )
+        self.assertIn("sha256sum", prepare_command)
+        self.assertIn('if [ "$app_mode" = existing ]', prepare_command)
+        self.assertLess(
+            stage,
             deploy.index("Pass delegated runtime secrets"),
         )
-        pre_prune_command = deploy[pre_prune:ensure]
-        self.assertIn("--previous-endpoint-file", pre_prune_command)
-        post_prune = deploy.index(
-            "Retire obsolete Runpod releases after successful deployment"
+        rollback = deploy.index(
+            "Reconcile the durable generation after failure or cancellation"
         )
-        self.assertLess(
-            deploy.index("Pass delegated runtime secrets"),
-            deploy.index("Mint a fresh post-rollout TARS GitHub App token"),
+        cleanup = deploy.index("Remove runner-side deployment credentials")
+        application_step = deploy.index(
+            "Pass delegated runtime secrets to the deployment interface"
         )
-        self.assertLess(
-            deploy.index("Mint a fresh post-rollout TARS GitHub App token"),
-            deploy.index("Reconfirm current main before Runpod retirement"),
+        accepted_provider = deploy.index(
+            "Verify the smoke-accepted provider generation"
         )
-        self.assertLess(
-            deploy.index("Reconfirm current main before Runpod retirement"),
-            post_prune,
+        commit_generation = deploy.index(
+            "Commit the accepted app-provider generation"
         )
-        post_rollout_gate = deploy[
-            deploy.index("Reconfirm current main before Runpod retirement") :
-            post_prune
+        self.assertLess(application_step, accepted_provider)
+        self.assertLess(accepted_provider, commit_generation)
+        accepted_provider_command = deploy[
+            accepted_provider:commit_generation
         ]
-        self.assertIn('if [ "$RELEASE_SHA" != "$main_sha" ]; then', post_rollout_gate)
         self.assertIn(
-            'echo "should_prune=false" >> "$GITHUB_OUTPUT"', post_rollout_gate
+            "tars_runpod_release.py verify-target",
+            accepted_provider_command,
         )
-        self.assertIn('echo "sha=$main_sha" >> "$GITHUB_OUTPUT"', post_rollout_gate)
+        self.assertLess(application_step, rollback)
+        self.assertLess(rollback, cleanup)
+        rollback_command = deploy[rollback:cleanup]
+        self.assertIn("if: failure() || cancelled()", rollback_command)
+        self.assertIn("docker service scale \"$service=0\"", rollback_command)
+        self.assertIn("tars_runpod_release.py rollback", rollback_command)
+        self.assertIn("/srv/tars/deployment/runpod-rollout-boundary.json", rollback_command)
+        self.assertIn("tars_runpod_release.py describe", rollback_command)
+        self.assertIn("tars_runpod_release.py describe-boundary", rollback_command)
+        self.assertIn('if [ "$kind" = application ]', rollback_command)
+        self.assertIn("verify-application", rollback_command)
+        self.assertIn("tars_runpod_release.py verify-target", rollback_command)
+        self.assertIn('test "$live_sha" = "$expected_sha"', rollback_command)
+        self.assertIn('test "$live_gpu" = "$expected_gpu"', rollback_command)
         self.assertIn(
-            "GH_TOKEN: ${{ steps.prune-app-token.outputs.token }}",
-            post_rollout_gate,
+            'test "$live_endpoint" = "$expected_endpoint"', rollback_command
         )
-        post_prune_command = deploy[
-            post_prune : deploy.index("Remove runner-side deployment credentials")
+        self.assertIn("/srv/tars/deployment/current.json", rollback_command)
+        self.assertLess(
+            rollback_command.index("verify-application"),
+            rollback_command.index(
+                'docker service scale "tars_dispatcher=$replicas"'
+            ),
+        )
+        self.assertLess(
+            rollback_command.index(
+                "deployment lock does not belong to the rollout boundary"
+            ),
+            rollback_command.index("tars_runpod_release.py rollback"),
+        )
+        interrupted_classification = deploy[
+            interrupted_classify:interrupted_reconcile
         ]
-        self.assertNotIn("--previous-endpoint-file", post_prune_command)
+        self.assertLess(
+            interrupted_classification.index(
+                "interrupted application lock does not belong"
+            ),
+            deploy[interrupted_classify:].index(
+                "Reconcile the interrupted provider generation"
+            ),
+        )
+        self.assertLess(
+            rollback_command.rindex("tars_runpod_release.py rollback"),
+            rollback_command.rindex('docker service scale tars_dispatcher=1'),
+        )
+        self.assertLess(
+            rollback_command.rindex(
+                'test "$live_endpoint" = "$expected_endpoint"'
+            ),
+            rollback_command.rindex('rm -f "$boundary"'),
+        )
+        self.assertNotIn("tars-dispatcher-before-rollout", deploy)
+        for temporary_name in (
+            "tars-initial-app-state",
+            "tars-initial-boundary-values",
+            "tars-app-baseline",
+            "tars-application-boundary.json",
+            "tars-recovered-application-boundary.json",
+            "tars-prior-runpod-boundary.json",
+            "tars-runpod-rollout.json",
+            "tars-runpod-rollback-values",
+        ):
+            self.assertIn(temporary_name, deploy[cleanup:])
         bootstrap = deploy.index('"$bundle/deploy/tars-deploy" bootstrap-stateful')
         application = deploy.index('exec "$bundle/deploy/tars-deploy" deploy')
         self.assertLess(bootstrap, application)
@@ -3144,13 +3603,9 @@ class WorkflowContractTest(unittest.TestCase):
             '"$bundle/deploy/tars-deploy" unlock --expected-owner "$expected_owner"',
             workflow,
         )
-        unlock = workflow.index(
-            '"$bundle/deploy/tars-deploy" unlock --expected-owner "$expected_owner"'
+        self.assertNotIn(
+            "/srv/tars/deployment/runpod-previous-endpoint", workflow
         )
-        clear_predecessor = workflow.index(
-            "rm -f -- /srv/tars/deployment/runpod-previous-endpoint"
-        )
-        self.assertLess(unlock, clear_predecessor)
         cleanup = workflow[workflow.index("Remove runner-side recovery credentials") :]
         self.assertIn("if: always()", cleanup)
 
