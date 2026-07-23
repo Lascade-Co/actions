@@ -11,6 +11,10 @@ permissions:
 env:
   PYTHONDONTWRITEBYTECODE: "1"
 
+concurrency:
+  group: tars-production-delivery
+  cancel-in-progress: false
+
 jobs:
   build:
     name: Build immutable TARS release
@@ -20,9 +24,6 @@ jobs:
       contents: read
       packages: read
       id-token: write
-    concurrency:
-      group: tars-deploy-build-${{ github.event.client_payload.repo }}
-      cancel-in-progress: true
     outputs:
       release_sha: ${{ steps.payload.outputs.sha }}
       api_digest: ${{ steps.images.outputs.api_digest }}
@@ -30,7 +31,6 @@ jobs:
       gpu_digest: ${{ steps.images.outputs.gpu_digest }}
       garage_digest: ${{ steps.images.outputs.garage_digest }}
       otel_digest: ${{ steps.images.outputs.otel_digest }}
-      runpod_endpoint_id: ${{ steps.runpod.outputs.endpoint_id }}
       artifact_name: ${{ steps.bundle.outputs.artifact_name }}
     steps:
       - name: Check out central delivery code
@@ -115,20 +115,6 @@ jobs:
           project-slug: tars
           env-slug: prod
           secret-path: /deployment
-          include-imports: "false"
-          recursive: "false"
-          export-type: env
-
-      - name: Fetch the Runpod release secret from Infisical
-        uses: Infisical/secrets-action@v1.0.16
-        with:
-          method: universal
-          client-id: ${{ secrets.INFISICAL_CLIENT_ID }}
-          client-secret: ${{ secrets.INFISICAL_CLIENT_SECRET }}
-          domain: ${{ secrets.INFISICAL_DOMAIN }}
-          project-slug: tars
-          env-slug: prod
-          secret-path: /runtime
           include-imports: "false"
           recursive: "false"
           export-type: env
@@ -310,21 +296,7 @@ jobs:
             --expected-otel-digest "$OTEL_BUILD_DIGEST" \
             --github-output "$GITHUB_OUTPUT"
 
-      - name: Provision or verify the immutable Runpod release
-        id: runpod
-        env:
-          RELEASE_SHA: ${{ steps.payload.outputs.sha }}
-          GPU_IMAGE: ${{ steps.lock.outputs.registry }}:gpu-sha-${{ steps.payload.outputs.sha }}@${{ steps.images.outputs.gpu_digest }}
-        run: |
-          python3 central/scripts/tars/tars_runpod_release.py ensure \
-            --release-sha "$RELEASE_SHA" \
-            --gpu-image "$GPU_IMAGE" \
-            --api-key-file "$RUNNER_TEMP/tars-docker-config/RUNPOD_API_KEY" \
-            --registry-username-file "$RUNNER_TEMP/tars-docker-config/DOCR_READ_USERNAME" \
-            --registry-password-file "$RUNNER_TEMP/tars-docker-config/DOCR_READ_PASSWORD" \
-            --github-output "$GITHUB_OUTPUT"
-
-      - name: Create exact-SHA deployment bundle and data-only release environment
+      - name: Create the exact-SHA source bundle and verified digest metadata
         id: bundle
         env:
           RELEASE_SHA: ${{ steps.payload.outputs.sha }}
@@ -333,20 +305,48 @@ jobs:
           GPU_DIGEST: ${{ steps.images.outputs.gpu_digest }}
           GARAGE_DIGEST: ${{ steps.images.outputs.garage_digest }}
           OTEL_DIGEST: ${{ steps.images.outputs.otel_digest }}
-          RUNPOD_ENDPOINT_ID: ${{ steps.runpod.outputs.endpoint_id }}
         run: |
           artifact="$RUNNER_TEMP/tars-release-artifact"
           install -d -m 0700 "$artifact"
-          python3 central/scripts/tars/tars_lock_outputs.py source/release/lock.json \
-            --release-env "$artifact/release.env" \
-            --api-digest "$API_DIGEST" \
-            --dispatcher-digest "$DISPATCHER_DIGEST" \
-            --gpu-digest "$GPU_DIGEST" \
-            --garage-digest "$GARAGE_DIGEST" \
-            --otel-digest "$OTEL_DIGEST" \
-            --runpod-endpoint-id "$RUNPOD_ENDPOINT_ID"
           printf '%s\n' "$RELEASE_SHA" > source/.tars-release-sha
           tar -C source --exclude=.git -czf "$artifact/tars-source.tar.gz" .
+          python3 - "$artifact/release-metadata.json" <<'PY'
+          import json
+          import os
+          import re
+          import sys
+          from pathlib import Path
+
+          sha = re.compile(r"[0-9a-f]{40}\Z")
+          digest = re.compile(r"sha256:[0-9a-f]{64}\Z")
+          metadata = {
+              "release_sha": os.environ["RELEASE_SHA"],
+              "api_digest": os.environ["API_DIGEST"],
+              "dispatcher_digest": os.environ["DISPATCHER_DIGEST"],
+              "gpu_digest": os.environ["GPU_DIGEST"],
+              "garage_digest": os.environ["GARAGE_DIGEST"],
+              "otel_digest": os.environ["OTEL_DIGEST"],
+          }
+          if sha.fullmatch(metadata["release_sha"]) is None:
+              raise SystemExit("release metadata contains an invalid SHA")
+          if any(
+              digest.fullmatch(value) is None
+              for key, value in metadata.items()
+              if key.endswith("_digest")
+          ):
+              raise SystemExit("release metadata contains an invalid image digest")
+          path = Path(sys.argv[1])
+          path.write_text(
+              json.dumps(metadata, sort_keys=True, separators=(",", ":")) + "\n",
+              encoding="utf-8",
+          )
+          path.chmod(0o600)
+          PY
+          (
+            cd "$artifact"
+            sha256sum tars-source.tar.gz release-metadata.json > SHA256SUMS
+          )
+          chmod 0600 "$artifact/SHA256SUMS"
           artifact_name="tars-release-$RELEASE_SHA"
           echo "artifact_name=$artifact_name" >> "$GITHUB_OUTPUT"
 
@@ -365,11 +365,7 @@ jobs:
         run: |
           docker logout registry.digitalocean.com >/dev/null 2>&1 || true
           config="${DOCKER_CONFIG:-$RUNNER_TEMP/tars-docker-config}"
-          rm -f \
-            "$config/config.json" \
-            "$config/DOCR_READ_USERNAME" \
-            "$config/DOCR_READ_PASSWORD" \
-            "$config/RUNPOD_API_KEY"
+          rm -f "$config/config.json"
 
   deploy:
     name: Deploy TARS production
@@ -379,9 +375,6 @@ jobs:
       contents: read
       id-token: write
     timeout-minutes: 360
-    concurrency:
-      group: tars-production-deploy
-      cancel-in-progress: false
     steps:
       - name: Check out central delivery code
         uses: actions/checkout@v7.0.0
@@ -430,16 +423,91 @@ jobs:
           name: ${{ needs.build.outputs.artifact_name }}
           path: ${{ runner.temp }}/tars-release-artifact
 
-      - name: Verify the local artifact interface
+      - name: Verify the local artifact interface and expose digest metadata
+        id: artifact
         env:
           RELEASE_SHA: ${{ steps.payload.outputs.sha }}
+          BUILT_API_DIGEST: ${{ needs.build.outputs.api_digest }}
+          BUILT_DISPATCHER_DIGEST: ${{ needs.build.outputs.dispatcher_digest }}
+          BUILT_GPU_DIGEST: ${{ needs.build.outputs.gpu_digest }}
+          BUILT_GARAGE_DIGEST: ${{ needs.build.outputs.garage_digest }}
+          BUILT_OTEL_DIGEST: ${{ needs.build.outputs.otel_digest }}
         run: |
+          artifact="$RUNNER_TEMP/tars-release-artifact"
           verify="$RUNNER_TEMP/tars-release-verify"
           install -d -m 0700 "$verify"
-          tar -xzf "$RUNNER_TEMP/tars-release-artifact/tars-source.tar.gz" -C "$verify"
+          python3 - "$artifact" "$GITHUB_OUTPUT" <<'PY'
+          import hashlib
+          import json
+          import os
+          import re
+          import stat
+          import sys
+          from pathlib import Path
+
+          root = Path(sys.argv[1])
+          output = Path(sys.argv[2])
+          expected_files = ("tars-source.tar.gz", "release-metadata.json")
+          manifest_path = root / "SHA256SUMS"
+          for path in (manifest_path, *(root / name for name in expected_files)):
+              metadata = path.lstat()
+              if not stat.S_ISREG(metadata.st_mode):
+                  raise SystemExit(f"artifact member is not a regular file: {path.name}")
+          lines = manifest_path.read_text(encoding="utf-8").splitlines()
+          if len(lines) != len(expected_files):
+              raise SystemExit("artifact checksum manifest has an invalid member count")
+          checksums = {}
+          for line in lines:
+              match = re.fullmatch(r"([0-9a-f]{64})  ([A-Za-z0-9.-]+)", line)
+              if match is None or match.group(2) not in expected_files:
+                  raise SystemExit("artifact checksum manifest is invalid")
+              if match.group(2) in checksums:
+                  raise SystemExit("artifact checksum manifest contains a duplicate")
+              checksums[match.group(2)] = match.group(1)
+          if set(checksums) != set(expected_files):
+              raise SystemExit("artifact checksum manifest is incomplete")
+          for name, expected in checksums.items():
+              actual = hashlib.sha256((root / name).read_bytes()).hexdigest()
+              if actual != expected:
+                  raise SystemExit(f"artifact checksum mismatch: {name}")
+
+          metadata = json.loads((root / "release-metadata.json").read_text("utf-8"))
+          keys = {
+              "release_sha",
+              "api_digest",
+              "dispatcher_digest",
+              "gpu_digest",
+              "garage_digest",
+              "otel_digest",
+          }
+          if not isinstance(metadata, dict) or set(metadata) != keys:
+              raise SystemExit("release metadata has an invalid schema")
+          if re.fullmatch(r"[0-9a-f]{40}", metadata["release_sha"]) is None:
+              raise SystemExit("release metadata SHA is invalid")
+          for key in keys - {"release_sha"}:
+              if re.fullmatch(r"sha256:[0-9a-f]{64}", metadata[key]) is None:
+                  raise SystemExit(f"release metadata digest is invalid: {key}")
+          expected = {
+              "release_sha": os.environ["RELEASE_SHA"],
+              "api_digest": os.environ["BUILT_API_DIGEST"],
+              "dispatcher_digest": os.environ["BUILT_DISPATCHER_DIGEST"],
+              "gpu_digest": os.environ["BUILT_GPU_DIGEST"],
+              "garage_digest": os.environ["BUILT_GARAGE_DIGEST"],
+              "otel_digest": os.environ["BUILT_OTEL_DIGEST"],
+          }
+          if metadata != expected:
+              raise SystemExit("artifact metadata does not match the build outputs")
+          with output.open("a", encoding="utf-8") as handle:
+              for key in sorted(keys - {"release_sha"}):
+                  handle.write(f"{key}={metadata[key]}\n")
+          PY
+          tar -xzf "$artifact/tars-source.tar.gz" -C "$verify"
           test "$(cat "$verify/.tars-release-sha")" = "$RELEASE_SHA"
           test -x "$verify/deploy/tars-deploy"
-          test -s "$RUNNER_TEMP/tars-release-artifact/release.env"
+          python3 central/scripts/tars/tars_lock_outputs.py "$verify/release/lock.json" \
+            --workflow central/.github/workflows/tars-ci.yml \
+            --workflow central/.github/workflows/tars-deploy.yml \
+            --github-output "$GITHUB_OUTPUT"
 
       - name: Fetch deployment secrets from Infisical
         uses: Infisical/secrets-action@v1.0.16
@@ -477,6 +545,13 @@ jobs:
             --output-directory "$RUNNER_TEMP/tars-deploy-secrets" \
             --github-output "$GITHUB_OUTPUT" \
             --github-env "$GITHUB_ENV"
+          printf '%s' "$DOCR_READ_USERNAME" \
+            > "$RUNNER_TEMP/tars-deploy-secrets/DOCR_READ_USERNAME"
+          printf '%s' "$DOCR_READ_PASSWORD" \
+            > "$RUNNER_TEMP/tars-deploy-secrets/DOCR_READ_PASSWORD"
+          chmod 0600 \
+            "$RUNNER_TEMP/tars-deploy-secrets/DOCR_READ_USERNAME" \
+            "$RUNNER_TEMP/tars-deploy-secrets/DOCR_READ_PASSWORD"
 
       - name: Connect the runner to the TARS private route
         uses: rohittp0/wiregaurd@v3
@@ -490,7 +565,7 @@ jobs:
           install -m 0600 "$RUNNER_TEMP/tars-deploy-secrets/DEPLOY_SSH_PRIVATE_KEY" "$HOME/.ssh/tars_key"
           install -m 0600 "$RUNNER_TEMP/tars-deploy-secrets/DEPLOY_SSH_KNOWN_HOSTS" "$HOME/.ssh/tars_known_hosts"
 
-      - name: Upload and expand the exact source bundle on the control node
+      - name: Upload source and Capture the currently deployed Runpod endpoint
         env:
           SSH_HOST: ${{ steps.connection.outputs.host }}
           SSH_USER: ${{ steps.connection.outputs.user }}
@@ -513,7 +588,6 @@ jobs:
           ssh "${ssh_options[@]}" "$target" "install -d -m 0700 '$upload_dir'"
           scp "${ssh_options[@]}" \
             "$RUNNER_TEMP/tars-release-artifact/tars-source.tar.gz" \
-            "$RUNNER_TEMP/tars-release-artifact/release.env" \
             "$target:$upload_dir/"
           ssh "${ssh_options[@]}" "$target" /bin/sh -s -- "$RELEASE_SHA" <<'REMOTE'
           set -eu
@@ -525,38 +599,32 @@ jobs:
           rm -rf -- "$bundle"
           install -d -m 0750 "$bundle"
           tar -xzf "$upload/tars-source.tar.gz" -C "$bundle"
-          install -m 0600 "$upload/release.env" "$bundle/.release.env"
           test "$(cat "$bundle/.tars-release-sha")" = "$sha"
           rm -rf -- "$upload"
           REMOTE
-
-      - name: Capture the currently deployed Runpod endpoint before rollout
-        env:
-          SSH_HOST: ${{ steps.connection.outputs.host }}
-          SSH_USER: ${{ steps.connection.outputs.user }}
-          RELEASE_SHA: ${{ steps.payload.outputs.sha }}
-          TARGET_RUNPOD_ENDPOINT: ${{ needs.build.outputs.runpod_endpoint_id }}
-        run: |
-          ssh_options=(
-            -i "$HOME/.ssh/tars_key"
-            -o BatchMode=yes
-            -o IdentitiesOnly=yes
-            -o StrictHostKeyChecking=yes
-            -o ServerAliveInterval=15
-            -o ServerAliveCountMax=3
-            -o TCPKeepAlive=yes
-            -o "UserKnownHostsFile=$HOME/.ssh/tars_known_hosts"
-          )
-          target="$SSH_USER@$SSH_HOST"
           current="$RUNNER_TEMP/tars-current-runpod-endpoint"
           stored="$RUNNER_TEMP/tars-stored-runpod-predecessor"
-          previous="$RUNNER_TEMP/tars-previous-runpod-endpoint"
-          store="$RUNNER_TEMP/tars-runpod-predecessor-to-store"
-          # The SHA is payload-validated and identifies the uploaded immutable bundle.
-          # shellcheck disable=SC2029
-          ssh "${ssh_options[@]}" "$target" \
-            "/srv/tars/incoming/$RELEASE_SHA/deploy/tars-deploy current-runpod-endpoint" \
-            > "$current"
+          ssh "${ssh_options[@]}" "$target" /bin/sh -s <<'REMOTE' > "$current"
+          set -eu
+          service=tars_dispatcher
+          services="$(docker service ls --format '{{.Name}}')"
+          if ! printf '%s\n' "$services" | grep -Fx "$service" >/dev/null; then
+            exit 0
+          fi
+          endpoint="$(
+            docker service inspect \
+              --format '{{range .Spec.TaskTemplate.ContainerSpec.Env}}{{println .}}{{end}}' \
+              "$service" |
+              sed -n 's/^TARS_RUNPOD_ENDPOINT_ID=//p'
+          )"
+          case "$endpoint" in
+            ""|*[!A-Za-z0-9_-]*)
+              echo "live dispatcher has an invalid Runpod endpoint ID" >&2
+              exit 1
+              ;;
+          esac
+          printf '%s\n' "$endpoint"
+          REMOTE
           ssh "${ssh_options[@]}" "$target" /bin/sh -s <<'REMOTE' > "$stored"
           set -eu
           state=/srv/tars/deployment/runpod-previous-endpoint
@@ -570,6 +638,82 @@ jobs:
           fi
           REMOTE
           chmod 0600 "$current" "$stored"
+
+      - name: Retire obsolete Runpod releases before reserving worker capacity
+        env:
+          RELEASE_SHA: ${{ steps.payload.outputs.sha }}
+        run: |
+          python3 central/scripts/tars/tars_runpod_release.py pre-prune \
+            --api-key-file "$RUNNER_TEMP/tars-deploy-secrets/RUNPOD_API_KEY" \
+            --current-endpoint-file "$RUNNER_TEMP/tars-current-runpod-endpoint" \
+            --previous-endpoint-file "$RUNNER_TEMP/tars-stored-runpod-predecessor" \
+            --protected-release-sha "$RELEASE_SHA"
+
+      - name: Provision or verify the immutable Runpod release
+        id: runpod
+        env:
+          RELEASE_SHA: ${{ steps.payload.outputs.sha }}
+          GPU_IMAGE: ${{ steps.artifact.outputs.registry }}:gpu-sha-${{ steps.payload.outputs.sha }}@${{ steps.artifact.outputs.gpu_digest }}
+        run: |
+          python3 central/scripts/tars/tars_runpod_release.py ensure \
+            --release-sha "$RELEASE_SHA" \
+            --gpu-image "$GPU_IMAGE" \
+            --api-key-file "$RUNNER_TEMP/tars-deploy-secrets/RUNPOD_API_KEY" \
+            --registry-username-file "$RUNNER_TEMP/tars-deploy-secrets/DOCR_READ_USERNAME" \
+            --registry-password-file "$RUNNER_TEMP/tars-deploy-secrets/DOCR_READ_PASSWORD" \
+            --github-output "$GITHUB_OUTPUT"
+
+      - name: Install the endpoint-bound release and protect its predecessor
+        env:
+          SSH_HOST: ${{ steps.connection.outputs.host }}
+          SSH_USER: ${{ steps.connection.outputs.user }}
+          RELEASE_SHA: ${{ steps.payload.outputs.sha }}
+          API_DIGEST: ${{ steps.artifact.outputs.api_digest }}
+          DISPATCHER_DIGEST: ${{ steps.artifact.outputs.dispatcher_digest }}
+          GPU_DIGEST: ${{ steps.artifact.outputs.gpu_digest }}
+          GARAGE_DIGEST: ${{ steps.artifact.outputs.garage_digest }}
+          OTEL_DIGEST: ${{ steps.artifact.outputs.otel_digest }}
+          RUNPOD_ENDPOINT_ID: ${{ steps.runpod.outputs.endpoint_id }}
+          TARGET_RUNPOD_ENDPOINT: ${{ steps.runpod.outputs.endpoint_id }}
+        run: |
+          release_env="$RUNNER_TEMP/tars-release.env"
+          python3 central/scripts/tars/tars_lock_outputs.py \
+            "$RUNNER_TEMP/tars-release-verify/release/lock.json" \
+            --release-env "$release_env" \
+            --api-digest "$API_DIGEST" \
+            --dispatcher-digest "$DISPATCHER_DIGEST" \
+            --gpu-digest "$GPU_DIGEST" \
+            --garage-digest "$GARAGE_DIGEST" \
+            --otel-digest "$OTEL_DIGEST" \
+            --runpod-endpoint-id "$RUNPOD_ENDPOINT_ID"
+          ssh_options=(
+            -i "$HOME/.ssh/tars_key"
+            -o BatchMode=yes
+            -o IdentitiesOnly=yes
+            -o StrictHostKeyChecking=yes
+            -o ServerAliveInterval=15
+            -o ServerAliveCountMax=3
+            -o TCPKeepAlive=yes
+            -o "UserKnownHostsFile=$HOME/.ssh/tars_known_hosts"
+          )
+          target="$SSH_USER@$SSH_HOST"
+          remote_env=".tars-release-env-$RELEASE_SHA"
+          scp "${ssh_options[@]}" "$release_env" "$target:$remote_env"
+          ssh "${ssh_options[@]}" "$target" /bin/sh -s -- "$RELEASE_SHA" <<'REMOTE'
+          set -eu
+          sha=$1
+          case "$sha" in *[!0-9a-f]*|'') exit 64 ;; esac
+          test "${#sha}" -eq 40
+          incoming="$HOME/.tars-release-env-$sha"
+          bundle="/srv/tars/incoming/$sha"
+          test "$(cat "$bundle/.tars-release-sha")" = "$sha"
+          install -m 0600 "$incoming" "$bundle/.release.env"
+          rm -f -- "$incoming"
+          REMOTE
+          current="$RUNNER_TEMP/tars-current-runpod-endpoint"
+          stored="$RUNNER_TEMP/tars-stored-runpod-predecessor"
+          previous="$RUNNER_TEMP/tars-previous-runpod-endpoint"
+          store="$RUNNER_TEMP/tars-runpod-predecessor-to-store"
           python3 central/scripts/tars/tars_runpod_release.py select-previous \
             --current-endpoint-file "$current" \
             --target-endpoint "$TARGET_RUNPOD_ENDPOINT" \
@@ -688,7 +832,7 @@ jobs:
       - name: Retire expired Runpod releases after successful deployment
         if: steps.prune-main.outputs.should_prune == 'true'
         env:
-          CURRENT_RUNPOD_ENDPOINT: ${{ needs.build.outputs.runpod_endpoint_id }}
+          CURRENT_RUNPOD_ENDPOINT: ${{ steps.runpod.outputs.endpoint_id }}
           PROTECTED_RELEASE_SHA: ${{ steps.prune-main.outputs.sha }}
         run: |
           python3 central/scripts/tars/tars_runpod_release.py prune \
@@ -706,5 +850,6 @@ jobs:
             "$RUNNER_TEMP/tars-previous-runpod-endpoint" \
             "$RUNNER_TEMP/tars-runpod-predecessor-to-store" \
             "$RUNNER_TEMP/tars-stored-runpod-predecessor" \
+            "$RUNNER_TEMP/tars-release.env" \
             "$HOME/.ssh/tars_key" \
             "$HOME/.ssh/tars_known_hosts"

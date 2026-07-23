@@ -31,12 +31,7 @@ DEPLOYMENT_KEYS = (
     "DEPLOY_SSH_KNOWN_HOSTS",
     "WIREGUARD_CONFIG",
 )
-BUILD_KEYS = (
-    "DOCR_WRITE_TOKEN",
-    "DOCR_READ_USERNAME",
-    "DOCR_READ_PASSWORD",
-    "RUNPOD_API_KEY",
-)
+BUILD_KEYS = ("DOCR_WRITE_TOKEN",)
 DEPLOY_KEYS = (
     "DOCR_READ_USERNAME",
     "DOCR_READ_PASSWORD",
@@ -157,8 +152,6 @@ def capture_build(
     try:
         values = required(environment, BUILD_KEYS)
         write_docker_config(values["DOCR_WRITE_TOKEN"], output_directory)
-        for name in ("DOCR_READ_USERNAME", "DOCR_READ_PASSWORD", "RUNPOD_API_KEY"):
-            write_private(output_directory / name, values[name])
     finally:
         clear_exports(github_env, (*DEPLOYMENT_KEYS, *RUNTIME_KEYS))
 

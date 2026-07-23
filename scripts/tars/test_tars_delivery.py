@@ -573,8 +573,10 @@ class RunnerSecretsTest(unittest.TestCase):
             encoded = config["auths"]["registry.digitalocean.com"]["auth"]
             self.assertEqual(base64.b64decode(encoded), b"write-token:write-token")
             self.assertEqual(config_path.stat().st_mode & 0o777, 0o600)
-            for name in ("DOCR_READ_USERNAME", "DOCR_READ_PASSWORD", "RUNPOD_API_KEY"):
-                self.assertEqual((root / "docker" / name).stat().st_mode & 0o777, 0o600)
+            self.assertEqual(
+                {path.name for path in (root / "docker").iterdir()},
+                {"config.json"},
+            )
             cleared = github_env.read_text(encoding="utf-8")
             self.assertEqual(
                 cleared,
@@ -583,28 +585,16 @@ class RunnerSecretsTest(unittest.TestCase):
                 ),
             )
 
-    def test_build_capture_requires_the_minimal_registry_and_runpod_credentials(self) -> None:
+    def test_build_capture_requires_only_the_registry_write_credential(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             capture_build(
-                {
-                    "DOCR_WRITE_TOKEN": "write-token",
-                    "DOCR_READ_USERNAME": "reader",
-                    "DOCR_READ_PASSWORD": "password",
-                    "RUNPOD_API_KEY": "runpod-key",
-                },
+                {"DOCR_WRITE_TOKEN": "write-token"},
                 root / "docker",
                 root / "github-env",
             )
-            self.assertEqual(
-                BUILD_KEYS,
-                (
-                    "DOCR_WRITE_TOKEN",
-                    "DOCR_READ_USERNAME",
-                    "DOCR_READ_PASSWORD",
-                    "RUNPOD_API_KEY",
-                ),
-            )
+            self.assertEqual(BUILD_KEYS, ("DOCR_WRITE_TOKEN",))
+            self.assertTrue((root / "docker" / "config.json").is_file())
 
     def test_build_capture_clears_known_exports_on_failure(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -703,6 +693,9 @@ class FakeReleaseAPI:
         self.auths: list[dict] = []
         self.calls: list[str] = []
         self.template_env = {"RUNPOD_INIT_TIMEOUT": "1200"}
+        self.template_env_by_id: dict[str, object] = {}
+        self.health_by_endpoint: dict[str, list[object]] = {}
+        self.health_calls: list[str] = []
 
     def inventory(self) -> Inventory:
         return Inventory(tuple(self.endpoints), tuple(self.templates), tuple(self.auths))
@@ -734,8 +727,26 @@ class FakeReleaseAPI:
         return {
             "id": template["id"],
             "name": template["name"],
-            "env": dict(self.template_env),
+            "env": (
+                self.template_env_by_id[template_id]
+                if template_id in self.template_env_by_id
+                else dict(self.template_env)
+            ),
         }
+
+    def read_endpoint_health(
+        self, endpoint_id: str
+    ) -> tars_runpod_release.EndpointHealth:
+        self.health_calls.append(endpoint_id)
+        outcomes = self.health_by_endpoint.get(endpoint_id)
+        if not outcomes:
+            return tars_runpod_release.EndpointHealth(0, 0)
+        outcome = outcomes.pop(0)
+        if isinstance(outcome, Exception):
+            raise outcome
+        if not isinstance(outcome, tars_runpod_release.EndpointHealth):
+            raise AssertionError("invalid fake endpoint health outcome")
+        return outcome
 
     def create_auth(self, name: str, username: str, password: str) -> dict:
         self.calls.append("create_auth")
@@ -880,6 +891,98 @@ class RunpodReleaseTest(unittest.TestCase):
         + "@sha256:"
         + "a" * 64
     )
+
+    def test_endpoint_health_uses_official_bearer_api_and_exact_job_counts(
+        self,
+    ) -> None:
+        captured = []
+
+        class Response:
+            status = 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self):
+                return (
+                    b'{"jobs":{"completed":3,"failed":0,"inProgress":1,'
+                    b'"inQueue":2,"retried":0},"workers":{"ready":1}}'
+                )
+
+        def open_request(request, *, timeout):
+            captured.append((request, timeout))
+            return Response()
+
+        health = RunpodClient("api-key", opener=open_request).read_endpoint_health(
+            "endpoint-id"
+        )
+
+        self.assertEqual(
+            health,
+            tars_runpod_release.EndpointHealth(in_queue=2, in_progress=1),
+        )
+        request, timeout = captured[0]
+        self.assertEqual(
+            request.full_url,
+            "https://api.runpod.ai/v2/endpoint-id/health",
+        )
+        self.assertEqual(request.method, "GET")
+        self.assertEqual(request.get_header("Authorization"), "Bearer api-key")
+        self.assertEqual(timeout, tars_runpod_release.REQUEST_TIMEOUT_SECONDS)
+
+    def test_endpoint_health_retries_transient_transport_at_most_three_times(
+        self,
+    ) -> None:
+        calls = 0
+        sleeps = []
+
+        def fail(_request, *, timeout):
+            nonlocal calls
+            calls += 1
+            raise urllib.error.URLError("offline")
+
+        client = RunpodClient("api-key", opener=fail, sleeper=sleeps.append)
+        with self.assertRaisesRegex(RunpodReleaseError, "after 3 calls"):
+            client.read_endpoint_health("endpoint-id")
+
+        self.assertEqual(calls, 3)
+        self.assertEqual(sleeps, [1.0, 2.0])
+
+    def test_endpoint_health_rejects_malformed_active_job_counts(self) -> None:
+        class Response:
+            status = 200
+
+            def __init__(self, body: bytes) -> None:
+                self.body = body
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self):
+                return self.body
+
+        for body in (
+            b"{}",
+            b'{"jobs":[]}',
+            b'{"jobs":{"inQueue":0}}',
+            b'{"jobs":{"inQueue":false,"inProgress":0}}',
+            b'{"jobs":{"inQueue":-1,"inProgress":0}}',
+        ):
+            with self.subTest(body=body):
+                client = RunpodClient(
+                    "api-key",
+                    opener=lambda _request, *, timeout, body=body: Response(body),
+                )
+                with self.assertRaisesRegex(
+                    RunpodReleaseError, "endpoint health"
+                ):
+                    client.read_endpoint_health("endpoint-id")
 
     def test_ensure_is_deterministic_idempotent_and_secret_free(self) -> None:
         api = FakeReleaseAPI()
@@ -2024,6 +2127,377 @@ class RunpodReleaseTest(unittest.TestCase):
         self.assertIn("endpoint-mismatch", remaining)
         self.assertIn("foreign-endpoint", remaining)
 
+    def test_prune_skips_endpoint_with_queued_or_running_work(self) -> None:
+        now = datetime(2026, 7, 21, tzinfo=timezone.utc)
+        api = FakeReleaseAPI()
+        api.seed_release("a" * 40, "current", now)
+        api.seed_release("b" * 40, "busy", now - timedelta(days=2))
+        api.health_by_endpoint["endpoint-busy"] = [
+            tars_runpod_release.EndpointHealth(1, 0)
+        ]
+
+        retired = prune_releases(
+            api,
+            current_endpoint_id="endpoint-current",
+            previous_endpoint_id=None,
+            protected_release_sha="a" * 40,
+            now=now,
+        )
+
+        self.assertEqual(retired, 0)
+        self.assertEqual(api.calls, [])
+        self.assertEqual(api.health_calls, ["endpoint-busy"])
+        self.assertIn(
+            "endpoint-busy", {endpoint["id"] for endpoint in api.endpoints}
+        )
+
+    def test_prune_preflights_all_health_before_any_mutation(self) -> None:
+        now = datetime(2026, 7, 21, tzinfo=timezone.utc)
+        api = FakeReleaseAPI()
+        api.seed_release("a" * 40, "current", now)
+        api.seed_release("b" * 40, "first", now - timedelta(days=3))
+        api.seed_release("c" * 40, "second", now - timedelta(days=2))
+        api.health_by_endpoint["endpoint-second"] = [
+            RunpodReleaseError("Runpod endpoint health is unavailable")
+        ]
+
+        with self.assertRaisesRegex(RunpodReleaseError, "health"):
+            prune_releases(
+                api,
+                current_endpoint_id="endpoint-current",
+                previous_endpoint_id=None,
+                protected_release_sha="a" * 40,
+                now=now,
+            )
+
+        self.assertEqual(api.calls, [])
+        self.assertEqual(
+            api.health_calls, ["endpoint-first", "endpoint-second"]
+        )
+        self.assertIn(
+            "endpoint-first", {endpoint["id"] for endpoint in api.endpoints}
+        )
+
+    def test_prune_rechecks_immediately_before_zeroing(self) -> None:
+        now = datetime(2026, 7, 21, tzinfo=timezone.utc)
+        api = FakeReleaseAPI()
+        api.seed_release("a" * 40, "current", now)
+        api.seed_release("b" * 40, "raced", now - timedelta(days=2))
+        api.health_by_endpoint["endpoint-raced"] = [
+            tars_runpod_release.EndpointHealth(0, 0),
+            tars_runpod_release.EndpointHealth(0, 1),
+        ]
+
+        retired = prune_releases(
+            api,
+            current_endpoint_id="endpoint-current",
+            previous_endpoint_id=None,
+            protected_release_sha="a" * 40,
+            now=now,
+        )
+
+        self.assertEqual(retired, 0)
+        self.assertEqual(api.calls, [])
+        self.assertEqual(
+            api.health_calls, ["endpoint-raced", "endpoint-raced"]
+        )
+
+    def test_prune_restores_endpoint_if_work_appears_after_zero(self) -> None:
+        now = datetime(2026, 7, 21, tzinfo=timezone.utc)
+        api = FakeReleaseAPI()
+        api.seed_release("a" * 40, "current", now)
+        api.seed_release("b" * 40, "raced", now - timedelta(days=2))
+        api.health_by_endpoint["endpoint-raced"] = [
+            tars_runpod_release.EndpointHealth(0, 0),
+            tars_runpod_release.EndpointHealth(0, 0),
+            tars_runpod_release.EndpointHealth(1, 0),
+        ]
+
+        with self.assertRaisesRegex(RunpodReleaseError, "received work"):
+            prune_releases(
+                api,
+                current_endpoint_id="endpoint-current",
+                previous_endpoint_id=None,
+                protected_release_sha="a" * 40,
+                now=now,
+            )
+
+        self.assertEqual(
+            api.calls, ["zero:endpoint-raced", "activate:endpoint-raced"]
+        )
+        raced = next(
+            endpoint
+            for endpoint in api.endpoints
+            if endpoint["id"] == "endpoint-raced"
+        )
+        self.assertEqual(raced["workersMax"], 2)
+
+    def test_prune_preserves_preexisting_zero_limit_if_work_appears(self) -> None:
+        now = datetime(2026, 7, 21, tzinfo=timezone.utc)
+        api = FakeReleaseAPI()
+        api.seed_release("a" * 40, "current", now)
+        api.seed_release("b" * 40, "already-zero", now - timedelta(days=2))
+        endpoint = next(
+            endpoint
+            for endpoint in api.endpoints
+            if endpoint["id"] == "endpoint-already-zero"
+        )
+        endpoint["workersMax"] = 0
+        api.health_by_endpoint["endpoint-already-zero"] = [
+            tars_runpod_release.EndpointHealth(0, 0),
+            tars_runpod_release.EndpointHealth(0, 0),
+            tars_runpod_release.EndpointHealth(0, 1),
+        ]
+
+        with self.assertRaisesRegex(RunpodReleaseError, "left unchanged"):
+            prune_releases(
+                api,
+                current_endpoint_id="endpoint-current",
+                previous_endpoint_id=None,
+                protected_release_sha="a" * 40,
+                now=now,
+            )
+
+        self.assertEqual(api.calls, [])
+        self.assertEqual(endpoint["workersMax"], 0)
+        self.assertIn(
+            "endpoint-already-zero",
+            {candidate["id"] for candidate in api.endpoints},
+        )
+
+    def test_prune_restores_endpoint_if_post_zero_health_is_unavailable(
+        self,
+    ) -> None:
+        now = datetime(2026, 7, 21, tzinfo=timezone.utc)
+        api = FakeReleaseAPI()
+        api.seed_release("a" * 40, "current", now)
+        api.seed_release("b" * 40, "unknown", now - timedelta(days=2))
+        api.health_by_endpoint["endpoint-unknown"] = [
+            tars_runpod_release.EndpointHealth(0, 0),
+            tars_runpod_release.EndpointHealth(0, 0),
+            RunpodReleaseError("Runpod endpoint health is unavailable"),
+        ]
+
+        with self.assertRaisesRegex(
+            RunpodReleaseError, "could not be confirmed after workers"
+        ):
+            prune_releases(
+                api,
+                current_endpoint_id="endpoint-current",
+                previous_endpoint_id=None,
+                protected_release_sha="a" * 40,
+                now=now,
+            )
+
+        self.assertEqual(
+            api.calls, ["zero:endpoint-unknown", "activate:endpoint-unknown"]
+        )
+        self.assertNotIn(
+            "delete_endpoint:endpoint-unknown", api.calls
+        )
+
+    def test_prune_retires_only_the_exact_legacy_tars_chain(self) -> None:
+        now = datetime(2026, 7, 21, tzinfo=timezone.utc)
+        api = FakeReleaseAPI()
+        api.seed_release("a" * 40, "current", now)
+        api.seed_release("b" * 40, "legacy", now - timedelta(days=2))
+        legacy_template = next(
+            template
+            for template in api.templates
+            if template["id"] == "template-legacy"
+        )
+        legacy_template["env"] = []
+        api.template_env_by_id["template-legacy"] = None
+        legacy_endpoint = next(
+            endpoint
+            for endpoint in api.endpoints
+            if endpoint["id"] == "endpoint-legacy"
+        )
+        legacy_endpoint["gpuIds"] = "AMPERE_16"
+
+        retired = prune_releases(
+            api,
+            current_endpoint_id="endpoint-current",
+            previous_endpoint_id=None,
+            protected_release_sha="a" * 40,
+            now=now,
+            grace=timedelta(0),
+        )
+
+        self.assertEqual(retired, 1)
+        self.assertEqual(
+            api.calls,
+            [
+                "zero:endpoint-legacy",
+                "delete_endpoint:endpoint-legacy",
+                "delete_template:tars-runpod-template-v1-" + "b" * 40,
+                "delete_auth:auth-legacy",
+            ],
+        )
+
+    def test_prune_rejects_mixed_legacy_contracts_without_health_or_mutation(
+        self,
+    ) -> None:
+        now = datetime(2026, 7, 21, tzinfo=timezone.utc)
+        for label, graphql_env, rest_env, gpu_ids in (
+            (
+                "legacy-env-current-gpu",
+                [],
+                None,
+                GPU_POOL_SELECTOR,
+            ),
+            (
+                "current-env-legacy-gpu",
+                [{"key": "RUNPOD_INIT_TIMEOUT"}],
+                {"RUNPOD_INIT_TIMEOUT": "1200"},
+                "AMPERE_16",
+            ),
+        ):
+            with self.subTest(label=label):
+                api = FakeReleaseAPI()
+                api.seed_release("a" * 40, "current", now)
+                api.seed_release("b" * 40, label, now - timedelta(days=2))
+                template_id = f"template-{label}"
+                endpoint_id = f"endpoint-{label}"
+                next(
+                    template
+                    for template in api.templates
+                    if template["id"] == template_id
+                )["env"] = graphql_env
+                api.template_env_by_id[template_id] = rest_env
+                next(
+                    endpoint
+                    for endpoint in api.endpoints
+                    if endpoint["id"] == endpoint_id
+                )["gpuIds"] = gpu_ids
+
+                retired = prune_releases(
+                    api,
+                    current_endpoint_id="endpoint-current",
+                    previous_endpoint_id=None,
+                    protected_release_sha="a" * 40,
+                    now=now,
+                    grace=timedelta(0),
+                )
+
+                self.assertEqual(retired, 0)
+                self.assertEqual(api.calls, [])
+                self.assertEqual(api.health_calls, [])
+
+    def test_prune_rejects_legacy_rest_env_drift_before_mutation(self) -> None:
+        now = datetime(2026, 7, 21, tzinfo=timezone.utc)
+        api = FakeReleaseAPI()
+        api.seed_release("a" * 40, "current", now)
+        api.seed_release("b" * 40, "legacy", now - timedelta(days=2))
+        next(
+            template
+            for template in api.templates
+            if template["id"] == "template-legacy"
+        )["env"] = []
+        next(
+            endpoint
+            for endpoint in api.endpoints
+            if endpoint["id"] == "endpoint-legacy"
+        )["gpuIds"] = "AMPERE_16"
+        api.template_env_by_id["template-legacy"] = {}
+
+        with self.assertRaisesRegex(RunpodReleaseError, "REST template env"):
+            prune_releases(
+                api,
+                current_endpoint_id="endpoint-current",
+                previous_endpoint_id=None,
+                protected_release_sha="a" * 40,
+                now=now,
+                grace=timedelta(0),
+            )
+
+        self.assertEqual(api.calls, [])
+        self.assertEqual(api.health_calls, [])
+
+    def test_pre_prune_cli_empty_current_file_never_contacts_runpod(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            current = root / "current"
+            previous = root / "previous"
+            current.write_text("", encoding="utf-8")
+            previous.write_text("endpoint-previous\n", encoding="utf-8")
+            argv = [
+                "tars_runpod_release.py",
+                "pre-prune",
+                "--api-key-file",
+                str(root / "missing-api-key"),
+                "--current-endpoint-file",
+                str(current),
+                "--previous-endpoint-file",
+                str(previous),
+                "--protected-release-sha",
+                "a" * 40,
+            ]
+
+            with (
+                mock.patch("sys.argv", argv),
+                mock.patch("sys.stdout", new=io.StringIO()) as output,
+                mock.patch.object(
+                    tars_runpod_release, "RunpodClient"
+                ) as client_type,
+                mock.patch.object(
+                    tars_runpod_release, "prune_releases"
+                ) as prune,
+            ):
+                tars_runpod_release.main()
+
+            client_type.assert_not_called()
+            prune.assert_not_called()
+            self.assertIn("retired 0", output.getvalue())
+
+    def test_pre_prune_cli_uses_zero_grace_and_endpoint_files(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            api_key = root / "api-key"
+            current = root / "current"
+            previous = root / "previous"
+            api_key.write_text("api-key\n", encoding="utf-8")
+            api_key.chmod(0o600)
+            current.write_text("endpoint-current\n", encoding="utf-8")
+            previous.write_text("endpoint-previous\n", encoding="utf-8")
+            argv = [
+                "tars_runpod_release.py",
+                "pre-prune",
+                "--api-key-file",
+                str(api_key),
+                "--current-endpoint-file",
+                str(current),
+                "--previous-endpoint-file",
+                str(previous),
+                "--protected-release-sha",
+                "a" * 40,
+            ]
+            client = object()
+
+            with (
+                mock.patch("sys.argv", argv),
+                mock.patch("sys.stdout", new=io.StringIO()),
+                mock.patch.object(
+                    tars_runpod_release,
+                    "RunpodClient",
+                    return_value=client,
+                ),
+                mock.patch.object(
+                    tars_runpod_release,
+                    "prune_releases",
+                    return_value=2,
+                ) as prune,
+            ):
+                tars_runpod_release.main()
+
+            prune.assert_called_once()
+            kwargs = prune.call_args.kwargs
+            self.assertIs(prune.call_args.args[0], client)
+            self.assertEqual(kwargs["current_endpoint_id"], "endpoint-current")
+            self.assertEqual(kwargs["previous_endpoint_id"], "endpoint-previous")
+            self.assertEqual(kwargs["protected_release_sha"], "a" * 40)
+            self.assertEqual(kwargs["grace"], timedelta(0))
+
     def test_prune_does_not_delete_unageable_partial_chain_orphans(self) -> None:
         now = datetime(2026, 7, 21, tzinfo=timezone.utc)
         api = FakeReleaseAPI()
@@ -2049,6 +2523,43 @@ class RunpodReleaseTest(unittest.TestCase):
             "template-partial", {template["id"] for template in api.templates}
         )
         self.assertIn("auth-partial", {auth["id"] for auth in api.auths})
+
+    def test_zero_grace_prune_rejects_malformed_fresh_creation_time(self) -> None:
+        now = datetime(2026, 7, 21, tzinfo=timezone.utc)
+        api = FakeReleaseAPI()
+        api.seed_release("a" * 40, "current", now)
+        api.seed_release("b" * 40, "drifted", now - timedelta(days=2))
+        original_inventory = api.inventory
+        inventory_calls = 0
+
+        def inventory_with_timestamp_drift() -> Inventory:
+            nonlocal inventory_calls
+            inventory_calls += 1
+            if inventory_calls == 2:
+                next(
+                    endpoint
+                    for endpoint in api.endpoints
+                    if endpoint["id"] == "endpoint-drifted"
+                )["createdAt"] = "not-a-timestamp"
+            return original_inventory()
+
+        api.inventory = inventory_with_timestamp_drift  # type: ignore[method-assign]
+
+        retired = prune_releases(
+            api,
+            current_endpoint_id="endpoint-current",
+            previous_endpoint_id=None,
+            protected_release_sha="a" * 40,
+            now=now,
+            grace=timedelta(0),
+        )
+
+        self.assertEqual(retired, 0)
+        self.assertEqual(api.health_calls, [])
+        self.assertEqual(api.calls, [])
+        self.assertIn(
+            "endpoint-drifted", {endpoint["id"] for endpoint in api.endpoints}
+        )
 
     def test_prune_rejects_template_image_tag_from_another_release(self) -> None:
         now = datetime(2026, 7, 21, tzinfo=timezone.utc)
@@ -2250,19 +2761,19 @@ class WorkflowContractTest(unittest.TestCase):
         self.assertIn("timeout-minutes: 120", workflow)
         self.assertIn(".tars-release-sha", workflow)
         self.assertIn("DEPLOY_SSH_KNOWN_HOSTS", workflow)
-        self.assertEqual(workflow.count("Infisical/secrets-action@v1.0.16"), 4)
-        self.assertEqual(workflow.count("method: universal"), 4)
+        self.assertEqual(workflow.count("Infisical/secrets-action@v1.0.16"), 3)
+        self.assertEqual(workflow.count("method: universal"), 3)
         self.assertEqual(
-            workflow.count("client-id: ${{ secrets.INFISICAL_CLIENT_ID }}"), 4
+            workflow.count("client-id: ${{ secrets.INFISICAL_CLIENT_ID }}"), 3
         )
         self.assertEqual(
-            workflow.count("client-secret: ${{ secrets.INFISICAL_CLIENT_SECRET }}"), 4
+            workflow.count("client-secret: ${{ secrets.INFISICAL_CLIENT_SECRET }}"), 3
         )
         self.assertNotIn("oidc-audience:", workflow)
-        self.assertEqual(workflow.count('include-imports: "false"'), 4)
-        self.assertEqual(workflow.count('recursive: "false"'), 4)
+        self.assertEqual(workflow.count('include-imports: "false"'), 3)
+        self.assertEqual(workflow.count('recursive: "false"'), 3)
         self.assertEqual(workflow.count("secret-path: /deployment"), 2)
-        self.assertEqual(workflow.count("secret-path: /runtime"), 2)
+        self.assertEqual(workflow.count("secret-path: /runtime"), 1)
         self.assertEqual(workflow.count("tars_runner_secrets.py capture-build"), 1)
         self.assertEqual(workflow.count("tars_runner_secrets.py capture-deploy"), 1)
         self.assertNotIn("tars_infisical.py", workflow)
@@ -2298,6 +2809,7 @@ class WorkflowContractTest(unittest.TestCase):
             workflow.count("tada_bundle=${{ runner.temp }}/tada-bundle"), 2
         )
         self.assertEqual(workflow.count("tars_runpod_release.py ensure"), 1)
+        self.assertEqual(workflow.count("tars_runpod_release.py pre-prune"), 1)
         self.assertEqual(workflow.count("tars_runpod_release.py prune"), 1)
         self.assertEqual(workflow.count("tars_registry_release.py probe"), 1)
         self.assertEqual(workflow.count("tars_registry_release.py verify"), 1)
@@ -2305,7 +2817,7 @@ class WorkflowContractTest(unittest.TestCase):
             workflow.count("if: steps.existing-images.outputs."), 5
         )
         self.assertIn(
-            ":gpu-sha-${{ steps.payload.outputs.sha }}@${{ steps.images.outputs.gpu_digest }}",
+            ":gpu-sha-${{ steps.payload.outputs.sha }}@${{ steps.artifact.outputs.gpu_digest }}",
             workflow,
         )
         for component in ("api", "dispatcher", "gpu", "garage", "otel"):
@@ -2328,8 +2840,6 @@ class WorkflowContractTest(unittest.TestCase):
             ),
             5,
         )
-        self.assertIn('"$config/RUNPOD_API_KEY"', workflow)
-        self.assertIn('"$config/DOCR_READ_USERNAME"', workflow)
         self.assertNotIn(
             'rm -rf "${DOCKER_CONFIG:-$RUNNER_TEMP/tars-docker-config}"', workflow
         )
@@ -2348,12 +2858,31 @@ class WorkflowContractTest(unittest.TestCase):
         self.assertEqual(workflow.count("packages: read"), 1)
         self.assertIn("packages: read", build)
         self.assertNotIn("packages: read", deploy)
+        self.assertNotIn("secret-path: /runtime", build)
+        self.assertNotIn("RUNPOD_API_KEY", build)
+        self.assertNotIn("DOCR_READ_USERNAME", build)
+        self.assertNotIn("DOCR_READ_PASSWORD", build)
+        self.assertIn("RUNPOD_API_KEY", deploy)
+        self.assertIn("DOCR_READ_USERNAME", deploy)
+        self.assertIn("DOCR_READ_PASSWORD", deploy)
         self.assertLess(
             deploy.index("Confirm the final current main revision"),
             deploy.index("Pass delegated runtime secrets"),
         )
         self.assertLess(
             deploy.index("Capture the currently deployed Runpod endpoint"),
+            deploy.index(
+                "Retire obsolete Runpod releases before reserving worker capacity"
+            ),
+        )
+        self.assertLess(
+            deploy.index(
+                "Retire obsolete Runpod releases before reserving worker capacity"
+            ),
+            deploy.index("Provision or verify the immutable Runpod release"),
+        )
+        self.assertLess(
+            deploy.index("Provision or verify the immutable Runpod release"),
             deploy.index("Pass delegated runtime secrets"),
         )
         self.assertLess(
