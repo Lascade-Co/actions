@@ -37,7 +37,7 @@ from tars_runner_secrets import (
 )
 from tars_runpod_release import (
     ENDPOINT_TIMEOUT_MS,
-    GPU_TIER,
+    GPU_POOL_SELECTOR,
     Inventory,
     RunpodClient,
     RunpodReleaseError,
@@ -718,7 +718,15 @@ class FakeReleaseAPI:
             "computeType": endpoint["computeType"],
             "gpuCount": endpoint["gpuCount"],
             "executionTimeoutMs": endpoint["executionTimeoutMs"],
-            "gpuTypeIds": [endpoint["gpuIds"]],
+            "gpuTypeIds": [
+                "NVIDIA RTX A4000",
+                "NVIDIA RTX A4500",
+                "NVIDIA RTX 4000 Ada Generation",
+                "NVIDIA RTX 2000 Ada Generation",
+                "NVIDIA L4",
+                "NVIDIA RTX A5000",
+                "NVIDIA GeForce RTX 3090",
+            ],
         }
 
     def read_template(self, template_id: str) -> dict:
@@ -773,7 +781,7 @@ class FakeReleaseAPI:
         return {
             "id": endpoint_id,
             "name": name,
-            "gpuIds": "AMPERE_16",
+            "gpuIds": GPU_POOL_SELECTOR,
             "idleTimeout": 5,
             "locations": "",
             "scalerType": "REQUEST_COUNT",
@@ -1111,6 +1119,31 @@ class RunpodReleaseTest(unittest.TestCase):
                 registry_password="password",
             )
 
+    def test_exact_rerun_rejects_gpu_pool_removal_or_reordering(self) -> None:
+        for selector in ("AMPERE_16", "AMPERE_24,AMPERE_16"):
+            with self.subTest(selector=selector):
+                api = FakeReleaseAPI()
+                ensure_release(
+                    api,
+                    release_sha="a" * 40,
+                    gpu_image=self.IMAGE,
+                    registry_username="reader",
+                    registry_password="password",
+                )
+                calls_before_drift = list(api.calls)
+                api.endpoints[0]["gpuIds"] = selector
+
+                with self.assertRaisesRegex(RunpodReleaseError, "gpuIds"):
+                    ensure_release(
+                        api,
+                        release_sha="a" * 40,
+                        gpu_image=self.IMAGE,
+                        registry_username="reader",
+                        registry_password="password",
+                    )
+
+                self.assertEqual(api.calls, calls_before_drift)
+
     def test_exact_rerun_repairs_only_deterministic_rest_execution_fields(self) -> None:
         api = FakeReleaseAPI()
         expected = ensure_release(
@@ -1267,7 +1300,7 @@ class RunpodReleaseTest(unittest.TestCase):
             created = client.create_endpoint(response["name"], "template1")
         self.assertEqual(created, response)
         query = graphql.call_args.args[1]
-        self.assertIn(f'gpuIds: "{GPU_TIER}"', query)
+        self.assertIn(f'gpuIds: "{GPU_POOL_SELECTOR}"', query)
         self.assertIn("workersMin: 0", query)
         self.assertIn("workersMax: 2", query)
         self.assertIn('scalerType: "REQUEST_COUNT"', query)
@@ -1276,6 +1309,9 @@ class RunpodReleaseTest(unittest.TestCase):
         self.assertNotIn("executionTimeoutMs", query)
         self.assertNotIn("gpuCount", query)
         self.assertNotIn("computeType", query)
+        self.assertEqual(
+            GPU_POOL_SELECTOR.split(","), ["AMPERE_16", "AMPERE_24"]
+        )
         patch_endpoint.assert_called_once_with(
             endpoint_id="endpoint1",
             payload={"executionTimeoutMs": ENDPOINT_TIMEOUT_MS, "gpuCount": 1},

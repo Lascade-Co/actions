@@ -36,7 +36,10 @@ MAX_TRANSIENT_CALLS = 3
 REQUEST_TIMEOUT_SECONDS = 30
 ENDPOINT_TIMEOUT_MS = 7_200_000
 CONTAINER_DISK_GB = 20
-GPU_TIER = "AMPERE_16"
+# Runpod accepts comma-separated pools in priority order. Keep the cheapest
+# 16 GB pool primary and use the slightly dearer 24 GB pool only when primary
+# supply is constrained.
+GPU_POOL_SELECTOR = "AMPERE_16,AMPERE_24"
 WORKERS_MIN = 0
 WORKERS_MAX = 2
 SCALER_TYPE = "REQUEST_COUNT"
@@ -733,7 +736,7 @@ def _save_endpoint_query(
     fields = (
         f"name: {_graphql_string(name)}",
         f"templateId: {_graphql_string(template_id)}",
-        f"gpuIds: {_graphql_string(GPU_TIER)}",
+        f"gpuIds: {_graphql_string(GPU_POOL_SELECTOR)}",
         f"idleTimeout: {IDLE_TIMEOUT_SECONDS}",
         'locations: ""',
         f"scalerType: {_graphql_string(SCALER_TYPE)}",
@@ -824,7 +827,7 @@ def verify_endpoint_base(
 ) -> str:
     expectations = {
         "name": expected_name,
-        "gpuIds": GPU_TIER,
+        "gpuIds": GPU_POOL_SELECTOR,
         "idleTimeout": IDLE_TIMEOUT_SECONDS,
         "scalerType": SCALER_TYPE,
         "scalerValue": SCALER_VALUE,
@@ -875,9 +878,9 @@ def verify_endpoint_rest_base(
         _expect_equal(resource.get(field), expected, f"REST endpoint {field}")
     # Runpod's endpoint-specific and list responses currently omit computeType
     # even though the REST schema documents it. The GraphQL side of every
-    # release reconciliation separately proves gpuIds=AMPERE_16 before handing
-    # the endpoint off; the REST side must still prove a concrete GPU selector
-    # and reject any explicit CPU identity.
+    # release reconciliation separately proves the ordered primary/fallback
+    # gpuIds selector before handing the endpoint off; the REST side must still
+    # prove a concrete GPU selector and reject any explicit CPU identity.
     if resource.get("computeType") not in (None, "GPU"):
         raise RunpodReleaseError(
             "existing Runpod REST endpoint computeType does not match this release"
