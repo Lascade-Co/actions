@@ -25,11 +25,11 @@ jobs:
       cancel-in-progress: true
     outputs:
       release_sha: ${{ steps.payload.outputs.sha }}
-      api_digest: ${{ steps.api.outputs.digest }}
-      dispatcher_digest: ${{ steps.dispatcher.outputs.digest }}
-      gpu_digest: ${{ steps.gpu.outputs.digest }}
-      garage_digest: ${{ steps.garage.outputs.digest }}
-      otel_digest: ${{ steps.otel.outputs.digest }}
+      api_digest: ${{ steps.images.outputs.api_digest }}
+      dispatcher_digest: ${{ steps.images.outputs.dispatcher_digest }}
+      gpu_digest: ${{ steps.images.outputs.gpu_digest }}
+      garage_digest: ${{ steps.images.outputs.garage_digest }}
+      otel_digest: ${{ steps.images.outputs.otel_digest }}
       runpod_endpoint_id: ${{ steps.runpod.outputs.endpoint_id }}
       artifact_name: ${{ steps.bundle.outputs.artifact_name }}
     steps:
@@ -148,16 +148,44 @@ jobs:
 
       - name: Capture build metadata
         id: metadata
-        run: echo "built_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+        env:
+          RELEASE_SHA: ${{ steps.payload.outputs.sha }}
+        run: |
+          built_at="$(git -C source show -s --format=%cI "$RELEASE_SHA")"
+          source_date_epoch="$(git -C source show -s --format=%ct "$RELEASE_SHA")"
+          case "$source_date_epoch" in
+            ""|*[!0-9]*)
+              echo "invalid source commit timestamp" >&2
+              exit 1
+              ;;
+          esac
+          printf 'built_at=%s\n' "$built_at" >> "$GITHUB_OUTPUT"
+          printf 'source_date_epoch=%s\n' "$source_date_epoch" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve existing exact-SHA image tags
+        id: existing-images
+        env:
+          REGISTRY: ${{ steps.lock.outputs.registry }}
+          RELEASE_SHA: ${{ steps.payload.outputs.sha }}
+        run: |
+          python3 central/scripts/tars/tars_registry_release.py probe \
+            --registry "$REGISTRY" \
+            --release-sha "$RELEASE_SHA" \
+            --docker-config "$RUNNER_TEMP/tars-docker-config" \
+            --github-output "$GITHUB_OUTPUT"
 
       - name: Build and push API
         id: api
+        if: steps.existing-images.outputs.api_exists != 'true'
+        env:
+          SOURCE_DATE_EPOCH: ${{ steps.metadata.outputs.source_date_epoch }}
         uses: docker/build-push-action@v7.3.0
         with:
           context: source
           file: source/Dockerfile.api
           platforms: ${{ steps.lock.outputs.target_platform }}
           push: true
+          provenance: false
           tags: ${{ steps.lock.outputs.registry }}:api-sha-${{ steps.payload.outputs.sha }}
           build-args: |
             GO_IMAGE=${{ steps.lock.outputs.go_image }}
@@ -170,12 +198,16 @@ jobs:
 
       - name: Build and push dispatcher with the locked private TADA bundle
         id: dispatcher
+        if: steps.existing-images.outputs.dispatcher_exists != 'true'
+        env:
+          SOURCE_DATE_EPOCH: ${{ steps.metadata.outputs.source_date_epoch }}
         uses: docker/build-push-action@v7.3.0
         with:
           context: source
           file: source/Dockerfile.dispatcher
           platforms: ${{ steps.lock.outputs.target_platform }}
           push: true
+          provenance: false
           tags: ${{ steps.lock.outputs.registry }}:dispatcher-sha-${{ steps.payload.outputs.sha }}
           build-contexts: |
             tada_bundle=${{ runner.temp }}/tada-bundle
@@ -194,12 +226,16 @@ jobs:
 
       - name: Build and push Runpod GPU worker with the same TADA bundle
         id: gpu
+        if: steps.existing-images.outputs.gpu_exists != 'true'
+        env:
+          SOURCE_DATE_EPOCH: ${{ steps.metadata.outputs.source_date_epoch }}
         uses: docker/build-push-action@v7.3.0
         with:
           context: source
           file: source/Dockerfile.gpu
           platforms: ${{ steps.lock.outputs.target_platform }}
           push: true
+          provenance: false
           tags: ${{ steps.lock.outputs.registry }}:gpu-sha-${{ steps.payload.outputs.sha }}
           build-contexts: |
             tada_bundle=${{ runner.temp }}/tada-bundle
@@ -211,18 +247,21 @@ jobs:
             TADA_REVISION=${{ steps.lock.outputs.tada_revision }}
             TARS_VERSION=sha-${{ steps.payload.outputs.sha }}
             TARS_REVISION=${{ steps.payload.outputs.sha }}
-            TARS_BUILT_AT=${{ steps.metadata.outputs.built_at }}
           cache-from: type=gha,scope=tars-gpu
           cache-to: type=gha,mode=max,scope=tars-gpu
 
       - name: Build and push Garage wrapper
         id: garage
+        if: steps.existing-images.outputs.garage_exists != 'true'
+        env:
+          SOURCE_DATE_EPOCH: ${{ steps.metadata.outputs.source_date_epoch }}
         uses: docker/build-push-action@v7.3.0
         with:
           context: source
           file: source/deploy/garage/Dockerfile
           platforms: ${{ steps.lock.outputs.target_platform }}
           push: true
+          provenance: false
           tags: ${{ steps.lock.outputs.registry }}:garage-sha-${{ steps.payload.outputs.sha }}
           build-args: |
             GARAGE_UPSTREAM_IMAGE=${{ steps.lock.outputs.garage_upstream_image }}
@@ -232,12 +271,16 @@ jobs:
 
       - name: Build and push OpenTelemetry wrapper
         id: otel
+        if: steps.existing-images.outputs.otel_exists != 'true'
+        env:
+          SOURCE_DATE_EPOCH: ${{ steps.metadata.outputs.source_date_epoch }}
         uses: docker/build-push-action@v7.3.0
         with:
           context: source
           file: source/deploy/otel/Dockerfile
           platforms: ${{ steps.lock.outputs.target_platform }}
           push: true
+          provenance: false
           tags: ${{ steps.lock.outputs.registry }}:otel-sha-${{ steps.payload.outputs.sha }}
           build-args: |
             OTEL_UPSTREAM_IMAGE=${{ steps.lock.outputs.otel_upstream_image }}
@@ -245,11 +288,33 @@ jobs:
           cache-from: type=gha,scope=tars-otel
           cache-to: type=gha,mode=max,scope=tars-otel
 
+      - name: Verify the immutable image tag set
+        id: images
+        env:
+          API_BUILD_DIGEST: ${{ steps.api.outputs.digest }}
+          DISPATCHER_BUILD_DIGEST: ${{ steps.dispatcher.outputs.digest }}
+          GPU_BUILD_DIGEST: ${{ steps.gpu.outputs.digest }}
+          GARAGE_BUILD_DIGEST: ${{ steps.garage.outputs.digest }}
+          OTEL_BUILD_DIGEST: ${{ steps.otel.outputs.digest }}
+          REGISTRY: ${{ steps.lock.outputs.registry }}
+          RELEASE_SHA: ${{ steps.payload.outputs.sha }}
+        run: |
+          python3 central/scripts/tars/tars_registry_release.py verify \
+            --registry "$REGISTRY" \
+            --release-sha "$RELEASE_SHA" \
+            --docker-config "$RUNNER_TEMP/tars-docker-config" \
+            --expected-api-digest "$API_BUILD_DIGEST" \
+            --expected-dispatcher-digest "$DISPATCHER_BUILD_DIGEST" \
+            --expected-gpu-digest "$GPU_BUILD_DIGEST" \
+            --expected-garage-digest "$GARAGE_BUILD_DIGEST" \
+            --expected-otel-digest "$OTEL_BUILD_DIGEST" \
+            --github-output "$GITHUB_OUTPUT"
+
       - name: Provision or verify the immutable Runpod release
         id: runpod
         env:
           RELEASE_SHA: ${{ steps.payload.outputs.sha }}
-          GPU_IMAGE: ${{ steps.lock.outputs.registry }}:gpu-sha-${{ steps.payload.outputs.sha }}@${{ steps.gpu.outputs.digest }}
+          GPU_IMAGE: ${{ steps.lock.outputs.registry }}:gpu-sha-${{ steps.payload.outputs.sha }}@${{ steps.images.outputs.gpu_digest }}
         run: |
           python3 central/scripts/tars/tars_runpod_release.py ensure \
             --release-sha "$RELEASE_SHA" \
@@ -263,11 +328,11 @@ jobs:
         id: bundle
         env:
           RELEASE_SHA: ${{ steps.payload.outputs.sha }}
-          API_DIGEST: ${{ steps.api.outputs.digest }}
-          DISPATCHER_DIGEST: ${{ steps.dispatcher.outputs.digest }}
-          GPU_DIGEST: ${{ steps.gpu.outputs.digest }}
-          GARAGE_DIGEST: ${{ steps.garage.outputs.digest }}
-          OTEL_DIGEST: ${{ steps.otel.outputs.digest }}
+          API_DIGEST: ${{ steps.images.outputs.api_digest }}
+          DISPATCHER_DIGEST: ${{ steps.images.outputs.dispatcher_digest }}
+          GPU_DIGEST: ${{ steps.images.outputs.gpu_digest }}
+          GARAGE_DIGEST: ${{ steps.images.outputs.garage_digest }}
+          OTEL_DIGEST: ${{ steps.images.outputs.otel_digest }}
           RUNPOD_ENDPOINT_ID: ${{ steps.runpod.outputs.endpoint_id }}
         run: |
           artifact="$RUNNER_TEMP/tars-release-artifact"

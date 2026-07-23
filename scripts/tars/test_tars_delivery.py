@@ -21,6 +21,11 @@ from tars_lock_outputs import (
     write_release_environment,
 )
 from tars_payload import load_payload
+from tars_registry_release import (
+    RegistryReleaseError,
+    inspect_digest,
+    resolve_release,
+)
 from tars_runner_secrets import (
     BUILD_KEYS,
     DEPLOY_KEYS,
@@ -187,6 +192,177 @@ class LockOutputTest(unittest.TestCase):
         self.assertEqual(output["docker_buildx_version"], "0.34.1")
         self.assertIn("@sha256:", output["postgres_image"])
 
+
+class RegistryReleaseTest(unittest.TestCase):
+    REGISTRY = "registry.digitalocean.com/lascade/tars"
+    RELEASE_SHA = "a" * 40
+    DIGESTS = {
+        component: "sha256:" + str(index) * 64
+        for index, component in enumerate(
+            ("api", "dispatcher", "gpu", "garage", "otel"), start=1
+        )
+    }
+
+    @staticmethod
+    def manifest(digest: str) -> str:
+        return json.dumps(
+            {
+                "schemaVersion": 2,
+                "mediaType": "application/vnd.oci.image.manifest.v1+json",
+                "digest": digest,
+                "size": 123,
+            }
+        )
+
+    def test_inspect_returns_the_registry_manifest_digest(self) -> None:
+        runner = mock.Mock(
+            return_value=subprocess.CompletedProcess(
+                args=[],
+                returncode=0,
+                stdout=self.manifest(self.DIGESTS["api"]),
+                stderr="",
+            )
+        )
+        digest = inspect_digest(
+            self.REGISTRY + ":api-sha-" + self.RELEASE_SHA,
+            Path("/private/docker-config"),
+            runner=runner,
+        )
+        self.assertEqual(digest, self.DIGESTS["api"])
+        command = runner.call_args.args[0]
+        self.assertEqual(
+            command[:5],
+            ["docker", "buildx", "imagetools", "inspect", "--format"],
+        )
+        self.assertEqual(
+            runner.call_args.kwargs["env"]["DOCKER_CONFIG"],
+            "/private/docker-config",
+        )
+
+    def test_inspect_treats_only_a_missing_manifest_as_absent(self) -> None:
+        missing = mock.Mock(
+            return_value=subprocess.CompletedProcess(
+                args=[], returncode=1, stdout="", stderr="manifest unknown"
+            )
+        )
+        self.assertIsNone(
+            inspect_digest(
+                self.REGISTRY + ":api-sha-" + self.RELEASE_SHA,
+                Path("/private/docker-config"),
+                runner=missing,
+            )
+        )
+        self.assertEqual(missing.call_count, 1)
+
+        transient = mock.Mock(
+            return_value=subprocess.CompletedProcess(
+                args=[], returncode=1, stdout="", stderr="temporary registry failure"
+            )
+        )
+        with self.assertRaisesRegex(RegistryReleaseError, "inspection failed"):
+            inspect_digest(
+                self.REGISTRY + ":api-sha-" + self.RELEASE_SHA,
+                Path("/private/docker-config"),
+                runner=transient,
+            )
+        self.assertEqual(transient.call_count, 3)
+
+        for unsafe_failure in (
+            "docker-credential-helper: executable file not found",
+            "repository does not exist or may require authorization",
+        ):
+            with self.subTest(failure=unsafe_failure):
+                failed_auth_or_tool = mock.Mock(
+                    return_value=subprocess.CompletedProcess(
+                        args=[],
+                        returncode=1,
+                        stdout="",
+                        stderr=unsafe_failure,
+                    )
+                )
+                with self.assertRaisesRegex(RegistryReleaseError, "inspection failed"):
+                    inspect_digest(
+                        self.REGISTRY + ":api-sha-" + self.RELEASE_SHA,
+                        Path("/private/docker-config"),
+                        runner=failed_auth_or_tool,
+                    )
+                self.assertEqual(failed_auth_or_tool.call_count, 3)
+
+    def test_inspect_rejects_malformed_success_without_retrying(self) -> None:
+        runner = mock.Mock(
+            return_value=subprocess.CompletedProcess(
+                args=[], returncode=0, stdout='{"schemaVersion":2}', stderr=""
+            )
+        )
+        with self.assertRaisesRegex(RegistryReleaseError, "manifest"):
+            inspect_digest(
+                self.REGISTRY + ":api-sha-" + self.RELEASE_SHA,
+                Path("/private/docker-config"),
+                runner=runner,
+            )
+        self.assertEqual(runner.call_count, 1)
+
+    def test_probe_supports_partial_tags_and_verify_requires_every_tag(self) -> None:
+        available = {
+            "api": self.DIGESTS["api"],
+            "gpu": self.DIGESTS["gpu"],
+        }
+
+        def inspector(reference: str, _docker_config: Path) -> str | None:
+            component = reference.rsplit(":", 1)[1].split("-sha-", 1)[0]
+            return available.get(component)
+
+        probed = resolve_release(
+            registry=self.REGISTRY,
+            release_sha=self.RELEASE_SHA,
+            docker_config=Path("/private/docker-config"),
+            allow_missing=True,
+            inspector=inspector,
+        )
+        self.assertEqual(probed["api_exists"], "true")
+        self.assertEqual(probed["dispatcher_exists"], "false")
+        self.assertEqual(probed["gpu_digest"], self.DIGESTS["gpu"])
+        with self.assertRaisesRegex(RegistryReleaseError, "dispatcher"):
+            resolve_release(
+                registry=self.REGISTRY,
+                release_sha=self.RELEASE_SHA,
+                docker_config=Path("/private/docker-config"),
+                allow_missing=False,
+                inspector=inspector,
+            )
+
+    def test_verify_reuses_exact_digests_and_rejects_a_build_mismatch(self) -> None:
+        def inspector(reference: str, _docker_config: Path) -> str:
+            component = reference.rsplit(":", 1)[1].split("-sha-", 1)[0]
+            return self.DIGESTS[component]
+
+        resolved = resolve_release(
+            registry=self.REGISTRY,
+            release_sha=self.RELEASE_SHA,
+            docker_config=Path("/private/docker-config"),
+            allow_missing=False,
+            expected_digests=self.DIGESTS,
+            inspector=inspector,
+        )
+        self.assertEqual(
+            {component: resolved[f"{component}_digest"] for component in self.DIGESTS},
+            self.DIGESTS,
+        )
+        with self.assertRaisesRegex(RegistryReleaseError, "gpu"):
+            resolve_release(
+                registry=self.REGISTRY,
+                release_sha=self.RELEASE_SHA,
+                docker_config=Path("/private/docker-config"),
+                allow_missing=False,
+                expected_digests={
+                    **self.DIGESTS,
+                    "gpu": "sha256:" + "f" * 64,
+                },
+                inspector=inspector,
+            )
+
+
+class LockReleaseEnvironmentTest(unittest.TestCase):
     def test_writes_data_only_release_environment(self) -> None:
         images = {
             "nginx": {"reference": f"docker.io/library/nginx@sha256:{'a' * 64}"},
@@ -705,6 +881,29 @@ class RunpodReleaseTest(unittest.TestCase):
             "a" * 40, "registry-reader", "super-secret-registry-password"
         )
         self.assertNotIn("super-secret-registry-password", " ".join(names))
+
+    def test_same_sha_with_a_different_digest_fails_without_provider_mutation(
+        self,
+    ) -> None:
+        api = FakeReleaseAPI()
+        ensure_release(
+            api,
+            release_sha="a" * 40,
+            gpu_image=self.IMAGE,
+            registry_username="reader",
+            registry_password="password",
+        )
+        calls = list(api.calls)
+        changed_digest = self.IMAGE.rsplit(":", 1)[0] + ":" + "b" * 64
+        with self.assertRaisesRegex(RunpodReleaseError, "imageName"):
+            ensure_release(
+                api,
+                release_sha="a" * 40,
+                gpu_image=changed_digest,
+                registry_username="reader",
+                registry_password="password",
+            )
+        self.assertEqual(api.calls, calls)
 
     def test_ensure_rejects_nonimmutable_or_mismatched_gpu_images(self) -> None:
         invalid_images = (
@@ -1893,9 +2092,10 @@ class WorkflowContractTest(unittest.TestCase):
         self.assertNotIn("Dockerfile.worker", workflow)
         self.assertNotIn("TARS_WORKER_IMAGE", workflow)
         self.assertIn(
-            "DISPATCHER_DIGEST: ${{ steps.dispatcher.outputs.digest }}", workflow
+            "DISPATCHER_DIGEST: ${{ steps.images.outputs.dispatcher_digest }}",
+            workflow,
         )
-        self.assertIn("GPU_DIGEST: ${{ steps.gpu.outputs.digest }}", workflow)
+        self.assertIn("GPU_DIGEST: ${{ steps.images.outputs.gpu_digest }}", workflow)
         self.assertIn("source/Dockerfile.dispatcher", workflow)
         self.assertIn("source/Dockerfile.gpu", workflow)
         self.assertNotIn("tars_worker_render_gate.py", workflow)
@@ -1905,9 +2105,34 @@ class WorkflowContractTest(unittest.TestCase):
         )
         self.assertEqual(workflow.count("tars_runpod_release.py ensure"), 1)
         self.assertEqual(workflow.count("tars_runpod_release.py prune"), 1)
+        self.assertEqual(workflow.count("tars_registry_release.py probe"), 1)
+        self.assertEqual(workflow.count("tars_registry_release.py verify"), 1)
+        self.assertEqual(
+            workflow.count("if: steps.existing-images.outputs."), 5
+        )
         self.assertIn(
-            ":gpu-sha-${{ steps.payload.outputs.sha }}@${{ steps.gpu.outputs.digest }}",
+            ":gpu-sha-${{ steps.payload.outputs.sha }}@${{ steps.images.outputs.gpu_digest }}",
             workflow,
+        )
+        for component in ("api", "dispatcher", "gpu", "garage", "otel"):
+            self.assertIn(
+                f"{component}_digest: "
+                f"${{{{ steps.images.outputs.{component}_digest }}}}",
+                workflow,
+            )
+        self.assertNotIn("date -u +%Y-%m-%dT%H:%M:%SZ", workflow)
+        self.assertIn(
+            'git -C source show -s --format=%cI "$RELEASE_SHA"', workflow
+        )
+        self.assertIn(
+            'git -C source show -s --format=%ct "$RELEASE_SHA"', workflow
+        )
+        self.assertEqual(workflow.count("provenance: false"), 5)
+        self.assertEqual(
+            workflow.count(
+                "SOURCE_DATE_EPOCH: ${{ steps.metadata.outputs.source_date_epoch }}"
+            ),
+            5,
         )
         self.assertIn('"$config/RUNPOD_API_KEY"', workflow)
         self.assertIn('"$config/DOCR_READ_USERNAME"', workflow)
