@@ -35,15 +35,15 @@ work="$(mktemp -d)"
 dispatcher_paused=0
 
 cleanup() {
-  status=$?
+  exit_status=$?
   trap - EXIT HUP INT TERM
   if [ "$dispatcher_paused" -eq 1 ]; then
     ssh -i ~/.ssh/deployment -o IdentitiesOnly=yes \
       ubuntu@"$DEPLOY_SSH_HOST" \
-      docker service scale tars_dispatcher=1 >&2 || status=1
+      docker service scale tars_dispatcher=1 >&2 || exit_status=1
   fi
   rm -rf -- "$work"
-  exit "$status"
+  exit "$exit_status"
 }
 trap cleanup EXIT HUP INT TERM
 
