@@ -28,11 +28,13 @@ from tars_registry_release import (
 )
 from tars_runner_secrets import (
     BUILD_KEYS,
+    CONNECTION_KEYS,
     DEPLOY_KEYS,
     DEPLOYMENT_KEYS,
     RUNTIME_KEYS,
     RunnerSecretError,
     capture_build,
+    capture_connection,
     capture_deploy,
 )
 from tars_runpod_release import (
@@ -604,6 +606,57 @@ class RunnerSecretsTest(unittest.TestCase):
                 capture_build({}, root / "docker", github_env)
             self.assertEqual(
                 github_env.read_text(encoding="utf-8"),
+                "".join(
+                    f"{name}=\n" for name in (*DEPLOYMENT_KEYS, *RUNTIME_KEYS)
+                ),
+            )
+
+    def test_connection_capture_requires_only_connection_secrets(self) -> None:
+        environment = {name: self.environment()[name] for name in CONNECTION_KEYS}
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            output_directory = root / "captured"
+            github_output = root / "github-output"
+            github_env = root / "github-env"
+            capture_connection(
+                environment,
+                output_directory,
+                github_output,
+                github_env,
+            )
+            self.assertEqual(
+                {path.name for path in output_directory.iterdir()},
+                {"DEPLOY_SSH_PRIVATE_KEY", "DEPLOY_SSH_KNOWN_HOSTS"},
+            )
+            for path in output_directory.iterdir():
+                self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+            rendered = github_output.read_text(encoding="utf-8")
+            self.assertIn("host<<", rendered)
+            self.assertIn("10.20.30.40", rendered)
+            self.assertIn("user<<", rendered)
+            self.assertIn("ubuntu", rendered)
+            self.assertIn("wireguard_config<<", rendered)
+            self.assertEqual(
+                github_env.read_text(encoding="utf-8"),
+                "".join(
+                    f"{name}=\n" for name in (*DEPLOYMENT_KEYS, *RUNTIME_KEYS)
+                ),
+            )
+
+    def test_connection_capture_clears_exports_on_validation_failure(self) -> None:
+        environment = {name: self.environment()[name] for name in CONNECTION_KEYS}
+        environment["DEPLOY_SSH_HOST"] = "control.example.com"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with self.assertRaisesRegex(RunnerSecretError, "literal IPv4"):
+                capture_connection(
+                    environment,
+                    root / "captured",
+                    root / "github-output",
+                    root / "github-env",
+                )
+            self.assertEqual(
+                (root / "github-env").read_text(encoding="utf-8"),
                 "".join(
                     f"{name}=\n" for name in (*DEPLOYMENT_KEYS, *RUNTIME_KEYS)
                 ),
@@ -2507,6 +2560,84 @@ class RunpodReleaseTest(unittest.TestCase):
             self.assertEqual(kwargs["protected_release_sha"], "a" * 40)
             self.assertEqual(kwargs["grace"], timedelta(0))
 
+    def test_post_prune_cli_uses_zero_grace_without_predecessor_protection(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            api_key = root / "api-key"
+            api_key.write_text("api-key\n", encoding="utf-8")
+            api_key.chmod(0o600)
+            argv = [
+                "tars_runpod_release.py",
+                "prune",
+                "--api-key-file",
+                str(api_key),
+                "--current-endpoint",
+                "endpoint-current",
+                "--protected-release-sha",
+                "a" * 40,
+            ]
+            client = object()
+
+            with (
+                mock.patch("sys.argv", argv),
+                mock.patch("sys.stdout", new=io.StringIO()) as output,
+                mock.patch.object(
+                    tars_runpod_release,
+                    "RunpodClient",
+                    return_value=client,
+                ),
+                mock.patch.object(
+                    tars_runpod_release,
+                    "prune_releases",
+                    return_value=2,
+                ) as prune,
+                mock.patch.object(
+                    tars_runpod_release,
+                    "verify_no_superseded_tars_endpoints",
+                ) as verify,
+            ):
+                tars_runpod_release.main()
+
+            prune.assert_called_once()
+            kwargs = prune.call_args.kwargs
+            self.assertIs(prune.call_args.args[0], client)
+            self.assertEqual(kwargs["current_endpoint_id"], "endpoint-current")
+            self.assertIsNone(kwargs["previous_endpoint_id"])
+            self.assertEqual(kwargs["protected_release_sha"], "a" * 40)
+            self.assertEqual(kwargs["grace"], timedelta(0))
+            verify.assert_called_once_with(
+                client,
+                current_endpoint_id="endpoint-current",
+            )
+            self.assertIn("retired 2 obsolete", output.getvalue())
+
+    def test_post_prune_fails_if_an_exact_superseded_endpoint_remains(self) -> None:
+        now = datetime(2026, 7, 21, tzinfo=timezone.utc)
+        api = FakeReleaseAPI()
+        api.seed_release("a" * 40, "current", now)
+        api.seed_release("b" * 40, "superseded", now - timedelta(days=1))
+
+        with self.assertRaisesRegex(
+            RunpodReleaseError,
+            "1 superseded TARS Runpod endpoint",
+        ):
+            tars_runpod_release.verify_no_superseded_tars_endpoints(
+                api,
+                current_endpoint_id="endpoint-current",
+            )
+
+        api.endpoints = [
+            endpoint
+            for endpoint in api.endpoints
+            if endpoint["id"] == "endpoint-current"
+        ]
+        tars_runpod_release.verify_no_superseded_tars_endpoints(
+            api,
+            current_endpoint_id="endpoint-current",
+        )
+
     def test_prune_does_not_delete_unageable_partial_chain_orphans(self) -> None:
         now = datetime(2026, 7, 21, tzinfo=timezone.utc)
         api = FakeReleaseAPI()
@@ -2794,9 +2925,9 @@ class WorkflowContractTest(unittest.TestCase):
         self.assertNotIn("sudo -n", workflow)
         self.assertNotIn(":latest", workflow)
         self.assertNotIn("@latest", workflow)
-        self.assertEqual(workflow.count("ServerAliveInterval=15"), 3)
-        self.assertEqual(workflow.count("ServerAliveCountMax=3"), 3)
-        self.assertEqual(workflow.count("TCPKeepAlive=yes"), 3)
+        self.assertEqual(workflow.count("ServerAliveInterval=15"), 4)
+        self.assertEqual(workflow.count("ServerAliveCountMax=3"), 4)
+        self.assertEqual(workflow.count("TCPKeepAlive=yes"), 4)
         self.assertNotIn("/pulls", workflow)
         self.assertNotIn("tars_tree_attestation.py", workflow)
         self.assertNotIn("permission-pull-requests", workflow)
@@ -2820,6 +2951,10 @@ class WorkflowContractTest(unittest.TestCase):
         self.assertEqual(workflow.count("tars_runpod_release.py ensure"), 1)
         self.assertEqual(workflow.count("tars_runpod_release.py pre-prune"), 1)
         self.assertEqual(workflow.count("tars_runpod_release.py prune"), 1)
+        self.assertEqual(
+            workflow.count("--workflow central/.github/workflows/tars-unlock.yml"),
+            2,
+        )
         self.assertEqual(workflow.count("tars_registry_release.py probe"), 1)
         self.assertEqual(workflow.count("tars_registry_release.py verify"), 1)
         self.assertEqual(
@@ -2878,21 +3013,35 @@ class WorkflowContractTest(unittest.TestCase):
             deploy.index("Confirm the final current main revision"),
             deploy.index("Pass delegated runtime secrets"),
         )
-        self.assertLess(
-            deploy.index("Capture the currently deployed Runpod endpoint"),
-            deploy.index(
-                "Retire obsolete Runpod releases before reserving worker capacity"
-            ),
+        source_upload = deploy.index(
+            "Upload source and Capture the currently deployed Runpod endpoint"
         )
-        self.assertLess(
-            deploy.index(
-                "Retire obsolete Runpod releases before reserving worker capacity"
-            ),
-            deploy.index("Provision or verify the immutable Runpod release"),
+        lock_preflight = deploy.index(
+            "Refuse Runpod mutation while a deployment lock exists"
         )
+        pre_prune = deploy.index(
+            "Retire obsolete Runpod releases before reserving worker capacity"
+        )
+        ensure = deploy.index("Provision or verify the immutable Runpod release")
+        self.assertLess(source_upload, lock_preflight)
+        self.assertLess(lock_preflight, pre_prune)
+        self.assertLess(pre_prune, ensure)
+        lock_preflight_command = deploy[lock_preflight:pre_prune]
+        self.assertIn("docker config inspect tars_deploy_lock", lock_preflight_command)
+        self.assertIn(
+            "Run 'Manual TARS deployment-lock recovery'",
+            lock_preflight_command,
+        )
+        self.assertIn("expected_owner=$owner", lock_preflight_command)
+        self.assertIn("recovery_sha=$recovery_sha", lock_preflight_command)
         self.assertLess(
-            deploy.index("Provision or verify the immutable Runpod release"),
+            ensure,
             deploy.index("Pass delegated runtime secrets"),
+        )
+        pre_prune_command = deploy[pre_prune:ensure]
+        self.assertIn("--previous-endpoint-file", pre_prune_command)
+        post_prune = deploy.index(
+            "Retire obsolete Runpod releases after successful deployment"
         )
         self.assertLess(
             deploy.index("Pass delegated runtime secrets"),
@@ -2904,11 +3053,11 @@ class WorkflowContractTest(unittest.TestCase):
         )
         self.assertLess(
             deploy.index("Reconfirm current main before Runpod retirement"),
-            deploy.index("Retire expired Runpod releases"),
+            post_prune,
         )
         post_rollout_gate = deploy[
             deploy.index("Reconfirm current main before Runpod retirement") :
-            deploy.index("Retire expired Runpod releases")
+            post_prune
         ]
         self.assertIn('if [ "$RELEASE_SHA" != "$main_sha" ]; then', post_rollout_gate)
         self.assertIn(
@@ -2919,6 +3068,10 @@ class WorkflowContractTest(unittest.TestCase):
             "GH_TOKEN: ${{ steps.prune-app-token.outputs.token }}",
             post_rollout_gate,
         )
+        post_prune_command = deploy[
+            post_prune : deploy.index("Remove runner-side deployment credentials")
+        ]
+        self.assertNotIn("--previous-endpoint-file", post_prune_command)
         bootstrap = deploy.index('"$bundle/deploy/tars-deploy" bootstrap-stateful')
         application = deploy.index('exec "$bundle/deploy/tars-deploy" deploy')
         self.assertLess(bootstrap, application)
@@ -2941,6 +3094,65 @@ class WorkflowContractTest(unittest.TestCase):
             "rohittp0/wiregaurd@v3",
         ):
             self.assertIn(reference, workflow)
+
+    def test_unlock_workflow_reuses_the_verified_recovery_interface(self) -> None:
+        workflow = (self.ROOT / ".github/workflows/tars-unlock.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("workflow_dispatch:", workflow)
+        self.assertIn("expected_owner:", workflow)
+        self.assertIn("recovery_sha:", workflow)
+        self.assertIn('RECOVERY_REF: ${{ github.ref }}', workflow)
+        self.assertIn(
+            'if [ "$RECOVERY_REF" != "refs/heads/main" ]; then',
+            workflow,
+        )
+        self.assertIn("group: tars-production-delivery", workflow)
+        self.assertIn("cancel-in-progress: false", workflow)
+        self.assertIn("timeout-minutes: 15", workflow)
+        for reference in (
+            "actions/checkout@v7.0.0",
+            "actions/create-github-app-token@v3.2.0",
+            "Infisical/secrets-action@v1.0.16",
+            "rohittp0/wiregaurd@v3",
+        ):
+            self.assertIn(reference, workflow)
+        self.assertEqual(workflow.count("secret-path: /deployment"), 1)
+        self.assertNotIn("secret-path: /runtime", workflow)
+        self.assertIn("tars_runner_secrets.py capture-connection", workflow)
+        self.assertNotIn("remote-secrets.sh", workflow)
+        self.assertIn("StrictHostKeyChecking=yes", workflow)
+        self.assertIn("ServerAliveInterval=15", workflow)
+        self.assertIn("ServerAliveCountMax=3", workflow)
+        self.assertIn("TCPKeepAlive=yes", workflow)
+        self.assertNotIn("ssh-keyscan", workflow)
+        self.assertNotIn("set -x", workflow)
+        self.assertEqual(
+            workflow.count("repos/Lascade-Co/TARS/git/ref/heads/main"),
+            2,
+        )
+        self.assertIn('if [ "$sha" != "$RECOVERY_SHA" ]; then', workflow)
+        self.assertIn('if [ "$live_main_sha" != "$RECOVERY_SHA" ]; then', workflow)
+        self.assertIn('bundle="/srv/tars/incoming/$recovery_sha"', workflow)
+        self.assertNotIn('bundle="/srv/tars/incoming/$expected_owner"', workflow)
+        self.assertIn(
+            'test "$(cat "$bundle/.tars-release-sha")" = "$recovery_sha"',
+            workflow,
+        )
+        self.assertIn("export TARS_SECRET_SOURCE=environment", workflow)
+        self.assertIn(
+            '"$bundle/deploy/tars-deploy" unlock --expected-owner "$expected_owner"',
+            workflow,
+        )
+        unlock = workflow.index(
+            '"$bundle/deploy/tars-deploy" unlock --expected-owner "$expected_owner"'
+        )
+        clear_predecessor = workflow.index(
+            "rm -f -- /srv/tars/deployment/runpod-previous-endpoint"
+        )
+        self.assertLess(unlock, clear_predecessor)
+        cleanup = workflow[workflow.index("Remove runner-side recovery credentials") :]
+        self.assertIn("if: always()", cleanup)
 
     def test_ci_runs_only_core_collaboration_checks(self) -> None:
         workflow = (self.ROOT / ".github/workflows/tars-ci.yml").read_text(

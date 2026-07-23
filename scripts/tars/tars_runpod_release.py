@@ -1583,6 +1583,30 @@ def prune_releases(
     return len(retired_releases)
 
 
+def verify_no_superseded_tars_endpoints(
+    client: ReleaseAPI,
+    *,
+    current_endpoint_id: str,
+) -> None:
+    current_endpoint_id = _resource_id(current_endpoint_id, "current endpoint ID")
+    inventory = client.inventory()
+    current = _by_id(inventory.endpoints, current_endpoint_id)
+    if current is None or _endpoint_release_sha(current) is None:
+        raise RunpodReleaseError(
+            "current endpoint is not a TARS-owned Runpod release after cleanup"
+        )
+    superseded = [
+        endpoint
+        for endpoint in inventory.endpoints
+        if endpoint.get("id") != current_endpoint_id
+        and _endpoint_release_sha(endpoint) is not None
+    ]
+    if superseded:
+        raise RunpodReleaseError(
+            f"{len(superseded)} superseded TARS Runpod endpoint(s) remain after cleanup"
+        )
+
+
 def read_secret(path: Path, name: str) -> str:
     try:
         metadata = path.lstat()
@@ -1679,7 +1703,6 @@ def main() -> None:
     prune = commands.add_parser("prune")
     prune.add_argument("--api-key-file", type=Path, required=True)
     prune.add_argument("--current-endpoint", required=True)
-    prune.add_argument("--previous-endpoint-file", type=Path, required=True)
     prune.add_argument("--protected-release-sha", required=True)
     pre_prune = commands.add_parser("pre-prune")
     pre_prune.add_argument("--api-key-file", type=Path, required=True)
@@ -1755,11 +1778,16 @@ def main() -> None:
             deleted = prune_releases(
                 client,
                 current_endpoint_id=args.current_endpoint,
-                previous_endpoint_id=read_previous_endpoint(args.previous_endpoint_file),
+                previous_endpoint_id=None,
                 protected_release_sha=args.protected_release_sha,
                 now=datetime.now(timezone.utc),
+                grace=timedelta(0),
             )
-            print(f"retired {deleted} expired TARS Runpod release(s)")
+            verify_no_superseded_tars_endpoints(
+                client,
+                current_endpoint_id=args.current_endpoint,
+            )
+            print(f"retired {deleted} obsolete TARS Runpod release(s)")
     except RunpodReleaseError as error:
         parser.exit(1, f"TARS Runpod release failed: {error}\n")
 

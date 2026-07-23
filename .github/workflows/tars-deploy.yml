@@ -85,6 +85,7 @@ jobs:
           python3 central/scripts/tars/tars_lock_outputs.py source/release/lock.json \
             --workflow central/.github/workflows/tars-ci.yml \
             --workflow central/.github/workflows/tars-deploy.yml \
+            --workflow central/.github/workflows/tars-unlock.yml \
             --github-output "$GITHUB_OUTPUT"
 
       - name: Fetch the locked TADA bundle outside the source build context
@@ -507,6 +508,7 @@ jobs:
           python3 central/scripts/tars/tars_lock_outputs.py "$verify/release/lock.json" \
             --workflow central/.github/workflows/tars-ci.yml \
             --workflow central/.github/workflows/tars-deploy.yml \
+            --workflow central/.github/workflows/tars-unlock.yml \
             --github-output "$GITHUB_OUTPUT"
 
       - name: Fetch deployment secrets from Infisical
@@ -638,6 +640,58 @@ jobs:
           fi
           REMOTE
           chmod 0600 "$current" "$stored"
+
+      - name: Refuse Runpod mutation while a deployment lock exists
+        env:
+          SSH_HOST: ${{ steps.connection.outputs.host }}
+          SSH_USER: ${{ steps.connection.outputs.user }}
+          RECOVERY_SHA: ${{ steps.payload.outputs.sha }}
+        run: |
+          ssh_options=(
+            -i "$HOME/.ssh/tars_key"
+            -o BatchMode=yes
+            -o IdentitiesOnly=yes
+            -o StrictHostKeyChecking=yes
+            -o ServerAliveInterval=15
+            -o ServerAliveCountMax=3
+            -o TCPKeepAlive=yes
+            -o "UserKnownHostsFile=$HOME/.ssh/tars_known_hosts"
+          )
+          target="$SSH_USER@$SSH_HOST"
+          ssh "${ssh_options[@]}" "$target" /bin/sh -s -- "$RECOVERY_SHA" <<'REMOTE'
+          set -eu
+          recovery_sha=$1
+          case "$recovery_sha" in ""|*[!0-9a-f]*) exit 64 ;; esac
+          test "${#recovery_sha}" -eq 40
+          found=false
+          config_names="$(docker config ls \
+            --filter name=tars_deploy_lock --format '{{.Name}}')"
+          # Docker config names cannot contain whitespace.
+          # shellcheck disable=SC2086
+          for name in $config_names; do
+            if [ "$name" = tars_deploy_lock ]; then
+              found=true
+            fi
+          done
+          if [ "$found" = false ]; then
+            exit 0
+          fi
+          owner="$(docker config inspect tars_deploy_lock \
+            --format '{{index .Spec.Labels "tars.owner"}}')"
+          case "$owner" in
+            ""|*[!0-9a-f]*)
+              echo "tars_deploy_lock has an invalid owner; inspect it before deployment" >&2
+              exit 1
+              ;;
+          esac
+          if [ "${#owner}" -ne 40 ]; then
+            echo "tars_deploy_lock has an invalid owner; inspect it before deployment" >&2
+            exit 1
+          fi
+          echo "TARS deployment lock is held by $owner." >&2
+          echo "Run 'Manual TARS deployment-lock recovery' with expected_owner=$owner and recovery_sha=$recovery_sha, then rerun deployment." >&2
+          exit 1
+          REMOTE
 
       - name: Retire obsolete Runpod releases before reserving worker capacity
         env:
@@ -829,7 +883,7 @@ jobs:
           fi
           echo "should_prune=true" >> "$GITHUB_OUTPUT"
 
-      - name: Retire expired Runpod releases after successful deployment
+      - name: Retire obsolete Runpod releases after successful deployment
         if: steps.prune-main.outputs.should_prune == 'true'
         env:
           CURRENT_RUNPOD_ENDPOINT: ${{ steps.runpod.outputs.endpoint_id }}
@@ -838,7 +892,6 @@ jobs:
           python3 central/scripts/tars/tars_runpod_release.py prune \
             --api-key-file "$RUNNER_TEMP/tars-deploy-secrets/RUNPOD_API_KEY" \
             --current-endpoint "$CURRENT_RUNPOD_ENDPOINT" \
-            --previous-endpoint-file "$RUNNER_TEMP/tars-previous-runpod-endpoint" \
             --protected-release-sha "$PROTECTED_RELEASE_SHA"
 
       - name: Remove runner-side deployment credentials

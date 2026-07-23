@@ -1,0 +1,178 @@
+name: Manual TARS deployment-lock recovery
+run-name: Manual TARS deployment-lock recovery
+
+on:
+  workflow_dispatch:
+    inputs:
+      expected_owner:
+        description: Full lowercase 40-character TARS release SHA that owns tars_deploy_lock
+        required: true
+        type: string
+      recovery_sha:
+        description: Current TARS main SHA whose uploaded deploy code performs recovery
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tars-production-delivery
+  cancel-in-progress: false
+
+jobs:
+  unlock:
+    name: Remove a verified stale TARS deployment lock
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Validate the expected lock owner
+        id: owner
+        shell: bash
+        env:
+          EXPECTED_OWNER: ${{ inputs.expected_owner }}
+          RECOVERY_SHA: ${{ inputs.recovery_sha }}
+          RECOVERY_REF: ${{ github.ref }}
+        run: |
+          if [ "$RECOVERY_REF" != "refs/heads/main" ]; then
+            echo "deployment-lock recovery must run from the Actions main branch" >&2
+            exit 64
+          fi
+          if [[ ! "$EXPECTED_OWNER" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "expected_owner must be a full lowercase Git SHA" >&2
+            exit 64
+          fi
+          if [[ ! "$RECOVERY_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "recovery_sha must be a full lowercase Git SHA" >&2
+            exit 64
+          fi
+          printf 'sha=%s\n' "$EXPECTED_OWNER" >> "$GITHUB_OUTPUT"
+          printf 'recovery_sha=%s\n' "$RECOVERY_SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Check out central recovery code
+        uses: actions/checkout@v7.0.0
+        with:
+          ref: ${{ github.sha }}
+          path: central
+          persist-credentials: false
+
+      - name: Mint a read-only TARS GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v3.2.0
+        with:
+          client-id: ${{ secrets.CI_APP_CLIENT_ID }}
+          private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
+          owner: Lascade-Co
+          repositories: TARS
+          permission-contents: read
+
+      - name: Resolve the current TARS main revision
+        id: current-main
+        shell: bash
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          RECOVERY_SHA: ${{ steps.owner.outputs.recovery_sha }}
+        run: |
+          sha="$(gh api repos/Lascade-Co/TARS/git/ref/heads/main --jq .object.sha)"
+          if [[ ! "$sha" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "current TARS main did not resolve to a full lowercase Git SHA" >&2
+            exit 1
+          fi
+          if [ "$sha" != "$RECOVERY_SHA" ]; then
+            echo "recovery_sha is not the current TARS main revision" >&2
+            exit 1
+          fi
+          printf 'sha=%s\n' "$sha" >> "$GITHUB_OUTPUT"
+
+      - name: Fetch deployment connection secrets from Infisical
+        uses: Infisical/secrets-action@v1.0.16
+        with:
+          method: universal
+          client-id: ${{ secrets.INFISICAL_CLIENT_ID }}
+          client-secret: ${{ secrets.INFISICAL_CLIENT_SECRET }}
+          domain: ${{ secrets.INFISICAL_DOMAIN }}
+          project-slug: tars
+          env-slug: prod
+          secret-path: /deployment
+          include-imports: "false"
+          recursive: "false"
+          export-type: env
+
+      - name: Validate and capture the recovery connection
+        id: connection
+        shell: bash
+        run: |
+          umask 077
+          python3 central/scripts/tars/tars_runner_secrets.py capture-connection \
+            --output-directory "$RUNNER_TEMP/tars-recovery-secrets" \
+            --github-output "$GITHUB_OUTPUT" \
+            --github-env "$GITHUB_ENV"
+
+      - name: Connect the runner to the TARS private route
+        uses: rohittp0/wiregaurd@v3
+        with:
+          config: ${{ steps.connection.outputs.wireguard_config }}
+          ips: ${{ steps.connection.outputs.host }}
+
+      - name: Install the pinned SSH identity and known-host set
+        shell: bash
+        run: |
+          install -d -m 0700 "$HOME/.ssh"
+          install -m 0600 \
+            "$RUNNER_TEMP/tars-recovery-secrets/DEPLOY_SSH_PRIVATE_KEY" \
+            "$HOME/.ssh/tars_key"
+          install -m 0600 \
+            "$RUNNER_TEMP/tars-recovery-secrets/DEPLOY_SSH_KNOWN_HOSTS" \
+            "$HOME/.ssh/tars_known_hosts"
+
+      - name: Remove the stale deployment lock
+        shell: bash
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          SSH_HOST: ${{ steps.connection.outputs.host }}
+          SSH_USER: ${{ steps.connection.outputs.user }}
+          EXPECTED_OWNER: ${{ steps.owner.outputs.sha }}
+          RECOVERY_SHA: ${{ steps.current-main.outputs.sha }}
+        run: |
+          ssh_options=(
+            -i "$HOME/.ssh/tars_key"
+            -o BatchMode=yes
+            -o IdentitiesOnly=yes
+            -o StrictHostKeyChecking=yes
+            -o ServerAliveInterval=15
+            -o ServerAliveCountMax=3
+            -o TCPKeepAlive=yes
+            -o "UserKnownHostsFile=$HOME/.ssh/tars_known_hosts"
+          )
+          target="$SSH_USER@$SSH_HOST"
+          live_main_sha="$(gh api repos/Lascade-Co/TARS/git/ref/heads/main --jq .object.sha)"
+          if [ "$live_main_sha" != "$RECOVERY_SHA" ]; then
+            echo "TARS main changed before deployment-lock recovery could run" >&2
+            exit 1
+          fi
+
+          ssh "${ssh_options[@]}" "$target" /bin/sh -s -- \
+            "$EXPECTED_OWNER" "$RECOVERY_SHA" <<'REMOTE'
+          set -eu
+          expected_owner=$1
+          recovery_sha=$2
+          case "$expected_owner" in ""|*[!0-9a-f]*) exit 64 ;; esac
+          case "$recovery_sha" in ""|*[!0-9a-f]*) exit 64 ;; esac
+          test "${#expected_owner}" -eq 40
+          test "${#recovery_sha}" -eq 40
+          bundle="/srv/tars/incoming/$recovery_sha"
+          test "$(cat "$bundle/.tars-release-sha")" = "$recovery_sha"
+          test -x "$bundle/deploy/tars-deploy"
+          export TARS_SECRET_SOURCE=environment
+          "$bundle/deploy/tars-deploy" unlock --expected-owner "$expected_owner"
+          rm -f -- /srv/tars/deployment/runpod-previous-endpoint
+          REMOTE
+
+      - name: Remove runner-side recovery credentials
+        if: always()
+        shell: bash
+        run: |
+          rm -rf \
+            "$RUNNER_TEMP/tars-recovery-secrets" \
+            "$HOME/.ssh/tars_key" \
+            "$HOME/.ssh/tars_known_hosts"
