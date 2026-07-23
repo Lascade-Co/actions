@@ -2052,6 +2052,16 @@ class WorkflowContractTest(unittest.TestCase):
         self.assertEqual(selected_for_next_release, endpoint_b)
         self.assertTrue(should_store_for_next_release)
 
+    def test_endpoint_selection_files_are_empty_when_no_endpoint_exists(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "endpoint"
+            tars_runpod_release.write_endpoint_file(path, None)
+            self.assertEqual(path.read_bytes(), b"")
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+
+            tars_runpod_release.write_endpoint_file(path, "endpoint-a")
+            self.assertEqual(path.read_bytes(), b"endpoint-a\n")
+
     def test_deploy_workflow_has_immutable_and_non_cancelled_deploy_contract(self) -> None:
         import re
 

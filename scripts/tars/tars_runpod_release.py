@@ -1342,7 +1342,10 @@ def select_previous_endpoint(
 
 def write_endpoint_file(path: Path, endpoint_id: str | None) -> None:
     try:
-        path.write_text(f"{endpoint_id or ''}\n", encoding="utf-8")
+        path.write_text(
+            f"{endpoint_id}\n" if endpoint_id is not None else "",
+            encoding="utf-8",
+        )
         path.chmod(0o600)
     except OSError as error:
         raise RunpodReleaseError("cannot write the endpoint selection file") from error
