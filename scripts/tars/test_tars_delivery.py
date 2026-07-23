@@ -1622,7 +1622,26 @@ class RunpodReleaseTest(unittest.TestCase):
                 expected_image=self.TARGET_IMAGE,
             )
 
-        api.templates[0]["boundEndpointId"] = "stable-endpoint"
+    def test_stable_topology_accepts_missing_inverse_endpoint_binding(self) -> None:
+        for marker in (None, "missing"):
+            with self.subTest(marker=marker):
+                api = FakeReleaseAPI()
+                api.seed_stable(self.TARGET_IMAGE, version=11)
+                if marker == "missing":
+                    api.templates[0].pop("boundEndpointId")
+                else:
+                    api.templates[0]["boundEndpointId"] = marker
+
+                tars_runpod_release.verify_stable_topology(
+                    api,
+                    ids=self.stable_ids(),
+                    expected_image=self.TARGET_IMAGE,
+                )
+
+    def test_stable_topology_requires_exclusive_template_and_auth(self) -> None:
+        api = FakeReleaseAPI()
+        api.seed_stable(self.TARGET_IMAGE, version=11)
+        api.templates[0]["boundEndpointId"] = None
         shared = FakeReleaseAPI.endpoint(
             endpoint_id="shared-endpoint",
             name="unrelated-endpoint",
@@ -2112,6 +2131,169 @@ class RunpodReleaseTest(unittest.TestCase):
         self.assertFalse(
             any(call.startswith("delete_") for call in api.calls)
         )
+
+    def test_explicit_migration_accepts_missing_inverse_endpoint_binding(
+        self,
+    ) -> None:
+        for marker in (None, "missing"):
+            with self.subTest(marker=marker):
+                api = FakeReleaseAPI()
+                api.seed_release(
+                    "a" * 40,
+                    "current",
+                    datetime.now(timezone.utc) - timedelta(days=1),
+                )
+                if marker == "missing":
+                    api.templates[0].pop("boundEndpointId")
+                else:
+                    api.templates[0]["boundEndpointId"] = marker
+
+                adopted = (
+                    tars_runpod_release.adopt_existing_stable_resources(
+                        api,
+                        endpoint_id="endpoint-current",
+                        sleeper=lambda _seconds: None,
+                    )
+                )
+
+                self.assertEqual(
+                    adopted,
+                    tars_runpod_release.StableResourceIDs(
+                        "endpoint-current",
+                        "template-current",
+                        "auth-current",
+                    ),
+                )
+
+    def test_explicit_migration_accepts_sparse_rest_template_defaults(
+        self,
+    ) -> None:
+        class SparseRESTTemplateAPI(FakeReleaseAPI):
+            def read_endpoint(self, endpoint_id: str) -> dict:
+                resource = super().read_endpoint(endpoint_id)
+                resource["template"].pop("imageName", None)
+                return resource
+
+            @staticmethod
+            def _rest_template(template: dict) -> dict:
+                resource = FakeReleaseAPI._rest_template(template)
+                for field in (
+                    "dockerEntrypoint",
+                    "dockerStartCmd",
+                    "isPublic",
+                    "ports",
+                    "readme",
+                    "volumeInGb",
+                    "volumeMountPath",
+                ):
+                    resource.pop(field, None)
+                return resource
+
+        api = SparseRESTTemplateAPI()
+        api.seed_release(
+            "a" * 40,
+            "current",
+            datetime.now(timezone.utc) - timedelta(days=1),
+        )
+        api.templates[0]["boundEndpointId"] = None
+
+        adopted = tars_runpod_release.adopt_existing_stable_resources(
+            api,
+            endpoint_id="endpoint-current",
+            sleeper=lambda _seconds: None,
+        )
+
+        self.assertEqual(
+            adopted,
+            tars_runpod_release.StableResourceIDs(
+                "endpoint-current",
+                "template-current",
+                "auth-current",
+            ),
+        )
+
+    def test_sparse_rest_template_rejects_explicit_non_defaults(self) -> None:
+        base = {
+            "id": "stable-template",
+            "name": "tars-runpod-template-v2",
+            "imageName": self.TARGET_IMAGE,
+            "containerRegistryAuthId": "stable-auth",
+            "containerDiskInGb": 20,
+            "env": {"RUNPOD_INIT_TIMEOUT": "1200"},
+            "isServerless": True,
+        }
+        cases = {
+            "dockerEntrypoint": ["/bin/sh"],
+            "dockerStartCmd": ["serve"],
+            "isPublic": True,
+            "ports": ["8080/http"],
+            "readme": "unexpected",
+            "volumeInGb": 1,
+            "volumeMountPath": "/unexpected",
+        }
+        for field, value in cases.items():
+            with self.subTest(field=field):
+                with self.assertRaisesRegex(
+                    RunpodReleaseError,
+                    f"owned REST template {field}",
+                ):
+                    tars_runpod_release.verify_owned_template_rest(
+                        {**base, field: value},
+                        template_id="stable-template",
+                        expected_name="tars-runpod-template-v2",
+                        image=self.TARGET_IMAGE,
+                        auth_id="stable-auth",
+                    )
+
+    def test_explicit_migration_rejects_conflicting_inverse_binding(
+        self,
+    ) -> None:
+        api = FakeReleaseAPI()
+        api.seed_release(
+            "a" * 40,
+            "current",
+            datetime.now(timezone.utc) - timedelta(days=1),
+        )
+        api.templates[0]["boundEndpointId"] = "different-endpoint"
+
+        with self.assertRaisesRegex(
+            RunpodReleaseError, "adopted template bound endpoint"
+        ):
+            tars_runpod_release.adopt_existing_stable_resources(
+                api,
+                endpoint_id="endpoint-current",
+                sleeper=lambda _seconds: None,
+            )
+
+        self.assertEqual(api.calls, [])
+
+    def test_explicit_migration_rejects_shared_template(self) -> None:
+        api = FakeReleaseAPI()
+        api.seed_release(
+            "a" * 40,
+            "current",
+            datetime.now(timezone.utc) - timedelta(days=1),
+        )
+        api.templates[0]["boundEndpointId"] = None
+        api.endpoints.append(
+            FakeReleaseAPI.endpoint(
+                endpoint_id="shared-endpoint",
+                name="unrelated-endpoint",
+                template_id="template-current",
+                created=datetime.now(timezone.utc),
+            )
+        )
+
+        with self.assertRaisesRegex(
+            RunpodReleaseError, "shared by another endpoint"
+        ):
+            tars_runpod_release.adopt_existing_stable_resources(
+                api,
+                endpoint_id="endpoint-current",
+                sleeper=lambda _seconds: None,
+            )
+
+        self.assertEqual(api.calls, [])
 
     def test_explicit_migration_refuses_stale_embedded_template(self) -> None:
         class StaleEmbeddedTemplateAPI(FakeReleaseAPI):

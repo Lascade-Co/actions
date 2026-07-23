@@ -890,6 +890,18 @@ def _expect_equal(actual: Any, expected: Any, description: str) -> None:
         raise RunpodReleaseError(f"existing Runpod {description} does not match this release")
 
 
+def _expect_optional_bound_endpoint(
+    template: Mapping[str, Any], endpoint_id: str, description: str
+) -> None:
+    """Accept Runpod's omitted/null inverse while rejecting a real conflict."""
+
+    bound_endpoint_id = template.get("boundEndpointId")
+    if bound_endpoint_id not in (None, endpoint_id):
+        raise RunpodReleaseError(
+            f"existing Runpod {description} does not match this release"
+        )
+
+
 def verify_auth(resource: Mapping[str, Any], expected_name: str) -> str:
     _expect_equal(resource.get("name"), expected_name, "registry auth name")
     return _resource_id(resource.get("id"), "registry auth ID")
@@ -1092,13 +1104,90 @@ def verify_owned_template_rest(
         auth_id=auth_id,
     )
     _expect_equal(resource.get("id"), template_id, "owned REST template id")
-    for field, value in expected.items():
+    for field in (
+        "containerDiskInGb",
+        "containerRegistryAuthId",
+        "env",
+        "imageName",
+        "name",
+    ):
         _expect_equal(
-            resource.get(field), value, f"owned REST template {field}"
+            resource.get(field),
+            expected[field],
+            f"owned REST template {field}",
         )
+    _verify_sparse_template_defaults(resource, expected)
     if resource.get("isServerless") is not True:
         raise RunpodReleaseError(
             "existing Runpod owned REST template is not serverless"
+        )
+    return _resource_id(resource.get("id"), "template ID")
+
+
+def _verify_sparse_template_defaults(
+    resource: Mapping[str, Any], expected: Mapping[str, Any]
+) -> None:
+    """Reject explicit non-defaults while allowing Runpod's sparse reads."""
+
+    for field in (
+        "dockerEntrypoint",
+        "dockerStartCmd",
+        "isPublic",
+        "ports",
+        "readme",
+        "volumeInGb",
+        "volumeMountPath",
+    ):
+        actual = resource.get(field)
+        value = expected[field]
+        if actual is not None and (
+            type(actual) is not type(value) or actual != value
+        ):
+            raise RunpodReleaseError(
+                f"existing Runpod owned REST template {field} "
+                "does not match this release"
+            )
+
+
+def verify_embedded_template_rest(
+    resource: Mapping[str, Any],
+    *,
+    template_id: str,
+    expected_name: str,
+    image: str,
+    auth_id: str,
+) -> str:
+    """Verify the documented subset in an endpoint-embedded template."""
+
+    expected = _owned_template_payload(
+        name=expected_name,
+        image=image,
+        auth_id=auth_id,
+    )
+    for field in (
+        "id",
+        "name",
+        "containerDiskInGb",
+        "containerRegistryAuthId",
+        "env",
+    ):
+        expected_value = template_id if field == "id" else expected[field]
+        _expect_equal(
+            resource.get(field),
+            expected_value,
+            f"embedded REST template {field}",
+        )
+    embedded_image = resource.get("imageName")
+    if embedded_image is not None:
+        _expect_equal(
+            embedded_image,
+            image,
+            "embedded REST template imageName",
+        )
+    _verify_sparse_template_defaults(resource, expected)
+    if resource.get("isServerless") is not True:
+        raise RunpodReleaseError(
+            "existing Runpod embedded REST template is not serverless"
         )
     return _resource_id(resource.get("id"), "template ID")
 
@@ -1180,8 +1269,8 @@ def _stable_inventory_resources(
     _expect_equal(
         endpoint.get("templateId"), ids.template_id, "stable endpoint templateId"
     )
-    _expect_equal(
-        template.get("boundEndpointId"),
+    _expect_optional_bound_endpoint(
+        template,
         ids.endpoint_id,
         "stable template bound endpoint",
     )
@@ -1396,9 +1485,10 @@ def _verify_endpoint_template(
         raise RunpodReleaseError(
             "Runpod stable endpoint omitted its bound template"
         )
-    verify_stable_template_rest(
+    verify_embedded_template_rest(
         template,
         template_id=ids.template_id,
+        expected_name=STABLE_TEMPLATE_NAME,
         image=image,
         auth_id=ids.auth_id,
     )
@@ -2356,8 +2446,8 @@ def verify_adoptable_topology(
         ids.auth_id,
         "adopted template registry auth",
     )
-    _expect_equal(
-        template.get("boundEndpointId"),
+    _expect_optional_bound_endpoint(
+        template,
         ids.endpoint_id,
         "adopted template bound endpoint",
     )
@@ -2408,7 +2498,7 @@ def verify_adoptable_topology(
         raise RunpodReleaseError(
             "Runpod endpoint to adopt omitted its bound template"
         )
-    verify_owned_template_rest(
+    verify_embedded_template_rest(
         embedded_template,
         template_id=ids.template_id,
         expected_name=template_name,
