@@ -551,6 +551,7 @@ class FakeReleaseAPI:
             "containerDiskInGb": 20,
             "volumeInGb": 0,
             "dockerArgs": None,
+            "env": [],
             "containerRegistryAuthId": auth_id,
             "boundEndpointId": None,
         }
@@ -616,6 +617,7 @@ class FakeReleaseAPI:
                 "containerDiskInGb": 20,
                 "volumeInGb": 0,
                 "dockerArgs": None,
+                "env": [],
                 "containerRegistryAuthId": auth_id,
                 "boundEndpointId": endpoint_id,
             }
@@ -634,14 +636,14 @@ class FakeReleaseAPI:
         stored = next(item for item in self.endpoints if item["id"] == endpoint["id"])
         stored["workersMin"] = 0
         stored["workersMax"] = 0
-        return dict(stored)
+        return self.read_endpoint(stored["id"])
 
     def activate_endpoint(self, endpoint: dict) -> dict:
         self.calls.append(f"activate:{endpoint['id']}")
         stored = next(item for item in self.endpoints if item["id"] == endpoint["id"])
         stored["workersMin"] = 0
         stored["workersMax"] = 2
-        return dict(stored)
+        return self.read_endpoint(stored["id"])
 
     def configure_endpoint(self, endpoint: dict) -> dict:
         self.calls.append(f"configure:{endpoint['id']}")
@@ -724,6 +726,68 @@ class RunpodReleaseTest(unittest.TestCase):
                     registry_username="reader",
                     registry_password="password",
                 )
+
+    def test_template_verification_requires_explicit_empty_runtime_fields(self) -> None:
+        base = {
+            "id": "template1",
+            "name": "tars-runpod-template-v1-" + "a" * 40,
+            "imageName": self.IMAGE,
+            "isServerless": True,
+            "containerDiskInGb": 20,
+            "volumeInGb": 0,
+            "containerRegistryAuthId": "auth1",
+            "dockerArgs": "",
+            "env": [],
+        }
+        for docker_args in (None, ""):
+            for environment in (None, []):
+                with self.subTest(
+                    docker_args=docker_args, environment=environment
+                ):
+                    resource = {
+                        **base,
+                        "dockerArgs": docker_args,
+                        "env": environment,
+                    }
+                    self.assertEqual(
+                        tars_runpod_release.verify_template(
+                            resource,
+                            expected_name=base["name"],
+                            image=self.IMAGE,
+                            auth_id="auth1",
+                        ),
+                        "template1",
+                    )
+                    self.assertEqual(
+                        tars_runpod_release._template_release_sha(resource),
+                        "a" * 40,
+                    )
+
+        invalid = (
+            (
+                "missing dockerArgs",
+                {
+                    key: value
+                    for key, value in base.items()
+                    if key != "dockerArgs"
+                },
+            ),
+            (
+                "missing env",
+                {key: value for key, value in base.items() if key != "env"},
+            ),
+            ("nonempty dockerArgs", {**base, "dockerArgs": "python handler.py"}),
+            ("nonempty env", {**base, "env": [{"key": "UNREVIEWED"}]}),
+        )
+        for label, resource in invalid:
+            with self.subTest(label=label), self.assertRaises(RunpodReleaseError):
+                tars_runpod_release.verify_template(
+                    resource,
+                    expected_name=base["name"],
+                    image=self.IMAGE,
+                    auth_id="auth1",
+                )
+            self.assertIsNone(tars_runpod_release._template_release_sha(resource))
 
     def test_ensure_verifies_rest_and_graphql_endpoint_contracts(self) -> None:
         api = FakeReleaseAPI()
@@ -951,6 +1015,8 @@ class RunpodReleaseTest(unittest.TestCase):
         query = graphql.call_args.args[1]
         for field in ("gpuIds", "locations", "scalerType", "scalerValue"):
             self.assertIn(field, query)
+        self.assertRegex(query, r"env\s*\{\s*key\s*\}")
+        self.assertNotRegex(query, r"env\s*\{[^}]*\bvalue\b")
         for rest_only_field in ("gpuCount", "computeType", "executionTimeoutMs"):
             self.assertNotIn(rest_only_field, query)
 
@@ -1044,6 +1110,8 @@ class RunpodReleaseTest(unittest.TestCase):
         query = graphql.call_args.args[1]
         self.assertEqual(query.count("containerRegistryAuthId"), 1)
         self.assertIn(f"imageName: {json.dumps(self.IMAGE)}", query)
+        self.assertEqual(query.count('dockerArgs: ""'), 1)
+        self.assertRegex(query, r"env:\s*\[\]")
 
     def test_auth_and_template_create_recover_lost_responses_without_reissuing_mutations(self) -> None:
         release_sha = "a" * 40
@@ -1058,6 +1126,7 @@ class RunpodReleaseTest(unittest.TestCase):
             "containerDiskInGb": 20,
             "volumeInGb": 0,
             "dockerArgs": None,
+            "env": [],
             "containerRegistryAuthId": "auth1",
             "boundEndpointId": None,
         }
@@ -1180,10 +1249,14 @@ class RunpodReleaseTest(unittest.TestCase):
             "templateId": graphql_endpoint["templateId"],
             "workersMin": graphql_endpoint["workersMin"],
             "workersMax": graphql_endpoint["workersMax"],
-            "computeType": graphql_endpoint["computeType"],
             "gpuCount": graphql_endpoint["gpuCount"],
             "executionTimeoutMs": graphql_endpoint["executionTimeoutMs"],
-            "gpuTypeIds": ["AMPERE_16"],
+            "gpuTypeIds": [
+                "NVIDIA RTX A4000",
+                "NVIDIA RTX A4500",
+                "NVIDIA RTX 4000 Ada Generation",
+                "NVIDIA RTX 2000 Ada Generation",
+            ],
         }
         calls: list[urllib.request.Request] = []
 
@@ -1224,6 +1297,62 @@ class RunpodReleaseTest(unittest.TestCase):
             {"includeTemplate": ["true"]},
         )
         self.assertEqual(calls[0].get_header("Authorization"), "Bearer api-key")
+
+    def test_endpoint_rest_requires_gpu_identity_when_compute_type_is_omitted(self) -> None:
+        api = FakeReleaseAPI()
+        endpoint = FakeReleaseAPI.endpoint(
+            endpoint_id="endpoint1",
+            name="tars-runpod-endpoint-v1-" + "a" * 40,
+            template_id="template1",
+            created=datetime.now(timezone.utc),
+        )
+        api.endpoints.append(endpoint)
+        live_shape = api.read_endpoint("endpoint1")
+        live_shape.pop("computeType")
+        self.assertEqual(
+            tars_runpod_release.verify_endpoint_rest(
+                live_shape,
+                endpoint_id="endpoint1",
+                expected_name=endpoint["name"],
+                template_id="template1",
+            ),
+            "endpoint1",
+        )
+
+        invalid = (
+            (
+                "missing GPU selectors",
+                {
+                    key: value
+                    for key, value in live_shape.items()
+                    if key != "gpuTypeIds"
+                },
+            ),
+            ("empty GPU selectors", {**live_shape, "gpuTypeIds": []}),
+            (
+                "non-list GPU selectors",
+                {**live_shape, "gpuTypeIds": "AMPERE_16"},
+            ),
+            ("malformed GPU selectors", {**live_shape, "gpuTypeIds": [{}]}),
+            (
+                "duplicate GPU selectors",
+                {**live_shape, "gpuTypeIds": ["NVIDIA RTX A4000"] * 2},
+            ),
+            ("explicit CPU compute", {**live_shape, "computeType": "CPU"}),
+            ("CPU flavor selectors", {**live_shape, "cpuFlavorIds": ["cpu3c"]}),
+            (
+                "CPU instance selectors",
+                {**live_shape, "instanceIds": ["cpu3c-8-16"]},
+            ),
+        )
+        for label, drift in invalid:
+            with self.subTest(label=label), self.assertRaises(RunpodReleaseError):
+                tars_runpod_release.verify_endpoint_rest(
+                    drift,
+                    endpoint_id="endpoint1",
+                    expected_name=endpoint["name"],
+                    template_id="template1",
+                )
 
     def test_endpoint_rest_patch_stops_after_three_total_calls(self) -> None:
         calls = 0
@@ -1587,6 +1716,33 @@ class RunpodReleaseTest(unittest.TestCase):
         self.assertEqual(api.calls, [])
         self.assertIn(
             "endpoint-mismatch", {endpoint["id"] for endpoint in api.endpoints}
+        )
+
+    def test_prune_rejects_template_with_unproven_runtime_fields(self) -> None:
+        now = datetime(2026, 7, 21, tzinfo=timezone.utc)
+        api = FakeReleaseAPI()
+        api.seed_release("a" * 40, "current", now)
+        api.seed_release("e" * 40, "runtime-drift", now - timedelta(days=2))
+        drifted_template = next(
+            template
+            for template in api.templates
+            if template["id"] == "template-runtime-drift"
+        )
+        del drifted_template["env"]
+
+        retired = prune_releases(
+            api,
+            current_endpoint_id="endpoint-current",
+            previous_endpoint_id=None,
+            protected_release_sha="a" * 40,
+            now=now,
+        )
+
+        self.assertEqual(retired, 0)
+        self.assertEqual(api.calls, [])
+        self.assertIn(
+            "endpoint-runtime-drift",
+            {endpoint["id"] for endpoint in api.endpoints},
         )
 
     def test_prune_protects_the_observed_main_release_sha(self) -> None:

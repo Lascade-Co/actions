@@ -273,7 +273,8 @@ class RunpodClient:
                 }
                 podTemplates {
                   id name imageName isServerless containerDiskInGb volumeInGb
-                  dockerArgs containerRegistryAuthId boundEndpointId
+                  dockerArgs env { key }
+                  containerRegistryAuthId boundEndpointId
                 }
                 containerRegistryCreds { id name }
               }
@@ -375,6 +376,8 @@ class RunpodClient:
             containerDiskInGb: {CONTAINER_DISK_GB}
             volumeInGb: 0
             isServerless: true
+            dockerArgs: ""
+            env: []
           }}) {{
             id name
           }}
@@ -780,8 +783,13 @@ def verify_template(
     }
     for field, expected in expectations.items():
         _expect_equal(resource.get(field), expected, f"template {field}")
-    if resource.get("dockerArgs") not in (None, ""):
+    if "dockerArgs" not in resource or resource.get("dockerArgs") not in (
+        None,
+        "",
+    ):
         raise RunpodReleaseError("existing Runpod template dockerArgs does not match this release")
+    if "env" not in resource or resource.get("env") not in (None, []):
+        raise RunpodReleaseError("existing Runpod template env does not match this release")
     return _resource_id(resource.get("id"), "template ID")
 
 
@@ -840,10 +848,39 @@ def verify_endpoint_rest_base(
         "templateId": template_id,
         "workersMin": WORKERS_MIN,
         "workersMax": workers_max,
-        "computeType": "GPU",
     }
     for field, expected in expectations.items():
         _expect_equal(resource.get(field), expected, f"REST endpoint {field}")
+    # Runpod's endpoint-specific and list responses currently omit computeType
+    # even though the REST schema documents it. The GraphQL side of every
+    # release reconciliation separately proves gpuIds=AMPERE_16 before handing
+    # the endpoint off; the REST side must still prove a concrete GPU selector
+    # and reject any explicit CPU identity.
+    if resource.get("computeType") not in (None, "GPU"):
+        raise RunpodReleaseError(
+            "existing Runpod REST endpoint computeType does not match this release"
+        )
+    gpu_type_ids = resource.get("gpuTypeIds")
+    if (
+        not isinstance(gpu_type_ids, list)
+        or not gpu_type_ids
+        or any(
+            not isinstance(gpu_type_id, str)
+            or not 1 <= len(gpu_type_id) <= 191
+            or gpu_type_id.strip() != gpu_type_id
+            for gpu_type_id in gpu_type_ids
+        )
+        or len(set(gpu_type_ids)) != len(gpu_type_ids)
+    ):
+        raise RunpodReleaseError(
+            "existing Runpod REST endpoint gpuTypeIds does not match this release"
+        )
+    if resource.get("cpuFlavorIds") not in (None, []) or resource.get(
+        "instanceIds"
+    ) not in (None, []):
+        raise RunpodReleaseError(
+            "existing Runpod REST endpoint CPU selectors do not match this release"
+        )
     return _resource_id(resource.get("id"), "endpoint ID")
 
 
@@ -1067,7 +1104,10 @@ def _template_release_sha(resource: Mapping[str, Any]) -> str | None:
         resource.get("isServerless") is not True
         or resource.get("containerDiskInGb") != CONTAINER_DISK_GB
         or resource.get("volumeInGb") != 0
+        or "dockerArgs" not in resource
         or resource.get("dockerArgs") not in (None, "")
+        or "env" not in resource
+        or resource.get("env") not in (None, [])
     ):
         return None
     return match.group(1)
