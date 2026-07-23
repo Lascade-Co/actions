@@ -687,6 +687,8 @@ class RunnerSecretsTest(unittest.TestCase):
 
 
 class FakeReleaseAPI:
+    OMIT_TEMPLATE_ENV = object()
+
     def __init__(self) -> None:
         self.endpoints: list[dict] = []
         self.templates: list[dict] = []
@@ -724,15 +726,18 @@ class FakeReleaseAPI:
 
     def read_template(self, template_id: str) -> dict:
         template = next(item for item in self.templates if item["id"] == template_id)
-        return {
+        resource = {
             "id": template["id"],
             "name": template["name"],
-            "env": (
-                self.template_env_by_id[template_id]
-                if template_id in self.template_env_by_id
-                else dict(self.template_env)
-            ),
         }
+        environment = (
+            self.template_env_by_id[template_id]
+            if template_id in self.template_env_by_id
+            else dict(self.template_env)
+        )
+        if environment is not self.OMIT_TEMPLATE_ENV:
+            resource["env"] = environment
+        return resource
 
     def read_endpoint_health(
         self, endpoint_id: str
@@ -2307,7 +2312,7 @@ class RunpodReleaseTest(unittest.TestCase):
             if template["id"] == "template-legacy"
         )
         legacy_template["env"] = []
-        api.template_env_by_id["template-legacy"] = None
+        api.template_env_by_id["template-legacy"] = FakeReleaseAPI.OMIT_TEMPLATE_ENV
         legacy_endpoint = next(
             endpoint
             for endpoint in api.endpoints
@@ -2386,33 +2391,37 @@ class RunpodReleaseTest(unittest.TestCase):
 
     def test_prune_rejects_legacy_rest_env_drift_before_mutation(self) -> None:
         now = datetime(2026, 7, 21, tzinfo=timezone.utc)
-        api = FakeReleaseAPI()
-        api.seed_release("a" * 40, "current", now)
-        api.seed_release("b" * 40, "legacy", now - timedelta(days=2))
-        next(
-            template
-            for template in api.templates
-            if template["id"] == "template-legacy"
-        )["env"] = []
-        next(
-            endpoint
-            for endpoint in api.endpoints
-            if endpoint["id"] == "endpoint-legacy"
-        )["gpuIds"] = "AMPERE_16"
-        api.template_env_by_id["template-legacy"] = {}
+        for rest_environment in (None, {}):
+            with self.subTest(rest_environment=rest_environment):
+                api = FakeReleaseAPI()
+                api.seed_release("a" * 40, "current", now)
+                api.seed_release("b" * 40, "legacy", now - timedelta(days=2))
+                next(
+                    template
+                    for template in api.templates
+                    if template["id"] == "template-legacy"
+                )["env"] = []
+                next(
+                    endpoint
+                    for endpoint in api.endpoints
+                    if endpoint["id"] == "endpoint-legacy"
+                )["gpuIds"] = "AMPERE_16"
+                api.template_env_by_id["template-legacy"] = rest_environment
 
-        with self.assertRaisesRegex(RunpodReleaseError, "REST template env"):
-            prune_releases(
-                api,
-                current_endpoint_id="endpoint-current",
-                previous_endpoint_id=None,
-                protected_release_sha="a" * 40,
-                now=now,
-                grace=timedelta(0),
-            )
+                with self.assertRaisesRegex(
+                    RunpodReleaseError, "REST template env"
+                ):
+                    prune_releases(
+                        api,
+                        current_endpoint_id="endpoint-current",
+                        previous_endpoint_id=None,
+                        protected_release_sha="a" * 40,
+                        now=now,
+                        grace=timedelta(0),
+                    )
 
-        self.assertEqual(api.calls, [])
-        self.assertEqual(api.health_calls, [])
+                self.assertEqual(api.calls, [])
+                self.assertEqual(api.health_calls, [])
 
     def test_pre_prune_cli_empty_current_file_never_contacts_runpod(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

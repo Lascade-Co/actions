@@ -1245,19 +1245,18 @@ def verify_retirement_template_rest(
 
     _expect_equal(resource.get("id"), template_id, "REST template id")
     _expect_equal(resource.get("name"), expected_name, "REST template name")
-    expected_env: Any
     if variant == "current":
-        expected_env = TEMPLATE_ENV
+        _expect_equal(resource.get("env"), TEMPLATE_ENV, "REST template env")
     elif variant == "legacy":
-        # Runpod's REST representation of the historical GraphQL env=[] form.
-        expected_env = None
+        # Runpod omits env entirely from the REST representation of the
+        # historical GraphQL env=[] form. Keep this exception retirement-only;
+        # current release reconciliation still requires the exact env object.
+        if "env" in resource:
+            raise RunpodReleaseError(
+                "existing Runpod REST template env does not match this release"
+            )
     else:
         raise AssertionError("unknown TARS retirement template variant")
-    if "env" not in resource:
-        raise RunpodReleaseError(
-            "existing Runpod REST template env does not match this release"
-        )
-    _expect_equal(resource.get("env"), expected_env, "REST template env")
     return _resource_id(resource.get("id"), "template ID")
 
 
