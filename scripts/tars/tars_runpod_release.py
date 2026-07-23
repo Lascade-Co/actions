@@ -930,6 +930,7 @@ def verify_template(
     if "dockerArgs" not in resource or resource.get("dockerArgs") not in (
         None,
         "",
+        "{}",
     ):
         raise RunpodReleaseError("existing Runpod template dockerArgs does not match this release")
     if resource.get("env") != TEMPLATE_ENV_KEYS:

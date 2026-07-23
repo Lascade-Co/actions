@@ -1638,6 +1638,31 @@ class RunpodReleaseTest(unittest.TestCase):
                     expected_image=self.TARGET_IMAGE,
                 )
 
+    def test_stable_topology_accepts_empty_rest_command_serialization(
+        self,
+    ) -> None:
+        api = FakeReleaseAPI()
+        api.seed_stable(self.TARGET_IMAGE, version=11)
+        api.templates[0]["dockerArgs"] = "{}"
+
+        tars_runpod_release.verify_stable_topology(
+            api,
+            ids=self.stable_ids(),
+            expected_image=self.TARGET_IMAGE,
+        )
+
+        for docker_args in ('{"cmd":["unexpected"]}', "[]", "{ }"):
+            with self.subTest(docker_args=docker_args):
+                api.templates[0]["dockerArgs"] = docker_args
+                with self.assertRaisesRegex(
+                    RunpodReleaseError, "template dockerArgs"
+                ):
+                    tars_runpod_release.verify_stable_topology(
+                        api,
+                        ids=self.stable_ids(),
+                        expected_image=self.TARGET_IMAGE,
+                    )
+
     def test_stable_topology_requires_exclusive_template_and_auth(self) -> None:
         api = FakeReleaseAPI()
         api.seed_stable(self.TARGET_IMAGE, version=11)
