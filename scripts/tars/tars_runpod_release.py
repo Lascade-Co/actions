@@ -67,6 +67,9 @@ IMMUTABLE_GPU_IMAGE = re.compile(
     r"registry\.digitalocean\.com/lascade/tars:gpu-sha-([0-9a-f]{40})"
     r"@sha256:([0-9a-f]{64})\Z"
 )
+APPLICATION_GPU_DIGEST_IMAGE = re.compile(
+    r"registry\.digitalocean\.com/lascade/tars@sha256:([0-9a-f]{64})\Z"
+)
 RESOURCE_ID = re.compile(r"[A-Za-z0-9_-]{1,191}\Z")
 ENDPOINT_NAME = re.compile(r"tars-runpod-endpoint-v1-([0-9a-f]{40})\Z")
 TEMPLATE_NAME = re.compile(r"tars-runpod-template-v1-([0-9a-f]{40})\Z")
@@ -1240,6 +1243,74 @@ def _validate_release_image(release_sha: str, gpu_image: str) -> None:
         raise RunpodReleaseError("GPU image tag does not match the release SHA")
 
 
+def _application_image_digest(release_sha: str, gpu_image: str) -> str:
+    """Return the digest from one exact supported application image reference."""
+
+    if SHA.fullmatch(release_sha) is None:
+        raise RunpodReleaseError(
+            "application release SHA must be 40 lowercase hexadecimal characters"
+        )
+    image_match = IMMUTABLE_GPU_IMAGE.fullmatch(gpu_image)
+    if image_match is not None:
+        if image_match.group(1) != release_sha:
+            raise RunpodReleaseError(
+                "application GPU image tag does not match its release SHA"
+            )
+        return image_match.group(2)
+    digest_match = APPLICATION_GPU_DIGEST_IMAGE.fullmatch(gpu_image)
+    if digest_match is not None:
+        return digest_match.group(1)
+    raise RunpodReleaseError(
+        "application GPU image must be an immutable TARS DOCR digest "
+        "or exact-SHA tag and digest"
+    )
+
+
+def _provider_image_digest(release_sha: str, provider_image: str) -> str:
+    _validate_release_image(release_sha, provider_image)
+    provider_match = IMMUTABLE_GPU_IMAGE.fullmatch(provider_image)
+    if provider_match is None:  # pragma: no cover - guarded above
+        raise AssertionError("validated provider image did not match")
+    return provider_match.group(2)
+
+
+def _validate_application_provider_coupling(
+    release_sha: str,
+    application_image: str,
+    provider_image: str,
+) -> None:
+    """Prove application and provider references identify one release image."""
+
+    try:
+        application_digest = _application_image_digest(
+            release_sha, application_image
+        )
+        provider_digest = _provider_image_digest(
+            release_sha, provider_image
+        )
+    except RunpodReleaseError as error:
+        raise RunpodReleaseError(
+            f"provider image bound to the live dispatcher is invalid: {error}"
+        ) from error
+    if application_digest != provider_digest:
+        raise RunpodReleaseError(
+            "provider image bound to the live dispatcher: application and "
+            "provider rollback image digests do not match"
+        )
+
+
+def _application_image_for_provider(
+    release_sha: str, provider_image: str
+) -> str:
+    """Return the digest-only image representation emitted to the application."""
+
+    provider_digest = _provider_image_digest(release_sha, provider_image)
+    return (
+        "registry.digitalocean.com/lascade/tars@sha256:"
+        f"{provider_digest}"
+    )
+
+
 def _stable_auth_is_owned(resource: Mapping[str, Any]) -> bool:
     name = str(resource.get("name", ""))
     return (
@@ -1701,7 +1772,7 @@ def _validate_application_baseline(
         raise RunpodReleaseError(
             "application rollout baseline has invalid fields"
         )
-    _validate_release_image(baseline.release_sha, baseline.gpu_image)
+    _application_image_digest(baseline.release_sha, baseline.gpu_image)
     _resource_id(baseline.endpoint_id, "application baseline endpoint")
     if baseline.replicas != 1:
         raise RunpodReleaseError(
@@ -1821,13 +1892,11 @@ def write_rollout_receipt(path: Path, receipt: StableRolloutReceipt) -> None:
             raise RunpodReleaseError(
                 "existing rollout receipt is missing its application baseline"
             )
-        _validate_release_image(
-            receipt.prior_release_sha, receipt.prior_app_gpu_image
+        _validate_application_provider_coupling(
+            receipt.prior_release_sha,
+            receipt.prior_app_gpu_image,
+            receipt.prior_image,
         )
-        if receipt.prior_app_gpu_image != receipt.prior_image:
-            raise RunpodReleaseError(
-                "application and provider rollback images do not match"
-            )
     elif (
         receipt.prior_release_sha is not None
         or receipt.prior_app_gpu_image is not None
@@ -1947,11 +2016,10 @@ def prepare_stable_release(
             raise RunpodReleaseError(
                 "existing deployment preparation requires the prior app SHA and image"
             )
-        _validate_release_image(prior_release_sha, prior_app_gpu_image)
-        _expect_equal(
-            prior_image,
+        _validate_application_provider_coupling(
+            prior_release_sha,
             prior_app_gpu_image,
-            "provider image bound to the live dispatcher",
+            prior_image,
         )
         baseline = "existing"
     mode = "noop" if prior_image == gpu_image else "update"
@@ -2228,21 +2296,25 @@ def verify_application_generation(
         baseline.endpoint_id,
         "application baseline stable endpoint",
     )
-    inventory_endpoint, _, rest_endpoint = verify_stable_topology(
-        client,
-        ids=ids,
-        expected_image=baseline.gpu_image,
+    inventory_endpoint, template, rest_endpoint = verify_stable_topology(
+        client, ids=ids
+    )
+    provider_image = str(template.get("imageName", ""))
+    _validate_application_provider_coupling(
+        baseline.release_sha,
+        baseline.gpu_image,
+        provider_image,
     )
     _verify_endpoint_template(
         rest_endpoint,
         ids=ids,
-        image=baseline.gpu_image,
+        image=provider_image,
     )
     version = _endpoint_version(rest_endpoint)
     verify_active_worker_generation(
         inventory_endpoint,
         rest_endpoint,
-        image=baseline.gpu_image,
+        image=provider_image,
         auth_id=ids.auth_id,
         version=version,
     )
@@ -3516,6 +3588,12 @@ def main() -> None:
                     ("prior_gpu_image", receipt.prior_app_gpu_image or ""),
                     ("prior_release_sha", receipt.prior_release_sha or ""),
                     ("release_sha", receipt.release_sha),
+                    (
+                        "target_app_gpu_image",
+                        _application_image_for_provider(
+                            receipt.release_sha, receipt.target_image
+                        ),
+                    ),
                     ("target_image", receipt.target_image),
                 )
             else:
@@ -3529,6 +3607,7 @@ def main() -> None:
                     ("prior_gpu_image", ""),
                     ("prior_release_sha", ""),
                     ("release_sha", ""),
+                    ("target_app_gpu_image", ""),
                     ("target_image", ""),
                 )
             for name, value in outputs:
@@ -3543,6 +3622,12 @@ def main() -> None:
                 ("prior_gpu_image", receipt.prior_app_gpu_image or ""),
                 ("prior_release_sha", receipt.prior_release_sha or ""),
                 ("release_sha", receipt.release_sha),
+                (
+                    "target_app_gpu_image",
+                    _application_image_for_provider(
+                        receipt.release_sha, receipt.target_image
+                    ),
+                ),
                 ("target_image", receipt.target_image),
             ):
                 append_output(args.github_output, name, value)

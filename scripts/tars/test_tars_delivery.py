@@ -1055,6 +1055,21 @@ class RunpodReleaseTest(unittest.TestCase):
         + "@sha256:"
         + "c" * 64
     )
+    LEGACY_APPLICATION_IMAGE = (
+        "registry.digitalocean.com/lascade/tars@sha256:" + "a" * 64
+    )
+    LEGACY_APPLICATION_IMAGE_WITH_DIFFERENT_DIGEST = (
+        "registry.digitalocean.com/lascade/tars@sha256:" + "c" * 64
+    )
+    LEGACY_TARGET_IMAGE = (
+        "registry.digitalocean.com/lascade/tars@sha256:" + "b" * 64
+    )
+    OTHER_RELEASE_WITH_SAME_DIGEST = (
+        "registry.digitalocean.com/lascade/tars:gpu-sha-"
+        + "b" * 40
+        + "@sha256:"
+        + "a" * 64
+    )
 
     @staticmethod
     def stable_ids() -> tars_runpod_release.StableResourceIDs:
@@ -1202,7 +1217,7 @@ class RunpodReleaseTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             boundary = Path(directory) / "boundary.json"
             with self.assertRaisesRegex(
-                RunpodReleaseError, "live dispatcher"
+                RunpodReleaseError, "GPU image tag does not match"
             ):
                 tars_runpod_release.prepare_stable_release(
                     api,
@@ -1224,7 +1239,7 @@ class RunpodReleaseTest(unittest.TestCase):
         api.seed_stable(self.IMAGE, version=7)
         with tempfile.TemporaryDirectory() as directory:
             with self.assertRaisesRegex(
-                RunpodReleaseError, "live dispatcher"
+                RunpodReleaseError, "rollback image digests do not match"
             ):
                 tars_runpod_release.prepare_stable_release(
                     api,
@@ -1335,6 +1350,200 @@ class RunpodReleaseTest(unittest.TestCase):
         self.assertEqual(document["kind"], "application")
         self.assertEqual(document["replicas"], 1)
 
+    def test_application_baseline_round_trips_legacy_digest_only_image(
+        self,
+    ) -> None:
+        baseline = tars_runpod_release.ApplicationRolloutBaseline(
+            release_sha="a" * 40,
+            gpu_image=self.LEGACY_APPLICATION_IMAGE,
+            endpoint_id="stable-endpoint",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "boundary.json"
+            tars_runpod_release.write_application_baseline(path, baseline)
+
+            self.assertEqual(
+                tars_runpod_release.read_application_baseline(path),
+                baseline,
+            )
+            self.assertEqual(
+                json.loads(path.read_text(encoding="utf-8"))["gpu_image"],
+                self.LEGACY_APPLICATION_IMAGE,
+            )
+
+    def test_application_baseline_rejects_wrong_exact_sha_tag(self) -> None:
+        baseline = tars_runpod_release.ApplicationRolloutBaseline(
+            release_sha="a" * 40,
+            gpu_image=self.TARGET_IMAGE,
+            endpoint_id="stable-endpoint",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "boundary.json"
+            with self.assertRaisesRegex(
+                RunpodReleaseError,
+                "application GPU image tag does not match",
+            ):
+                tars_runpod_release.write_application_baseline(path, baseline)
+            self.assertFalse(path.exists())
+
+    def test_application_baseline_rejects_other_digest_only_shapes(
+        self,
+    ) -> None:
+        invalid_images = (
+            "registry.example.com/lascade/tars@sha256:" + "a" * 64,
+            "registry.digitalocean.com/lascade/tars:latest",
+            "registry.digitalocean.com/lascade/tars@sha256:" + "a" * 63,
+            "registry.digitalocean.com/lascade/tars@sha256:" + "A" * 64,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for index, image in enumerate(invalid_images):
+                with self.subTest(image=image):
+                    path = root / f"boundary-{index}.json"
+                    baseline = (
+                        tars_runpod_release.ApplicationRolloutBaseline(
+                            release_sha="a" * 40,
+                            gpu_image=image,
+                            endpoint_id="stable-endpoint",
+                        )
+                    )
+                    with self.assertRaisesRegex(
+                        RunpodReleaseError,
+                        "immutable TARS DOCR digest",
+                    ):
+                        tars_runpod_release.write_application_baseline(
+                            path, baseline
+                        )
+                    self.assertFalse(path.exists())
+
+    def test_prepare_accepts_legacy_app_reference_for_strict_provider(
+        self,
+    ) -> None:
+        api = FakeReleaseAPI()
+        api.seed_stable(self.IMAGE, version=7)
+        with tempfile.TemporaryDirectory() as directory:
+            boundary = Path(directory) / "boundary.json"
+            receipt = tars_runpod_release.prepare_stable_release(
+                api,
+                ids=self.stable_ids(),
+                release_sha="b" * 40,
+                gpu_image=self.TARGET_IMAGE,
+                prior_release_sha="a" * 40,
+                prior_app_gpu_image=self.LEGACY_APPLICATION_IMAGE,
+                greenfield=False,
+                receipt_path=boundary,
+            )
+            stored = tars_runpod_release.read_rollout_receipt(boundary)
+
+        self.assertEqual(
+            receipt.prior_app_gpu_image,
+            self.LEGACY_APPLICATION_IMAGE,
+        )
+        self.assertEqual(receipt.prior_image, self.IMAGE)
+        self.assertEqual(stored, receipt)
+        self.assertEqual(api.calls, [])
+
+    def test_rollout_receipt_rejects_legacy_app_provider_mismatch(
+        self,
+    ) -> None:
+        cases = (
+            (
+                "digest",
+                "a" * 40,
+                self.LEGACY_APPLICATION_IMAGE_WITH_DIFFERENT_DIGEST,
+                self.IMAGE,
+                "rollback image digests do not match",
+            ),
+            (
+                "release",
+                "b" * 40,
+                self.LEGACY_APPLICATION_IMAGE,
+                self.IMAGE,
+                "GPU image tag does not match",
+            ),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for (
+                label,
+                prior_release_sha,
+                prior_app_image,
+                provider_image,
+                message,
+            ) in cases:
+                with self.subTest(label=label):
+                    path = root / f"{label}.json"
+                    receipt = tars_runpod_release.StableRolloutReceipt(
+                        endpoint_id="stable-endpoint",
+                        template_id="stable-template",
+                        auth_id="stable-auth",
+                        baseline="existing",
+                        prior_release_sha=prior_release_sha,
+                        prior_app_gpu_image=prior_app_image,
+                        release_sha="b" * 40,
+                        target_image=self.TARGET_IMAGE,
+                        prior_image=provider_image,
+                        prior_version=7,
+                        target_version=8,
+                        mode="update",
+                    )
+                    with self.assertRaisesRegex(
+                        RunpodReleaseError, message
+                    ):
+                        tars_runpod_release.write_rollout_receipt(
+                            path, receipt
+                        )
+                    self.assertFalse(path.exists())
+
+    def test_provider_and_target_images_remain_strictly_tagged(self) -> None:
+        cases = (
+            ("target", self.IMAGE, self.LEGACY_TARGET_IMAGE),
+            ("provider", self.LEGACY_APPLICATION_IMAGE, self.TARGET_IMAGE),
+        )
+        for label, provider_image, target_image in cases:
+            with self.subTest(label=label):
+                api = FakeReleaseAPI()
+                api.seed_stable(provider_image, version=7)
+                with tempfile.TemporaryDirectory() as directory:
+                    boundary = Path(directory) / "boundary.json"
+                    with self.assertRaisesRegex(
+                        RunpodReleaseError,
+                        (
+                            "exact-SHA tag and digest"
+                            if label == "target"
+                            else "stable template image is not immutable"
+                        ),
+                    ):
+                        tars_runpod_release.prepare_stable_release(
+                            api,
+                            ids=self.stable_ids(),
+                            release_sha="b" * 40,
+                            gpu_image=target_image,
+                            prior_release_sha="a" * 40,
+                            prior_app_gpu_image=(
+                                self.LEGACY_APPLICATION_IMAGE
+                            ),
+                            greenfield=False,
+                            receipt_path=boundary,
+                        )
+                    self.assertFalse(boundary.exists())
+
+    def test_provider_image_projects_to_exact_application_digest_reference(
+        self,
+    ) -> None:
+        self.assertEqual(
+            tars_runpod_release._application_image_for_provider(
+                "a" * 40, self.IMAGE
+            ),
+            self.LEGACY_APPLICATION_IMAGE,
+        )
+        with self.assertRaisesRegex(
+            RunpodReleaseError, "exact-SHA tag and digest"
+        ):
+            tars_runpod_release._application_image_for_provider(
+                "a" * 40, self.LEGACY_APPLICATION_IMAGE
+            )
+
     def test_boundary_readers_reject_duplicate_json_keys_recursively(self) -> None:
         baseline = tars_runpod_release.ApplicationRolloutBaseline(
             release_sha="a" * 40,
@@ -1440,6 +1649,60 @@ class RunpodReleaseTest(unittest.TestCase):
 
         self.assertEqual(version, 7)
         self.assertEqual(api.calls, [])
+
+    def test_verify_application_accepts_legacy_app_reference_for_provider(
+        self,
+    ) -> None:
+        api = FakeReleaseAPI()
+        api.seed_stable(self.IMAGE, version=7)
+        baseline = tars_runpod_release.ApplicationRolloutBaseline(
+            release_sha="a" * 40,
+            gpu_image=self.LEGACY_APPLICATION_IMAGE,
+            endpoint_id="stable-endpoint",
+        )
+
+        version = tars_runpod_release.verify_application_generation(
+            api,
+            baseline=baseline,
+            ids=self.stable_ids(),
+        )
+
+        self.assertEqual(version, 7)
+        self.assertEqual(api.calls, [])
+
+    def test_verify_application_rejects_legacy_app_provider_drift(
+        self,
+    ) -> None:
+        cases = (
+            (
+                "digest",
+                self.IMAGE_WITH_DIFFERENT_DIGEST,
+                "rollback image digests do not match",
+            ),
+            (
+                "release",
+                self.OTHER_RELEASE_WITH_SAME_DIGEST,
+                "GPU image tag does not match",
+            ),
+        )
+        baseline = tars_runpod_release.ApplicationRolloutBaseline(
+            release_sha="a" * 40,
+            gpu_image=self.LEGACY_APPLICATION_IMAGE,
+            endpoint_id="stable-endpoint",
+        )
+        for label, provider_image, message in cases:
+            with self.subTest(label=label):
+                api = FakeReleaseAPI()
+                api.seed_stable(provider_image, version=7)
+                with self.assertRaisesRegex(
+                    RunpodReleaseError, message
+                ):
+                    tars_runpod_release.verify_application_generation(
+                        api,
+                        baseline=baseline,
+                        ids=self.stable_ids(),
+                    )
+                self.assertEqual(api.calls, [])
 
     def test_verify_application_rejects_endpoint_or_active_worker_drift(
         self,
@@ -3449,6 +3712,19 @@ class WorkflowContractTest(unittest.TestCase):
             workflow,
         )
         self.assertIn("GPU_DIGEST: ${{ steps.images.outputs.gpu_digest }}", workflow)
+        provider_image = (
+            "${{ steps.artifact.outputs.registry }}:gpu-sha-"
+            "${{ steps.payload.outputs.sha }}@"
+            "${{ steps.artifact.outputs.gpu_digest }}"
+        )
+        application_image = (
+            "${{ steps.artifact.outputs.registry }}@"
+            "${{ steps.artifact.outputs.gpu_digest }}"
+        )
+        self.assertEqual(workflow.count(provider_image), 1)
+        self.assertEqual(workflow.count(application_image), 2)
+        self.assertEqual(workflow.count("APPLICATION_GPU_IMAGE:"), 2)
+        self.assertIn("target_app_gpu_image", workflow)
         self.assertIn("source/Dockerfile.dispatcher", workflow)
         self.assertIn("source/Dockerfile.gpu", workflow)
         self.assertNotIn("tars_worker_render_gate.py", workflow)
@@ -3598,6 +3874,7 @@ class WorkflowContractTest(unittest.TestCase):
         )
         interrupted_verification = deploy[interrupted_verify:baseline]
         self.assertIn("verify-application", interrupted_verification)
+        self.assertIn("TARGET_APP_GPU_IMAGE", interrupted_verification)
         self.assertIn("TARS_GPU_IMAGE_DIGEST", interrupted_verification)
         self.assertIn("TARS_RUNPOD_ENDPOINT_ID", interrupted_verification)
         self.assertIn(
@@ -3675,6 +3952,11 @@ class WorkflowContractTest(unittest.TestCase):
             "tars_runpod_release.py verify-target",
             accepted_provider_command,
         )
+        accepted_application_command = deploy[commit_generation:rollback]
+        self.assertIn(
+            "APPLICATION_GPU_IMAGE", accepted_application_command
+        )
+        self.assertNotIn(":gpu-sha-", accepted_application_command)
         self.assertLess(application_step, rollback)
         self.assertLess(rollback, cleanup)
         rollback_command = deploy[rollback:cleanup]
@@ -3684,6 +3966,8 @@ class WorkflowContractTest(unittest.TestCase):
         self.assertIn("/srv/tars/deployment/runpod-rollout-boundary.json", rollback_command)
         self.assertIn("tars_runpod_release.py describe", rollback_command)
         self.assertIn("tars_runpod_release.py describe-boundary", rollback_command)
+        self.assertIn("target_app_gpu_image", rollback_command)
+        self.assertIn("APPLICATION_GPU_IMAGE", rollback_command)
         self.assertIn('if [ "$kind" = application ]', rollback_command)
         self.assertIn("verify-application", rollback_command)
         self.assertIn("tars_runpod_release.py verify-target", rollback_command)

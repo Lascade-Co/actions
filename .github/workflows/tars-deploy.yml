@@ -879,7 +879,7 @@ jobs:
           PRIOR_SHA: ${{ steps.interrupted.outputs.prior_release_sha }}
           PRIOR_GPU_IMAGE: ${{ steps.interrupted.outputs.prior_gpu_image }}
           TARGET_SHA: ${{ steps.interrupted.outputs.release_sha }}
-          TARGET_GPU_IMAGE: ${{ steps.interrupted.outputs.target_image }}
+          TARGET_APP_GPU_IMAGE: ${{ steps.interrupted.outputs.target_app_gpu_image }}
           ENDPOINT_ID: ${{ steps.interrupted.outputs.endpoint_id }}
           SSH_HOST: ${{ steps.connection.outputs.host }}
           SSH_USER: ${{ steps.connection.outputs.user }}
@@ -898,7 +898,7 @@ jobs:
           classification="$(
             ssh "${ssh_options[@]}" "$target" /bin/sh -s -- \
               "$BASELINE" "$PRIOR_SHA" "$PRIOR_GPU_IMAGE" \
-              "$TARGET_SHA" "$TARGET_GPU_IMAGE" "$ENDPOINT_ID" <<'REMOTE'
+              "$TARGET_SHA" "$TARGET_APP_GPU_IMAGE" "$ENDPOINT_ID" <<'REMOTE'
           set -eu
           baseline=$1
           prior_sha=$2
@@ -1061,7 +1061,7 @@ jobs:
           PRIOR_SHA: ${{ steps.interrupted.outputs.prior_release_sha }}
           PRIOR_GPU_IMAGE: ${{ steps.interrupted.outputs.prior_gpu_image }}
           TARGET_SHA: ${{ steps.interrupted.outputs.release_sha }}
-          TARGET_GPU_IMAGE: ${{ steps.interrupted.outputs.target_image }}
+          TARGET_APP_GPU_IMAGE: ${{ steps.interrupted.outputs.target_app_gpu_image }}
           ENDPOINT_ID: ${{ steps.interrupted.outputs.endpoint_id }}
           SSH_HOST: ${{ steps.connection.outputs.host }}
           SSH_USER: ${{ steps.connection.outputs.user }}
@@ -1073,7 +1073,7 @@ jobs:
               ;;
             greenfield-baseline|repair-greenfield)
               expected_sha=$TARGET_SHA
-              expected_gpu=$TARGET_GPU_IMAGE
+              expected_gpu=$TARGET_APP_GPU_IMAGE
               ;;
             *)
               exit 64
@@ -1106,7 +1106,7 @@ jobs:
           target="$SSH_USER@$SSH_HOST"
           ssh "${ssh_options[@]}" "$target" /bin/sh -s -- \
             "$CLASSIFICATION" "$PRIOR_SHA" "$PRIOR_GPU_IMAGE" \
-            "$TARGET_SHA" "$TARGET_GPU_IMAGE" "$ENDPOINT_ID" <<'REMOTE'
+            "$TARGET_SHA" "$TARGET_APP_GPU_IMAGE" "$ENDPOINT_ID" <<'REMOTE'
           set -eu
           classification=$1
           prior_sha=$2
@@ -1562,7 +1562,7 @@ jobs:
           SSH_HOST: ${{ steps.connection.outputs.host }}
           SSH_USER: ${{ steps.connection.outputs.user }}
           RELEASE_SHA: ${{ steps.payload.outputs.sha }}
-          GPU_IMAGE: ${{ steps.artifact.outputs.registry }}:gpu-sha-${{ steps.payload.outputs.sha }}@${{ steps.artifact.outputs.gpu_digest }}
+          APPLICATION_GPU_IMAGE: ${{ steps.artifact.outputs.registry }}@${{ steps.artifact.outputs.gpu_digest }}
           ENDPOINT_ID: ${{ steps.runpod-stage.outputs.endpoint_id }}
         run: |
           ssh_options=(
@@ -1581,7 +1581,7 @@ jobs:
               awk '{print $1}'
           )"
           ssh "${ssh_options[@]}" "$target" /bin/sh -s -- \
-            "$RELEASE_SHA" "$GPU_IMAGE" "$ENDPOINT_ID" \
+            "$RELEASE_SHA" "$APPLICATION_GPU_IMAGE" "$ENDPOINT_ID" \
             "$boundary_sha" <<'REMOTE'
           set -eu
           release_sha=$1
@@ -1620,7 +1620,7 @@ jobs:
         env:
           HAD_INTERRUPTED_BOUNDARY: ${{ steps.initial-app.outputs.interrupted }}
           RELEASE_SHA: ${{ steps.payload.outputs.sha }}
-          GPU_IMAGE: ${{ steps.artifact.outputs.registry }}:gpu-sha-${{ steps.payload.outputs.sha }}@${{ steps.artifact.outputs.gpu_digest }}
+          APPLICATION_GPU_IMAGE: ${{ steps.artifact.outputs.registry }}@${{ steps.artifact.outputs.gpu_digest }}
           SSH_HOST: ${{ steps.connection.outputs.host }}
           SSH_USER: ${{ steps.connection.outputs.user }}
         run: |
@@ -1708,7 +1708,7 @@ jobs:
             fi
             ssh "${ssh_options[@]}" "$target" /bin/sh -s -- \
               "$mode" "$prior_sha" "$prior_gpu" "$endpoint_id" \
-              "$RELEASE_SHA" "$GPU_IMAGE" <<'REMOTE'
+              "$RELEASE_SHA" "$APPLICATION_GPU_IMAGE" <<'REMOTE'
             set -eu
             mode=$1
             prior_sha=$2
@@ -1886,7 +1886,7 @@ jobs:
           prior_gpu="$(get_value prior_gpu_image)"
           prior_sha="$(get_value prior_release_sha)"
           target_sha="$(get_value release_sha)"
-          target_gpu="$(get_value target_image)"
+          target_gpu="$(get_value target_app_gpu_image)"
           case "$baseline" in existing|greenfield) ;; *) exit 64 ;; esac
 
           ssh "${ssh_options[@]}" "$target" /bin/sh -s <<'REMOTE'
