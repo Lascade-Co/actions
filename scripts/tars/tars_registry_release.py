@@ -8,6 +8,7 @@ import json
 import os
 import re
 import subprocess
+import time
 from pathlib import Path
 from typing import Callable
 
@@ -45,6 +46,7 @@ def inspect_digest(
     docker_config: Path,
     *,
     runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+    sleeper: Callable[[float], None] = time.sleep,
 ) -> str | None:
     """Return a tag's manifest digest, or ``None`` only for a missing tag."""
 
@@ -77,6 +79,7 @@ def inspect_digest(
                     f"registry inspection failed for {reference} after "
                     f"{MAX_TRANSIENT_CALLS} attempts"
                 ) from None
+            sleeper(attempt)
             continue
         if completed.returncode == 0:
             return _manifest_digest(completed.stdout)
@@ -88,6 +91,7 @@ def inspect_digest(
                 f"registry inspection failed for {reference} after "
                 f"{MAX_TRANSIENT_CALLS} attempts"
             )
+        sleeper(attempt)
     raise AssertionError("bounded registry inspection loop did not return")
 
 
@@ -116,9 +120,12 @@ def _manifest_digest(raw: str) -> str:
         raise RegistryReleaseError("registry returned an invalid image manifest") from error
     digest = manifest.get("digest") if isinstance(manifest, dict) else None
     size = manifest.get("size") if isinstance(manifest, dict) else None
+    schema_version = (
+        manifest.get("schemaVersion") if isinstance(manifest, dict) else None
+    )
     if (
         not isinstance(manifest, dict)
-        or manifest.get("schemaVersion") != 2
+        or schema_version not in (None, 2)
         or manifest.get("mediaType") not in MEDIA_TYPES
         or not isinstance(digest, str)
         or DIGEST.fullmatch(digest) is None

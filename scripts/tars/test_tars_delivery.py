@@ -207,7 +207,6 @@ class RegistryReleaseTest(unittest.TestCase):
     def manifest(digest: str) -> str:
         return json.dumps(
             {
-                "schemaVersion": 2,
                 "mediaType": "application/vnd.oci.image.manifest.v1+json",
                 "digest": digest,
                 "size": 123,
@@ -259,13 +258,19 @@ class RegistryReleaseTest(unittest.TestCase):
                 args=[], returncode=1, stdout="", stderr="temporary registry failure"
             )
         )
+        sleeper = mock.Mock()
         with self.assertRaisesRegex(RegistryReleaseError, "inspection failed"):
             inspect_digest(
                 self.REGISTRY + ":api-sha-" + self.RELEASE_SHA,
                 Path("/private/docker-config"),
                 runner=transient,
+                sleeper=sleeper,
             )
         self.assertEqual(transient.call_count, 3)
+        self.assertEqual(
+            [call.args[0] for call in sleeper.call_args_list],
+            [1, 2],
+        )
 
         for unsafe_failure in (
             "docker-credential-helper: executable file not found",
@@ -285,13 +290,17 @@ class RegistryReleaseTest(unittest.TestCase):
                         self.REGISTRY + ":api-sha-" + self.RELEASE_SHA,
                         Path("/private/docker-config"),
                         runner=failed_auth_or_tool,
+                        sleeper=lambda _delay: None,
                     )
                 self.assertEqual(failed_auth_or_tool.call_count, 3)
 
     def test_inspect_rejects_malformed_success_without_retrying(self) -> None:
         runner = mock.Mock(
             return_value=subprocess.CompletedProcess(
-                args=[], returncode=0, stdout='{"schemaVersion":2}', stderr=""
+                args=[],
+                returncode=0,
+                stdout='{"mediaType":"application/vnd.oci.image.manifest.v1+json"}',
+                stderr="",
             )
         )
         with self.assertRaisesRegex(RegistryReleaseError, "manifest"):
