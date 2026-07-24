@@ -786,6 +786,7 @@ class FakeReleaseAPI:
                 "NVIDIA L4",
                 "NVIDIA RTX A5000",
                 "NVIDIA GeForce RTX 3090",
+                "NVIDIA GeForce RTX 4090",
             ],
             "version": endpoint.get("version", 0),
             "workers": [dict(worker) for worker in endpoint.get("workers", [])],
@@ -912,6 +913,17 @@ class FakeReleaseAPI:
         endpoint["name"] = "tars-runpod-endpoint-v2"
         return self.read_endpoint(endpoint_id)
 
+    def add_ada24_fallback(
+        self, endpoint_id: str, template_id: str
+    ) -> dict:
+        self.calls.append(f"add_ada24_fallback:{endpoint_id}")
+        endpoint = next(item for item in self.endpoints if item["id"] == endpoint_id)
+        if endpoint["templateId"] != template_id:
+            raise AssertionError("fake endpoint/template mismatch")
+        endpoint["gpuIds"] = GPU_POOL_SELECTOR
+        endpoint["version"] = endpoint.get("version", 0) + 1
+        return self.read_endpoint(endpoint_id)
+
     @staticmethod
     def endpoint(
         *, endpoint_id: str, name: str, template_id: str, created: datetime
@@ -919,9 +931,12 @@ class FakeReleaseAPI:
         return {
             "id": endpoint_id,
             "name": name,
+            "type": "QB",
             "gpuIds": GPU_POOL_SELECTOR,
             "idleTimeout": 5,
             "locations": "",
+            "networkVolumeId": None,
+            "flashBootType": "OFF",
             "scalerType": "REQUEST_COUNT",
             "scalerValue": 1,
             "templateId": template_id,
@@ -2612,12 +2627,335 @@ class RunpodReleaseTest(unittest.TestCase):
         )
         self.assertRegex(api.auths[0]["name"], r"^tars-runpod-auth-v2-[0-9a-f]{12}$")
 
+    def test_explicit_ada24_transition_updates_exact_stable_endpoint_once(
+        self,
+    ) -> None:
+        class AppliedWithLostResponseAPI(FakeReleaseAPI):
+            def add_ada24_fallback(
+                self, endpoint_id: str, template_id: str
+            ) -> dict:
+                super().add_ada24_fallback(endpoint_id, template_id)
+                return {}
+
+        api = AppliedWithLostResponseAPI()
+        api.seed_stable(self.IMAGE, version=7)
+        api.endpoints[0]["gpuIds"] = (
+            tars_runpod_release.PRE_ADA24_GPU_POOL_SELECTOR
+        )
+
+        ids = tars_runpod_release.add_ada24_fallback_to_stable_endpoint(
+            api,
+            ids=self.stable_ids(),
+            sleeper=lambda _seconds: None,
+        )
+
+        self.assertEqual(ids, self.stable_ids())
+        self.assertEqual(api.endpoints[0]["gpuIds"], GPU_POOL_SELECTOR)
+        self.assertEqual(api.templates[0]["imageName"], self.IMAGE)
+        self.assertEqual(
+            api.calls, ["add_ada24_fallback:stable-endpoint"]
+        )
+        self.assertEqual(
+            api.health_calls,
+            ["stable-endpoint", "stable-endpoint"],
+        )
+
+    def test_explicit_ada24_transition_is_idempotent_without_mutation(
+        self,
+    ) -> None:
+        api = FakeReleaseAPI()
+        api.seed_stable(self.IMAGE, version=8)
+
+        ids = tars_runpod_release.add_ada24_fallback_to_stable_endpoint(
+            api,
+            ids=self.stable_ids(),
+            sleeper=lambda _seconds: None,
+        )
+
+        self.assertEqual(ids, self.stable_ids())
+        self.assertEqual(api.calls, [])
+        self.assertEqual(api.health_calls, ["stable-endpoint"])
+
+    def test_explicit_ada24_transition_refuses_provider_work_before_mutation(
+        self,
+    ) -> None:
+        cases = (
+            (
+                "queued",
+                tars_runpod_release.EndpointHealth(1, 0),
+                False,
+            ),
+            (
+                "in-progress",
+                tars_runpod_release.EndpointHealth(0, 1),
+                False,
+            ),
+            (
+                "active-worker",
+                tars_runpod_release.EndpointHealth(0, 0),
+                True,
+            ),
+        )
+        for name, health, active_worker in cases:
+            with self.subTest(name=name):
+                api = FakeReleaseAPI()
+                api.seed_stable(self.IMAGE, version=7)
+                api.endpoints[0]["gpuIds"] = (
+                    tars_runpod_release.PRE_ADA24_GPU_POOL_SELECTOR
+                )
+                api.health_by_endpoint["stable-endpoint"] = [health]
+                if active_worker:
+                    api.endpoints[0]["pods"] = [
+                        {"id": "worker", "desiredStatus": "RUNNING"}
+                    ]
+                    api.endpoints[0]["workers"] = [
+                        {
+                            "id": "worker",
+                            "image": self.IMAGE,
+                            "containerRegistryAuthId": "stable-auth",
+                            "slsVersion": 7,
+                        }
+                    ]
+
+                with self.assertRaisesRegex(
+                    RunpodReleaseError,
+                    "requires zero queued, in-progress, and active worker",
+                ):
+                    (
+                        tars_runpod_release
+                        .add_ada24_fallback_to_stable_endpoint(
+                            api,
+                            ids=self.stable_ids(),
+                            sleeper=lambda _seconds: None,
+                        )
+                    )
+                self.assertEqual(api.calls, [])
+
+    def test_explicit_ada24_transition_refuses_unreviewed_selector(
+        self,
+    ) -> None:
+        api = FakeReleaseAPI()
+        api.seed_stable(self.IMAGE, version=7)
+        api.endpoints[0]["gpuIds"] = "AMPERE_24,ADA_24"
+
+        with self.assertRaisesRegex(RunpodReleaseError, "endpoint gpuIds"):
+            tars_runpod_release.add_ada24_fallback_to_stable_endpoint(
+                api,
+                ids=self.stable_ids(),
+            )
+
+        self.assertEqual(api.calls, [])
+        self.assertEqual(api.health_calls, [])
+
+    def test_explicit_ada24_transition_never_reissues_unconfirmed_mutation(
+        self,
+    ) -> None:
+        class UnconfirmedTransitionAPI(FakeReleaseAPI):
+            def add_ada24_fallback(
+                self, endpoint_id: str, template_id: str
+            ) -> dict:
+                self.calls.append(f"add_ada24_fallback:{endpoint_id}")
+                return {}
+
+        api = UnconfirmedTransitionAPI()
+        api.seed_stable(self.IMAGE, version=7)
+        api.endpoints[0]["gpuIds"] = (
+            tars_runpod_release.PRE_ADA24_GPU_POOL_SELECTOR
+        )
+        ticks = iter((0.0, 1.0))
+
+        with self.assertRaisesRegex(
+            RunpodReleaseError, "did not converge"
+        ):
+            tars_runpod_release.add_ada24_fallback_to_stable_endpoint(
+                api,
+                ids=self.stable_ids(),
+                timeout_seconds=0.5,
+                poll_seconds=0.1,
+                sleeper=lambda _seconds: None,
+                clock=lambda: next(ticks),
+            )
+
+        self.assertEqual(
+            api.calls, ["add_ada24_fallback:stable-endpoint"]
+        )
+
+    def test_explicit_ada24_transition_uses_exact_state_not_undocumented_version(
+        self,
+    ) -> None:
+        class NoVersionTransitionAPI(FakeReleaseAPI):
+            def add_ada24_fallback(
+                self, endpoint_id: str, template_id: str
+            ) -> dict:
+                self.calls.append(f"add_ada24_fallback:{endpoint_id}")
+                endpoint = next(
+                    item
+                    for item in self.endpoints
+                    if item["id"] == endpoint_id
+                )
+                if endpoint["templateId"] != template_id:
+                    raise AssertionError("fake endpoint/template mismatch")
+                endpoint["gpuIds"] = GPU_POOL_SELECTOR
+                return self.read_endpoint(endpoint_id)
+
+        api = NoVersionTransitionAPI()
+        api.seed_stable(self.IMAGE, version=7)
+        api.endpoints[0]["gpuIds"] = (
+            tars_runpod_release.PRE_ADA24_GPU_POOL_SELECTOR
+        )
+
+        ids = tars_runpod_release.add_ada24_fallback_to_stable_endpoint(
+            api,
+            ids=self.stable_ids(),
+            sleeper=lambda _seconds: None,
+        )
+
+        self.assertEqual(ids, self.stable_ids())
+        self.assertEqual(api.endpoints[0]["version"], 7)
+        self.assertEqual(
+            api.calls, ["add_ada24_fallback:stable-endpoint"]
+        )
+
+    def test_explicit_ada24_transition_refuses_image_drift_after_mutation(
+        self,
+    ) -> None:
+        class ImageDriftTransitionAPI(FakeReleaseAPI):
+            def add_ada24_fallback(
+                self, endpoint_id: str, template_id: str
+            ) -> dict:
+                result = super().add_ada24_fallback(
+                    endpoint_id, template_id
+                )
+                self.templates[0]["imageName"] = (
+                    RunpodReleaseTest.TARGET_IMAGE
+                )
+                return result
+
+        api = ImageDriftTransitionAPI()
+        api.seed_stable(self.IMAGE, version=7)
+        api.endpoints[0]["gpuIds"] = (
+            tars_runpod_release.PRE_ADA24_GPU_POOL_SELECTOR
+        )
+
+        with self.assertRaisesRegex(
+            RunpodReleaseError, "stable template image"
+        ):
+            tars_runpod_release.add_ada24_fallback_to_stable_endpoint(
+                api,
+                ids=self.stable_ids(),
+                sleeper=lambda _seconds: None,
+            )
+
+        self.assertEqual(
+            api.calls, ["add_ada24_fallback:stable-endpoint"]
+        )
+
+    def test_explicit_ada24_cli_requires_confirmation_and_all_stable_ids(
+        self,
+    ) -> None:
+        api = FakeReleaseAPI()
+        api.seed_stable(self.IMAGE, version=7)
+        api.endpoints[0]["gpuIds"] = (
+            tars_runpod_release.PRE_ADA24_GPU_POOL_SELECTOR
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            paths: dict[str, Path] = {}
+            for name, value in {
+                "api": "runpod-key",
+                "endpoint": "stable-endpoint",
+                "template": "stable-template",
+                "auth": "stable-auth",
+            }.items():
+                path = root / name
+                path.write_text(value, encoding="utf-8")
+                path.chmod(0o600)
+                paths[name] = path
+            arguments = [
+                "tars_runpod_release.py",
+                "add-ada24-fallback",
+                "--api-key-file",
+                str(paths["api"]),
+                "--endpoint-id-file",
+                str(paths["endpoint"]),
+                "--template-id-file",
+                str(paths["template"]),
+                "--auth-id-file",
+                str(paths["auth"]),
+            ]
+            with (
+                mock.patch("sys.argv", arguments),
+                mock.patch("sys.stderr", io.StringIO()),
+                mock.patch.object(
+                    tars_runpod_release,
+                    "RunpodClient",
+                    return_value=api,
+                ),
+                self.assertRaises(SystemExit) as exit_error,
+            ):
+                tars_runpod_release.main()
+            self.assertEqual(exit_error.exception.code, 1)
+            self.assertEqual(api.calls, [])
+
+            with (
+                mock.patch(
+                    "sys.argv",
+                    [*arguments, "--confirm-add-ada24-fallback"],
+                ),
+                mock.patch("sys.stdout", io.StringIO()),
+                mock.patch.object(
+                    tars_runpod_release,
+                    "RunpodClient",
+                    return_value=api,
+                ),
+            ):
+                tars_runpod_release.main()
+
+        self.assertEqual(
+            api.calls, ["add_ada24_fallback:stable-endpoint"]
+        )
+
+    def test_ordinary_deploy_never_invokes_ada24_transition(self) -> None:
+        workflow = (
+            Path(__file__).resolve().parents[2]
+            / ".github"
+            / "workflows"
+            / "tars-deploy.yml"
+        )
+        self.assertNotIn(
+            "add-ada24-fallback",
+            workflow.read_text(encoding="utf-8"),
+        )
+
+    def test_ada24_runbook_retains_lock_and_drain_on_uncertainty(self) -> None:
+        runbook = (
+            Path(__file__).resolve().parent / "RUNPOD_STABLE.md"
+        ).read_text(encoding="utf-8")
+        for required in (
+            "no queued or running `Central TARS Production Delivery` workflow",
+            "atomically create `tars_deploy_lock`",
+            "ensure the dispatcher is at zero",
+            "retain the lock and ensure",
+            "Rerun the same idempotent",
+            "wait for exact 1/1 convergence",
+            "verify API readiness",
+        ):
+            with self.subTest(required=required):
+                self.assertIn(required, runbook)
+        self.assertNotIn(
+            "Use an exit trap like the migration procedure below",
+            runbook,
+        )
+
     def test_explicit_migration_adopts_existing_ids_without_creation(self) -> None:
         api = FakeReleaseAPI()
         api.seed_release(
             "a" * 40,
             "current",
             datetime.now(timezone.utc) - timedelta(days=1),
+        )
+        api.endpoints[0]["gpuIds"] = (
+            tars_runpod_release.PRE_ADA24_GPU_POOL_SELECTOR
         )
         ids = tars_runpod_release.StableResourceIDs(
             "endpoint-current", "template-current", "auth-current"
@@ -3023,6 +3361,131 @@ class RunpodReleaseTest(unittest.TestCase):
             calls[0].get_header("Authorization"), "Bearer api-key"
         )
 
+    def test_ada24_transition_uses_one_full_graphql_save_for_existing_id(
+        self,
+    ) -> None:
+        client = RunpodClient("api-key")
+        with mock.patch.object(
+            client,
+            "_graphql",
+            return_value={
+                "saveEndpoint": {
+                    "id": "stable-endpoint",
+                    "name": "tars-runpod-endpoint-v2",
+                }
+            },
+        ) as graphql:
+            updated = client.add_ada24_fallback(
+                "stable-endpoint", "stable-template"
+            )
+
+        self.assertEqual(updated["id"], "stable-endpoint")
+        graphql.assert_called_once()
+        self.assertEqual(
+            graphql.call_args.args[0],
+            "add stable ADA 24 GB fallback",
+        )
+        self.assertEqual(graphql.call_args.kwargs["max_calls"], 1)
+        query = graphql.call_args.args[1]
+        for field in (
+            'id: "stable-endpoint"',
+            'name: "tars-runpod-endpoint-v2"',
+            'templateId: "stable-template"',
+            'type: "QB"',
+            f'gpuIds: "{GPU_POOL_SELECTOR}"',
+            "idleTimeout: 5",
+            'locations: ""',
+            "networkVolumeId: null",
+            "flashBootType: OFF",
+            'scalerType: "REQUEST_COUNT"',
+            "scalerValue: 1",
+            "workersMin: 0",
+            "workersMax: 2",
+        ):
+            with self.subTest(field=field):
+                self.assertIn(field, query)
+        for rest_only_field in (
+            "executionTimeoutMs",
+            "gpuCount",
+            "computeType",
+        ):
+            self.assertNotIn(rest_only_field, query)
+
+    def test_ada24_transition_lost_response_is_never_blindly_retried(
+        self,
+    ) -> None:
+        outcomes = (
+            RunpodReleaseError("response lost"),
+            {},
+        )
+        for outcome in outcomes:
+            with self.subTest(outcome=outcome):
+                client = RunpodClient("api-key")
+                with mock.patch.object(
+                    client,
+                    "_graphql",
+                    side_effect=(
+                        outcome
+                        if isinstance(outcome, Exception)
+                        else None
+                    ),
+                    return_value=(
+                        outcome
+                        if not isinstance(outcome, Exception)
+                        else None
+                    ),
+                ) as graphql:
+                    self.assertEqual(
+                        client.add_ada24_fallback(
+                            "stable-endpoint", "stable-template"
+                        ),
+                        {},
+                    )
+
+                self.assertEqual(graphql.call_count, 1)
+                self.assertEqual(
+                    graphql.call_args.kwargs["max_calls"], 1
+                )
+
+    def test_ada24_transition_stops_on_definitive_graphql_rejection(
+        self,
+    ) -> None:
+        outcomes = (
+            tars_runpod_release.RunpodDefinitiveRequestError("rejected"),
+            {
+                "saveEndpoint": {
+                    "id": "other-endpoint",
+                    "name": "tars-runpod-endpoint-v2",
+                }
+            },
+        )
+        for outcome in outcomes:
+            with self.subTest(outcome=outcome):
+                client = RunpodClient("api-key")
+                with mock.patch.object(
+                    client,
+                    "_graphql",
+                    side_effect=(
+                        outcome
+                        if isinstance(outcome, Exception)
+                        else None
+                    ),
+                    return_value=(
+                        outcome
+                        if not isinstance(outcome, Exception)
+                        else None
+                    ),
+                ) as graphql:
+                    with self.assertRaisesRegex(
+                        RunpodReleaseError,
+                        "rejected|different endpoint identity",
+                    ):
+                        client.add_ada24_fallback(
+                            "stable-endpoint", "stable-template"
+                        )
+
+                self.assertEqual(graphql.call_count, 1)
+
     def test_explicit_legacy_retirement_is_exact_idempotent_and_protects_stable(
         self,
     ) -> None:
@@ -3264,7 +3727,8 @@ class RunpodReleaseTest(unittest.TestCase):
         self.assertNotIn("gpuCount", query)
         self.assertNotIn("computeType", query)
         self.assertEqual(
-            GPU_POOL_SELECTOR.split(","), ["AMPERE_16", "AMPERE_24"]
+            GPU_POOL_SELECTOR.split(","),
+            ["AMPERE_16", "AMPERE_24", "ADA_24"],
         )
         patch_endpoint.assert_called_once_with(
             endpoint_id="endpoint1",
@@ -3291,7 +3755,15 @@ class RunpodReleaseTest(unittest.TestCase):
             self.assertEqual(client.inventory(), Inventory((), (), ()))
 
         query = graphql.call_args.args[1]
-        for field in ("gpuIds", "locations", "scalerType", "scalerValue"):
+        for field in (
+            "type",
+            "gpuIds",
+            "locations",
+            "networkVolumeId",
+            "flashBootType",
+            "scalerType",
+            "scalerValue",
+        ):
             self.assertIn(field, query)
         self.assertRegex(query, r"env\s*\{\s*key\s*\}")
         self.assertNotRegex(query, r"env\s*\{[^}]*\bvalue\b")

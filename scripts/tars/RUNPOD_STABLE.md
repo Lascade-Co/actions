@@ -11,7 +11,63 @@ and one fixed registry-auth record. Their IDs live in Infisical
 The ordinary `main` deployment never creates or deletes Runpod resources. It
 pauses the TARS dispatcher, drains the endpoint, records the exact prior image
 and endpoint version, and updates only the fixed template's immutable image.
-The endpoint remains configured for zero minimum and two maximum workers.
+The endpoint remains configured for zero minimum and two maximum workers. Its
+ordered GPU selectors are `AMPERE_16,AMPERE_24,ADA_24`: the ADA 24 GB pool is
+the last fallback after both cheaper pools.
+
+## Add the ADA 24 GB fallback once
+
+This is an explicit operator migration, never an ordinary deployment step.
+First land the central-actions revision containing this tooling; that push does
+not dispatch TARS. Before any subsequent TARS dispatch or deployment, verify
+there is no queued or running `Central TARS Production Delivery` workflow.
+Then verify there is no deployment lock, durable Runpod rollout boundary, or
+Swarm rollout and atomically create `tars_deploy_lock`, using the exact live
+TARS application release SHA for both its `tars.owner` label and JSON owner.
+Only after that lock exists may the operator pause `tars_dispatcher` and wait
+until its desired replica count is zero and every dispatcher task is terminal.
+Prepare owner-only files containing the Runpod API key and the three stable IDs
+from Infisical:
+
+```sh
+python3 scripts/tars/tars_runpod_release.py add-ada24-fallback \
+  --api-key-file "$work/RUNPOD_API_KEY" \
+  --endpoint-id-file "$work/RUNPOD_ENDPOINT_ID" \
+  --template-id-file "$work/RUNPOD_TEMPLATE_ID" \
+  --auth-id-file "$work/RUNPOD_REGISTRY_AUTH_ID" \
+  --confirm-add-ada24-fallback
+```
+
+After the command succeeds and verifies the exact target topology, scale
+`tars_dispatcher=1`, wait for exact 1/1 convergence with no old updating task,
+verify API readiness, and recheck that no Swarm update is active. Only then
+remove `tars_deploy_lock`. Do not use an unconditional exit trap that restores
+the dispatcher or removes the lock: after interruption, timeout, convergence
+failure, readiness failure, or any ambiguous provider response, deliberately
+retain the lock and ensure the dispatcher is at zero, scaling it back down if
+restoration had begun. Rerun the same idempotent command to reconcile the
+provider state by reads; resume dispatch and remove the lock only after that
+verification succeeds.
+
+The command accepts exactly the prior
+`AMPERE_16,AMPERE_24` selector or the final
+`AMPERE_16,AMPERE_24,ADA_24` selector. It verifies the fixed endpoint,
+template, registry auth, immutable image, REST execution settings, zero queued
+jobs, zero in-progress jobs, and no active correlated workers before acting.
+The reviewed endpoint remains queue-based (`QB`), has no network volume, and
+keeps FlashBoot `OFF`. When required, the command sends one full GraphQL
+`saveEndpoint` mutation containing the existing endpoint ID and all reviewed
+GraphQL endpoint settings. It never updates the template image, creates
+resources, changes IDs, or uses a REST patch. A missing or malformed mutation
+response is reconciled only through reads. The authoritative convergence proof
+is the exact full GraphQL configuration plus unchanged IDs, image, REST
+execution settings, and idle state; Runpod does not document selector changes
+as incrementing the REST endpoint version. Rerunning after success is a
+verified no-op.
+
+The normal deployment verifier requires the final selector, but the deploy
+workflow never invokes this command. Therefore finish this transition before
+triggering or retrying the TARS `main` deployment.
 
 ## Adopt the existing production resources once
 
@@ -204,9 +260,10 @@ application boundary protects its release SHA. A full rollout receipt protects
 both its prior and target SHAs, including stored and incoming recovery bundles.
 Malformed or unsafe live markers stop housekeeping before deletion.
 
-Each transient HTTP operation is bounded to three calls. A template update or
-endpoint rename is issued once; an ambiguous lost response is reconciled by
-read-only polling rather than by blindly repeating the mutation.
+Each transient HTTP operation is bounded to three calls. A template update,
+endpoint rename, or explicit ADA 24 GB endpoint expansion is issued once; an
+ambiguous lost response is reconciled by read-only polling rather than by
+blindly repeating the mutation.
 
 ## Retire old per-release resources explicitly
 

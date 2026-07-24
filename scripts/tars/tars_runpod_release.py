@@ -6,7 +6,9 @@ verify the stable endpoint, template, and registry-auth IDs supplied by
 Infisical, capture the complete prior template contract, and update only the
 template image. Existing exact v1 resources can be renamed in place through
 the explicit ``migrate`` command; creation is available solely through the
-explicit one-time ``bootstrap`` command.
+explicit one-time ``bootstrap`` command. The reviewed expansion from the
+16/24 GB GPU pools to the 16/24 GB plus ADA 24 GB fallback is available only
+through the explicit one-time ``add-ada24-fallback`` command.
 
 Secret values are accepted only through owner-only files.  Runpod's GraphQL
 API uses its documented ``api_key`` query parameter; registry credentials stay
@@ -41,12 +43,15 @@ REQUEST_TIMEOUT_SECONDS = 30
 ENDPOINT_TIMEOUT_MS = 7_200_000
 CONTAINER_DISK_GB = 20
 # Runpod accepts comma-separated pools in priority order. Keep the cheapest
-# 16 GB pool primary and use the slightly dearer 24 GB pool only when primary
-# supply is constrained.
-GPU_POOL_SELECTOR = "AMPERE_16,AMPERE_24"
+# 16 GB pool primary, then the 24 GB Ampere pool, and use the ADA 24 GB pool
+# only when both cheaper pools are constrained.
+GPU_POOL_SELECTOR = "AMPERE_16,AMPERE_24,ADA_24"
+PRE_ADA24_GPU_POOL_SELECTOR = "AMPERE_16,AMPERE_24"
 LEGACY_GPU_POOL_SELECTOR = "AMPERE_16"
 WORKERS_MIN = 0
 WORKERS_MAX = 2
+ENDPOINT_TYPE = "QB"
+FLASH_BOOT_TYPE = "OFF"
 SCALER_TYPE = "REQUEST_COUNT"
 SCALER_VALUE = 1
 IDLE_TIMEOUT_SECONDS = 5
@@ -219,6 +224,10 @@ class ReleaseAPI(Protocol):
         self, endpoint_id: str, template_id: str
     ) -> dict[str, Any]: ...
 
+    def add_ada24_fallback(
+        self, endpoint_id: str, template_id: str
+    ) -> dict[str, Any]: ...
+
     def zero_endpoint(self, endpoint: Mapping[str, Any]) -> dict[str, Any]: ...
 
     def delete_endpoint(self, endpoint_id: str) -> Inventory: ...
@@ -371,8 +380,9 @@ class RunpodClient:
             query TarsRunpodInventory {
               myself {
                 endpoints {
-                  id name gpuIds idleTimeout locations scalerType scalerValue
-                  templateId workersMax workersMin createdAt
+                  id name type gpuIds idleTimeout locations networkVolumeId
+                  flashBootType scalerType scalerValue templateId workersMax
+                  workersMin createdAt
                   pods { id desiredStatus }
                 }
                 podTemplates {
@@ -643,6 +653,48 @@ class RunpodClient:
             document, "renamed stable endpoint"
         )
 
+    def add_ada24_fallback(
+        self, endpoint_id: str, template_id: str
+    ) -> dict[str, Any]:
+        """Issue the reviewed stable endpoint expansion exactly once.
+
+        Any non-definitive failure can mean Runpod accepted the mutation but
+        lost its response. The operator path therefore reconciles the exact
+        endpoint by reads and never reissues the mutation in this invocation.
+        """
+
+        endpoint_id = _resource_id(endpoint_id, "stable endpoint ID")
+        template_id = _resource_id(template_id, "stable template ID")
+        try:
+            data = self._graphql(
+                "add stable ADA 24 GB fallback",
+                _save_endpoint_query(
+                    name=STABLE_ENDPOINT_NAME,
+                    template_id=template_id,
+                    endpoint_id=endpoint_id,
+                ),
+                max_calls=1,
+            )
+        except RunpodDefinitiveRequestError:
+            raise
+        except RunpodReleaseError:
+            return {}
+        try:
+            updated = _object(
+                data.get("saveEndpoint"), "updated stable endpoint"
+            )
+        except RunpodReleaseError:
+            return {}
+        if (
+            updated.get("id") != endpoint_id
+            or updated.get("name") != STABLE_ENDPOINT_NAME
+        ):
+            raise RunpodDefinitiveRequestError(
+                "Runpod ADA 24 GB fallback mutation returned a different "
+                "endpoint identity"
+            )
+        return updated
+
     def read_endpoint_health(self, endpoint_id: str) -> EndpointHealth:
         """Read the official Serverless health counters with bounded retries."""
 
@@ -882,20 +934,29 @@ def _save_endpoint_query(
     *,
     name: str,
     template_id: str,
+    endpoint_id: str | None = None,
 ) -> str:
     _resource_name(name, OWNED_ENDPOINT_NAME, "endpoint name")
     _resource_id(template_id, "template ID")
-    fields = (
+    fields = [
         f"name: {_graphql_string(name)}",
         f"templateId: {_graphql_string(template_id)}",
+        f"type: {_graphql_string(ENDPOINT_TYPE)}",
         f"gpuIds: {_graphql_string(GPU_POOL_SELECTOR)}",
         f"idleTimeout: {IDLE_TIMEOUT_SECONDS}",
         'locations: ""',
+        "networkVolumeId: null",
+        f"flashBootType: {FLASH_BOOT_TYPE}",
         f"scalerType: {_graphql_string(SCALER_TYPE)}",
         f"scalerValue: {SCALER_VALUE}",
         f"workersMin: {WORKERS_MIN}",
         f"workersMax: {WORKERS_MAX}",
-    )
+    ]
+    if endpoint_id is not None:
+        fields.insert(
+            0,
+            f"id: {_graphql_string(_resource_id(endpoint_id, 'endpoint ID'))}",
+        )
     rendered = "\n".join(fields)
     return f"""
     mutation TarsSaveEndpoint {{
@@ -976,11 +1037,15 @@ def verify_endpoint_base(
     expected_name: str,
     template_id: str,
     workers_max: int = WORKERS_MAX,
+    gpu_pool_selector: str = GPU_POOL_SELECTOR,
 ) -> str:
     expectations = {
         "name": expected_name,
-        "gpuIds": GPU_POOL_SELECTOR,
+        "type": ENDPOINT_TYPE,
+        "gpuIds": gpu_pool_selector,
         "idleTimeout": IDLE_TIMEOUT_SECONDS,
+        "networkVolumeId": None,
+        "flashBootType": FLASH_BOOT_TYPE,
         "scalerType": SCALER_TYPE,
         "scalerValue": SCALER_VALUE,
         "templateId": template_id,
@@ -1000,12 +1065,14 @@ def verify_endpoint(
     expected_name: str,
     template_id: str,
     workers_max: int = WORKERS_MAX,
+    gpu_pool_selector: str = GPU_POOL_SELECTOR,
 ) -> str:
     return verify_endpoint_base(
         resource,
         expected_name=expected_name,
         template_id=template_id,
         workers_max=workers_max,
+        gpu_pool_selector=gpu_pool_selector,
     )
 
 
@@ -1404,11 +1471,17 @@ def _verify_stable_topology_once(
     *,
     ids: StableResourceIDs,
     expected_image: str | None = None,
+    gpu_pool_selectors: tuple[str, ...] = (GPU_POOL_SELECTOR,),
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
     """Prove the configured IDs form the one fixed, exact TARS topology."""
 
     ids = _validate_stable_ids(ids)
     endpoint, template, auth = _stable_inventory_resources(client, ids)
+    gpu_pool_selector = endpoint.get("gpuIds")
+    if gpu_pool_selector not in gpu_pool_selectors:
+        raise RunpodReleaseError(
+            "existing Runpod endpoint gpuIds does not match this release"
+        )
     image = str(template.get("imageName", ""))
     if IMMUTABLE_GPU_IMAGE.fullmatch(image) is None:
         raise RunpodReleaseError(
@@ -1427,6 +1500,7 @@ def _verify_stable_topology_once(
         endpoint,
         expected_name=STABLE_ENDPOINT_NAME,
         template_id=ids.template_id,
+        gpu_pool_selector=gpu_pool_selector,
     )
     verify_stable_template_rest(
         client.read_template(ids.template_id),
@@ -1459,15 +1533,21 @@ def verify_stable_topology(
     *,
     ids: StableResourceIDs,
     expected_image: str | None = None,
+    gpu_pool_selectors: tuple[str, ...] = (GPU_POOL_SELECTOR,),
     sleeper: Callable[[float], None] = time.sleep,
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
     """Prove the stable topology from one correlated worker observation."""
 
+    if not gpu_pool_selectors or len(set(gpu_pool_selectors)) != len(
+        gpu_pool_selectors
+    ):
+        raise ValueError("stable GPU pool selectors must be unique and nonempty")
     return _retry_worker_inventory_correlation(
         lambda: _verify_stable_topology_once(
             client,
             ids=ids,
             expected_image=expected_image,
+            gpu_pool_selectors=gpu_pool_selectors,
         ),
         sleeper=sleeper,
     )
@@ -1607,6 +1687,97 @@ def wait_for_stable_idle(
         if clock() >= deadline:
             raise RunpodReleaseError(
                 "Runpod stable endpoint did not drain before the rollout deadline"
+            )
+        sleeper(poll_seconds)
+
+
+def _verify_ada24_transition_idle(
+    client: ReleaseAPI,
+    *,
+    ids: StableResourceIDs,
+    expected_image: str | None,
+    sleeper: Callable[[float], None],
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    """Prove one exact pre/post-transition topology has no provider work."""
+
+    endpoint, template, rest_endpoint = verify_stable_topology(
+        client,
+        ids=ids,
+        expected_image=expected_image,
+        gpu_pool_selectors=(
+            PRE_ADA24_GPU_POOL_SELECTOR,
+            GPU_POOL_SELECTOR,
+        ),
+        sleeper=sleeper,
+    )
+    health = client.read_endpoint_health(ids.endpoint_id)
+    if health.has_active_work or _active_workers(endpoint, rest_endpoint):
+        raise RunpodReleaseError(
+            "ADA 24 GB fallback transition requires zero queued, "
+            "in-progress, and active worker work"
+        )
+    return endpoint, template, rest_endpoint
+
+
+def add_ada24_fallback_to_stable_endpoint(
+    client: ReleaseAPI,
+    *,
+    ids: StableResourceIDs,
+    timeout_seconds: float = ROLLOUT_TIMEOUT_SECONDS,
+    poll_seconds: float = ROLLOUT_POLL_SECONDS,
+    sleeper: Callable[[float], None] = time.sleep,
+    clock: Callable[[], float] = time.monotonic,
+) -> StableResourceIDs:
+    """Expand only the exact reviewed two-pool stable endpoint in place.
+
+    The command is idempotent when the target selector is already present.
+    A required mutation is issued exactly once. Its outcome is then reconciled
+    through exact read-only topology observations, including the unchanged
+    template image, complete endpoint configuration, and the same
+    endpoint/template/auth IDs.
+    """
+
+    if timeout_seconds <= 0 or poll_seconds <= 0:
+        raise ValueError("Runpod rollout timing must be positive")
+    ids = _validate_stable_ids(ids)
+    endpoint, template, _ = _verify_ada24_transition_idle(
+        client,
+        ids=ids,
+        expected_image=None,
+        sleeper=sleeper,
+    )
+    image = str(template.get("imageName", ""))
+    if endpoint.get("gpuIds") == GPU_POOL_SELECTOR:
+        return ids
+    _expect_equal(
+        endpoint.get("gpuIds"),
+        PRE_ADA24_GPU_POOL_SELECTOR,
+        "endpoint gpuIds before ADA 24 GB fallback transition",
+    )
+
+    # This is the sole mutation in the transition. Even when its response is
+    # lost, reconciliation below is read-only.
+    client.add_ada24_fallback(ids.endpoint_id, ids.template_id)
+    deadline = clock() + timeout_seconds
+    while True:
+        endpoint, _, _ = _verify_ada24_transition_idle(
+            client,
+            ids=ids,
+            expected_image=image,
+            sleeper=sleeper,
+        )
+        if endpoint.get("gpuIds") == GPU_POOL_SELECTOR:
+            return ids
+        if endpoint.get("gpuIds") != GPU_POOL_SELECTOR:
+            _expect_equal(
+                endpoint.get("gpuIds"),
+                PRE_ADA24_GPU_POOL_SELECTOR,
+                "endpoint gpuIds during ADA 24 GB fallback transition",
+            )
+        if clock() >= deadline:
+            raise RunpodReleaseError(
+                "Runpod ADA 24 GB fallback transition did not converge "
+                "before the deadline"
             )
         sleeper(poll_seconds)
 
@@ -2617,10 +2788,19 @@ def verify_adoptable_topology(
         image=image,
         auth_id=ids.auth_id,
     )
+    gpu_pool_selector = endpoint.get("gpuIds")
+    if gpu_pool_selector not in (
+        PRE_ADA24_GPU_POOL_SELECTOR,
+        GPU_POOL_SELECTOR,
+    ):
+        raise RunpodReleaseError(
+            "existing Runpod endpoint gpuIds does not match this release"
+        )
     verify_endpoint(
         endpoint,
         expected_name=endpoint_name,
         template_id=ids.template_id,
+        gpu_pool_selector=gpu_pool_selector,
     )
     verify_owned_template_rest(
         client.read_template(ids.template_id),
@@ -2712,6 +2892,10 @@ def wait_for_adopted_topology(
                 client,
                 ids=ids,
                 expected_image=image,
+                gpu_pool_selectors=(
+                    PRE_ADA24_GPU_POOL_SELECTOR,
+                    GPU_POOL_SELECTOR,
+                ),
                 sleeper=sleeper,
             )
             health = client.read_endpoint_health(ids.endpoint_id)
@@ -3025,14 +3209,20 @@ def verify_retirement_endpoint(
     """Verify exact current or historical endpoint fields only for retirement."""
 
     if variant == "current":
-        gpu_selector = GPU_POOL_SELECTOR
+        gpu_selectors = (
+            PRE_ADA24_GPU_POOL_SELECTOR,
+            GPU_POOL_SELECTOR,
+        )
     elif variant == "legacy":
-        gpu_selector = LEGACY_GPU_POOL_SELECTOR
+        gpu_selectors = (LEGACY_GPU_POOL_SELECTOR,)
     else:
         raise AssertionError("unknown TARS retirement endpoint variant")
+    if resource.get("gpuIds") not in gpu_selectors:
+        raise RunpodReleaseError(
+            "existing Runpod endpoint gpuIds does not match this release"
+        )
     expectations = {
         "name": expected_name,
-        "gpuIds": gpu_selector,
         "idleTimeout": IDLE_TIMEOUT_SECONDS,
         "scalerType": SCALER_TYPE,
         "scalerValue": SCALER_VALUE,
@@ -3607,6 +3797,16 @@ def main() -> None:
         action="store_true",
         help="required acknowledgement that this is a one-time operator action",
     )
+    add_ada24 = commands.add_parser("add-ada24-fallback")
+    add_ada24.add_argument("--api-key-file", type=Path, required=True)
+    add_ada24.add_argument("--endpoint-id-file", type=Path, required=True)
+    add_ada24.add_argument("--template-id-file", type=Path, required=True)
+    add_ada24.add_argument("--auth-id-file", type=Path, required=True)
+    add_ada24.add_argument(
+        "--confirm-add-ada24-fallback",
+        action="store_true",
+        help="required acknowledgement that this is a one-time operator action",
+    )
     retirement_plan = commands.add_parser("retire-legacy-plan")
     retirement_plan.add_argument("--api-key-file", type=Path, required=True)
     retirement_plan.add_argument("--endpoint-id-file", type=Path, required=True)
@@ -3716,6 +3916,7 @@ def main() -> None:
             "verify-application",
             "verify-target",
             "migrate",
+            "add-ada24-fallback",
             "bootstrap",
             "retire-legacy-plan",
             "retire-legacy",
@@ -3836,6 +4037,26 @@ def main() -> None:
                 print(
                     "adopted the existing Runpod topology in place; "
                     "the emitted Infisical IDs are unchanged"
+                )
+                return
+            if args.command == "add-ada24-fallback":
+                if not args.confirm_add_ada24_fallback:
+                    raise RunpodReleaseError(
+                        "explicit ADA 24 GB fallback transition requires "
+                        "--confirm-add-ada24-fallback"
+                    )
+                ids = add_ada24_fallback_to_stable_endpoint(
+                    client,
+                    ids=read_stable_ids(
+                        args.endpoint_id_file,
+                        args.template_id_file,
+                        args.auth_id_file,
+                    ),
+                )
+                print(
+                    "verified the stable Runpod endpoint uses "
+                    f"{GPU_POOL_SELECTOR}; endpoint {ids.endpoint_id} and its "
+                    "template/auth IDs are unchanged"
                 )
                 return
             if args.command == "retire-legacy-plan":
