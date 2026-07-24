@@ -12,8 +12,11 @@ The ordinary `main` deployment never creates or deletes Runpod resources. It
 pauses the TARS dispatcher, drains the endpoint, records the exact prior image
 and endpoint version, and updates only the fixed template's immutable image.
 The endpoint remains configured for zero minimum and two maximum workers. Its
-ordered GPU selectors are `AMPERE_16,AMPERE_24,ADA_24`: the ADA 24 GB pool is
-the last fallback after both cheaper pools.
+ordered pool selectors are `AMPERE_16,AMPERE_24,ADA_24`, followed by the exact
+negative selector
+`-NVIDIA RTX PRO 6000 Blackwell Server Edition MIG 1g.24gb`. The ADA 24 GB
+pool remains the last fallback after both cheaper pools; the negative selector
+only excludes the incompatible Blackwell MIG slice.
 
 ## Add the ADA 24 GB fallback once
 
@@ -49,11 +52,12 @@ restoration had begun. Rerun the same idempotent command to reconcile the
 provider state by reads; resume dispatch and remove the lock only after that
 verification succeeds.
 
-The command accepts exactly the prior
-`AMPERE_16,AMPERE_24` selector or the final
-`AMPERE_16,AMPERE_24,ADA_24` selector. It verifies the fixed endpoint,
-template, registry auth, immutable image, REST execution settings, zero queued
-jobs, zero in-progress jobs, and no active correlated workers before acting.
+The command accepts exactly the prior `AMPERE_16,AMPERE_24` selector, the
+intermediate `AMPERE_16,AMPERE_24,ADA_24` selector, or the later reviewed
+selector containing the Blackwell MIG exclusion. It verifies the fixed
+endpoint, template, registry auth, immutable image, REST execution settings,
+zero queued jobs, zero in-progress jobs, and no active correlated workers
+before acting.
 The reviewed endpoint remains queue-based (`QB`), has no network volume, and
 keeps FlashBoot `OFF`. When required, the command sends one full GraphQL
 `saveEndpoint` mutation containing the existing endpoint ID and all reviewed
@@ -65,9 +69,48 @@ execution settings, and idle state; Runpod does not document selector changes
 as incrementing the REST endpoint version. Rerunning after success is a
 verified no-op.
 
-The normal deployment verifier requires the final selector, but the deploy
-workflow never invokes this command. Therefore finish this transition before
+The normal deployment verifier requires the final selector containing the
+Blackwell MIG exclusion, and the deploy workflow never invokes either
+one-time selector command. Complete both required transitions before
 triggering or retrying the TARS `main` deployment.
+
+## Exclude the incompatible Blackwell MIG slice once
+
+This is a separate explicit operator migration, never an ordinary deployment
+step. First land the central-actions revision containing the command without
+dispatching TARS. Verify there is no queued or running
+`Central TARS Production Delivery` workflow, deployment lock, durable Runpod
+rollout boundary, or Swarm rollout. Atomically create `tars_deploy_lock` for
+the exact live application release, pause `tars_dispatcher`, and wait until
+its desired replica count is zero and every task is terminal. Prepare the same
+owner-only API-key and stable-ID files used above, then run:
+
+```sh
+python3 scripts/tars/tars_runpod_release.py exclude-blackwell-mig \
+  --api-key-file "$work/RUNPOD_API_KEY" \
+  --endpoint-id-file "$work/RUNPOD_ENDPOINT_ID" \
+  --template-id-file "$work/RUNPOD_TEMPLATE_ID" \
+  --auth-id-file "$work/RUNPOD_REGISTRY_AUTH_ID" \
+  --confirm-exclude-blackwell-mig
+```
+
+The command accepts only the exact pre-transition
+`AMPERE_16,AMPERE_24,ADA_24` selector or the exact final selector. It proves
+the stable IDs, immutable image, complete endpoint configuration, REST
+execution settings, zero queued jobs, zero in-progress jobs, and no active
+correlated workers. When required, it issues one full GraphQL `saveEndpoint`
+mutation for the existing endpoint ID and reconciles an ambiguous response
+only by reads. It does not change the template image or any resource ID and
+does not assume that Runpod increments the endpoint version.
+
+After successful verification, scale `tars_dispatcher=1`, wait for exact 1/1
+convergence with no old updating task, verify API readiness, prove no Swarm
+update is active, and only then remove `tars_deploy_lock`. On interruption,
+timeout, readiness failure, or an ambiguous provider outcome, retain the lock
+and keep the dispatcher at zero. Rerun the same idempotent command to reconcile
+by reads. Never overlap this selector migration with an application/provider
+rollout: rollout receipts bind template images and endpoint versions, not a
+selector transition.
 
 ## Adopt the existing production resources once
 
@@ -261,9 +304,9 @@ both its prior and target SHAs, including stored and incoming recovery bundles.
 Malformed or unsafe live markers stop housekeeping before deletion.
 
 Each transient HTTP operation is bounded to three calls. A template update,
-endpoint rename, or explicit ADA 24 GB endpoint expansion is issued once; an
-ambiguous lost response is reconciled by read-only polling rather than by
-blindly repeating the mutation.
+endpoint rename, explicit ADA 24 GB endpoint expansion, or explicit Blackwell
+MIG exclusion is issued once; an ambiguous lost response is reconciled by
+read-only polling rather than by blindly repeating the mutation.
 
 ## Retire old per-release resources explicitly
 

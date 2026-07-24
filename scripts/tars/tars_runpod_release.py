@@ -8,7 +8,9 @@ template image. Existing exact v1 resources can be renamed in place through
 the explicit ``migrate`` command; creation is available solely through the
 explicit one-time ``bootstrap`` command. The reviewed expansion from the
 16/24 GB GPU pools to the 16/24 GB plus ADA 24 GB fallback is available only
-through the explicit one-time ``add-ada24-fallback`` command.
+through the explicit one-time ``add-ada24-fallback`` command. Excluding the
+incompatible Blackwell 24 GB MIG slice is likewise available only through the
+explicit one-time ``exclude-blackwell-mig`` command.
 
 Secret values are accepted only through owner-only files.  Runpod's GraphQL
 API uses its documented ``api_key`` query parameter; registry credentials stay
@@ -44,8 +46,15 @@ ENDPOINT_TIMEOUT_MS = 7_200_000
 CONTAINER_DISK_GB = 20
 # Runpod accepts comma-separated pools in priority order. Keep the cheapest
 # 16 GB pool primary, then the 24 GB Ampere pool, and use the ADA 24 GB pool
-# only when both cheaper pools are constrained.
-GPU_POOL_SELECTOR = "AMPERE_16,AMPERE_24,ADA_24"
+# only when both cheaper pools are constrained. The exact negative selector
+# removes one incompatible Blackwell MIG slice without changing pool order.
+BLACKWELL_MIG_GPU_ID = (
+    "NVIDIA RTX PRO 6000 Blackwell Server Edition MIG 1g.24gb"
+)
+GPU_POOL_SELECTOR = (
+    "AMPERE_16,AMPERE_24,ADA_24,-" + BLACKWELL_MIG_GPU_ID
+)
+PRE_MIG_EXCLUSION_GPU_POOL_SELECTOR = "AMPERE_16,AMPERE_24,ADA_24"
 PRE_ADA24_GPU_POOL_SELECTOR = "AMPERE_16,AMPERE_24"
 LEGACY_GPU_POOL_SELECTOR = "AMPERE_16"
 WORKERS_MIN = 0
@@ -225,6 +234,10 @@ class ReleaseAPI(Protocol):
     ) -> dict[str, Any]: ...
 
     def add_ada24_fallback(
+        self, endpoint_id: str, template_id: str
+    ) -> dict[str, Any]: ...
+
+    def exclude_blackwell_mig(
         self, endpoint_id: str, template_id: str
     ) -> dict[str, Any]: ...
 
@@ -653,10 +666,16 @@ class RunpodClient:
             document, "renamed stable endpoint"
         )
 
-    def add_ada24_fallback(
-        self, endpoint_id: str, template_id: str
+    def _set_stable_gpu_selector(
+        self,
+        endpoint_id: str,
+        template_id: str,
+        *,
+        gpu_pool_selector: str,
+        operation: str,
+        transition: str,
     ) -> dict[str, Any]:
-        """Issue the reviewed stable endpoint expansion exactly once.
+        """Issue one reviewed stable endpoint selector mutation exactly once.
 
         Any non-definitive failure can mean Runpod accepted the mutation but
         lost its response. The operator path therefore reconciles the exact
@@ -667,11 +686,12 @@ class RunpodClient:
         template_id = _resource_id(template_id, "stable template ID")
         try:
             data = self._graphql(
-                "add stable ADA 24 GB fallback",
+                operation,
                 _save_endpoint_query(
                     name=STABLE_ENDPOINT_NAME,
                     template_id=template_id,
                     endpoint_id=endpoint_id,
+                    gpu_pool_selector=gpu_pool_selector,
                 ),
                 max_calls=1,
             )
@@ -690,10 +710,32 @@ class RunpodClient:
             or updated.get("name") != STABLE_ENDPOINT_NAME
         ):
             raise RunpodDefinitiveRequestError(
-                "Runpod ADA 24 GB fallback mutation returned a different "
-                "endpoint identity"
+                f"Runpod {transition} mutation returned a different endpoint "
+                "identity"
             )
         return updated
+
+    def add_ada24_fallback(
+        self, endpoint_id: str, template_id: str
+    ) -> dict[str, Any]:
+        return self._set_stable_gpu_selector(
+            endpoint_id,
+            template_id,
+            gpu_pool_selector=PRE_MIG_EXCLUSION_GPU_POOL_SELECTOR,
+            operation="add stable ADA 24 GB fallback",
+            transition="ADA 24 GB fallback",
+        )
+
+    def exclude_blackwell_mig(
+        self, endpoint_id: str, template_id: str
+    ) -> dict[str, Any]:
+        return self._set_stable_gpu_selector(
+            endpoint_id,
+            template_id,
+            gpu_pool_selector=GPU_POOL_SELECTOR,
+            operation="exclude incompatible stable Blackwell MIG GPU",
+            transition="Blackwell MIG exclusion",
+        )
 
     def read_endpoint_health(self, endpoint_id: str) -> EndpointHealth:
         """Read the official Serverless health counters with bounded retries."""
@@ -935,14 +977,20 @@ def _save_endpoint_query(
     name: str,
     template_id: str,
     endpoint_id: str | None = None,
+    gpu_pool_selector: str = GPU_POOL_SELECTOR,
 ) -> str:
     _resource_name(name, OWNED_ENDPOINT_NAME, "endpoint name")
     _resource_id(template_id, "template ID")
+    if gpu_pool_selector not in (
+        PRE_MIG_EXCLUSION_GPU_POOL_SELECTOR,
+        GPU_POOL_SELECTOR,
+    ):
+        raise ValueError("endpoint GPU selector is outside the reviewed set")
     fields = [
         f"name: {_graphql_string(name)}",
         f"templateId: {_graphql_string(template_id)}",
         f"type: {_graphql_string(ENDPOINT_TYPE)}",
-        f"gpuIds: {_graphql_string(GPU_POOL_SELECTOR)}",
+        f"gpuIds: {_graphql_string(gpu_pool_selector)}",
         f"idleTimeout: {IDLE_TIMEOUT_SECONDS}",
         'locations: ""',
         "networkVolumeId: null",
@@ -1706,6 +1754,7 @@ def _verify_ada24_transition_idle(
         expected_image=expected_image,
         gpu_pool_selectors=(
             PRE_ADA24_GPU_POOL_SELECTOR,
+            PRE_MIG_EXCLUSION_GPU_POOL_SELECTOR,
             GPU_POOL_SELECTOR,
         ),
         sleeper=sleeper,
@@ -1747,7 +1796,10 @@ def add_ada24_fallback_to_stable_endpoint(
         sleeper=sleeper,
     )
     image = str(template.get("imageName", ""))
-    if endpoint.get("gpuIds") == GPU_POOL_SELECTOR:
+    if endpoint.get("gpuIds") in (
+        PRE_MIG_EXCLUSION_GPU_POOL_SELECTOR,
+        GPU_POOL_SELECTOR,
+    ):
         return ids
     _expect_equal(
         endpoint.get("gpuIds"),
@@ -1766,17 +1818,102 @@ def add_ada24_fallback_to_stable_endpoint(
             expected_image=image,
             sleeper=sleeper,
         )
-        if endpoint.get("gpuIds") == GPU_POOL_SELECTOR:
+        if endpoint.get("gpuIds") in (
+            PRE_MIG_EXCLUSION_GPU_POOL_SELECTOR,
+            GPU_POOL_SELECTOR,
+        ):
             return ids
-        if endpoint.get("gpuIds") != GPU_POOL_SELECTOR:
-            _expect_equal(
-                endpoint.get("gpuIds"),
-                PRE_ADA24_GPU_POOL_SELECTOR,
-                "endpoint gpuIds during ADA 24 GB fallback transition",
-            )
+        _expect_equal(
+            endpoint.get("gpuIds"),
+            PRE_ADA24_GPU_POOL_SELECTOR,
+            "endpoint gpuIds during ADA 24 GB fallback transition",
+        )
         if clock() >= deadline:
             raise RunpodReleaseError(
                 "Runpod ADA 24 GB fallback transition did not converge "
+                "before the deadline"
+            )
+        sleeper(poll_seconds)
+
+
+def _verify_blackwell_mig_exclusion_transition_idle(
+    client: ReleaseAPI,
+    *,
+    ids: StableResourceIDs,
+    expected_image: str | None,
+    sleeper: Callable[[float], None],
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    """Prove the exact pre/post-exclusion topology has no provider work."""
+
+    endpoint, template, rest_endpoint = verify_stable_topology(
+        client,
+        ids=ids,
+        expected_image=expected_image,
+        gpu_pool_selectors=(
+            PRE_MIG_EXCLUSION_GPU_POOL_SELECTOR,
+            GPU_POOL_SELECTOR,
+        ),
+        sleeper=sleeper,
+    )
+    health = client.read_endpoint_health(ids.endpoint_id)
+    if health.has_active_work or _active_workers(endpoint, rest_endpoint):
+        raise RunpodReleaseError(
+            "Blackwell MIG exclusion transition requires zero queued, "
+            "in-progress, and active worker work"
+        )
+    return endpoint, template, rest_endpoint
+
+
+def exclude_blackwell_mig_from_stable_endpoint(
+    client: ReleaseAPI,
+    *,
+    ids: StableResourceIDs,
+    timeout_seconds: float = ROLLOUT_TIMEOUT_SECONDS,
+    poll_seconds: float = ROLLOUT_POLL_SECONDS,
+    sleeper: Callable[[float], None] = time.sleep,
+    clock: Callable[[], float] = time.monotonic,
+) -> StableResourceIDs:
+    """Exclude one exact incompatible MIG GPU from the stable endpoint."""
+
+    if timeout_seconds <= 0 or poll_seconds <= 0:
+        raise ValueError("Runpod rollout timing must be positive")
+    ids = _validate_stable_ids(ids)
+    endpoint, template, _ = _verify_blackwell_mig_exclusion_transition_idle(
+        client,
+        ids=ids,
+        expected_image=None,
+        sleeper=sleeper,
+    )
+    image = str(template.get("imageName", ""))
+    if endpoint.get("gpuIds") == GPU_POOL_SELECTOR:
+        return ids
+    _expect_equal(
+        endpoint.get("gpuIds"),
+        PRE_MIG_EXCLUSION_GPU_POOL_SELECTOR,
+        "endpoint gpuIds before Blackwell MIG exclusion transition",
+    )
+
+    # This is the sole mutation in the transition. Even when its response is
+    # lost, reconciliation below is read-only.
+    client.exclude_blackwell_mig(ids.endpoint_id, ids.template_id)
+    deadline = clock() + timeout_seconds
+    while True:
+        endpoint, _, _ = _verify_blackwell_mig_exclusion_transition_idle(
+            client,
+            ids=ids,
+            expected_image=image,
+            sleeper=sleeper,
+        )
+        if endpoint.get("gpuIds") == GPU_POOL_SELECTOR:
+            return ids
+        _expect_equal(
+            endpoint.get("gpuIds"),
+            PRE_MIG_EXCLUSION_GPU_POOL_SELECTOR,
+            "endpoint gpuIds during Blackwell MIG exclusion transition",
+        )
+        if clock() >= deadline:
+            raise RunpodReleaseError(
+                "Runpod Blackwell MIG exclusion transition did not converge "
                 "before the deadline"
             )
         sleeper(poll_seconds)
@@ -2791,6 +2928,7 @@ def verify_adoptable_topology(
     gpu_pool_selector = endpoint.get("gpuIds")
     if gpu_pool_selector not in (
         PRE_ADA24_GPU_POOL_SELECTOR,
+        PRE_MIG_EXCLUSION_GPU_POOL_SELECTOR,
         GPU_POOL_SELECTOR,
     ):
         raise RunpodReleaseError(
@@ -2894,6 +3032,7 @@ def wait_for_adopted_topology(
                 expected_image=image,
                 gpu_pool_selectors=(
                     PRE_ADA24_GPU_POOL_SELECTOR,
+                    PRE_MIG_EXCLUSION_GPU_POOL_SELECTOR,
                     GPU_POOL_SELECTOR,
                 ),
                 sleeper=sleeper,
@@ -3211,6 +3350,7 @@ def verify_retirement_endpoint(
     if variant == "current":
         gpu_selectors = (
             PRE_ADA24_GPU_POOL_SELECTOR,
+            PRE_MIG_EXCLUSION_GPU_POOL_SELECTOR,
             GPU_POOL_SELECTOR,
         )
     elif variant == "legacy":
@@ -3807,6 +3947,24 @@ def main() -> None:
         action="store_true",
         help="required acknowledgement that this is a one-time operator action",
     )
+    exclude_blackwell_mig = commands.add_parser("exclude-blackwell-mig")
+    exclude_blackwell_mig.add_argument(
+        "--api-key-file", type=Path, required=True
+    )
+    exclude_blackwell_mig.add_argument(
+        "--endpoint-id-file", type=Path, required=True
+    )
+    exclude_blackwell_mig.add_argument(
+        "--template-id-file", type=Path, required=True
+    )
+    exclude_blackwell_mig.add_argument(
+        "--auth-id-file", type=Path, required=True
+    )
+    exclude_blackwell_mig.add_argument(
+        "--confirm-exclude-blackwell-mig",
+        action="store_true",
+        help="required acknowledgement that this is a one-time operator action",
+    )
     retirement_plan = commands.add_parser("retire-legacy-plan")
     retirement_plan.add_argument("--api-key-file", type=Path, required=True)
     retirement_plan.add_argument("--endpoint-id-file", type=Path, required=True)
@@ -3917,6 +4075,7 @@ def main() -> None:
             "verify-target",
             "migrate",
             "add-ada24-fallback",
+            "exclude-blackwell-mig",
             "bootstrap",
             "retire-legacy-plan",
             "retire-legacy",
@@ -4046,6 +4205,27 @@ def main() -> None:
                         "--confirm-add-ada24-fallback"
                     )
                 ids = add_ada24_fallback_to_stable_endpoint(
+                    client,
+                    ids=read_stable_ids(
+                        args.endpoint_id_file,
+                        args.template_id_file,
+                        args.auth_id_file,
+                    ),
+                )
+                print(
+                    "verified the stable Runpod endpoint uses "
+                    f"{PRE_MIG_EXCLUSION_GPU_POOL_SELECTOR} or a later "
+                    f"reviewed selector; endpoint {ids.endpoint_id} and its "
+                    "template/auth IDs are unchanged"
+                )
+                return
+            if args.command == "exclude-blackwell-mig":
+                if not args.confirm_exclude_blackwell_mig:
+                    raise RunpodReleaseError(
+                        "explicit Blackwell MIG exclusion transition requires "
+                        "--confirm-exclude-blackwell-mig"
+                    )
+                ids = exclude_blackwell_mig_from_stable_endpoint(
                     client,
                     ids=read_stable_ids(
                         args.endpoint_id_file,

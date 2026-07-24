@@ -920,6 +920,19 @@ class FakeReleaseAPI:
         endpoint = next(item for item in self.endpoints if item["id"] == endpoint_id)
         if endpoint["templateId"] != template_id:
             raise AssertionError("fake endpoint/template mismatch")
+        endpoint["gpuIds"] = (
+            tars_runpod_release.PRE_MIG_EXCLUSION_GPU_POOL_SELECTOR
+        )
+        endpoint["version"] = endpoint.get("version", 0) + 1
+        return self.read_endpoint(endpoint_id)
+
+    def exclude_blackwell_mig(
+        self, endpoint_id: str, template_id: str
+    ) -> dict:
+        self.calls.append(f"exclude_blackwell_mig:{endpoint_id}")
+        endpoint = next(item for item in self.endpoints if item["id"] == endpoint_id)
+        if endpoint["templateId"] != template_id:
+            raise AssertionError("fake endpoint/template mismatch")
         endpoint["gpuIds"] = GPU_POOL_SELECTOR
         endpoint["version"] = endpoint.get("version", 0) + 1
         return self.read_endpoint(endpoint_id)
@@ -2627,6 +2640,18 @@ class RunpodReleaseTest(unittest.TestCase):
         )
         self.assertRegex(api.auths[0]["name"], r"^tars-runpod-auth-v2-[0-9a-f]{12}$")
 
+    def test_ordinary_topology_requires_blackwell_mig_exclusion(self) -> None:
+        api = FakeReleaseAPI()
+        api.seed_stable(self.IMAGE, version=8)
+        api.endpoints[0]["gpuIds"] = (
+            tars_runpod_release.PRE_MIG_EXCLUSION_GPU_POOL_SELECTOR
+        )
+
+        with self.assertRaisesRegex(RunpodReleaseError, "endpoint gpuIds"):
+            tars_runpod_release.verify_stable_topology(
+                api, ids=self.stable_ids()
+            )
+
     def test_explicit_ada24_transition_updates_exact_stable_endpoint_once(
         self,
     ) -> None:
@@ -2650,7 +2675,10 @@ class RunpodReleaseTest(unittest.TestCase):
         )
 
         self.assertEqual(ids, self.stable_ids())
-        self.assertEqual(api.endpoints[0]["gpuIds"], GPU_POOL_SELECTOR)
+        self.assertEqual(
+            api.endpoints[0]["gpuIds"],
+            tars_runpod_release.PRE_MIG_EXCLUSION_GPU_POOL_SELECTOR,
+        )
         self.assertEqual(api.templates[0]["imageName"], self.IMAGE)
         self.assertEqual(
             api.calls, ["add_ada24_fallback:stable-endpoint"]
@@ -2795,7 +2823,9 @@ class RunpodReleaseTest(unittest.TestCase):
                 )
                 if endpoint["templateId"] != template_id:
                     raise AssertionError("fake endpoint/template mismatch")
-                endpoint["gpuIds"] = GPU_POOL_SELECTOR
+                endpoint["gpuIds"] = (
+                    tars_runpod_release.PRE_MIG_EXCLUSION_GPU_POOL_SELECTOR
+                )
                 return self.read_endpoint(endpoint_id)
 
         api = NoVersionTransitionAPI()
@@ -2915,6 +2945,289 @@ class RunpodReleaseTest(unittest.TestCase):
             api.calls, ["add_ada24_fallback:stable-endpoint"]
         )
 
+    def test_explicit_blackwell_mig_exclusion_updates_exact_endpoint_once(
+        self,
+    ) -> None:
+        class AppliedWithLostResponseAPI(FakeReleaseAPI):
+            def exclude_blackwell_mig(
+                self, endpoint_id: str, template_id: str
+            ) -> dict:
+                super().exclude_blackwell_mig(endpoint_id, template_id)
+                return {}
+
+        api = AppliedWithLostResponseAPI()
+        api.seed_stable(self.IMAGE, version=8)
+        api.endpoints[0]["gpuIds"] = (
+            tars_runpod_release.PRE_MIG_EXCLUSION_GPU_POOL_SELECTOR
+        )
+
+        ids = (
+            tars_runpod_release
+            .exclude_blackwell_mig_from_stable_endpoint(
+                api,
+                ids=self.stable_ids(),
+                sleeper=lambda _seconds: None,
+            )
+        )
+
+        self.assertEqual(ids, self.stable_ids())
+        self.assertEqual(api.endpoints[0]["gpuIds"], GPU_POOL_SELECTOR)
+        self.assertEqual(api.templates[0]["imageName"], self.IMAGE)
+        self.assertEqual(
+            api.calls, ["exclude_blackwell_mig:stable-endpoint"]
+        )
+        self.assertEqual(
+            api.health_calls,
+            ["stable-endpoint", "stable-endpoint"],
+        )
+
+    def test_explicit_blackwell_mig_exclusion_is_idempotent(self) -> None:
+        api = FakeReleaseAPI()
+        api.seed_stable(self.IMAGE, version=9)
+
+        ids = (
+            tars_runpod_release
+            .exclude_blackwell_mig_from_stable_endpoint(
+                api,
+                ids=self.stable_ids(),
+                sleeper=lambda _seconds: None,
+            )
+        )
+
+        self.assertEqual(ids, self.stable_ids())
+        self.assertEqual(api.calls, [])
+        self.assertEqual(api.health_calls, ["stable-endpoint"])
+
+    def test_blackwell_mig_exclusion_refuses_provider_work(self) -> None:
+        cases = (
+            ("queued", tars_runpod_release.EndpointHealth(1, 0), False),
+            ("in-progress", tars_runpod_release.EndpointHealth(0, 1), False),
+            ("active-worker", tars_runpod_release.EndpointHealth(0, 0), True),
+        )
+        for name, health, active_worker in cases:
+            with self.subTest(name=name):
+                api = FakeReleaseAPI()
+                api.seed_stable(self.IMAGE, version=8)
+                api.endpoints[0]["gpuIds"] = (
+                    tars_runpod_release
+                    .PRE_MIG_EXCLUSION_GPU_POOL_SELECTOR
+                )
+                api.health_by_endpoint["stable-endpoint"] = [health]
+                if active_worker:
+                    api.endpoints[0]["pods"] = [
+                        {"id": "worker", "desiredStatus": "RUNNING"}
+                    ]
+                    api.endpoints[0]["workers"] = [
+                        {
+                            "id": "worker",
+                            "image": self.IMAGE,
+                            "containerRegistryAuthId": "stable-auth",
+                            "slsVersion": 8,
+                        }
+                    ]
+
+                with self.assertRaisesRegex(
+                    RunpodReleaseError,
+                    "requires zero queued, in-progress, and active worker",
+                ):
+                    (
+                        tars_runpod_release
+                        .exclude_blackwell_mig_from_stable_endpoint(
+                            api,
+                            ids=self.stable_ids(),
+                            sleeper=lambda _seconds: None,
+                        )
+                    )
+                self.assertEqual(api.calls, [])
+
+    def test_blackwell_mig_exclusion_refuses_unreviewed_selector(self) -> None:
+        api = FakeReleaseAPI()
+        api.seed_stable(self.IMAGE, version=8)
+        api.endpoints[0]["gpuIds"] = "AMPERE_16,ADA_24"
+
+        with self.assertRaisesRegex(RunpodReleaseError, "endpoint gpuIds"):
+            (
+                tars_runpod_release
+                .exclude_blackwell_mig_from_stable_endpoint(
+                    api,
+                    ids=self.stable_ids(),
+                )
+            )
+
+        self.assertEqual(api.calls, [])
+        self.assertEqual(api.health_calls, [])
+
+    def test_blackwell_mig_exclusion_never_reissues_ambiguous_mutation(
+        self,
+    ) -> None:
+        class UnconfirmedTransitionAPI(FakeReleaseAPI):
+            def exclude_blackwell_mig(
+                self, endpoint_id: str, template_id: str
+            ) -> dict:
+                self.calls.append(f"exclude_blackwell_mig:{endpoint_id}")
+                return {}
+
+        api = UnconfirmedTransitionAPI()
+        api.seed_stable(self.IMAGE, version=8)
+        api.endpoints[0]["gpuIds"] = (
+            tars_runpod_release.PRE_MIG_EXCLUSION_GPU_POOL_SELECTOR
+        )
+        ticks = iter((0.0, 1.0))
+
+        with self.assertRaisesRegex(RunpodReleaseError, "did not converge"):
+            (
+                tars_runpod_release
+                .exclude_blackwell_mig_from_stable_endpoint(
+                    api,
+                    ids=self.stable_ids(),
+                    timeout_seconds=0.5,
+                    poll_seconds=0.1,
+                    sleeper=lambda _seconds: None,
+                    clock=lambda: next(ticks),
+                )
+            )
+
+        self.assertEqual(
+            api.calls, ["exclude_blackwell_mig:stable-endpoint"]
+        )
+
+    def test_blackwell_mig_exclusion_does_not_require_version_change(
+        self,
+    ) -> None:
+        class NoVersionTransitionAPI(FakeReleaseAPI):
+            def exclude_blackwell_mig(
+                self, endpoint_id: str, template_id: str
+            ) -> dict:
+                self.calls.append(f"exclude_blackwell_mig:{endpoint_id}")
+                endpoint = next(
+                    item
+                    for item in self.endpoints
+                    if item["id"] == endpoint_id
+                )
+                endpoint["gpuIds"] = GPU_POOL_SELECTOR
+                return self.read_endpoint(endpoint_id)
+
+        api = NoVersionTransitionAPI()
+        api.seed_stable(self.IMAGE, version=8)
+        api.endpoints[0]["gpuIds"] = (
+            tars_runpod_release.PRE_MIG_EXCLUSION_GPU_POOL_SELECTOR
+        )
+
+        (
+            tars_runpod_release
+            .exclude_blackwell_mig_from_stable_endpoint(
+                api,
+                ids=self.stable_ids(),
+                sleeper=lambda _seconds: None,
+            )
+        )
+
+        self.assertEqual(api.endpoints[0]["version"], 8)
+        self.assertEqual(
+            api.calls, ["exclude_blackwell_mig:stable-endpoint"]
+        )
+
+    def test_blackwell_mig_exclusion_refuses_image_drift(self) -> None:
+        class ImageDriftTransitionAPI(FakeReleaseAPI):
+            def exclude_blackwell_mig(
+                self, endpoint_id: str, template_id: str
+            ) -> dict:
+                result = super().exclude_blackwell_mig(
+                    endpoint_id, template_id
+                )
+                self.templates[0]["imageName"] = (
+                    RunpodReleaseTest.TARGET_IMAGE
+                )
+                return result
+
+        api = ImageDriftTransitionAPI()
+        api.seed_stable(self.IMAGE, version=8)
+        api.endpoints[0]["gpuIds"] = (
+            tars_runpod_release.PRE_MIG_EXCLUSION_GPU_POOL_SELECTOR
+        )
+
+        with self.assertRaisesRegex(
+            RunpodReleaseError, "stable template image"
+        ):
+            (
+                tars_runpod_release
+                .exclude_blackwell_mig_from_stable_endpoint(
+                    api,
+                    ids=self.stable_ids(),
+                    sleeper=lambda _seconds: None,
+                )
+            )
+
+        self.assertEqual(
+            api.calls, ["exclude_blackwell_mig:stable-endpoint"]
+        )
+
+    def test_blackwell_mig_exclusion_cli_requires_confirmation(self) -> None:
+        api = FakeReleaseAPI()
+        api.seed_stable(self.IMAGE, version=8)
+        api.endpoints[0]["gpuIds"] = (
+            tars_runpod_release.PRE_MIG_EXCLUSION_GPU_POOL_SELECTOR
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            paths: dict[str, Path] = {}
+            for name, value in {
+                "api": "runpod-key",
+                "endpoint": "stable-endpoint",
+                "template": "stable-template",
+                "auth": "stable-auth",
+            }.items():
+                path = root / name
+                path.write_text(value, encoding="utf-8")
+                path.chmod(0o600)
+                paths[name] = path
+            arguments = [
+                "tars_runpod_release.py",
+                "exclude-blackwell-mig",
+                "--api-key-file",
+                str(paths["api"]),
+                "--endpoint-id-file",
+                str(paths["endpoint"]),
+                "--template-id-file",
+                str(paths["template"]),
+                "--auth-id-file",
+                str(paths["auth"]),
+            ]
+            with (
+                mock.patch("sys.argv", arguments),
+                mock.patch("sys.stderr", io.StringIO()),
+                mock.patch.object(
+                    tars_runpod_release,
+                    "RunpodClient",
+                    return_value=api,
+                ),
+                self.assertRaises(SystemExit) as exit_error,
+            ):
+                tars_runpod_release.main()
+            self.assertEqual(exit_error.exception.code, 1)
+            self.assertEqual(api.calls, [])
+
+            with (
+                mock.patch(
+                    "sys.argv",
+                    [
+                        *arguments,
+                        "--confirm-exclude-blackwell-mig",
+                    ],
+                ),
+                mock.patch("sys.stdout", io.StringIO()),
+                mock.patch.object(
+                    tars_runpod_release,
+                    "RunpodClient",
+                    return_value=api,
+                ),
+            ):
+                tars_runpod_release.main()
+
+        self.assertEqual(
+            api.calls, ["exclude_blackwell_mig:stable-endpoint"]
+        )
+
     def test_ordinary_deploy_never_invokes_ada24_transition(self) -> None:
         workflow = (
             Path(__file__).resolve().parents[2]
@@ -2924,6 +3237,10 @@ class RunpodReleaseTest(unittest.TestCase):
         )
         self.assertNotIn(
             "add-ada24-fallback",
+            workflow.read_text(encoding="utf-8"),
+        )
+        self.assertNotIn(
+            "exclude-blackwell-mig",
             workflow.read_text(encoding="utf-8"),
         )
 
@@ -2939,6 +3256,9 @@ class RunpodReleaseTest(unittest.TestCase):
             "Rerun the same idempotent",
             "wait for exact 1/1 convergence",
             "verify API readiness",
+            "exclude-blackwell-mig",
+            tars_runpod_release.BLACKWELL_MIG_GPU_ID,
+            "Never overlap this selector migration",
         ):
             with self.subTest(required=required):
                 self.assertIn(required, runbook)
@@ -2946,6 +3266,26 @@ class RunpodReleaseTest(unittest.TestCase):
             "Use an exit trap like the migration procedure below",
             runbook,
         )
+
+    def test_adoption_accepts_pre_exclusion_selector(self) -> None:
+        api = FakeReleaseAPI()
+        api.seed_release(
+            "a" * 40,
+            "current",
+            datetime.now(timezone.utc) - timedelta(days=1),
+        )
+        api.endpoints[0]["gpuIds"] = (
+            tars_runpod_release.PRE_MIG_EXCLUSION_GPU_POOL_SELECTOR
+        )
+        ids = tars_runpod_release.StableResourceIDs(
+            "endpoint-current", "template-current", "auth-current"
+        )
+
+        endpoint, _, _ = tars_runpod_release.verify_adoptable_topology(
+            api, ids=ids
+        )
+
+        self.assertEqual(endpoint["id"], ids.endpoint_id)
 
     def test_explicit_migration_adopts_existing_ids_without_creation(self) -> None:
         api = FakeReleaseAPI()
@@ -3392,7 +3732,8 @@ class RunpodReleaseTest(unittest.TestCase):
             'name: "tars-runpod-endpoint-v2"',
             'templateId: "stable-template"',
             'type: "QB"',
-            f'gpuIds: "{GPU_POOL_SELECTOR}"',
+            "gpuIds: "
+            f'"{tars_runpod_release.PRE_MIG_EXCLUSION_GPU_POOL_SELECTOR}"',
             "idleTimeout: 5",
             'locations: ""',
             "networkVolumeId: null",
@@ -3485,6 +3826,94 @@ class RunpodReleaseTest(unittest.TestCase):
                         )
 
                 self.assertEqual(graphql.call_count, 1)
+
+    def test_blackwell_mig_exclusion_uses_one_full_graphql_save(self) -> None:
+        client = RunpodClient("api-key")
+        with mock.patch.object(
+            client,
+            "_graphql",
+            return_value={
+                "saveEndpoint": {
+                    "id": "stable-endpoint",
+                    "name": "tars-runpod-endpoint-v2",
+                }
+            },
+        ) as graphql:
+            updated = client.exclude_blackwell_mig(
+                "stable-endpoint", "stable-template"
+            )
+
+        self.assertEqual(updated["id"], "stable-endpoint")
+        graphql.assert_called_once()
+        self.assertEqual(
+            graphql.call_args.args[0],
+            "exclude incompatible stable Blackwell MIG GPU",
+        )
+        self.assertEqual(graphql.call_args.kwargs["max_calls"], 1)
+        query = graphql.call_args.args[1]
+        for field in (
+            'id: "stable-endpoint"',
+            'name: "tars-runpod-endpoint-v2"',
+            'templateId: "stable-template"',
+            'type: "QB"',
+            f'gpuIds: "{GPU_POOL_SELECTOR}"',
+            "idleTimeout: 5",
+            'locations: ""',
+            "networkVolumeId: null",
+            "flashBootType: OFF",
+            'scalerType: "REQUEST_COUNT"',
+            "scalerValue: 1",
+            "workersMin: 0",
+            "workersMax: 2",
+        ):
+            with self.subTest(field=field):
+                self.assertIn(field, query)
+
+    def test_blackwell_mig_exclusion_lost_response_is_not_retried(
+        self,
+    ) -> None:
+        client = RunpodClient("api-key")
+        with mock.patch.object(
+            client,
+            "_graphql",
+            side_effect=RunpodReleaseError("response lost"),
+        ) as graphql:
+            self.assertEqual(
+                client.exclude_blackwell_mig(
+                    "stable-endpoint", "stable-template"
+                ),
+                {},
+            )
+
+        self.assertEqual(graphql.call_count, 1)
+        self.assertEqual(graphql.call_args.kwargs["max_calls"], 1)
+
+    def test_retirement_accepts_each_reviewed_historical_selector(
+        self,
+    ) -> None:
+        for selector in (
+            tars_runpod_release.PRE_ADA24_GPU_POOL_SELECTOR,
+            tars_runpod_release.PRE_MIG_EXCLUSION_GPU_POOL_SELECTOR,
+            GPU_POOL_SELECTOR,
+        ):
+            with self.subTest(selector=selector):
+                endpoint = FakeReleaseAPI.endpoint(
+                    endpoint_id="endpoint-old",
+                    name="tars-runpod-endpoint-v1-" + "a" * 40,
+                    template_id="template-old",
+                    created=datetime.now(timezone.utc),
+                )
+                endpoint["gpuIds"] = selector
+                self.assertEqual(
+                    tars_runpod_release.verify_retirement_endpoint(
+                        endpoint,
+                        expected_name=endpoint["name"],
+                        template_id="template-old",
+                        workers_max=2,
+                        variant="current",
+                    ),
+                    "endpoint-old",
+                )
 
     def test_explicit_legacy_retirement_is_exact_idempotent_and_protects_stable(
         self,
@@ -3728,7 +4157,13 @@ class RunpodReleaseTest(unittest.TestCase):
         self.assertNotIn("computeType", query)
         self.assertEqual(
             GPU_POOL_SELECTOR.split(","),
-            ["AMPERE_16", "AMPERE_24", "ADA_24"],
+            [
+                "AMPERE_16",
+                "AMPERE_24",
+                "ADA_24",
+                "-"
+                + tars_runpod_release.BLACKWELL_MIG_GPU_ID,
+            ],
         )
         patch_endpoint.assert_called_once_with(
             endpoint_id="endpoint1",
