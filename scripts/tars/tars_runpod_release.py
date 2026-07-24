@@ -30,7 +30,7 @@ import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Mapping, Protocol
+from typing import Any, Callable, Mapping, Protocol, TypeVar
 
 
 GRAPHQL_URL = "https://api.runpod.io/graphql"
@@ -89,6 +89,35 @@ class RunpodReleaseError(RuntimeError):
 
 class RunpodDefinitiveRequestError(RunpodReleaseError):
     """A provider response that proves the requested mutation was rejected."""
+
+
+class RunpodWorkerInventoryCorrelationError(RunpodReleaseError):
+    """A transient disagreement between Runpod's worker inventory reads."""
+
+
+_T = TypeVar("_T")
+
+
+def _retry_worker_inventory_correlation(
+    operation: Callable[[], _T],
+    *,
+    sleeper: Callable[[float], None] = time.sleep,
+) -> _T:
+    """Retry only cross-source worker races, at most three observations.
+
+    Each observation contains the required GraphQL and REST reads. Their
+    transport-level retry budgets remain independently capped by
+    ``MAX_TRANSIENT_CALLS``.
+    """
+
+    for attempt in range(1, MAX_TRANSIENT_CALLS + 1):
+        try:
+            return operation()
+        except RunpodWorkerInventoryCorrelationError:
+            if attempt == MAX_TRANSIENT_CALLS:
+                raise
+            sleeper(float(2 ** (attempt - 1)))
+    raise AssertionError("worker inventory retry loop did not return")
 
 
 class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
@@ -1370,7 +1399,7 @@ def _stable_inventory_resources(
     return endpoint, template, auth
 
 
-def verify_stable_topology(
+def _verify_stable_topology_once(
     client: ReleaseAPI,
     *,
     ids: StableResourceIDs,
@@ -1423,6 +1452,25 @@ def verify_stable_topology(
         version=version,
     )
     return endpoint, template, rest_endpoint
+
+
+def verify_stable_topology(
+    client: ReleaseAPI,
+    *,
+    ids: StableResourceIDs,
+    expected_image: str | None = None,
+    sleeper: Callable[[float], None] = time.sleep,
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    """Prove the stable topology from one correlated worker observation."""
+
+    return _retry_worker_inventory_correlation(
+        lambda: _verify_stable_topology_once(
+            client,
+            ids=ids,
+            expected_image=expected_image,
+        ),
+        sleeper=sleeper,
+    )
 
 
 def _endpoint_version(endpoint: Mapping[str, Any]) -> int:
@@ -1489,18 +1537,18 @@ def _active_workers(
     }
     missing = active_ids - set(workers_by_id)
     if missing:
-        raise RunpodReleaseError(
+        raise RunpodWorkerInventoryCorrelationError(
             "Runpod active worker is missing from the worker-inclusive endpoint read"
         )
     unclassified = set(workers_by_id) - set(statuses)
     if unclassified:
-        raise RunpodReleaseError(
+        raise RunpodWorkerInventoryCorrelationError(
             "Runpod REST worker is missing an authoritative worker status"
         )
     return tuple(workers_by_id[worker_id] for worker_id in sorted(active_ids))
 
 
-def _stable_observation(
+def _stable_observation_once(
     client: ReleaseAPI, ids: StableResourceIDs
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     inventory_endpoint, _, _ = _stable_inventory_resources(client, ids)
@@ -1513,7 +1561,22 @@ def _stable_observation(
     )
     _endpoint_version(rest_endpoint)
     _workers(rest_endpoint)
+    _active_workers(inventory_endpoint, rest_endpoint)
     return inventory_endpoint, rest_endpoint
+
+
+def _stable_observation(
+    client: ReleaseAPI,
+    ids: StableResourceIDs,
+    *,
+    sleeper: Callable[[float], None] = time.sleep,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Read GraphQL and REST worker state as one bounded observation."""
+
+    return _retry_worker_inventory_correlation(
+        lambda: _stable_observation_once(client, ids),
+        sleeper=sleeper,
+    )
 
 
 def wait_for_stable_idle(
@@ -1531,8 +1594,10 @@ def wait_for_stable_idle(
         raise ValueError("Runpod rollout timing must be positive")
     deadline = clock() + timeout_seconds
     while True:
+        inventory_endpoint, rest_endpoint = _stable_observation(
+            client, ids, sleeper=sleeper
+        )
         health = client.read_endpoint_health(ids.endpoint_id)
-        inventory_endpoint, rest_endpoint = _stable_observation(client, ids)
         if (
             health.in_queue == 0
             and health.in_progress == 0
@@ -1619,9 +1684,12 @@ def wait_for_stable_version(
                 client,
                 ids=ids,
                 expected_image=image,
+                sleeper=sleeper,
             )
             version = _endpoint_version(endpoint)
             active = _active_workers(inventory_endpoint, endpoint)
+        except RunpodWorkerInventoryCorrelationError:
+            raise
         except RunpodReleaseError:
             version = -1
             active = ({"not": "converged"},)
@@ -1671,7 +1739,9 @@ def wait_for_active_worker_generation(
         raise ValueError("Runpod rollout timing must be positive")
     deadline = clock() + timeout_seconds
     while True:
-        inventory_endpoint, endpoint = _stable_observation(client, ids)
+        inventory_endpoint, endpoint = _stable_observation(
+            client, ids, sleeper=sleeper
+        )
         try:
             _verify_endpoint_template(endpoint, ids=ids, image=image)
             _expect_equal(
@@ -2639,7 +2709,10 @@ def wait_for_adopted_topology(
     while True:
         try:
             endpoint, _, rest_endpoint = verify_stable_topology(
-                client, ids=ids, expected_image=image
+                client,
+                ids=ids,
+                expected_image=image,
+                sleeper=sleeper,
             )
             health = client.read_endpoint_health(ids.endpoint_id)
             if (
@@ -2648,6 +2721,8 @@ def wait_for_adopted_topology(
                 and not _active_workers(endpoint, rest_endpoint)
             ):
                 return
+        except RunpodWorkerInventoryCorrelationError:
+            raise
         except RunpodReleaseError:
             pass
         if clock() >= deadline:

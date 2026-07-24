@@ -1036,6 +1036,51 @@ class FakeReleaseAPI:
         return self.inventory()
 
 
+class RacingWorkerInventoryAPI(FakeReleaseAPI):
+    ACTIVE_MISSING_REST = "active-missing-rest"
+    REST_MISSING_STATUS = "rest-missing-status"
+
+    def __init__(self, race: str, transient_reads: int) -> None:
+        super().__init__()
+        if race not in (
+            self.ACTIVE_MISSING_REST,
+            self.REST_MISSING_STATUS,
+        ):
+            raise ValueError("invalid worker inventory race")
+        if transient_reads < 0:
+            raise ValueError("transient reads must not be negative")
+        self.race = race
+        self.transient_reads = transient_reads
+        self.correlation_inventory_calls = 0
+        self.correlation_endpoint_calls = 0
+
+    def inventory(self) -> Inventory:
+        self.correlation_inventory_calls += 1
+        inventory = super().inventory()
+        if (
+            self.race == self.REST_MISSING_STATUS
+            and self.correlation_inventory_calls <= self.transient_reads
+        ):
+            endpoints = tuple(
+                {**endpoint, "pods": []}
+                if endpoint.get("id") == "stable-endpoint"
+                else endpoint
+                for endpoint in inventory.endpoints
+            )
+            return Inventory(endpoints, inventory.templates, inventory.auths)
+        return inventory
+
+    def read_endpoint(self, endpoint_id: str) -> dict:
+        self.correlation_endpoint_calls += 1
+        endpoint = super().read_endpoint(endpoint_id)
+        if (
+            self.race == self.ACTIVE_MISSING_REST
+            and self.correlation_endpoint_calls <= self.transient_reads
+        ):
+            endpoint["workers"] = []
+        return endpoint
+
+
 class RunpodReleaseTest(unittest.TestCase):
     IMAGE = (
         "registry.digitalocean.com/lascade/tars:gpu-sha-"
@@ -1076,6 +1121,29 @@ class RunpodReleaseTest(unittest.TestCase):
         return tars_runpod_release.StableResourceIDs(
             "stable-endpoint", "stable-template", "stable-auth"
         )
+
+    def racing_worker_api(
+        self,
+        race: str,
+        transient_reads: int,
+        *,
+        desired_status: str = "RUNNING",
+        worker_image: str | None = None,
+    ) -> RacingWorkerInventoryAPI:
+        api = RacingWorkerInventoryAPI(race, transient_reads)
+        api.seed_stable(self.TARGET_IMAGE, version=8)
+        api.endpoints[0]["pods"] = [
+            {"id": "worker", "desiredStatus": desired_status}
+        ]
+        api.endpoints[0]["workers"] = [
+            {
+                "id": "worker",
+                "image": worker_image or self.TARGET_IMAGE,
+                "containerRegistryAuthId": "stable-auth",
+                "slsVersion": 8,
+            }
+        ]
+        return api
 
     @classmethod
     def stable_update_receipt(
@@ -1963,6 +2031,177 @@ class RunpodReleaseTest(unittest.TestCase):
                 ids=self.stable_ids(),
                 expected_image=self.TARGET_IMAGE,
             )
+
+    def test_stable_topology_retries_active_worker_missing_from_rest_once(
+        self,
+    ) -> None:
+        api = self.racing_worker_api(
+            RacingWorkerInventoryAPI.ACTIVE_MISSING_REST,
+            1,
+        )
+
+        sleeps: list[float] = []
+        endpoint, template, rest_endpoint = (
+            tars_runpod_release.verify_stable_topology(
+                api,
+                ids=self.stable_ids(),
+                expected_image=self.TARGET_IMAGE,
+                sleeper=sleeps.append,
+            )
+        )
+
+        self.assertEqual(endpoint["id"], "stable-endpoint")
+        self.assertEqual(template["id"], "stable-template")
+        self.assertEqual(rest_endpoint["workers"][0]["id"], "worker")
+        self.assertEqual(api.correlation_inventory_calls, 2)
+        self.assertEqual(api.correlation_endpoint_calls, 2)
+        self.assertEqual(sleeps, [1.0])
+
+    def test_stable_idle_retries_rest_worker_missing_status_twice(
+        self,
+    ) -> None:
+        api = self.racing_worker_api(
+            RacingWorkerInventoryAPI.REST_MISSING_STATUS,
+            2,
+            desired_status="EXITED",
+        )
+
+        sleeps: list[float] = []
+        tars_runpod_release.wait_for_stable_idle(
+            api,
+            ids=self.stable_ids(),
+            sleeper=sleeps.append,
+        )
+
+        self.assertEqual(api.correlation_inventory_calls, 3)
+        self.assertEqual(api.correlation_endpoint_calls, 3)
+        self.assertEqual(sleeps, [1.0, 2.0])
+        self.assertEqual(api.health_calls, ["stable-endpoint"])
+
+    def test_stable_idle_reads_health_after_correlated_worker_state(self) -> None:
+        events: list[str] = []
+
+        class OrderedHealthAPI(FakeReleaseAPI):
+            def inventory(self) -> Inventory:
+                events.append("inventory")
+                return super().inventory()
+
+            def read_endpoint(self, endpoint_id: str) -> dict:
+                events.append("rest")
+                return super().read_endpoint(endpoint_id)
+
+            def read_endpoint_health(
+                self, endpoint_id: str
+            ) -> tars_runpod_release.EndpointHealth:
+                events.append("health")
+                return super().read_endpoint_health(endpoint_id)
+
+        api = OrderedHealthAPI()
+        api.seed_stable(self.TARGET_IMAGE, version=8)
+
+        tars_runpod_release.wait_for_stable_idle(
+            api,
+            ids=self.stable_ids(),
+            sleeper=lambda _seconds: None,
+        )
+
+        self.assertEqual(events, ["inventory", "rest", "health"])
+
+    def test_stable_topology_fails_on_third_inventory_correlation_race(
+        self,
+    ) -> None:
+        for race, message in (
+            (
+                RacingWorkerInventoryAPI.ACTIVE_MISSING_REST,
+                "active worker is missing",
+            ),
+            (
+                RacingWorkerInventoryAPI.REST_MISSING_STATUS,
+                "authoritative worker status",
+            ),
+        ):
+            with self.subTest(race=race):
+                api = self.racing_worker_api(race, 3)
+                sleeps: list[float] = []
+                with self.assertRaisesRegex(
+                    tars_runpod_release.RunpodWorkerInventoryCorrelationError,
+                    message,
+                ):
+                    tars_runpod_release.verify_stable_topology(
+                        api,
+                        ids=self.stable_ids(),
+                        expected_image=self.TARGET_IMAGE,
+                        sleeper=sleeps.append,
+                    )
+                self.assertEqual(api.correlation_inventory_calls, 3)
+                self.assertEqual(api.correlation_endpoint_calls, 3)
+                self.assertEqual(sleeps, [1.0, 2.0])
+
+    def test_stable_topology_does_not_retry_generation_mismatch(self) -> None:
+        api = self.racing_worker_api(
+            RacingWorkerInventoryAPI.ACTIVE_MISSING_REST,
+            0,
+            worker_image=self.IMAGE,
+        )
+
+        with self.assertRaisesRegex(
+            RunpodReleaseError, "active worker image"
+        ):
+            tars_runpod_release.verify_stable_topology(
+                api,
+                ids=self.stable_ids(),
+                expected_image=self.TARGET_IMAGE,
+                sleeper=lambda _seconds: self.fail(
+                    "a definitive generation mismatch must not be retried"
+                ),
+            )
+
+        self.assertEqual(api.correlation_inventory_calls, 1)
+        self.assertEqual(api.correlation_endpoint_calls, 1)
+
+    def test_stable_version_does_not_restart_correlation_budget(self) -> None:
+        api = self.racing_worker_api(
+            RacingWorkerInventoryAPI.REST_MISSING_STATUS,
+            3,
+        )
+        sleeps: list[float] = []
+
+        with self.assertRaises(
+            tars_runpod_release.RunpodWorkerInventoryCorrelationError
+        ):
+            tars_runpod_release.wait_for_stable_version(
+                api,
+                ids=self.stable_ids(),
+                image=self.TARGET_IMAGE,
+                previous_version=7,
+                sleeper=sleeps.append,
+            )
+
+        self.assertEqual(api.correlation_inventory_calls, 3)
+        self.assertEqual(api.correlation_endpoint_calls, 3)
+        self.assertEqual(sleeps, [1.0, 2.0])
+
+    def test_adoption_does_not_restart_correlation_budget(self) -> None:
+        api = self.racing_worker_api(
+            RacingWorkerInventoryAPI.ACTIVE_MISSING_REST,
+            3,
+        )
+        sleeps: list[float] = []
+
+        with self.assertRaises(
+            tars_runpod_release.RunpodWorkerInventoryCorrelationError
+        ):
+            tars_runpod_release.wait_for_adopted_topology(
+                api,
+                ids=self.stable_ids(),
+                image=self.TARGET_IMAGE,
+                minimum_version=8,
+                sleeper=sleeps.append,
+            )
+
+        self.assertEqual(api.correlation_inventory_calls, 3)
+        self.assertEqual(api.correlation_endpoint_calls, 3)
+        self.assertEqual(sleeps, [1.0, 2.0])
 
     def test_stable_stage_same_image_is_noop_without_version_bump(self) -> None:
         api = FakeReleaseAPI()
@@ -3737,6 +3976,38 @@ class WorkflowContractTest(unittest.TestCase):
         self.assertEqual(workflow.count("tars_runpod_release.py rollback"), 2)
         self.assertEqual(workflow.count("tars_runpod_release.py verify-target"), 2)
         self.assertEqual(workflow.count("verify-application \\"), 3)
+        self.assertEqual(workflow.count("--dispatcher-already-drained"), 3)
+        self.assertEqual(
+            workflow.count(
+                'deployer="/srv/tars/incoming/$target_sha/deploy/tars-deploy"'
+            ),
+            1,
+        )
+        self.assertEqual(
+            workflow.count(
+                'deployer="/srv/tars/incoming/$recovery_sha/deploy/tars-deploy"'
+            ),
+            1,
+        )
+        self.assertIn(
+            "RECOVERY_SHA: ${{ steps.payload.outputs.sha }}",
+            workflow,
+        )
+        self.assertNotIn("--filter desired-state=running", workflow)
+        dispatcher_zero_scales = workflow.count(
+            "docker service scale tars_dispatcher=0"
+        ) + workflow.count('docker service scale "$service=0"')
+        self.assertEqual(dispatcher_zero_scales, 5)
+        self.assertEqual(
+            workflow.count("--format '{{.CurrentState}}'"),
+            dispatcher_zero_scales,
+        )
+        self.assertEqual(
+            workflow.count(
+                "Complete|Shutdown|Failed|Rejected|Remove|Orphaned"
+            ),
+            dispatcher_zero_scales,
+        )
         self.assertNotIn("tars_runpod_release.py finalize", workflow)
         self.assertNotIn("tars_runpod_release.py ensure", workflow)
         self.assertNotIn("tars_runpod_release.py pre-prune", workflow)
@@ -3961,6 +4232,11 @@ class WorkflowContractTest(unittest.TestCase):
         self.assertLess(rollback, cleanup)
         rollback_command = deploy[rollback:cleanup]
         self.assertIn("if: failure() || cancelled()", rollback_command)
+        self.assertIn("--dispatcher-already-drained", rollback_command)
+        self.assertIn(
+            'deployer="/srv/tars/incoming/$target_sha/deploy/tars-deploy"',
+            rollback_command,
+        )
         self.assertIn("docker service scale \"$service=0\"", rollback_command)
         self.assertIn("tars_runpod_release.py rollback", rollback_command)
         self.assertIn("/srv/tars/deployment/runpod-rollout-boundary.json", rollback_command)
@@ -4028,6 +4304,8 @@ class WorkflowContractTest(unittest.TestCase):
         bootstrap_command = deploy[bootstrap:application]
         self.assertIn('--bundle-dir "$bundle" || exit', bootstrap_command)
         self.assertNotIn("stateful_record=", deploy)
+        application_command = deploy[application:accepted_provider]
+        self.assertIn("--dispatcher-already-drained", application_command)
 
     def test_delivery_workflow_uses_latest_reviewed_action_versions(self) -> None:
         workflow = (self.ROOT / ".github/workflows/tars-deploy.yml").read_text(

@@ -845,8 +845,17 @@ jobs:
           case "$endpoint_id" in ""|*[!A-Za-z0-9_-]*) exit 64 ;; esac
           docker service scale "$service=0" >/dev/null
           deadline=$(( $(date +%s) + 8400 ))
-          while [ -n "$(docker service ps \
-            --filter desired-state=running --format '{{.ID}}' "$service")" ]; do
+          while :; do
+            if ! current_states="$(docker service ps --no-trunc \
+              --format '{{.CurrentState}}' "$service")"; then
+              echo "could not inspect dispatcher task state" >&2
+              exit 1
+            fi
+            if printf '%s\n' "$current_states" |
+              awk 'NF && $1 !~ /^(Complete|Shutdown|Failed|Rejected|Remove|Orphaned)$/ { exit 1 }'
+            then
+              break
+            fi
             if [ "$(date +%s)" -ge "$deadline" ]; then
               echo "dispatcher did not drain before interrupted recovery" >&2
               exit 1
@@ -1002,6 +1011,7 @@ jobs:
           CLASSIFICATION: ${{ steps.interrupted-app.outputs.classification }}
           PRIOR_SHA: ${{ steps.interrupted.outputs.prior_release_sha }}
           TARGET_SHA: ${{ steps.interrupted.outputs.release_sha }}
+          RECOVERY_SHA: ${{ steps.payload.outputs.sha }}
           SSH_HOST: ${{ steps.connection.outputs.host }}
           SSH_USER: ${{ steps.connection.outputs.user }}
         run: |
@@ -1023,6 +1033,7 @@ jobs:
           classification=$1
           prior_sha=$2
           target_sha=$3
+          recovery_sha=$4
           if docker config inspect tars_deploy_lock >/dev/null 2>&1; then
             owner="$(docker config inspect tars_deploy_lock \
               --format '{{index .Spec.Labels "tars.owner"}}')"
@@ -1044,15 +1055,35 @@ jobs:
               --current-main-sha "$release_sha" \
               --bundle-dir "$bundle"
           fi
-          "$bundle/deploy/tars-deploy" deploy \
+          deployer="/srv/tars/incoming/$recovery_sha/deploy/tars-deploy"
+          "$deployer" deploy \
+            --dispatcher-already-drained \
             --release-env "$bundle/.release.env" \
             --release-sha "$release_sha" \
             --current-main-sha "$release_sha" \
             --bundle-dir "$bundle"
           docker service scale tars_dispatcher=0 >/dev/null
+          deadline=$(( $(date +%s) + 8400 ))
+          while :; do
+            if ! current_states="$(docker service ps --no-trunc \
+              --format '{{.CurrentState}}' tars_dispatcher)"; then
+              echo "could not inspect dispatcher task state" >&2
+              exit 1
+            fi
+            if printf '%s\n' "$current_states" |
+              awk 'NF && $1 !~ /^(Complete|Shutdown|Failed|Rejected|Remove|Orphaned)$/ { exit 1 }'
+            then
+              break
+            fi
+            if [ "$(date +%s)" -ge "$deadline" ]; then
+              echo "dispatcher did not drain after interrupted application repair" >&2
+              exit 1
+            fi
+            sleep 5
+          done
           REMOTE
           } | ssh "${ssh_options[@]}" "$target" /bin/bash -s -- \
-            "$CLASSIFICATION" "$PRIOR_SHA" "$TARGET_SHA"
+            "$CLASSIFICATION" "$PRIOR_SHA" "$TARGET_SHA" "$RECOVERY_SHA"
 
       - name: Verify recovery and retire the interrupted boundary
         if: steps.initial-app.outputs.interrupted == 'true'
@@ -1322,9 +1353,17 @@ jobs:
           test "$recorded_sha" = "$release_sha"
           docker service scale tars_dispatcher=0 >/dev/null
           deadline=$(( $(date +%s) + 8400 ))
-          while [ -n "$(docker service ps \
-            --filter desired-state=running --format '{{.ID}}' \
-            tars_dispatcher)" ]; do
+          while :; do
+            if ! current_states="$(docker service ps --no-trunc \
+              --format '{{.CurrentState}}' tars_dispatcher)"; then
+              echo "could not inspect dispatcher task state" >&2
+              exit 1
+            fi
+            if printf '%s\n' "$current_states" |
+              awk 'NF && $1 !~ /^(Complete|Shutdown|Failed|Rejected|Remove|Orphaned)$/ { exit 1 }'
+            then
+              break
+            fi
             if [ "$(date +%s)" -ge "$deadline" ]; then
               echo "dispatcher did not drain after durable baseline" >&2
               exit 1
@@ -1543,6 +1582,7 @@ jobs:
             --current-main-sha "$current_main_sha" \
             --bundle-dir "$bundle" || exit
           exec "$bundle/deploy/tars-deploy" deploy \
+            --dispatcher-already-drained \
             --release-env "$bundle/.release.env" \
             --release-sha "$release_sha" \
             --current-main-sha "$current_main_sha" \
@@ -1897,8 +1937,17 @@ jobs:
           fi
           docker service scale "$service=0" >/dev/null
           deadline=$(( $(date +%s) + 8400 ))
-          while [ -n "$(docker service ps \
-            --filter desired-state=running --format '{{.ID}}' "$service")" ]; do
+          while :; do
+            if ! current_states="$(docker service ps --no-trunc \
+              --format '{{.CurrentState}}' "$service")"; then
+              echo "could not inspect dispatcher task state" >&2
+              exit 1
+            fi
+            if printf '%s\n' "$current_states" |
+              awk 'NF && $1 !~ /^(Complete|Shutdown|Failed|Rejected|Remove|Orphaned)$/ { exit 1 }'
+            then
+              break
+            fi
             if [ "$(date +%s)" -ge "$deadline" ]; then
               echo "dispatcher did not drain before rollback" >&2
               exit 1
@@ -1998,16 +2047,26 @@ jobs:
                   --expected-owner "$target_sha"
               fi
               bundle="/srv/tars/incoming/$prior_sha"
-              "$bundle/deploy/tars-deploy" deploy \
+              deployer="/srv/tars/incoming/$target_sha/deploy/tars-deploy"
+              "$deployer" deploy \
+                --dispatcher-already-drained \
                 --release-env "$bundle/.release.env" \
                 --release-sha "$prior_sha" \
                 --current-main-sha "$prior_sha" \
                 --bundle-dir "$bundle"
               docker service scale tars_dispatcher=0 >/dev/null
               deadline=$(( $(date +%s) + 8400 ))
-              while [ -n "$(docker service ps \
-                --filter desired-state=running --format '{{.ID}}' \
-                tars_dispatcher)" ]; do
+              while :; do
+                if ! current_states="$(docker service ps --no-trunc \
+                  --format '{{.CurrentState}}' tars_dispatcher)"; then
+                  echo "could not inspect dispatcher task state" >&2
+                  exit 1
+                fi
+                if printf '%s\n' "$current_states" |
+                  awk 'NF && $1 !~ /^(Complete|Shutdown|Failed|Rejected|Remove|Orphaned)$/ { exit 1 }'
+                then
+                  break
+                fi
                 if [ "$(date +%s)" -ge "$deadline" ]; then
                   echo "dispatcher did not drain after application rollback" >&2
                   exit 1
