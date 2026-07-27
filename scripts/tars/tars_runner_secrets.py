@@ -30,16 +30,25 @@ DEPLOYMENT_KEYS = (
     "DEPLOY_SSH_PRIVATE_KEY",
     "DEPLOY_SSH_KNOWN_HOSTS",
     "WIREGUARD_CONFIG",
+    "RUNPOD_ENDPOINT_ID",
+    "RUNPOD_TEMPLATE_ID",
+    "RUNPOD_REGISTRY_AUTH_ID",
 )
 BUILD_KEYS = ("DOCR_WRITE_TOKEN",)
-DEPLOY_KEYS = (
-    "DOCR_READ_USERNAME",
-    "DOCR_READ_PASSWORD",
+CONNECTION_KEYS = (
     "DEPLOY_SSH_HOST",
     "DEPLOY_SSH_USER",
     "DEPLOY_SSH_PRIVATE_KEY",
     "DEPLOY_SSH_KNOWN_HOSTS",
     "WIREGUARD_CONFIG",
+)
+DEPLOY_KEYS = (
+    "DOCR_READ_USERNAME",
+    "DOCR_READ_PASSWORD",
+    *CONNECTION_KEYS,
+    "RUNPOD_ENDPOINT_ID",
+    "RUNPOD_TEMPLATE_ID",
+    "RUNPOD_REGISTRY_AUTH_ID",
 )
 RUNTIME_KEYS = (
     "POSTGRES_PASSWORD",
@@ -50,6 +59,7 @@ RUNTIME_KEYS = (
     "GARAGE_ACCESS_KEY_ID",
     "GARAGE_SECRET_ACCESS_KEY",
     "ONEUPTIME_TOKEN",
+    "RUNPOD_API_KEY",
 )
 REMOTE_KEYS = ("DOCR_READ_USERNAME", "DOCR_READ_PASSWORD", *RUNTIME_KEYS)
 SSH_USER = re.compile(r"[a-z_][a-z0-9_-]{0,31}\Z")
@@ -152,7 +162,40 @@ def capture_build(
         values = required(environment, BUILD_KEYS)
         write_docker_config(values["DOCR_WRITE_TOKEN"], output_directory)
     finally:
-        clear_exports(github_env, DEPLOYMENT_KEYS)
+        clear_exports(github_env, (*DEPLOYMENT_KEYS, *RUNTIME_KEYS))
+
+
+def write_connection(
+    values: Mapping[str, str],
+    output_directory: Path,
+    github_output: Path,
+) -> None:
+    encoded_wireguard = validate_connection(values)
+    mask_for_actions(encoded_wireguard)
+    write_private(
+        output_directory / "DEPLOY_SSH_PRIVATE_KEY",
+        values["DEPLOY_SSH_PRIVATE_KEY"],
+    )
+    write_private(
+        output_directory / "DEPLOY_SSH_KNOWN_HOSTS",
+        values["DEPLOY_SSH_KNOWN_HOSTS"],
+    )
+    append_output(github_output, "host", values["DEPLOY_SSH_HOST"])
+    append_output(github_output, "user", values["DEPLOY_SSH_USER"])
+    append_output(github_output, "wireguard_config", encoded_wireguard)
+
+
+def capture_connection(
+    environment: Mapping[str, str],
+    output_directory: Path,
+    github_output: Path,
+    github_env: Path,
+) -> None:
+    try:
+        values = required(environment, CONNECTION_KEYS)
+        write_connection(values, output_directory, github_output)
+    finally:
+        clear_exports(github_env, (*DEPLOYMENT_KEYS, *RUNTIME_KEYS))
 
 
 def capture_deploy(
@@ -163,22 +206,17 @@ def capture_deploy(
 ) -> None:
     try:
         values = required(environment, (*DEPLOY_KEYS, *RUNTIME_KEYS))
-        encoded_wireguard = validate_connection(values)
-        mask_for_actions(encoded_wireguard)
-        write_private(
-            output_directory / "DEPLOY_SSH_PRIVATE_KEY",
-            values["DEPLOY_SSH_PRIVATE_KEY"],
-        )
-        write_private(
-            output_directory / "DEPLOY_SSH_KNOWN_HOSTS",
-            values["DEPLOY_SSH_KNOWN_HOSTS"],
-        )
+        write_connection(values, output_directory, github_output)
+        write_private(output_directory / "RUNPOD_API_KEY", values["RUNPOD_API_KEY"])
+        for name in (
+            "RUNPOD_ENDPOINT_ID",
+            "RUNPOD_TEMPLATE_ID",
+            "RUNPOD_REGISTRY_AUTH_ID",
+        ):
+            write_private(output_directory / name, values[name])
         exports = ["export TARS_SECRET_SOURCE=environment"]
         exports.extend(f"export {name}={shlex.quote(values[name])}" for name in REMOTE_KEYS)
         write_private(output_directory / "remote-secrets.sh", "\n".join(exports) + "\n")
-        append_output(github_output, "host", values["DEPLOY_SSH_HOST"])
-        append_output(github_output, "user", values["DEPLOY_SSH_USER"])
-        append_output(github_output, "wireguard_config", encoded_wireguard)
     finally:
         clear_exports(github_env, (*DEPLOYMENT_KEYS, *RUNTIME_KEYS))
 
@@ -189,6 +227,10 @@ def main() -> None:
     build = commands.add_parser("capture-build")
     build.add_argument("--output-directory", type=Path, required=True)
     build.add_argument("--github-env", type=Path, required=True)
+    connection = commands.add_parser("capture-connection")
+    connection.add_argument("--output-directory", type=Path, required=True)
+    connection.add_argument("--github-output", type=Path, required=True)
+    connection.add_argument("--github-env", type=Path, required=True)
     deploy = commands.add_parser("capture-deploy")
     deploy.add_argument("--output-directory", type=Path, required=True)
     deploy.add_argument("--github-output", type=Path, required=True)
@@ -197,8 +239,15 @@ def main() -> None:
     try:
         if args.command == "capture-build":
             capture_build(os.environ, args.output_directory, args.github_env)
-        else:
+        elif args.command == "capture-deploy":
             capture_deploy(
+                os.environ,
+                args.output_directory,
+                args.github_output,
+                args.github_env,
+            )
+        else:
+            capture_connection(
                 os.environ,
                 args.output_directory,
                 args.github_output,

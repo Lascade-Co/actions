@@ -11,6 +11,10 @@ permissions:
 env:
   PYTHONDONTWRITEBYTECODE: "1"
 
+concurrency:
+  group: tars-production-delivery
+  cancel-in-progress: false
+
 jobs:
   build:
     name: Build immutable TARS release
@@ -19,16 +23,13 @@ jobs:
     permissions:
       contents: read
       packages: read
-      id-token: write
-    concurrency:
-      group: tars-deploy-build-${{ github.event.client_payload.repo }}
-      cancel-in-progress: true
     outputs:
       release_sha: ${{ steps.payload.outputs.sha }}
-      api_digest: ${{ steps.api.outputs.digest }}
-      worker_digest: ${{ steps.worker.outputs.digest }}
-      garage_digest: ${{ steps.garage.outputs.digest }}
-      otel_digest: ${{ steps.otel.outputs.digest }}
+      api_digest: ${{ steps.images.outputs.api_digest }}
+      dispatcher_digest: ${{ steps.images.outputs.dispatcher_digest }}
+      gpu_digest: ${{ steps.images.outputs.gpu_digest }}
+      garage_digest: ${{ steps.images.outputs.garage_digest }}
+      otel_digest: ${{ steps.images.outputs.otel_digest }}
       artifact_name: ${{ steps.bundle.outputs.artifact_name }}
     steps:
       - name: Check out central delivery code
@@ -83,6 +84,7 @@ jobs:
           python3 central/scripts/tars/tars_lock_outputs.py source/release/lock.json \
             --workflow central/.github/workflows/tars-ci.yml \
             --workflow central/.github/workflows/tars-deploy.yml \
+            --workflow central/.github/workflows/tars-unlock.yml \
             --github-output "$GITHUB_OUTPUT"
 
       - name: Fetch the locked TADA bundle outside the source build context
@@ -117,7 +119,7 @@ jobs:
           recursive: "false"
           export-type: env
 
-      - name: Capture the DOCR write credential and clear runner exports
+      - name: Capture build credentials in owner-only files and clear runner exports
         run: |
           umask 077
           python3 central/scripts/tars/tars_runner_secrets.py capture-build \
@@ -132,16 +134,44 @@ jobs:
 
       - name: Capture build metadata
         id: metadata
-        run: echo "built_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+        env:
+          RELEASE_SHA: ${{ steps.payload.outputs.sha }}
+        run: |
+          built_at="$(git -C source show -s --format=%cI "$RELEASE_SHA")"
+          source_date_epoch="$(git -C source show -s --format=%ct "$RELEASE_SHA")"
+          case "$source_date_epoch" in
+            ""|*[!0-9]*)
+              echo "invalid source commit timestamp" >&2
+              exit 1
+              ;;
+          esac
+          printf 'built_at=%s\n' "$built_at" >> "$GITHUB_OUTPUT"
+          printf 'source_date_epoch=%s\n' "$source_date_epoch" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve existing exact-SHA image tags
+        id: existing-images
+        env:
+          REGISTRY: ${{ steps.lock.outputs.registry }}
+          RELEASE_SHA: ${{ steps.payload.outputs.sha }}
+        run: |
+          python3 central/scripts/tars/tars_registry_release.py probe \
+            --registry "$REGISTRY" \
+            --release-sha "$RELEASE_SHA" \
+            --docker-config "$RUNNER_TEMP/tars-docker-config" \
+            --github-output "$GITHUB_OUTPUT"
 
       - name: Build and push API
         id: api
+        if: steps.existing-images.outputs.api_exists != 'true'
+        env:
+          SOURCE_DATE_EPOCH: ${{ steps.metadata.outputs.source_date_epoch }}
         uses: docker/build-push-action@v7.3.0
         with:
           context: source
           file: source/Dockerfile.api
           platforms: ${{ steps.lock.outputs.target_platform }}
           push: true
+          provenance: false
           tags: ${{ steps.lock.outputs.registry }}:api-sha-${{ steps.payload.outputs.sha }}
           build-args: |
             GO_IMAGE=${{ steps.lock.outputs.go_image }}
@@ -152,15 +182,19 @@ jobs:
           cache-from: type=gha,scope=tars-api
           cache-to: type=gha,mode=max,scope=tars-api
 
-      - name: Build and push worker with the locked private TADA bundle
-        id: worker
+      - name: Build and push dispatcher with the locked private TADA bundle
+        id: dispatcher
+        if: steps.existing-images.outputs.dispatcher_exists != 'true'
+        env:
+          SOURCE_DATE_EPOCH: ${{ steps.metadata.outputs.source_date_epoch }}
         uses: docker/build-push-action@v7.3.0
         with:
           context: source
-          file: source/Dockerfile.worker
+          file: source/Dockerfile.dispatcher
           platforms: ${{ steps.lock.outputs.target_platform }}
           push: true
-          tags: ${{ steps.lock.outputs.registry }}:worker-sha-${{ steps.payload.outputs.sha }}
+          provenance: false
+          tags: ${{ steps.lock.outputs.registry }}:dispatcher-sha-${{ steps.payload.outputs.sha }}
           build-contexts: |
             tada_bundle=${{ runner.temp }}/tada-bundle
           build-args: |
@@ -173,17 +207,47 @@ jobs:
             TARS_VERSION=sha-${{ steps.payload.outputs.sha }}
             TARS_REVISION=${{ steps.payload.outputs.sha }}
             TARS_BUILT_AT=${{ steps.metadata.outputs.built_at }}
-          cache-from: type=gha,scope=tars-worker
-          cache-to: type=gha,mode=max,scope=tars-worker
+          cache-from: type=gha,scope=tars-dispatcher
+          cache-to: type=gha,mode=max,scope=tars-dispatcher
+
+      - name: Build and push Runpod GPU worker with the same TADA bundle
+        id: gpu
+        if: steps.existing-images.outputs.gpu_exists != 'true'
+        env:
+          SOURCE_DATE_EPOCH: ${{ steps.metadata.outputs.source_date_epoch }}
+        uses: docker/build-push-action@v7.3.0
+        with:
+          context: source
+          file: source/Dockerfile.gpu
+          platforms: ${{ steps.lock.outputs.target_platform }}
+          push: true
+          provenance: false
+          tags: ${{ steps.lock.outputs.registry }}:gpu-sha-${{ steps.payload.outputs.sha }}
+          build-contexts: |
+            tada_bundle=${{ runner.temp }}/tada-bundle
+          build-args: |
+            UV_IMAGE=${{ steps.lock.outputs.uv_image }}
+            PYTHON_IMAGE=${{ steps.lock.outputs.python_image }}
+            TADA_REPOSITORY=${{ steps.lock.outputs.tada_repository }}
+            TADA_OCI=${{ steps.lock.outputs.tada_oci }}
+            TADA_REVISION=${{ steps.lock.outputs.tada_revision }}
+            TARS_VERSION=sha-${{ steps.payload.outputs.sha }}
+            TARS_REVISION=${{ steps.payload.outputs.sha }}
+          cache-from: type=gha,scope=tars-gpu
+          cache-to: type=gha,mode=max,scope=tars-gpu
 
       - name: Build and push Garage wrapper
         id: garage
+        if: steps.existing-images.outputs.garage_exists != 'true'
+        env:
+          SOURCE_DATE_EPOCH: ${{ steps.metadata.outputs.source_date_epoch }}
         uses: docker/build-push-action@v7.3.0
         with:
           context: source
           file: source/deploy/garage/Dockerfile
           platforms: ${{ steps.lock.outputs.target_platform }}
           push: true
+          provenance: false
           tags: ${{ steps.lock.outputs.registry }}:garage-sha-${{ steps.payload.outputs.sha }}
           build-args: |
             GARAGE_UPSTREAM_IMAGE=${{ steps.lock.outputs.garage_upstream_image }}
@@ -193,12 +257,16 @@ jobs:
 
       - name: Build and push OpenTelemetry wrapper
         id: otel
+        if: steps.existing-images.outputs.otel_exists != 'true'
+        env:
+          SOURCE_DATE_EPOCH: ${{ steps.metadata.outputs.source_date_epoch }}
         uses: docker/build-push-action@v7.3.0
         with:
           context: source
           file: source/deploy/otel/Dockerfile
           platforms: ${{ steps.lock.outputs.target_platform }}
           push: true
+          provenance: false
           tags: ${{ steps.lock.outputs.registry }}:otel-sha-${{ steps.payload.outputs.sha }}
           build-args: |
             OTEL_UPSTREAM_IMAGE=${{ steps.lock.outputs.otel_upstream_image }}
@@ -206,25 +274,79 @@ jobs:
           cache-from: type=gha,scope=tars-otel
           cache-to: type=gha,mode=max,scope=tars-otel
 
-      - name: Create exact-SHA deployment bundle and data-only release environment
+      - name: Verify the immutable image tag set
+        id: images
+        env:
+          API_BUILD_DIGEST: ${{ steps.api.outputs.digest }}
+          DISPATCHER_BUILD_DIGEST: ${{ steps.dispatcher.outputs.digest }}
+          GPU_BUILD_DIGEST: ${{ steps.gpu.outputs.digest }}
+          GARAGE_BUILD_DIGEST: ${{ steps.garage.outputs.digest }}
+          OTEL_BUILD_DIGEST: ${{ steps.otel.outputs.digest }}
+          REGISTRY: ${{ steps.lock.outputs.registry }}
+          RELEASE_SHA: ${{ steps.payload.outputs.sha }}
+        run: |
+          python3 central/scripts/tars/tars_registry_release.py verify \
+            --registry "$REGISTRY" \
+            --release-sha "$RELEASE_SHA" \
+            --docker-config "$RUNNER_TEMP/tars-docker-config" \
+            --expected-api-digest "$API_BUILD_DIGEST" \
+            --expected-dispatcher-digest "$DISPATCHER_BUILD_DIGEST" \
+            --expected-gpu-digest "$GPU_BUILD_DIGEST" \
+            --expected-garage-digest "$GARAGE_BUILD_DIGEST" \
+            --expected-otel-digest "$OTEL_BUILD_DIGEST" \
+            --github-output "$GITHUB_OUTPUT"
+
+      - name: Create the exact-SHA source bundle and verified digest metadata
         id: bundle
         env:
           RELEASE_SHA: ${{ steps.payload.outputs.sha }}
-          API_DIGEST: ${{ steps.api.outputs.digest }}
-          WORKER_DIGEST: ${{ steps.worker.outputs.digest }}
-          GARAGE_DIGEST: ${{ steps.garage.outputs.digest }}
-          OTEL_DIGEST: ${{ steps.otel.outputs.digest }}
+          API_DIGEST: ${{ steps.images.outputs.api_digest }}
+          DISPATCHER_DIGEST: ${{ steps.images.outputs.dispatcher_digest }}
+          GPU_DIGEST: ${{ steps.images.outputs.gpu_digest }}
+          GARAGE_DIGEST: ${{ steps.images.outputs.garage_digest }}
+          OTEL_DIGEST: ${{ steps.images.outputs.otel_digest }}
         run: |
           artifact="$RUNNER_TEMP/tars-release-artifact"
           install -d -m 0700 "$artifact"
-          python3 central/scripts/tars/tars_lock_outputs.py source/release/lock.json \
-            --release-env "$artifact/release.env" \
-            --api-digest "$API_DIGEST" \
-            --worker-digest "$WORKER_DIGEST" \
-            --garage-digest "$GARAGE_DIGEST" \
-            --otel-digest "$OTEL_DIGEST"
           printf '%s\n' "$RELEASE_SHA" > source/.tars-release-sha
           tar -C source --exclude=.git -czf "$artifact/tars-source.tar.gz" .
+          python3 - "$artifact/release-metadata.json" <<'PY'
+          import json
+          import os
+          import re
+          import sys
+          from pathlib import Path
+
+          sha = re.compile(r"[0-9a-f]{40}\Z")
+          digest = re.compile(r"sha256:[0-9a-f]{64}\Z")
+          metadata = {
+              "release_sha": os.environ["RELEASE_SHA"],
+              "api_digest": os.environ["API_DIGEST"],
+              "dispatcher_digest": os.environ["DISPATCHER_DIGEST"],
+              "gpu_digest": os.environ["GPU_DIGEST"],
+              "garage_digest": os.environ["GARAGE_DIGEST"],
+              "otel_digest": os.environ["OTEL_DIGEST"],
+          }
+          if sha.fullmatch(metadata["release_sha"]) is None:
+              raise SystemExit("release metadata contains an invalid SHA")
+          if any(
+              digest.fullmatch(value) is None
+              for key, value in metadata.items()
+              if key.endswith("_digest")
+          ):
+              raise SystemExit("release metadata contains an invalid image digest")
+          path = Path(sys.argv[1])
+          path.write_text(
+              json.dumps(metadata, sort_keys=True, separators=(",", ":")) + "\n",
+              encoding="utf-8",
+          )
+          path.chmod(0o600)
+          PY
+          (
+          cd "$artifact" || exit 1
+            sha256sum tars-source.tar.gz release-metadata.json > SHA256SUMS
+          )
+          chmod 0600 "$artifact/SHA256SUMS"
           artifact_name="tars-release-$RELEASE_SHA"
           echo "artifact_name=$artifact_name" >> "$GITHUB_OUTPUT"
 
@@ -242,7 +364,8 @@ jobs:
         if: always()
         run: |
           docker logout registry.digitalocean.com >/dev/null 2>&1 || true
-          rm -rf "${DOCKER_CONFIG:-$RUNNER_TEMP/tars-docker-config}"
+          config="${DOCKER_CONFIG:-$RUNNER_TEMP/tars-docker-config}"
+          rm -f "$config/config.json"
 
   deploy:
     name: Deploy TARS production
@@ -250,13 +373,7 @@ jobs:
     runs-on: ubuntu-24.04
     permissions:
       contents: read
-      id-token: write
-    # V1 caps worker_count at three. Forward + rollback each budget
-    # 3 * 50m + 5m, leaving 50m for bootstrap, migration, smoke, and transport.
     timeout-minutes: 360
-    concurrency:
-      group: tars-production-deploy
-      cancel-in-progress: false
     steps:
       - name: Check out central delivery code
         uses: actions/checkout@v7.0.0
@@ -305,16 +422,92 @@ jobs:
           name: ${{ needs.build.outputs.artifact_name }}
           path: ${{ runner.temp }}/tars-release-artifact
 
-      - name: Verify the local artifact interface
+      - name: Verify the local artifact interface and expose digest metadata
+        id: artifact
         env:
           RELEASE_SHA: ${{ steps.payload.outputs.sha }}
+          BUILT_API_DIGEST: ${{ needs.build.outputs.api_digest }}
+          BUILT_DISPATCHER_DIGEST: ${{ needs.build.outputs.dispatcher_digest }}
+          BUILT_GPU_DIGEST: ${{ needs.build.outputs.gpu_digest }}
+          BUILT_GARAGE_DIGEST: ${{ needs.build.outputs.garage_digest }}
+          BUILT_OTEL_DIGEST: ${{ needs.build.outputs.otel_digest }}
         run: |
+          artifact="$RUNNER_TEMP/tars-release-artifact"
           verify="$RUNNER_TEMP/tars-release-verify"
           install -d -m 0700 "$verify"
-          tar -xzf "$RUNNER_TEMP/tars-release-artifact/tars-source.tar.gz" -C "$verify"
+          python3 - "$artifact" "$GITHUB_OUTPUT" <<'PY'
+          import hashlib
+          import json
+          import os
+          import re
+          import stat
+          import sys
+          from pathlib import Path
+
+          root = Path(sys.argv[1])
+          output = Path(sys.argv[2])
+          expected_files = ("tars-source.tar.gz", "release-metadata.json")
+          manifest_path = root / "SHA256SUMS"
+          for path in (manifest_path, *(root / name for name in expected_files)):
+              metadata = path.lstat()
+              if not stat.S_ISREG(metadata.st_mode):
+                  raise SystemExit(f"artifact member is not a regular file: {path.name}")
+          lines = manifest_path.read_text(encoding="utf-8").splitlines()
+          if len(lines) != len(expected_files):
+              raise SystemExit("artifact checksum manifest has an invalid member count")
+          checksums = {}
+          for line in lines:
+              match = re.fullmatch(r"([0-9a-f]{64})  ([A-Za-z0-9.-]+)", line)
+              if match is None or match.group(2) not in expected_files:
+                  raise SystemExit("artifact checksum manifest is invalid")
+              if match.group(2) in checksums:
+                  raise SystemExit("artifact checksum manifest contains a duplicate")
+              checksums[match.group(2)] = match.group(1)
+          if set(checksums) != set(expected_files):
+              raise SystemExit("artifact checksum manifest is incomplete")
+          for name, expected in checksums.items():
+              actual = hashlib.sha256((root / name).read_bytes()).hexdigest()
+              if actual != expected:
+                  raise SystemExit(f"artifact checksum mismatch: {name}")
+
+          metadata = json.loads((root / "release-metadata.json").read_text("utf-8"))
+          keys = {
+              "release_sha",
+              "api_digest",
+              "dispatcher_digest",
+              "gpu_digest",
+              "garage_digest",
+              "otel_digest",
+          }
+          if not isinstance(metadata, dict) or set(metadata) != keys:
+              raise SystemExit("release metadata has an invalid schema")
+          if re.fullmatch(r"[0-9a-f]{40}", metadata["release_sha"]) is None:
+              raise SystemExit("release metadata SHA is invalid")
+          for key in keys - {"release_sha"}:
+              if re.fullmatch(r"sha256:[0-9a-f]{64}", metadata[key]) is None:
+                  raise SystemExit(f"release metadata digest is invalid: {key}")
+          expected = {
+              "release_sha": os.environ["RELEASE_SHA"],
+              "api_digest": os.environ["BUILT_API_DIGEST"],
+              "dispatcher_digest": os.environ["BUILT_DISPATCHER_DIGEST"],
+              "gpu_digest": os.environ["BUILT_GPU_DIGEST"],
+              "garage_digest": os.environ["BUILT_GARAGE_DIGEST"],
+              "otel_digest": os.environ["BUILT_OTEL_DIGEST"],
+          }
+          if metadata != expected:
+              raise SystemExit("artifact metadata does not match the build outputs")
+          with output.open("a", encoding="utf-8") as handle:
+              for key in sorted(keys - {"release_sha"}):
+                  handle.write(f"{key}={metadata[key]}\n")
+          PY
+          tar -xzf "$artifact/tars-source.tar.gz" -C "$verify"
           test "$(cat "$verify/.tars-release-sha")" = "$RELEASE_SHA"
           test -x "$verify/deploy/tars-deploy"
-          test -s "$RUNNER_TEMP/tars-release-artifact/release.env"
+          python3 central/scripts/tars/tars_lock_outputs.py "$verify/release/lock.json" \
+            --workflow central/.github/workflows/tars-ci.yml \
+            --workflow central/.github/workflows/tars-deploy.yml \
+            --workflow central/.github/workflows/tars-unlock.yml \
+            --github-output "$GITHUB_OUTPUT"
 
       - name: Fetch deployment secrets from Infisical
         uses: Infisical/secrets-action@v1.0.16
@@ -352,6 +545,13 @@ jobs:
             --output-directory "$RUNNER_TEMP/tars-deploy-secrets" \
             --github-output "$GITHUB_OUTPUT" \
             --github-env "$GITHUB_ENV"
+          printf '%s' "$DOCR_READ_USERNAME" \
+            > "$RUNNER_TEMP/tars-deploy-secrets/DOCR_READ_USERNAME"
+          printf '%s' "$DOCR_READ_PASSWORD" \
+            > "$RUNNER_TEMP/tars-deploy-secrets/DOCR_READ_PASSWORD"
+          chmod 0600 \
+            "$RUNNER_TEMP/tars-deploy-secrets/DOCR_READ_USERNAME" \
+            "$RUNNER_TEMP/tars-deploy-secrets/DOCR_READ_PASSWORD"
 
       - name: Connect the runner to the TARS private route
         uses: rohittp0/wiregaurd@v3
@@ -365,7 +565,7 @@ jobs:
           install -m 0600 "$RUNNER_TEMP/tars-deploy-secrets/DEPLOY_SSH_PRIVATE_KEY" "$HOME/.ssh/tars_key"
           install -m 0600 "$RUNNER_TEMP/tars-deploy-secrets/DEPLOY_SSH_KNOWN_HOSTS" "$HOME/.ssh/tars_known_hosts"
 
-      - name: Upload and expand the exact source bundle on the control node
+      - name: Upload the verified source bundle
         env:
           SSH_HOST: ${{ steps.connection.outputs.host }}
           SSH_USER: ${{ steps.connection.outputs.user }}
@@ -388,7 +588,6 @@ jobs:
           ssh "${ssh_options[@]}" "$target" "install -d -m 0700 '$upload_dir'"
           scp "${ssh_options[@]}" \
             "$RUNNER_TEMP/tars-release-artifact/tars-source.tar.gz" \
-            "$RUNNER_TEMP/tars-release-artifact/release.env" \
             "$target:$upload_dir/"
           ssh "${ssh_options[@]}" "$target" /bin/sh -s -- "$RELEASE_SHA" <<'REMOTE'
           set -eu
@@ -400,9 +599,67 @@ jobs:
           rm -rf -- "$bundle"
           install -d -m 0750 "$bundle"
           tar -xzf "$upload/tars-source.tar.gz" -C "$bundle"
-          install -m 0600 "$upload/release.env" "$bundle/.release.env"
           test "$(cat "$bundle/.tars-release-sha")" = "$sha"
           rm -rf -- "$upload"
+          REMOTE
+
+      - name: Refuse an orphaned deployment lock
+        env:
+          SSH_HOST: ${{ steps.connection.outputs.host }}
+          SSH_USER: ${{ steps.connection.outputs.user }}
+          RECOVERY_SHA: ${{ steps.payload.outputs.sha }}
+        run: |
+          ssh_options=(
+            -i "$HOME/.ssh/tars_key"
+            -o BatchMode=yes
+            -o IdentitiesOnly=yes
+            -o StrictHostKeyChecking=yes
+            -o ServerAliveInterval=15
+            -o ServerAliveCountMax=3
+            -o TCPKeepAlive=yes
+            -o "UserKnownHostsFile=$HOME/.ssh/tars_known_hosts"
+          )
+          target="$SSH_USER@$SSH_HOST"
+          ssh "${ssh_options[@]}" "$target" /bin/sh -s -- "$RECOVERY_SHA" <<'REMOTE'
+          set -eu
+          recovery_sha=$1
+          case "$recovery_sha" in ""|*[!0-9a-f]*) exit 64 ;; esac
+          test "${#recovery_sha}" -eq 40
+          found=false
+          config_names="$(docker config ls \
+            --filter name=tars_deploy_lock --format '{{.Name}}')"
+          # Docker config names cannot contain whitespace.
+          # shellcheck disable=SC2086
+          for name in $config_names; do
+            if [ "$name" = tars_deploy_lock ]; then
+              found=true
+            fi
+          done
+          if [ "$found" = false ]; then
+            exit 0
+          fi
+          owner="$(docker config inspect tars_deploy_lock \
+            --format '{{index .Spec.Labels "tars.owner"}}')"
+          case "$owner" in
+            ""|*[!0-9a-f]*)
+              echo "tars_deploy_lock has an invalid owner; inspect it before deployment" >&2
+              exit 1
+              ;;
+          esac
+          if [ "${#owner}" -ne 40 ]; then
+            echo "tars_deploy_lock has an invalid owner; inspect it before deployment" >&2
+            exit 1
+          fi
+          boundary=/srv/tars/deployment/runpod-rollout-boundary.json
+          if [ -f "$boundary" ] && [ ! -L "$boundary" ] && \
+             [ "$(stat -c '%a' "$boundary")" = 600 ] && \
+             [ "$(stat -c '%u' "$boundary")" = "$(id -u)" ]; then
+            echo "deployment lock recovery is coupled to the durable Runpod boundary"
+            exit 0
+          fi
+          echo "TARS deployment lock is held by $owner." >&2
+          echo "Run 'Manual TARS deployment-lock recovery' with expected_owner=$owner and recovery_sha=$recovery_sha, then rerun deployment." >&2
+          exit 1
           REMOTE
 
       - name: Confirm the final current main revision
@@ -419,7 +676,882 @@ jobs:
           fi
           echo "sha=$main_sha" >> "$GITHUB_OUTPUT"
 
+      - name: Reconcile any durable boundary before changing application state
+        id: initial-app
+        env:
+          SSH_HOST: ${{ steps.connection.outputs.host }}
+          SSH_USER: ${{ steps.connection.outputs.user }}
+        run: |
+          ssh_options=(
+            -i "$HOME/.ssh/tars_key"
+            -o BatchMode=yes
+            -o IdentitiesOnly=yes
+            -o StrictHostKeyChecking=yes
+            -o ServerAliveInterval=15
+            -o ServerAliveCountMax=3
+            -o TCPKeepAlive=yes
+            -o "UserKnownHostsFile=$HOME/.ssh/tars_known_hosts"
+          )
+          target="$SSH_USER@$SSH_HOST"
+          state="$RUNNER_TEMP/tars-initial-app-state"
+          local_boundary="$RUNNER_TEMP/tars-prior-runpod-boundary.json"
+          if ssh "${ssh_options[@]}" "$target" /bin/sh -s \
+            > "$local_boundary" <<'REMOTE'
+          set -eu
+          boundary=/srv/tars/deployment/runpod-rollout-boundary.json
+          if [ ! -e "$boundary" ] && [ ! -L "$boundary" ]; then
+            exit 42
+          fi
+          test -f "$boundary"
+          test ! -L "$boundary"
+          test "$(stat -c '%a' "$boundary")" = 600
+          test "$(stat -c '%u' "$boundary")" = "$(id -u)"
+          cat "$boundary"
+          REMOTE
+          then
+            chmod 0600 "$local_boundary"
+          else
+            status=$?
+            rm -f "$local_boundary"
+            if [ "$status" -eq 42 ]; then
+              echo "interrupted=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            else
+              echo "the durable Runpod boundary is invalid or unreadable" >&2
+              exit "$status"
+            fi
+          fi
+          values="$RUNNER_TEMP/tars-initial-boundary-values"
+          : > "$values"
+          chmod 0600 "$values"
+          python3 central/scripts/tars/tars_runpod_release.py describe-boundary \
+            --boundary-file "$local_boundary" \
+            --github-output "$values"
+          get_value() {
+            name=$1
+            value="$(sed -n "s/^$name=//p" "$values")"
+            test "$(grep -c "^$name=" "$values")" -eq 1
+            printf '%s' "$value"
+          }
+          kind="$(get_value kind)"
+          if [ "$kind" = application ]; then
+            release_sha="$(get_value app_release_sha)"
+            gpu_image="$(get_value app_gpu_image)"
+            endpoint_id="$(get_value endpoint_id)"
+            replicas="$(get_value replicas)"
+            python3 central/scripts/tars/tars_runpod_release.py \
+              verify-application \
+              --api-key-file "$RUNNER_TEMP/tars-deploy-secrets/RUNPOD_API_KEY" \
+              --boundary-file "$local_boundary" \
+              --endpoint-id-file "$RUNNER_TEMP/tars-deploy-secrets/RUNPOD_ENDPOINT_ID" \
+              --template-id-file "$RUNNER_TEMP/tars-deploy-secrets/RUNPOD_TEMPLATE_ID" \
+              --auth-id-file "$RUNNER_TEMP/tars-deploy-secrets/RUNPOD_REGISTRY_AUTH_ID"
+            boundary_sha="$(
+              shasum -a 256 "$local_boundary" | awk '{print $1}'
+            )"
+            ssh "${ssh_options[@]}" "$target" /bin/sh -s -- \
+              "$release_sha" "$gpu_image" "$endpoint_id" "$replicas" \
+              "$boundary_sha" <<'REMOTE'
+            set -eu
+            release_sha=$1
+            gpu_image=$2
+            endpoint_id=$3
+            replicas=$4
+            boundary_sha=$5
+            boundary=/srv/tars/deployment/runpod-rollout-boundary.json
+            test "$replicas" = 1
+            test -f "$boundary"
+            test ! -L "$boundary"
+            test "$(stat -c '%a' "$boundary")" = 600
+            test "$(stat -c '%u' "$boundary")" = "$(id -u)"
+            test "$(sha256sum "$boundary" | awk '{print $1}')" = "$boundary_sha"
+            ! docker config inspect tars_deploy_lock >/dev/null 2>&1
+            for service in tars_nginx tars_api tars_dispatcher tars_otel-collector; do
+              docker service inspect "$service" >/dev/null 2>&1
+            done
+            live_sha="$(docker service inspect \
+              --format '{{index .Spec.Labels "tars.release.sha"}}' \
+              tars_dispatcher)"
+            live_environment="$(docker service inspect \
+              --format '{{range .Spec.TaskTemplate.ContainerSpec.Env}}{{println .}}{{end}}' \
+              tars_dispatcher)"
+            live_gpu="$(printf '%s\n' "$live_environment" |
+              sed -n 's/^TARS_GPU_IMAGE_DIGEST=//p')"
+            live_endpoint="$(printf '%s\n' "$live_environment" |
+              sed -n 's/^TARS_RUNPOD_ENDPOINT_ID=//p')"
+            test "$live_sha" = "$release_sha"
+            test "$live_gpu" = "$gpu_image"
+            test "$live_endpoint" = "$endpoint_id"
+            recorded_sha="$(python3 -c \
+              'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["sha"])' \
+              /srv/tars/deployment/current.json)"
+            test "$recorded_sha" = "$release_sha"
+            docker service scale "tars_dispatcher=$replicas" >/dev/null
+            deadline=$(( $(date +%s) + 900 ))
+            while :; do
+              actual="$(docker service ls --filter name=tars_dispatcher \
+                --format '{{.Replicas}}')"
+              if [ "$actual" = "$replicas/$replicas" ]; then
+                break
+              fi
+              if [ "$(date +%s)" -ge "$deadline" ]; then
+                echo "pre-drain dispatcher did not return during recovery" >&2
+                exit 1
+              fi
+              sleep 5
+            done
+            live_sha="$(docker service inspect \
+              --format '{{index .Spec.Labels "tars.release.sha"}}' \
+              tars_dispatcher)"
+            live_environment="$(docker service inspect \
+              --format '{{range .Spec.TaskTemplate.ContainerSpec.Env}}{{println .}}{{end}}' \
+              tars_dispatcher)"
+            live_gpu="$(printf '%s\n' "$live_environment" |
+              sed -n 's/^TARS_GPU_IMAGE_DIGEST=//p')"
+            live_endpoint="$(printf '%s\n' "$live_environment" |
+              sed -n 's/^TARS_RUNPOD_ENDPOINT_ID=//p')"
+            test "$live_sha" = "$release_sha"
+            test "$live_gpu" = "$gpu_image"
+            test "$live_endpoint" = "$endpoint_id"
+            rm -f "$boundary"
+          REMOTE
+            rm -f "$local_boundary"
+            echo "interrupted=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          test "$kind" = rollout
+          ssh "${ssh_options[@]}" "$target" /bin/sh -s <<'REMOTE' > "$state"
+          set -eu
+          service=tars_dispatcher
+          if ! docker service inspect "$service" >/dev/null 2>&1; then
+            printf '%s\n\n\n\n' greenfield
+            exit 0
+          fi
+          replicas="$(docker service inspect \
+            --format '{{.Spec.Mode.Replicated.Replicas}}' "$service")"
+          release_sha="$(docker service inspect \
+            --format '{{index .Spec.Labels "tars.release.sha"}}' "$service")"
+          environment="$(docker service inspect \
+            --format '{{range .Spec.TaskTemplate.ContainerSpec.Env}}{{println .}}{{end}}' \
+            "$service")"
+          gpu_image="$(printf '%s\n' "$environment" |
+            sed -n 's/^TARS_GPU_IMAGE_DIGEST=//p')"
+          endpoint_id="$(printf '%s\n' "$environment" |
+            sed -n 's/^TARS_RUNPOD_ENDPOINT_ID=//p')"
+          case "$replicas" in 0|1) ;; *) exit 64 ;; esac
+          case "$release_sha" in ""|*[!0-9a-f]*) exit 64 ;; esac
+          test "${#release_sha}" -eq 40
+          test -n "$gpu_image"
+          case "$endpoint_id" in ""|*[!A-Za-z0-9_-]*) exit 64 ;; esac
+          docker service scale "$service=0" >/dev/null
+          deadline=$(( $(date +%s) + 8400 ))
+          while :; do
+            if ! current_states="$(docker service ps --no-trunc \
+              --format '{{.CurrentState}}' "$service")"; then
+              echo "could not inspect dispatcher task state" >&2
+              exit 1
+            fi
+            if printf '%s\n' "$current_states" |
+              awk 'NF && $1 !~ /^(Complete|Shutdown|Failed|Rejected|Remove|Orphaned)$/ { exit 1 }'
+            then
+              break
+            fi
+            if [ "$(date +%s)" -ge "$deadline" ]; then
+              echo "dispatcher did not drain before interrupted recovery" >&2
+              exit 1
+            fi
+            sleep 5
+          done
+          printf '%s\n%s\n%s\n%s\n' \
+            existing "$release_sha" "$gpu_image" "$endpoint_id"
+          REMOTE
+          chmod 0600 "$state"
+          echo "interrupted=true" >> "$GITHUB_OUTPUT"
+          echo "mode=$(sed -n '1p' "$state")" >> "$GITHUB_OUTPUT"
+          echo "release_sha=$(sed -n '2p' "$state")" >> "$GITHUB_OUTPUT"
+          echo "gpu_image=$(sed -n '3p' "$state")" >> "$GITHUB_OUTPUT"
+          echo "endpoint_id=$(sed -n '4p' "$state")" >> "$GITHUB_OUTPUT"
+
+      - name: Describe the interrupted rollback boundary
+        if: steps.initial-app.outputs.interrupted == 'true'
+        id: interrupted
+        run: |
+          python3 central/scripts/tars/tars_runpod_release.py describe \
+            --receipt-file "$RUNNER_TEMP/tars-prior-runpod-boundary.json" \
+            --github-output "$GITHUB_OUTPUT"
+
+      - name: Classify the interrupted application transaction
+        if: steps.initial-app.outputs.interrupted == 'true'
+        id: interrupted-app
+        env:
+          BASELINE: ${{ steps.interrupted.outputs.baseline }}
+          PRIOR_SHA: ${{ steps.interrupted.outputs.prior_release_sha }}
+          PRIOR_GPU_IMAGE: ${{ steps.interrupted.outputs.prior_gpu_image }}
+          TARGET_SHA: ${{ steps.interrupted.outputs.release_sha }}
+          TARGET_APP_GPU_IMAGE: ${{ steps.interrupted.outputs.target_app_gpu_image }}
+          ENDPOINT_ID: ${{ steps.interrupted.outputs.endpoint_id }}
+          SSH_HOST: ${{ steps.connection.outputs.host }}
+          SSH_USER: ${{ steps.connection.outputs.user }}
+        run: |
+          ssh_options=(
+            -i "$HOME/.ssh/tars_key"
+            -o BatchMode=yes
+            -o IdentitiesOnly=yes
+            -o StrictHostKeyChecking=yes
+            -o ServerAliveInterval=15
+            -o ServerAliveCountMax=3
+            -o TCPKeepAlive=yes
+            -o "UserKnownHostsFile=$HOME/.ssh/tars_known_hosts"
+          )
+          target="$SSH_USER@$SSH_HOST"
+          classification="$(
+            ssh "${ssh_options[@]}" "$target" /bin/sh -s -- \
+              "$BASELINE" "$PRIOR_SHA" "$PRIOR_GPU_IMAGE" \
+              "$TARGET_SHA" "$TARGET_APP_GPU_IMAGE" "$ENDPOINT_ID" <<'REMOTE'
+          set -eu
+          baseline=$1
+          prior_sha=$2
+          prior_gpu=$3
+          target_sha=$4
+          target_gpu=$5
+          expected_endpoint=$6
+          present=0
+          for service in tars_nginx tars_api tars_dispatcher tars_otel-collector; do
+            if docker service inspect "$service" >/dev/null 2>&1; then
+              present=$((present + 1))
+            fi
+          done
+          if [ "$present" -ne 0 ] && [ "$present" -ne 4 ]; then
+            echo "partial application state requires operator recovery" >&2
+            exit 1
+          fi
+          live_sha=
+          live_gpu=
+          live_endpoint=
+          if [ "$present" -eq 4 ]; then
+            live_sha="$(docker service inspect \
+              --format '{{index .Spec.Labels "tars.release.sha"}}' \
+              tars_dispatcher)"
+            live_gpu="$(docker service inspect \
+              --format '{{range .Spec.TaskTemplate.ContainerSpec.Env}}{{println .}}{{end}}' \
+              tars_dispatcher | sed -n 's/^TARS_GPU_IMAGE_DIGEST=//p')"
+            live_endpoint="$(docker service inspect \
+              --format '{{range .Spec.TaskTemplate.ContainerSpec.Env}}{{println .}}{{end}}' \
+              tars_dispatcher | sed -n 's/^TARS_RUNPOD_ENDPOINT_ID=//p')"
+          fi
+          locked=false
+          if docker config inspect tars_deploy_lock >/dev/null 2>&1; then
+            locked=true
+            owner="$(docker config inspect tars_deploy_lock \
+              --format '{{index .Spec.Labels "tars.owner"}}')"
+            if [ "$owner" != "$target_sha" ]; then
+              echo "interrupted application lock does not belong to its durable boundary" >&2
+              exit 1
+            fi
+          fi
+          if [ "$baseline" = existing ] && \
+             [ "$present" -eq 4 ] && \
+             [ "$live_sha" = "$prior_sha" ] && \
+             [ "$live_gpu" = "$prior_gpu" ] && \
+             [ "$live_endpoint" = "$expected_endpoint" ] && \
+             [ "$locked" = false ]; then
+            echo existing-baseline
+          elif [ "$baseline" = existing ] && \
+               { [ "$present" -eq 0 ] || \
+                 { [ "$live_sha" = "$target_sha" ] && \
+                   [ "$live_gpu" = "$target_gpu" ] && \
+                   [ "$live_endpoint" = "$expected_endpoint" ]; } || \
+                 { [ "$live_sha" = "$prior_sha" ] && \
+                   [ "$live_gpu" = "$prior_gpu" ] && \
+                   [ "$live_endpoint" = "$expected_endpoint" ] && \
+                   [ "$locked" = true ]; }; }; then
+            echo repair-existing
+          elif [ "$baseline" = greenfield ] && \
+               [ "$present" -eq 0 ] && [ "$locked" = false ]; then
+            echo greenfield-baseline
+          elif [ "$baseline" = greenfield ] && \
+               [ "$present" -eq 4 ] && \
+               [ "$live_sha" = "$target_sha" ] && \
+               [ "$live_gpu" = "$target_gpu" ] && \
+               [ "$live_endpoint" = "$expected_endpoint" ]; then
+            echo repair-greenfield
+          else
+            echo "interrupted application does not match its durable boundary" >&2
+            exit 1
+          fi
+          REMOTE
+          )"
+          case "$classification" in
+            existing-baseline|greenfield-baseline|repair-existing|repair-greenfield) ;;
+            *) exit 64 ;;
+          esac
+          echo "classification=$classification" >> "$GITHUB_OUTPUT"
+
+      - name: Reconcile the interrupted provider generation
+        if: steps.initial-app.outputs.interrupted == 'true'
+        env:
+          BASELINE: ${{ steps.interrupted.outputs.baseline }}
+        run: |
+          if [ "$BASELINE" = greenfield ]; then
+            command=verify-target
+          else
+            test "$BASELINE" = existing
+            command=rollback
+          fi
+          python3 central/scripts/tars/tars_runpod_release.py "$command" \
+            --api-key-file "$RUNNER_TEMP/tars-deploy-secrets/RUNPOD_API_KEY" \
+            --receipt-file "$RUNNER_TEMP/tars-prior-runpod-boundary.json"
+
+      - name: Repair an interrupted application transaction
+        if: >-
+          steps.initial-app.outputs.interrupted == 'true' &&
+          (steps.interrupted-app.outputs.classification == 'repair-existing' ||
+           steps.interrupted-app.outputs.classification == 'repair-greenfield')
+        env:
+          CLASSIFICATION: ${{ steps.interrupted-app.outputs.classification }}
+          PRIOR_SHA: ${{ steps.interrupted.outputs.prior_release_sha }}
+          TARGET_SHA: ${{ steps.interrupted.outputs.release_sha }}
+          RECOVERY_SHA: ${{ steps.payload.outputs.sha }}
+          SSH_HOST: ${{ steps.connection.outputs.host }}
+          SSH_USER: ${{ steps.connection.outputs.user }}
+        run: |
+          ssh_options=(
+            -i "$HOME/.ssh/tars_key"
+            -o BatchMode=yes
+            -o IdentitiesOnly=yes
+            -o StrictHostKeyChecking=yes
+            -o ServerAliveInterval=15
+            -o ServerAliveCountMax=3
+            -o TCPKeepAlive=yes
+            -o "UserKnownHostsFile=$HOME/.ssh/tars_known_hosts"
+          )
+          target="$SSH_USER@$SSH_HOST"
+          {
+            cat "$RUNNER_TEMP/tars-deploy-secrets/remote-secrets.sh"
+            cat <<'REMOTE'
+          set -euo pipefail
+          classification=$1
+          prior_sha=$2
+          target_sha=$3
+          recovery_sha=$4
+          if docker config inspect tars_deploy_lock >/dev/null 2>&1; then
+            owner="$(docker config inspect tars_deploy_lock \
+              --format '{{index .Spec.Labels "tars.owner"}}')"
+            test "$owner" = "$target_sha"
+            target_bundle="/srv/tars/incoming/$target_sha"
+            "$target_bundle/deploy/tars-deploy" unlock \
+              --expected-owner "$target_sha"
+          fi
+          if [ "$classification" = repair-existing ]; then
+            release_sha=$prior_sha
+          else
+            release_sha=$target_sha
+          fi
+          bundle="/srv/tars/incoming/$release_sha"
+          if [ "$classification" = repair-greenfield ]; then
+            "$bundle/deploy/tars-deploy" bootstrap-stateful \
+              --release-env "$bundle/.release.env" \
+              --release-sha "$release_sha" \
+              --current-main-sha "$release_sha" \
+              --bundle-dir "$bundle"
+          fi
+          deployer="/srv/tars/incoming/$recovery_sha/deploy/tars-deploy"
+          "$deployer" deploy \
+            --dispatcher-already-drained \
+            --release-env "$bundle/.release.env" \
+            --release-sha "$release_sha" \
+            --current-main-sha "$release_sha" \
+            --bundle-dir "$bundle"
+          docker service scale tars_dispatcher=0 >/dev/null
+          deadline=$(( $(date +%s) + 8400 ))
+          while :; do
+            if ! current_states="$(docker service ps --no-trunc \
+              --format '{{.CurrentState}}' tars_dispatcher)"; then
+              echo "could not inspect dispatcher task state" >&2
+              exit 1
+            fi
+            if printf '%s\n' "$current_states" |
+              awk 'NF && $1 !~ /^(Complete|Shutdown|Failed|Rejected|Remove|Orphaned)$/ { exit 1 }'
+            then
+              break
+            fi
+            if [ "$(date +%s)" -ge "$deadline" ]; then
+              echo "dispatcher did not drain after interrupted application repair" >&2
+              exit 1
+            fi
+            sleep 5
+          done
+          REMOTE
+          } | ssh "${ssh_options[@]}" "$target" /bin/bash -s -- \
+            "$CLASSIFICATION" "$PRIOR_SHA" "$TARGET_SHA" "$RECOVERY_SHA"
+
+      - name: Verify recovery and retire the interrupted boundary
+        if: steps.initial-app.outputs.interrupted == 'true'
+        env:
+          CLASSIFICATION: ${{ steps.interrupted-app.outputs.classification }}
+          PRIOR_SHA: ${{ steps.interrupted.outputs.prior_release_sha }}
+          PRIOR_GPU_IMAGE: ${{ steps.interrupted.outputs.prior_gpu_image }}
+          TARGET_SHA: ${{ steps.interrupted.outputs.release_sha }}
+          TARGET_APP_GPU_IMAGE: ${{ steps.interrupted.outputs.target_app_gpu_image }}
+          ENDPOINT_ID: ${{ steps.interrupted.outputs.endpoint_id }}
+          SSH_HOST: ${{ steps.connection.outputs.host }}
+          SSH_USER: ${{ steps.connection.outputs.user }}
+        run: |
+          case "$CLASSIFICATION" in
+            existing-baseline|repair-existing)
+              expected_sha=$PRIOR_SHA
+              expected_gpu=$PRIOR_GPU_IMAGE
+              ;;
+            greenfield-baseline|repair-greenfield)
+              expected_sha=$TARGET_SHA
+              expected_gpu=$TARGET_APP_GPU_IMAGE
+              ;;
+            *)
+              exit 64
+              ;;
+          esac
+          provider_baseline="$RUNNER_TEMP/tars-recovered-application-boundary.json"
+          python3 central/scripts/tars/tars_runpod_release.py \
+            prepare-application \
+            --release-sha "$expected_sha" \
+            --gpu-image "$expected_gpu" \
+            --endpoint-id "$ENDPOINT_ID" \
+            --boundary-file "$provider_baseline"
+          python3 central/scripts/tars/tars_runpod_release.py \
+            verify-application \
+            --api-key-file "$RUNNER_TEMP/tars-deploy-secrets/RUNPOD_API_KEY" \
+            --boundary-file "$provider_baseline" \
+            --endpoint-id-file "$RUNNER_TEMP/tars-deploy-secrets/RUNPOD_ENDPOINT_ID" \
+            --template-id-file "$RUNNER_TEMP/tars-deploy-secrets/RUNPOD_TEMPLATE_ID" \
+            --auth-id-file "$RUNNER_TEMP/tars-deploy-secrets/RUNPOD_REGISTRY_AUTH_ID"
+          ssh_options=(
+            -i "$HOME/.ssh/tars_key"
+            -o BatchMode=yes
+            -o IdentitiesOnly=yes
+            -o StrictHostKeyChecking=yes
+            -o ServerAliveInterval=15
+            -o ServerAliveCountMax=3
+            -o TCPKeepAlive=yes
+            -o "UserKnownHostsFile=$HOME/.ssh/tars_known_hosts"
+          )
+          target="$SSH_USER@$SSH_HOST"
+          ssh "${ssh_options[@]}" "$target" /bin/sh -s -- \
+            "$CLASSIFICATION" "$PRIOR_SHA" "$PRIOR_GPU_IMAGE" \
+            "$TARGET_SHA" "$TARGET_APP_GPU_IMAGE" "$ENDPOINT_ID" <<'REMOTE'
+          set -eu
+          classification=$1
+          prior_sha=$2
+          prior_gpu=$3
+          target_sha=$4
+          target_gpu=$5
+          expected_endpoint=$6
+          boundary=/srv/tars/deployment/runpod-rollout-boundary.json
+          test -f "$boundary"
+          test ! -L "$boundary"
+          test "$(stat -c '%a' "$boundary")" = 600
+          test "$(stat -c '%u' "$boundary")" = "$(id -u)"
+          case "$classification" in
+            existing-baseline|repair-existing)
+              expected_sha=$prior_sha
+              expected_gpu=$prior_gpu
+              ;;
+            repair-greenfield)
+              expected_sha=$target_sha
+              expected_gpu=$target_gpu
+              ;;
+            greenfield-baseline)
+              for service in tars_nginx tars_api tars_dispatcher tars_otel-collector; do
+                ! docker service inspect "$service" >/dev/null 2>&1
+              done
+              ! docker config inspect tars_deploy_lock >/dev/null 2>&1
+              test ! -e /srv/tars/deployment/current.json
+              rm -f "$boundary"
+              exit 0
+              ;;
+            *)
+              exit 64
+              ;;
+          esac
+          ! docker config inspect tars_deploy_lock >/dev/null 2>&1
+          live_sha="$(docker service inspect \
+            --format '{{index .Spec.Labels "tars.release.sha"}}' \
+            tars_dispatcher)"
+          live_gpu="$(docker service inspect \
+            --format '{{range .Spec.TaskTemplate.ContainerSpec.Env}}{{println .}}{{end}}' \
+            tars_dispatcher | sed -n 's/^TARS_GPU_IMAGE_DIGEST=//p')"
+          live_endpoint="$(docker service inspect \
+            --format '{{range .Spec.TaskTemplate.ContainerSpec.Env}}{{println .}}{{end}}' \
+            tars_dispatcher | sed -n 's/^TARS_RUNPOD_ENDPOINT_ID=//p')"
+          test "$live_sha" = "$expected_sha"
+          test "$live_gpu" = "$expected_gpu"
+          test "$live_endpoint" = "$expected_endpoint"
+          recorded_sha="$(python3 -c \
+            'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["sha"])' \
+            /srv/tars/deployment/current.json)"
+          test "$recorded_sha" = "$expected_sha"
+          docker service scale tars_dispatcher=1 >/dev/null
+          deadline=$(( $(date +%s) + 900 ))
+          while :; do
+            actual="$(docker service ls --filter name=tars_dispatcher \
+              --format '{{.Replicas}}')"
+            if [ "$actual" = 1/1 ]; then
+              break
+            fi
+            if [ "$(date +%s)" -ge "$deadline" ]; then
+              echo "recovered dispatcher did not return" >&2
+              exit 1
+            fi
+            sleep 5
+          done
+          live_sha="$(docker service inspect \
+            --format '{{index .Spec.Labels "tars.release.sha"}}' \
+            tars_dispatcher)"
+          live_environment="$(docker service inspect \
+            --format '{{range .Spec.TaskTemplate.ContainerSpec.Env}}{{println .}}{{end}}' \
+            tars_dispatcher)"
+          live_gpu="$(printf '%s\n' "$live_environment" |
+            sed -n 's/^TARS_GPU_IMAGE_DIGEST=//p')"
+          live_endpoint="$(printf '%s\n' "$live_environment" |
+            sed -n 's/^TARS_RUNPOD_ENDPOINT_ID=//p')"
+          test "$live_sha" = "$expected_sha"
+          test "$live_gpu" = "$expected_gpu"
+          test "$live_endpoint" = "$expected_endpoint"
+          rm -f "$boundary"
+          REMOTE
+
+      - name: Capture the coupled application baseline
+        id: app-baseline
+        env:
+          SSH_HOST: ${{ steps.connection.outputs.host }}
+          SSH_USER: ${{ steps.connection.outputs.user }}
+        run: |
+          ssh_options=(
+            -i "$HOME/.ssh/tars_key"
+            -o BatchMode=yes
+            -o IdentitiesOnly=yes
+            -o StrictHostKeyChecking=yes
+            -o ServerAliveInterval=15
+            -o ServerAliveCountMax=3
+            -o TCPKeepAlive=yes
+            -o "UserKnownHostsFile=$HOME/.ssh/tars_known_hosts"
+          )
+          target="$SSH_USER@$SSH_HOST"
+          state="$RUNNER_TEMP/tars-app-baseline"
+          application_boundary="$RUNNER_TEMP/tars-application-boundary.json"
+          ssh "${ssh_options[@]}" "$target" /bin/sh -s <<'REMOTE' > "$state"
+          set -eu
+          boundary=/srv/tars/deployment/runpod-rollout-boundary.json
+          test ! -e "$boundary"
+          test ! -L "$boundary"
+          service=tars_dispatcher
+          if ! docker service inspect "$service" >/dev/null 2>&1; then
+            for candidate in tars_nginx tars_api tars_otel-collector; do
+              ! docker service inspect "$candidate" >/dev/null 2>&1
+            done
+            ! docker config inspect tars_deploy_lock >/dev/null 2>&1
+            test ! -e /srv/tars/deployment/current.json
+            printf '%s\n\n\n\n' greenfield
+            exit 0
+          fi
+          for candidate in tars_nginx tars_api tars_otel-collector; do
+            docker service inspect "$candidate" >/dev/null 2>&1
+          done
+          ! docker config inspect tars_deploy_lock >/dev/null 2>&1
+          replicas="$(docker service inspect \
+            --format '{{.Spec.Mode.Replicated.Replicas}}' "$service")"
+          release_sha="$(docker service inspect \
+            --format '{{index .Spec.Labels "tars.release.sha"}}' "$service")"
+          environment="$(docker service inspect \
+            --format '{{range .Spec.TaskTemplate.ContainerSpec.Env}}{{println .}}{{end}}' \
+            "$service")"
+          gpu_image="$(printf '%s\n' "$environment" |
+            sed -n 's/^TARS_GPU_IMAGE_DIGEST=//p')"
+          endpoint_id="$(printf '%s\n' "$environment" |
+            sed -n 's/^TARS_RUNPOD_ENDPOINT_ID=//p')"
+          if [ "$replicas" != 1 ]; then
+            echo "live dispatcher must have exactly one replica before deployment" >&2
+            exit 1
+          fi
+          case "$release_sha" in ""|*[!0-9a-f]*) exit 64 ;; esac
+          test "${#release_sha}" -eq 40
+          test -n "$gpu_image"
+          case "$endpoint_id" in ""|*[!A-Za-z0-9_-]*) exit 64 ;; esac
+          recorded_sha="$(python3 -c \
+            'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["sha"])' \
+            /srv/tars/deployment/current.json)"
+          test "$recorded_sha" = "$release_sha"
+          printf '%s\n%s\n%s\n%s\n' \
+            existing "$release_sha" "$gpu_image" "$endpoint_id"
+          REMOTE
+          chmod 0600 "$state"
+          mode="$(sed -n '1p' "$state")"
+          release_sha="$(sed -n '2p' "$state")"
+          gpu_image="$(sed -n '3p' "$state")"
+          endpoint_id="$(sed -n '4p' "$state")"
+          echo "mode=$mode" >> "$GITHUB_OUTPUT"
+          echo "release_sha=$release_sha" >> "$GITHUB_OUTPUT"
+          echo "gpu_image=$gpu_image" >> "$GITHUB_OUTPUT"
+          echo "endpoint_id=$endpoint_id" >> "$GITHUB_OUTPUT"
+          if [ "$mode" = greenfield ]; then
+            rm -f "$application_boundary"
+            exit 0
+          fi
+          test "$mode" = existing
+          python3 central/scripts/tars/tars_runpod_release.py \
+            prepare-application \
+            --release-sha "$release_sha" \
+            --gpu-image "$gpu_image" \
+            --endpoint-id "$endpoint_id" \
+            --boundary-file "$application_boundary"
+          boundary_sha="$(
+            shasum -a 256 "$application_boundary" | awk '{print $1}'
+          )"
+          incoming=".tars-application-boundary-$release_sha"
+          scp "${ssh_options[@]}" "$application_boundary" "$target:$incoming"
+          ssh "${ssh_options[@]}" "$target" /bin/sh -s -- \
+            "$release_sha" "$gpu_image" "$endpoint_id" "$incoming" \
+            "$boundary_sha" <<'REMOTE'
+          set -eu
+          release_sha=$1
+          gpu_image=$2
+          endpoint_id=$3
+          incoming=$4
+          boundary_sha=$5
+          boundary=/srv/tars/deployment/runpod-rollout-boundary.json
+          temporary="$boundary.tmp"
+          test ! -e "$boundary"
+          test ! -L "$boundary"
+          rm -f "$temporary"
+          install -m 0600 "$HOME/$incoming" "$temporary"
+          mv -f "$temporary" "$boundary"
+          rm -f "$HOME/$incoming"
+          test -f "$boundary"
+          test ! -L "$boundary"
+          test "$(stat -c '%a' "$boundary")" = 600
+          test "$(stat -c '%u' "$boundary")" = "$(id -u)"
+          test "$(sha256sum "$boundary" | awk '{print $1}')" = "$boundary_sha"
+          ! docker config inspect tars_deploy_lock >/dev/null 2>&1
+          for service in tars_nginx tars_api tars_dispatcher tars_otel-collector; do
+            docker service inspect "$service" >/dev/null 2>&1
+          done
+          live_sha="$(docker service inspect \
+            --format '{{index .Spec.Labels "tars.release.sha"}}' \
+            tars_dispatcher)"
+          live_environment="$(docker service inspect \
+            --format '{{range .Spec.TaskTemplate.ContainerSpec.Env}}{{println .}}{{end}}' \
+            tars_dispatcher)"
+          live_gpu="$(printf '%s\n' "$live_environment" |
+            sed -n 's/^TARS_GPU_IMAGE_DIGEST=//p')"
+          live_endpoint="$(printf '%s\n' "$live_environment" |
+            sed -n 's/^TARS_RUNPOD_ENDPOINT_ID=//p')"
+          test "$live_sha" = "$release_sha"
+          test "$live_gpu" = "$gpu_image"
+          test "$live_endpoint" = "$endpoint_id"
+          recorded_sha="$(python3 -c \
+            'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["sha"])' \
+            /srv/tars/deployment/current.json)"
+          test "$recorded_sha" = "$release_sha"
+          docker service scale tars_dispatcher=0 >/dev/null
+          deadline=$(( $(date +%s) + 8400 ))
+          while :; do
+            if ! current_states="$(docker service ps --no-trunc \
+              --format '{{.CurrentState}}' tars_dispatcher)"; then
+              echo "could not inspect dispatcher task state" >&2
+              exit 1
+            fi
+            if printf '%s\n' "$current_states" |
+              awk 'NF && $1 !~ /^(Complete|Shutdown|Failed|Rejected|Remove|Orphaned)$/ { exit 1 }'
+            then
+              break
+            fi
+            if [ "$(date +%s)" -ge "$deadline" ]; then
+              echo "dispatcher did not drain after durable baseline" >&2
+              exit 1
+            fi
+            sleep 5
+          done
+          REMOTE
+
+      - name: Prepare and persist the coupled rollout boundary
+        env:
+          APP_MODE: ${{ steps.app-baseline.outputs.mode }}
+          PRIOR_SHA: ${{ steps.app-baseline.outputs.release_sha }}
+          PRIOR_GPU_IMAGE: ${{ steps.app-baseline.outputs.gpu_image }}
+          PRIOR_ENDPOINT_ID: ${{ steps.app-baseline.outputs.endpoint_id }}
+          RELEASE_SHA: ${{ steps.payload.outputs.sha }}
+          GPU_IMAGE: ${{ steps.artifact.outputs.registry }}:gpu-sha-${{ steps.payload.outputs.sha }}@${{ steps.artifact.outputs.gpu_digest }}
+          SSH_HOST: ${{ steps.connection.outputs.host }}
+          SSH_USER: ${{ steps.connection.outputs.user }}
+        run: |
+          boundary="$RUNNER_TEMP/tars-runpod-rollout.json"
+          endpoint_id="$(cat "$RUNNER_TEMP/tars-deploy-secrets/RUNPOD_ENDPOINT_ID")"
+          args=(
+            --release-sha "$RELEASE_SHA"
+            --gpu-image "$GPU_IMAGE"
+            --api-key-file "$RUNNER_TEMP/tars-deploy-secrets/RUNPOD_API_KEY"
+            --endpoint-id-file "$RUNNER_TEMP/tars-deploy-secrets/RUNPOD_ENDPOINT_ID"
+            --template-id-file "$RUNNER_TEMP/tars-deploy-secrets/RUNPOD_TEMPLATE_ID"
+            --auth-id-file "$RUNNER_TEMP/tars-deploy-secrets/RUNPOD_REGISTRY_AUTH_ID"
+            --receipt-file "$boundary"
+          )
+          if [ "$APP_MODE" = greenfield ]; then
+            args+=(--greenfield)
+          else
+            test "$APP_MODE" = existing
+            test "$PRIOR_ENDPOINT_ID" = "$endpoint_id"
+            args+=(
+              --prior-release-sha "$PRIOR_SHA"
+              --prior-gpu-image "$PRIOR_GPU_IMAGE"
+            )
+          fi
+          python3 central/scripts/tars/tars_runpod_release.py prepare "${args[@]}"
+          receipt_sha="$(shasum -a 256 "$boundary" | awk '{print $1}')"
+          application_sha=
+          if [ "$APP_MODE" = existing ]; then
+            application_sha="$(
+              shasum -a 256 \
+                "$RUNNER_TEMP/tars-application-boundary.json" |
+                awk '{print $1}'
+            )"
+          fi
+          ssh_options=(
+            -i "$HOME/.ssh/tars_key"
+            -o BatchMode=yes
+            -o IdentitiesOnly=yes
+            -o StrictHostKeyChecking=yes
+            -o ServerAliveInterval=15
+            -o ServerAliveCountMax=3
+            -o TCPKeepAlive=yes
+            -o "UserKnownHostsFile=$HOME/.ssh/tars_known_hosts"
+          )
+          target="$SSH_USER@$SSH_HOST"
+          incoming=".tars-runpod-boundary-$RELEASE_SHA"
+          scp "${ssh_options[@]}" "$boundary" "$target:$incoming"
+          ssh "${ssh_options[@]}" "$target" /bin/sh -s -- \
+            "$incoming" "$APP_MODE" "$application_sha" \
+            "$receipt_sha" <<'REMOTE'
+          set -eu
+          incoming=$1
+          app_mode=$2
+          application_sha=$3
+          receipt_sha=$4
+          boundary=/srv/tars/deployment/runpod-rollout-boundary.json
+          temporary="$boundary.tmp"
+          if [ "$app_mode" = existing ]; then
+            test -f "$boundary"
+            test ! -L "$boundary"
+            test "$(stat -c '%a' "$boundary")" = 600
+            test "$(stat -c '%u' "$boundary")" = "$(id -u)"
+            test "$(sha256sum "$boundary" | awk '{print $1}')" = \
+              "$application_sha"
+          else
+            test "$app_mode" = greenfield
+            test ! -e "$boundary"
+            test ! -L "$boundary"
+          fi
+          rm -f "$temporary"
+          install -m 0600 "$HOME/$incoming" "$temporary"
+          mv -f "$temporary" "$boundary"
+          test "$(stat -c '%a' "$boundary")" = 600
+          test "$(stat -c '%u' "$boundary")" = "$(id -u)"
+          test "$(sha256sum "$boundary" | awk '{print $1}')" = "$receipt_sha"
+          rm -f "$HOME/$incoming"
+          REMOTE
+
+      - name: Stage the immutable image on the stable Runpod template
+        id: runpod-stage
+        run: |
+          python3 central/scripts/tars/tars_runpod_release.py stage \
+            --api-key-file "$RUNNER_TEMP/tars-deploy-secrets/RUNPOD_API_KEY" \
+            --receipt-file "$RUNNER_TEMP/tars-runpod-rollout.json" \
+            --github-output "$GITHUB_OUTPUT"
+
+      - name: Persist the confirmed provider generation
+        env:
+          SSH_HOST: ${{ steps.connection.outputs.host }}
+          SSH_USER: ${{ steps.connection.outputs.user }}
+          RELEASE_SHA: ${{ steps.payload.outputs.sha }}
+        run: |
+          ssh_options=(
+            -i "$HOME/.ssh/tars_key"
+            -o BatchMode=yes
+            -o IdentitiesOnly=yes
+            -o StrictHostKeyChecking=yes
+            -o ServerAliveInterval=15
+            -o ServerAliveCountMax=3
+            -o TCPKeepAlive=yes
+            -o "UserKnownHostsFile=$HOME/.ssh/tars_known_hosts"
+          )
+          target="$SSH_USER@$SSH_HOST"
+          incoming=".tars-runpod-staged-$RELEASE_SHA"
+          scp "${ssh_options[@]}" \
+            "$RUNNER_TEMP/tars-runpod-rollout.json" "$target:$incoming"
+          ssh "${ssh_options[@]}" "$target" /bin/sh -s -- "$incoming" <<'REMOTE'
+          set -eu
+          incoming=$1
+          boundary=/srv/tars/deployment/runpod-rollout-boundary.json
+          temporary="$boundary.tmp"
+          test -f "$boundary"
+          test ! -L "$boundary"
+          test "$(stat -c '%a' "$boundary")" = 600
+          test "$(stat -c '%u' "$boundary")" = "$(id -u)"
+          rm -f "$temporary"
+          install -m 0600 "$HOME/$incoming" "$temporary"
+          mv -f "$temporary" "$boundary"
+          test "$(stat -c '%a' "$boundary")" = 600
+          test "$(stat -c '%u' "$boundary")" = "$(id -u)"
+          rm -f "$HOME/$incoming"
+          REMOTE
+
+      - name: Install the release environment with the stable endpoint
+        env:
+          SSH_HOST: ${{ steps.connection.outputs.host }}
+          SSH_USER: ${{ steps.connection.outputs.user }}
+          RELEASE_SHA: ${{ steps.payload.outputs.sha }}
+          API_DIGEST: ${{ steps.artifact.outputs.api_digest }}
+          DISPATCHER_DIGEST: ${{ steps.artifact.outputs.dispatcher_digest }}
+          GPU_DIGEST: ${{ steps.artifact.outputs.gpu_digest }}
+          GARAGE_DIGEST: ${{ steps.artifact.outputs.garage_digest }}
+          OTEL_DIGEST: ${{ steps.artifact.outputs.otel_digest }}
+          RUNPOD_ENDPOINT_ID: ${{ steps.runpod-stage.outputs.endpoint_id }}
+        run: |
+          release_env="$RUNNER_TEMP/tars-release.env"
+          python3 central/scripts/tars/tars_lock_outputs.py \
+            "$RUNNER_TEMP/tars-release-verify/release/lock.json" \
+            --release-env "$release_env" \
+            --api-digest "$API_DIGEST" \
+            --dispatcher-digest "$DISPATCHER_DIGEST" \
+            --gpu-digest "$GPU_DIGEST" \
+            --garage-digest "$GARAGE_DIGEST" \
+            --otel-digest "$OTEL_DIGEST" \
+            --runpod-endpoint-id "$RUNPOD_ENDPOINT_ID"
+          ssh_options=(
+            -i "$HOME/.ssh/tars_key"
+            -o BatchMode=yes
+            -o IdentitiesOnly=yes
+            -o StrictHostKeyChecking=yes
+            -o ServerAliveInterval=15
+            -o ServerAliveCountMax=3
+            -o TCPKeepAlive=yes
+            -o "UserKnownHostsFile=$HOME/.ssh/tars_known_hosts"
+          )
+          target="$SSH_USER@$SSH_HOST"
+          remote_env=".tars-release-env-$RELEASE_SHA"
+          scp "${ssh_options[@]}" "$release_env" "$target:$remote_env"
+          ssh "${ssh_options[@]}" "$target" /bin/sh -s -- "$RELEASE_SHA" <<'REMOTE'
+          set -eu
+          sha=$1
+          case "$sha" in *[!0-9a-f]*|'') exit 64 ;; esac
+          test "${#sha}" -eq 40
+          incoming="$HOME/.tars-release-env-$sha"
+          bundle="/srv/tars/incoming/$sha"
+          test "$(cat "$bundle/.tars-release-sha")" = "$sha"
+          install -m 0600 "$incoming" "$bundle/.release.env"
+          rm -f -- "$incoming"
+          REMOTE
+
       - name: Pass delegated runtime secrets to the deployment interface
+        id: swarm-deploy
         env:
           SSH_HOST: ${{ steps.connection.outputs.host }}
           SSH_USER: ${{ steps.connection.outputs.user }}
@@ -450,6 +1582,7 @@ jobs:
             --current-main-sha "$current_main_sha" \
             --bundle-dir "$bundle" || exit
           exec "$bundle/deploy/tars-deploy" deploy \
+            --dispatcher-already-drained \
             --release-env "$bundle/.release.env" \
             --release-sha "$release_sha" \
             --current-main-sha "$current_main_sha" \
@@ -458,7 +1591,599 @@ jobs:
           } | ssh "${ssh_options[@]}" "$target" /bin/bash -s -- \
             "$RELEASE_SHA" "$CURRENT_MAIN_SHA"
 
+      - name: Verify the smoke-accepted provider generation
+        run: |
+          python3 central/scripts/tars/tars_runpod_release.py verify-target \
+            --api-key-file "$RUNNER_TEMP/tars-deploy-secrets/RUNPOD_API_KEY" \
+            --receipt-file "$RUNNER_TEMP/tars-runpod-rollout.json"
+
+      - name: Commit the accepted app-provider generation
+        env:
+          SSH_HOST: ${{ steps.connection.outputs.host }}
+          SSH_USER: ${{ steps.connection.outputs.user }}
+          RELEASE_SHA: ${{ steps.payload.outputs.sha }}
+          APPLICATION_GPU_IMAGE: ${{ steps.artifact.outputs.registry }}@${{ steps.artifact.outputs.gpu_digest }}
+          ENDPOINT_ID: ${{ steps.runpod-stage.outputs.endpoint_id }}
+        run: |
+          ssh_options=(
+            -i "$HOME/.ssh/tars_key"
+            -o BatchMode=yes
+            -o IdentitiesOnly=yes
+            -o StrictHostKeyChecking=yes
+            -o ServerAliveInterval=15
+            -o ServerAliveCountMax=3
+            -o TCPKeepAlive=yes
+            -o "UserKnownHostsFile=$HOME/.ssh/tars_known_hosts"
+          )
+          target="$SSH_USER@$SSH_HOST"
+          boundary_sha="$(
+            shasum -a 256 "$RUNNER_TEMP/tars-runpod-rollout.json" |
+              awk '{print $1}'
+          )"
+          ssh "${ssh_options[@]}" "$target" /bin/sh -s -- \
+            "$RELEASE_SHA" "$APPLICATION_GPU_IMAGE" "$ENDPOINT_ID" \
+            "$boundary_sha" <<'REMOTE'
+          set -eu
+          release_sha=$1
+          gpu_image=$2
+          endpoint_id=$3
+          boundary_sha=$4
+          ! docker config inspect tars_deploy_lock >/dev/null 2>&1
+          live_sha="$(docker service inspect \
+            --format '{{index .Spec.Labels "tars.release.sha"}}' \
+            tars_dispatcher)"
+          live_environment="$(docker service inspect \
+            --format '{{range .Spec.TaskTemplate.ContainerSpec.Env}}{{println .}}{{end}}' \
+            tars_dispatcher)"
+          live_gpu="$(printf '%s\n' "$live_environment" |
+            sed -n 's/^TARS_GPU_IMAGE_DIGEST=//p')"
+          live_endpoint="$(printf '%s\n' "$live_environment" |
+            sed -n 's/^TARS_RUNPOD_ENDPOINT_ID=//p')"
+          test "$live_sha" = "$release_sha"
+          test "$live_gpu" = "$gpu_image"
+          test "$live_endpoint" = "$endpoint_id"
+          recorded_sha="$(python3 -c \
+            'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["sha"])' \
+            /srv/tars/deployment/current.json)"
+          test "$recorded_sha" = "$release_sha"
+          boundary=/srv/tars/deployment/runpod-rollout-boundary.json
+          test -f "$boundary"
+          test ! -L "$boundary"
+          test "$(stat -c '%a' "$boundary")" = 600
+          test "$(stat -c '%u' "$boundary")" = "$(id -u)"
+          test "$(sha256sum "$boundary" | awk '{print $1}')" = "$boundary_sha"
+          rm -f "$boundary"
+          REMOTE
+
+      - name: Reconcile the durable generation after failure or cancellation
+        if: failure() || cancelled()
+        env:
+          HAD_INTERRUPTED_BOUNDARY: ${{ steps.initial-app.outputs.interrupted }}
+          RELEASE_SHA: ${{ steps.payload.outputs.sha }}
+          APPLICATION_GPU_IMAGE: ${{ steps.artifact.outputs.registry }}@${{ steps.artifact.outputs.gpu_digest }}
+          SSH_HOST: ${{ steps.connection.outputs.host }}
+          SSH_USER: ${{ steps.connection.outputs.user }}
+        run: |
+          initial_state="$RUNNER_TEMP/tars-initial-app-state"
+          app_baseline="$RUNNER_TEMP/tars-app-baseline"
+          receipt="$RUNNER_TEMP/tars-runpod-rollout.json"
+          if [ -z "$SSH_HOST" ] || [ -z "$SSH_USER" ] || \
+             [ ! -s "$HOME/.ssh/tars_key" ] || \
+             [ ! -s "$HOME/.ssh/tars_known_hosts" ]; then
+            if [ ! -s "$initial_state" ] && [ ! -s "$app_baseline" ] && \
+               [ ! -s "$receipt" ]; then
+              echo "deployment did not reach the application/provider transaction"
+              exit 0
+            fi
+            echo "deployment recovery credentials are unavailable" >&2
+            exit 1
+          fi
+          ssh_options=(
+            -i "$HOME/.ssh/tars_key"
+            -o BatchMode=yes
+            -o IdentitiesOnly=yes
+            -o StrictHostKeyChecking=yes
+            -o ServerAliveInterval=15
+            -o ServerAliveCountMax=3
+            -o TCPKeepAlive=yes
+            -o "UserKnownHostsFile=$HOME/.ssh/tars_known_hosts"
+          )
+          target="$SSH_USER@$SSH_HOST"
+          if ssh "${ssh_options[@]}" "$target" /bin/sh -s \
+            > "$receipt" <<'REMOTE'
+          set -eu
+          boundary=/srv/tars/deployment/runpod-rollout-boundary.json
+          if [ ! -e "$boundary" ] && [ ! -L "$boundary" ]; then
+            exit 42
+          fi
+          test -f "$boundary"
+          test ! -L "$boundary"
+          test "$(stat -c '%a' "$boundary")" = 600
+          test "$(stat -c '%u' "$boundary")" = "$(id -u)"
+          cat "$boundary"
+          REMOTE
+          then
+            chmod 0600 "$receipt"
+            has_boundary=true
+          else
+            status=$?
+            rm -f "$receipt"
+            if [ "$status" -eq 42 ]; then
+              has_boundary=false
+            else
+              echo "the durable Runpod boundary is invalid or unreadable" >&2
+              exit "$status"
+            fi
+          fi
+
+          if [ "$has_boundary" = false ]; then
+            # The remote marker is authoritative. Its absence means Runpod was
+            # not mutated, or the accepted generation already removed it.
+            state=
+            if [ -s "$app_baseline" ]; then
+              state=$app_baseline
+            elif [ "$HAD_INTERRUPTED_BOUNDARY" != true ] && \
+                 [ -s "$initial_state" ]; then
+              state=$initial_state
+            fi
+            if [ -z "$state" ]; then
+              echo "no provider transaction exists; leaving application state unchanged"
+              exit 0
+            fi
+            mode="$(sed -n '1p' "$state")"
+            prior_sha="$(sed -n '2p' "$state")"
+            prior_gpu="$(sed -n '3p' "$state")"
+            endpoint_id="$(sed -n '4p' "$state")"
+            case "$mode" in existing|greenfield) ;; *) exit 64 ;; esac
+            if [ "$mode" = existing ]; then
+              case "$prior_sha" in ""|*[!0-9a-f]*) exit 64 ;; esac
+              test "${#prior_sha}" -eq 40
+              test -n "$prior_gpu"
+              case "$endpoint_id" in ""|*[!A-Za-z0-9_-]*) exit 64 ;; esac
+            else
+              endpoint_id="$(
+                cat "$RUNNER_TEMP/tars-deploy-secrets/RUNPOD_ENDPOINT_ID"
+              )"
+              case "$endpoint_id" in ""|*[!A-Za-z0-9_-]*) exit 64 ;; esac
+            fi
+            ssh "${ssh_options[@]}" "$target" /bin/sh -s -- \
+              "$mode" "$prior_sha" "$prior_gpu" "$endpoint_id" \
+              "$RELEASE_SHA" "$APPLICATION_GPU_IMAGE" <<'REMOTE'
+            set -eu
+            mode=$1
+            prior_sha=$2
+            prior_gpu=$3
+            expected_endpoint=$4
+            target_sha=$5
+            target_gpu=$6
+            boundary=/srv/tars/deployment/runpod-rollout-boundary.json
+            test ! -e "$boundary"
+            test ! -L "$boundary"
+            present=0
+            for service in tars_nginx tars_api tars_dispatcher tars_otel-collector; do
+              if docker service inspect "$service" >/dev/null 2>&1; then
+                present=$((present + 1))
+              fi
+            done
+            if [ "$present" -eq 0 ]; then
+              test "$mode" = greenfield
+              ! docker config inspect tars_deploy_lock >/dev/null 2>&1
+              test ! -e /srv/tars/deployment/current.json
+              exit 0
+            fi
+            if [ "$present" -ne 4 ]; then
+              echo "partial application state cannot be restored without a boundary" >&2
+              exit 1
+            fi
+            ! docker config inspect tars_deploy_lock >/dev/null 2>&1
+            live_sha="$(docker service inspect \
+              --format '{{index .Spec.Labels "tars.release.sha"}}' \
+              tars_dispatcher)"
+            live_environment="$(docker service inspect \
+              --format '{{range .Spec.TaskTemplate.ContainerSpec.Env}}{{println .}}{{end}}' \
+              tars_dispatcher)"
+            live_gpu="$(printf '%s\n' "$live_environment" |
+              sed -n 's/^TARS_GPU_IMAGE_DIGEST=//p')"
+            live_endpoint="$(printf '%s\n' "$live_environment" |
+              sed -n 's/^TARS_RUNPOD_ENDPOINT_ID=//p')"
+            if [ "$live_sha" = "$target_sha" ] && \
+               [ "$live_gpu" = "$target_gpu" ]; then
+              expected_sha=$target_sha
+              expected_gpu=$target_gpu
+            else
+              test "$mode" = existing
+              test "$live_sha" = "$prior_sha"
+              test "$live_gpu" = "$prior_gpu"
+              expected_sha=$prior_sha
+              expected_gpu=$prior_gpu
+            fi
+            test "$live_endpoint" = "$expected_endpoint"
+            recorded_sha="$(python3 -c \
+              'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["sha"])' \
+              /srv/tars/deployment/current.json)"
+            test "$recorded_sha" = "$expected_sha"
+            docker service scale tars_dispatcher=1 >/dev/null
+            deadline=$(( $(date +%s) + 900 ))
+            while :; do
+              actual="$(docker service ls --filter name=tars_dispatcher \
+                --format '{{.Replicas}}')"
+              if [ "$actual" = 1/1 ]; then
+                break
+              fi
+              if [ "$(date +%s)" -ge "$deadline" ]; then
+                echo "dispatcher did not return after pre-mutation recovery" >&2
+                exit 1
+              fi
+              sleep 5
+            done
+            live_sha="$(docker service inspect \
+              --format '{{index .Spec.Labels "tars.release.sha"}}' \
+              tars_dispatcher)"
+            live_environment="$(docker service inspect \
+              --format '{{range .Spec.TaskTemplate.ContainerSpec.Env}}{{println .}}{{end}}' \
+              tars_dispatcher)"
+            live_gpu="$(printf '%s\n' "$live_environment" |
+              sed -n 's/^TARS_GPU_IMAGE_DIGEST=//p')"
+            live_endpoint="$(printf '%s\n' "$live_environment" |
+              sed -n 's/^TARS_RUNPOD_ENDPOINT_ID=//p')"
+            test "$live_sha" = "$expected_sha"
+            test "$live_gpu" = "$expected_gpu"
+            test "$live_endpoint" = "$expected_endpoint"
+          REMOTE
+            exit 0
+          fi
+
+          values="$RUNNER_TEMP/tars-runpod-rollback-values"
+          : > "$values"
+          chmod 0600 "$values"
+          python3 central/scripts/tars/tars_runpod_release.py describe-boundary \
+            --boundary-file "$receipt" \
+            --github-output "$values"
+          get_value() {
+            name=$1
+            value="$(sed -n "s/^$name=//p" "$values")"
+            test "$(grep -c "^$name=" "$values")" -eq 1
+            printf '%s' "$value"
+          }
+          kind="$(get_value kind)"
+          if [ "$kind" = application ]; then
+            release_sha="$(get_value app_release_sha)"
+            gpu_image="$(get_value app_gpu_image)"
+            endpoint_id="$(get_value endpoint_id)"
+            replicas="$(get_value replicas)"
+            python3 central/scripts/tars/tars_runpod_release.py \
+              verify-application \
+              --api-key-file "$RUNNER_TEMP/tars-deploy-secrets/RUNPOD_API_KEY" \
+              --boundary-file "$receipt" \
+              --endpoint-id-file "$RUNNER_TEMP/tars-deploy-secrets/RUNPOD_ENDPOINT_ID" \
+              --template-id-file "$RUNNER_TEMP/tars-deploy-secrets/RUNPOD_TEMPLATE_ID" \
+              --auth-id-file "$RUNNER_TEMP/tars-deploy-secrets/RUNPOD_REGISTRY_AUTH_ID"
+            boundary_sha="$(
+              shasum -a 256 "$receipt" | awk '{print $1}'
+            )"
+            ssh "${ssh_options[@]}" "$target" /bin/sh -s -- \
+              "$release_sha" "$gpu_image" "$endpoint_id" "$replicas" \
+              "$boundary_sha" <<'REMOTE'
+            set -eu
+            release_sha=$1
+            gpu_image=$2
+            endpoint_id=$3
+            replicas=$4
+            boundary_sha=$5
+            boundary=/srv/tars/deployment/runpod-rollout-boundary.json
+            test "$replicas" = 1
+            test -f "$boundary"
+            test ! -L "$boundary"
+            test "$(stat -c '%a' "$boundary")" = 600
+            test "$(stat -c '%u' "$boundary")" = "$(id -u)"
+            test "$(sha256sum "$boundary" | awk '{print $1}')" = "$boundary_sha"
+            ! docker config inspect tars_deploy_lock >/dev/null 2>&1
+            for service in tars_nginx tars_api tars_dispatcher tars_otel-collector; do
+              docker service inspect "$service" >/dev/null 2>&1
+            done
+            verify_live() {
+              live_sha="$(docker service inspect \
+                --format '{{index .Spec.Labels "tars.release.sha"}}' \
+                tars_dispatcher)"
+              live_environment="$(docker service inspect \
+                --format '{{range .Spec.TaskTemplate.ContainerSpec.Env}}{{println .}}{{end}}' \
+                tars_dispatcher)"
+              live_gpu="$(printf '%s\n' "$live_environment" |
+                sed -n 's/^TARS_GPU_IMAGE_DIGEST=//p')"
+              live_endpoint="$(printf '%s\n' "$live_environment" |
+                sed -n 's/^TARS_RUNPOD_ENDPOINT_ID=//p')"
+              test "$live_sha" = "$release_sha"
+              test "$live_gpu" = "$gpu_image"
+              test "$live_endpoint" = "$endpoint_id"
+              recorded_sha="$(python3 -c \
+                'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["sha"])' \
+                /srv/tars/deployment/current.json)"
+              test "$recorded_sha" = "$release_sha"
+            }
+            verify_live
+            docker service scale "tars_dispatcher=$replicas" >/dev/null
+            deadline=$(( $(date +%s) + 900 ))
+            while :; do
+              actual="$(docker service ls --filter name=tars_dispatcher \
+                --format '{{.Replicas}}')"
+              if [ "$actual" = "$replicas/$replicas" ]; then
+                break
+              fi
+              if [ "$(date +%s)" -ge "$deadline" ]; then
+                echo "pre-drain dispatcher did not return after failure" >&2
+                exit 1
+              fi
+              sleep 5
+            done
+            verify_live
+            rm -f "$boundary"
+          REMOTE
+            exit 0
+          fi
+          test "$kind" = rollout
+          baseline="$(get_value baseline)"
+          endpoint_id="$(get_value endpoint_id)"
+          prior_gpu="$(get_value prior_gpu_image)"
+          prior_sha="$(get_value prior_release_sha)"
+          target_sha="$(get_value release_sha)"
+          target_gpu="$(get_value target_app_gpu_image)"
+          case "$baseline" in existing|greenfield) ;; *) exit 64 ;; esac
+
+          ssh "${ssh_options[@]}" "$target" /bin/sh -s <<'REMOTE'
+          set -eu
+          service=tars_dispatcher
+          if ! docker service inspect "$service" >/dev/null 2>&1; then
+            exit 0
+          fi
+          docker service scale "$service=0" >/dev/null
+          deadline=$(( $(date +%s) + 8400 ))
+          while :; do
+            if ! current_states="$(docker service ps --no-trunc \
+              --format '{{.CurrentState}}' "$service")"; then
+              echo "could not inspect dispatcher task state" >&2
+              exit 1
+            fi
+            if printf '%s\n' "$current_states" |
+              awk 'NF && $1 !~ /^(Complete|Shutdown|Failed|Rejected|Remove|Orphaned)$/ { exit 1 }'
+            then
+              break
+            fi
+            if [ "$(date +%s)" -ge "$deadline" ]; then
+              echo "dispatcher did not drain before rollback" >&2
+              exit 1
+            fi
+            sleep 5
+          done
+          REMOTE
+
+          ssh "${ssh_options[@]}" "$target" /bin/sh -s -- "$target_sha" <<'REMOTE'
+          set -eu
+          target_sha=$1
+          if docker config inspect tars_deploy_lock >/dev/null 2>&1; then
+            owner="$(docker config inspect tars_deploy_lock \
+              --format '{{index .Spec.Labels "tars.owner"}}')"
+            if [ "$owner" != "$target_sha" ]; then
+              echo "deployment lock does not belong to the rollout boundary" >&2
+              exit 1
+            fi
+          fi
+          REMOTE
+
+          if [ "$baseline" = existing ]; then
+            python3 central/scripts/tars/tars_runpod_release.py rollback \
+              --api-key-file "$RUNNER_TEMP/tars-deploy-secrets/RUNPOD_API_KEY" \
+              --receipt-file "$receipt"
+            application_state="$(
+              ssh "${ssh_options[@]}" "$target" /bin/sh -s -- \
+                "$prior_sha" "$prior_gpu" "$target_sha" "$target_gpu" \
+                "$endpoint_id" <<'REMOTE'
+            set -eu
+            prior_sha=$1
+            prior_gpu=$2
+            target_sha=$3
+            target_gpu=$4
+            expected_endpoint=$5
+            present=0
+            for service in tars_nginx tars_api tars_dispatcher tars_otel-collector; do
+              if docker service inspect "$service" >/dev/null 2>&1; then
+                present=$((present + 1))
+              fi
+            done
+            if [ "$present" -ne 0 ] && [ "$present" -ne 4 ]; then
+              echo "partial application state requires operator recovery" >&2
+              exit 1
+            fi
+            locked=false
+            owner=
+            if docker config inspect tars_deploy_lock >/dev/null 2>&1; then
+              locked=true
+              owner="$(docker config inspect tars_deploy_lock \
+                --format '{{index .Spec.Labels "tars.owner"}}')"
+              test "$owner" = "$target_sha"
+            fi
+            if [ "$present" -eq 4 ]; then
+              live_sha="$(docker service inspect \
+                --format '{{index .Spec.Labels "tars.release.sha"}}' \
+                tars_dispatcher)"
+              live_environment="$(docker service inspect \
+                --format '{{range .Spec.TaskTemplate.ContainerSpec.Env}}{{println .}}{{end}}' \
+                tars_dispatcher)"
+              live_gpu="$(printf '%s\n' "$live_environment" |
+                sed -n 's/^TARS_GPU_IMAGE_DIGEST=//p')"
+              live_endpoint="$(printf '%s\n' "$live_environment" |
+                sed -n 's/^TARS_RUNPOD_ENDPOINT_ID=//p')"
+              test "$live_endpoint" = "$expected_endpoint"
+              if [ "$live_sha" = "$prior_sha" ] && \
+                 [ "$live_gpu" = "$prior_gpu" ] && \
+                 [ "$locked" = false ]; then
+                echo ready
+                exit 0
+              fi
+              if ! { [ "$live_sha" = "$prior_sha" ] && \
+                     [ "$live_gpu" = "$prior_gpu" ]; } && \
+                 ! { [ "$live_sha" = "$target_sha" ] && \
+                     [ "$live_gpu" = "$target_gpu" ]; }; then
+                echo "application does not match either receipt generation" >&2
+                exit 1
+              fi
+            fi
+            echo repair
+          REMOTE
+            )"
+            case "$application_state" in ready|repair) ;; *) exit 64 ;; esac
+            if [ "$application_state" = repair ]; then
+              {
+                cat "$RUNNER_TEMP/tars-deploy-secrets/remote-secrets.sh"
+                cat <<'REMOTE'
+              set -euo pipefail
+              prior_sha=$1
+              target_sha=$2
+              if docker config inspect tars_deploy_lock >/dev/null 2>&1; then
+                owner="$(docker config inspect tars_deploy_lock \
+                  --format '{{index .Spec.Labels "tars.owner"}}')"
+                test "$owner" = "$target_sha"
+                target_bundle="/srv/tars/incoming/$target_sha"
+                "$target_bundle/deploy/tars-deploy" unlock \
+                  --expected-owner "$target_sha"
+              fi
+              bundle="/srv/tars/incoming/$prior_sha"
+              deployer="/srv/tars/incoming/$target_sha/deploy/tars-deploy"
+              "$deployer" deploy \
+                --dispatcher-already-drained \
+                --release-env "$bundle/.release.env" \
+                --release-sha "$prior_sha" \
+                --current-main-sha "$prior_sha" \
+                --bundle-dir "$bundle"
+              docker service scale tars_dispatcher=0 >/dev/null
+              deadline=$(( $(date +%s) + 8400 ))
+              while :; do
+                if ! current_states="$(docker service ps --no-trunc \
+                  --format '{{.CurrentState}}' tars_dispatcher)"; then
+                  echo "could not inspect dispatcher task state" >&2
+                  exit 1
+                fi
+                if printf '%s\n' "$current_states" |
+                  awk 'NF && $1 !~ /^(Complete|Shutdown|Failed|Rejected|Remove|Orphaned)$/ { exit 1 }'
+                then
+                  break
+                fi
+                if [ "$(date +%s)" -ge "$deadline" ]; then
+                  echo "dispatcher did not drain after application rollback" >&2
+                  exit 1
+                fi
+                sleep 5
+              done
+          REMOTE
+              } | ssh "${ssh_options[@]}" "$target" /bin/bash -s -- \
+                "$prior_sha" "$target_sha"
+            fi
+            # Re-read the provider immediately before re-enabling the app.
+            python3 central/scripts/tars/tars_runpod_release.py rollback \
+              --api-key-file "$RUNNER_TEMP/tars-deploy-secrets/RUNPOD_API_KEY" \
+              --receipt-file "$receipt"
+            expected_sha=$prior_sha
+            expected_gpu=$prior_gpu
+          else
+            test "$baseline" = greenfield
+            python3 central/scripts/tars/tars_runpod_release.py verify-target \
+              --api-key-file "$RUNNER_TEMP/tars-deploy-secrets/RUNPOD_API_KEY" \
+              --receipt-file "$receipt"
+            expected_sha=$target_sha
+            expected_gpu=$target_gpu
+          fi
+
+          ssh "${ssh_options[@]}" "$target" /bin/sh -s -- \
+            "$baseline" "$expected_sha" "$expected_gpu" \
+            "$endpoint_id" <<'REMOTE'
+          set -eu
+          baseline=$1
+          expected_sha=$2
+          expected_gpu=$3
+          expected_endpoint=$4
+          boundary=/srv/tars/deployment/runpod-rollout-boundary.json
+          test -f "$boundary"
+          test ! -L "$boundary"
+          test "$(stat -c '%a' "$boundary")" = 600
+          test "$(stat -c '%u' "$boundary")" = "$(id -u)"
+          if docker config inspect tars_deploy_lock >/dev/null 2>&1; then
+            echo "application rollback is unresolved; dispatcher remains paused" >&2
+            exit 1
+          fi
+          present=0
+          for service in tars_nginx tars_api tars_dispatcher tars_otel-collector; do
+            if docker service inspect "$service" >/dev/null 2>&1; then
+              present=$((present + 1))
+            fi
+          done
+          if [ "$baseline" = greenfield ] && [ "$present" -eq 0 ]; then
+            test ! -e /srv/tars/deployment/current.json
+            rm -f "$boundary"
+            exit 0
+          fi
+          if [ "$present" -ne 4 ]; then
+            echo "application rollback is incomplete; boundary retained" >&2
+            exit 1
+          fi
+          live_sha="$(docker service inspect \
+            --format '{{index .Spec.Labels "tars.release.sha"}}' \
+            tars_dispatcher)"
+          live_environment="$(docker service inspect \
+            --format '{{range .Spec.TaskTemplate.ContainerSpec.Env}}{{println .}}{{end}}' \
+            tars_dispatcher)"
+          live_gpu="$(printf '%s\n' "$live_environment" |
+            sed -n 's/^TARS_GPU_IMAGE_DIGEST=//p')"
+          live_endpoint="$(printf '%s\n' "$live_environment" |
+            sed -n 's/^TARS_RUNPOD_ENDPOINT_ID=//p')"
+          test "$live_sha" = "$expected_sha"
+          test "$live_gpu" = "$expected_gpu"
+          test "$live_endpoint" = "$expected_endpoint"
+          recorded_sha="$(python3 -c \
+            'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["sha"])' \
+            /srv/tars/deployment/current.json)"
+          test "$recorded_sha" = "$expected_sha"
+          docker service scale tars_dispatcher=1 >/dev/null
+          deadline=$(( $(date +%s) + 900 ))
+          while :; do
+            actual="$(docker service ls --filter name=tars_dispatcher \
+              --format '{{.Replicas}}')"
+            if [ "$actual" = 1/1 ]; then
+              break
+            fi
+            if [ "$(date +%s)" -ge "$deadline" ]; then
+              echo "verified dispatcher did not return after rollback" >&2
+              exit 1
+            fi
+            sleep 5
+          done
+          live_sha="$(docker service inspect \
+            --format '{{index .Spec.Labels "tars.release.sha"}}' \
+            tars_dispatcher)"
+          live_environment="$(docker service inspect \
+            --format '{{range .Spec.TaskTemplate.ContainerSpec.Env}}{{println .}}{{end}}' \
+            tars_dispatcher)"
+          live_gpu="$(printf '%s\n' "$live_environment" |
+            sed -n 's/^TARS_GPU_IMAGE_DIGEST=//p')"
+          live_endpoint="$(printf '%s\n' "$live_environment" |
+            sed -n 's/^TARS_RUNPOD_ENDPOINT_ID=//p')"
+          test "$live_sha" = "$expected_sha"
+          test "$live_gpu" = "$expected_gpu"
+          test "$live_endpoint" = "$expected_endpoint"
+          rm -f "$boundary"
+          REMOTE
+
       - name: Remove runner-side deployment credentials
         if: always()
         run: |
-          rm -rf "$RUNNER_TEMP/tars-deploy-secrets" "$HOME/.ssh/tars_key" "$HOME/.ssh/tars_known_hosts"
+          rm -rf \
+            "$RUNNER_TEMP/tars-deploy-secrets" \
+            "$RUNNER_TEMP/tars-initial-app-state" \
+            "$RUNNER_TEMP/tars-initial-boundary-values" \
+            "$RUNNER_TEMP/tars-app-baseline" \
+            "$RUNNER_TEMP/tars-application-boundary.json" \
+            "$RUNNER_TEMP/tars-recovered-application-boundary.json" \
+            "$RUNNER_TEMP/tars-prior-runpod-boundary.json" \
+            "$RUNNER_TEMP/tars-runpod-rollout.json" \
+            "$RUNNER_TEMP/tars-runpod-rollback-values" \
+            "$RUNNER_TEMP/tars-release.env" \
+            "$HOME/.ssh/tars_key" \
+            "$HOME/.ssh/tars_known_hosts"

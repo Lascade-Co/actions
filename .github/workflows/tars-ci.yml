@@ -90,6 +90,7 @@ jobs:
           go test -count=1 ./...
           python3 -m unittest discover -s release -p 'test_*.py'
           python3 -m unittest discover -s deploy -p 'test_*.py'
+          python3 -m unittest discover -s runpod_worker -p 'test_*.py'
 
   report:
     name: Report pull request result
