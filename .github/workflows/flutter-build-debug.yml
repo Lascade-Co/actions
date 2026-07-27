@@ -22,6 +22,7 @@ jobs:
       name: ${{ steps.repo.outputs.name }}
       comment-id: ${{ steps.status.outputs.comment-id }}
       dart_define_method: ${{ steps.flags.outputs.dart_define_method }}
+      restore_build_files: ${{ steps.flags.outputs.restore_build_files }}
     steps:
       - name: Extract owner/repo
         id: repo
@@ -40,6 +41,12 @@ jobs:
             echo "dart_define_method=true" >> "$GITHUB_OUTPUT"
           else
             echo "dart_define_method=false" >> "$GITHUB_OUTPUT"
+          fi
+          RAW_RESTORE="${{ github.event.client_payload.restore_build_files }}"
+          if [ "$RAW_RESTORE" = "true" ]; then
+            echo "restore_build_files=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "restore_build_files=false" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Mint GitHub App token
@@ -149,6 +156,25 @@ jobs:
 
       - name: Decode google-services.json
         run: echo "${{ env.SERVICE_JSON_BASE64 }}" | base64 --decode > android/app/google-services.json
+
+      - name: Restore gitignored build files from Infisical
+        if: needs.prepare.outputs.restore_build_files == 'true'
+        shell: bash
+        run: |
+          restore_file() {
+            local b64_var="$1" path="$2"
+            local b64_value="${!b64_var:-}"
+            if [ -n "$b64_value" ]; then
+              mkdir -p "$(dirname "$path")"
+              echo "$b64_value" | base64 --decode > "$path"
+              echo "Restored $path"
+            fi
+          }
+          restore_file FIREBASE_OPTIONS_BASE64        lib/firebase_options.dart
+          restore_file IOS_PBXPROJ_BASE64             ios/Runner.xcodeproj/project.pbxproj
+          restore_file IOS_INFO_PLIST_BASE64          ios/Runner/Info.plist
+          restore_file IOS_RUNNER_ENTITLEMENTS_BASE64 ios/Runner/Runner.entitlements
+          restore_file IOS_WIDGET_ENTITLEMENTS_BASE64 ios/EsimWidgetExtension.entitlements
 
       - name: Determine build mode (dart-define vs .env)
         id: build-mode
@@ -313,6 +339,25 @@ jobs:
       - name: Decode GoogleService-Info.plist
         run: echo "${{ env.SERVICE_PLIST_BASE64 }}" | base64 --decode > ios/Runner/GoogleService-Info.plist
 
+      - name: Restore gitignored build files from Infisical
+        if: needs.prepare.outputs.restore_build_files == 'true'
+        shell: bash
+        run: |
+          restore_file() {
+            local b64_var="$1" path="$2"
+            local b64_value="${!b64_var:-}"
+            if [ -n "$b64_value" ]; then
+              mkdir -p "$(dirname "$path")"
+              echo "$b64_value" | base64 --decode > "$path"
+              echo "Restored $path"
+            fi
+          }
+          restore_file FIREBASE_OPTIONS_BASE64        lib/firebase_options.dart
+          restore_file IOS_PBXPROJ_BASE64             ios/Runner.xcodeproj/project.pbxproj
+          restore_file IOS_INFO_PLIST_BASE64          ios/Runner/Info.plist
+          restore_file IOS_RUNNER_ENTITLEMENTS_BASE64 ios/Runner/Runner.entitlements
+          restore_file IOS_WIDGET_ENTITLEMENTS_BASE64 ios/EsimWidgetExtension.entitlements
+
       - name: Determine build mode (dart-define vs .env)
         id: build-mode
         if: needs.prepare.outputs.dart_define_method == 'true'
@@ -331,7 +376,6 @@ jobs:
           PROFILES_DIR_LEGACY="$HOME/Library/MobileDevice/Provisioning Profiles"
           PROFILES_DIR_NEW="$HOME/Library/Developer/Xcode/UserData/Provisioning Profiles"
           mkdir -p "$PROFILES_DIR_LEGACY" "$PROFILES_DIR_NEW"
-
           install_extra_profile() {
             local b64_var="$1" env_var="$2" label="$3"
             local b64_value="${!b64_var:-}"
@@ -349,7 +393,6 @@ jobs:
               echo "Installed $label profile: $NAME ($UUID)"
             fi
           }
-
           install_extra_profile IOS_SHARE_EXT_PROVISION_PROFILE_BASE64    SHARE_EXT_PROFILE    "share extension"
           install_extra_profile IOS_LIVE_ACTIVITY_PROVISION_PROFILE_BASE64 LIVE_ACTIVITY_PROFILE "live activity widget"
 
@@ -383,7 +426,6 @@ jobs:
           add_pp "${{ env.LIVE_ACTIVITY_PROFILE_UUID }}"
           add_pp "${{ env.WIDGET_PROFILE_UUID }}"
           add_pp "${{ env.WATCH_PROFILE_UUID }}"
-
 
       - name: Read .flutter-version
         id: flutter-version
@@ -562,7 +604,6 @@ jobs:
           format: markdown
           message: |
             *Debug Build Ready*
-
             PR: ${{ github.event.client_payload.title || 'Debug Build' }}
             [Download](${{ steps.create_release.outputs.url }})
 
@@ -578,7 +619,6 @@ jobs:
             const firebaseCredentialsResult = "${{ steps.firebase-credentials.outcome }}";
             const androidUploadResult = "${{ steps.upload-android.outcome }}";
             const iosUploadResult = "${{ steps.upload-ios.outcome }}";
-
             let reason;
             if (androidResult === "failure" && iosResult === "failure") {
               reason = "Android and iOS builds";
@@ -587,7 +627,6 @@ jobs:
             } else {
               reason = "iOS build";
             }
-
             if (androidResult !== "failure" && iosResult !== "failure") {
               if (firebaseCliResult === "failure") {
                 reason = "Firebase CLI setup";
@@ -601,14 +640,12 @@ jobs:
                 reason = "iOS Firebase upload";
               }
             }
-
             const [owner, repo] = "${{ github.event.client_payload.repo }}".split("/");
             const body = [
               "<!-- central-build-debug-flutter -->",
               `**${reason}** failed.`,
               `[Check logs](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})`,
             ].join("\n");
-
             await github.rest.issues.updateComment({
               owner,
               repo,
