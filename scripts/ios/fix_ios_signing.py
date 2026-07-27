@@ -58,7 +58,7 @@ def main():
                 print(f"ERROR: WATCH_PROFILE_NAME required for target {bundle}", file=sys.stderr)
                 sys.exit(1)
             return watch_name
-        if bundle.endswith("Widget") or "Widget" in bundle or "LiveActivity" in bundle:
+        if "widget" in bundle.lower() or "liveactivity" in bundle.lower():
             if not widget_name:
                 print(
                     f"ERROR: WIDGET_PROFILE_NAME (or LIVE_ACTIVITY_PROFILE_NAME) "
