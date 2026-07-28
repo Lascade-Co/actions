@@ -24,6 +24,7 @@ jobs:
       commit_sha: ${{ steps.push.outputs.commit_sha }}
       is_travel_app: ${{ steps.flags.outputs.is_travel_app }}
       dart_define_method: ${{ steps.flags.outputs.dart_define_method }}
+      restore_build_files: ${{ steps.flags.outputs.restore_build_files }}
     steps:
       - name: Extract owner/repo
         id: repo
@@ -49,6 +50,13 @@ jobs:
             echo "dart_define_method=true" >> "$GITHUB_OUTPUT"
           else
             echo "dart_define_method=false" >> "$GITHUB_OUTPUT"
+          fi
+
+          RAW_RESTORE="${{ github.event.client_payload.restore_build_files }}"
+          if [ "$RAW_RESTORE" = "true" ]; then
+            echo "restore_build_files=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "restore_build_files=false" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Mint GitHub App token
@@ -174,6 +182,25 @@ jobs:
 
       - name: Decode google-services.json
         run: echo "${{ env.SERVICE_JSON_BASE64 }}" | base64 --decode > android/app/google-services.json
+
+      - name: Restore gitignored build files from Infisical
+        if: needs.prepare.outputs.restore_build_files == 'true'
+        shell: bash
+        run: |
+          restore_file() {
+            local b64_var="$1" path="$2"
+            local b64_value="${!b64_var:-}"
+            if [ -n "$b64_value" ]; then
+              mkdir -p "$(dirname "$path")"
+              echo "$b64_value" | base64 --decode > "$path"
+              echo "Restored $path"
+            fi
+          }
+          restore_file FIREBASE_OPTIONS_BASE64        lib/firebase_options.dart
+          restore_file IOS_PBXPROJ_BASE64             ios/Runner.xcodeproj/project.pbxproj
+          restore_file IOS_INFO_PLIST_BASE64          ios/Runner/Info.plist
+          restore_file IOS_RUNNER_ENTITLEMENTS_BASE64 ios/Runner/Runner.entitlements
+          restore_file IOS_WIDGET_ENTITLEMENTS_BASE64 ios/EsimWidgetExtension.entitlements
 
       - name: Determine build mode (dart-define vs .env)
         id: build-mode
@@ -339,6 +366,26 @@ jobs:
       - name: Decode GoogleService-Info.plist
         run: echo "${{ env.SERVICE_PLIST_BASE64 }}" | base64 --decode > ios/Runner/GoogleService-Info.plist
 
+      # Must run before "Switch Xcode project to manual signing", which reads project.pbxproj.
+      - name: Restore gitignored build files from Infisical
+        if: needs.prepare.outputs.restore_build_files == 'true'
+        shell: bash
+        run: |
+          restore_file() {
+            local b64_var="$1" path="$2"
+            local b64_value="${!b64_var:-}"
+            if [ -n "$b64_value" ]; then
+              mkdir -p "$(dirname "$path")"
+              echo "$b64_value" | base64 --decode > "$path"
+              echo "Restored $path"
+            fi
+          }
+          restore_file FIREBASE_OPTIONS_BASE64        lib/firebase_options.dart
+          restore_file IOS_PBXPROJ_BASE64             ios/Runner.xcodeproj/project.pbxproj
+          restore_file IOS_INFO_PLIST_BASE64          ios/Runner/Info.plist
+          restore_file IOS_RUNNER_ENTITLEMENTS_BASE64 ios/Runner/Runner.entitlements
+          restore_file IOS_WIDGET_ENTITLEMENTS_BASE64 ios/EsimWidgetExtension.entitlements
+
       - name: Determine build mode (dart-define vs .env)
         id: build-mode
         if: needs.prepare.outputs.dart_define_method == 'true'
@@ -439,6 +486,13 @@ jobs:
 
       - name: Flutter pub get
         run: flutter pub get
+
+      # Mirrors flutter-build-debug.yml (commit 53ee66a, "fixed crashlytics issue"):
+      # the Crashlytics build phase in the restored pbxproj shells out to flutterfire.
+      - name: Install FlutterFire CLI
+        run: |
+          dart pub global activate flutterfire_cli
+          echo "$HOME/.pub-cache/bin" >> "$GITHUB_PATH"
 
       - name: Build release IPA
         run: flutter build ipa --export-options-plist=ExportOptions.plist --no-pub ${{ steps.build-mode.outputs.dart_define_args }}
