@@ -463,6 +463,11 @@ jobs:
           flutter pub get
           duration=$(( $(date +%s) - start ))
           echo "duration=${duration}" >> "$GITHUB_OUTPUT"
+          
+      - name: Install FlutterFire CLI
+        run: |
+          dart pub global activate flutterfire_cli
+          echo "$HOME/.pub-cache/bin" >> "$GITHUB_PATH"    
 
       - name: Build IPA
         id: ios-build
