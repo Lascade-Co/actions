@@ -1,0 +1,106 @@
+name: Blog SEO Audit
+
+on:
+  workflow_dispatch:
+    inputs:
+      site:
+        description: 'Audit one site only (blank = all sites in data/seo_sites.json)'
+        required: false
+        type: string
+      blog_count:
+        description: 'How many blogs to audit (blank = the site config value)'
+        required: false
+        type: string
+  schedule:
+    # Daily at 06:00 UTC (10:00 Asia/Muscat)
+    - cron: '0 6 * * *'
+
+env:
+  RAW: https://raw.githubusercontent.com/Lascade-Co/actions/main
+  TELEGRAM_CHAT_ID: '-5312322129'
+
+jobs:
+  discover:
+    runs-on: ubuntu-latest
+    outputs:
+      sites: ${{ steps.list.outputs.sites }}
+    steps:
+      - name: Build the site matrix
+        id: list
+        env:
+          ONLY: ${{ inputs.site }}
+        run: |
+          curl -fsSL -o seo_sites.json "$RAW/data/seo_sites.json"
+          if [ -n "$ONLY" ]; then
+            SITES=$(jq -c --arg only "$ONLY" '[.[] | select(.name == $only) | .name]' seo_sites.json)
+          else
+            SITES=$(jq -c '[.[].name]' seo_sites.json)
+          fi
+          if [ "$SITES" = "[]" ]; then
+            echo "No sites matched. Known: $(jq -r '[.[].name] | join(", ")' seo_sites.json)" >&2
+            exit 1
+          fi
+          echo "sites=$SITES" >> "$GITHUB_OUTPUT"
+          echo "Matrix: $SITES"
+
+  audit:
+    needs: discover
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        site: ${{ fromJSON(needs.discover.outputs.sites) }}
+    steps:
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+
+      - name: Install dependencies
+        run: pip install --quiet requests beautifulsoup4 lxml
+
+      - name: Download audit scripts
+        run: |
+          curl -fsSL -o seo_sites.json      "$RAW/data/seo_sites.json"
+          curl -fsSL -o seo_model.py        "$RAW/scripts/seo/seo_model.py"
+          curl -fsSL -o seo_parse.py        "$RAW/scripts/seo/seo_parse.py"
+          curl -fsSL -o seo_fetch.py        "$RAW/scripts/seo/seo_fetch.py"
+          curl -fsSL -o seo_rulekit.py      "$RAW/scripts/seo/seo_rulekit.py"
+          curl -fsSL -o seo_checks_abc.py   "$RAW/scripts/seo/seo_checks_abc.py"
+          curl -fsSL -o seo_checks_def.py   "$RAW/scripts/seo/seo_checks_def.py"
+          curl -fsSL -o seo_checks_ghi.py   "$RAW/scripts/seo/seo_checks_ghi.py"
+          curl -fsSL -o seo_checks.py       "$RAW/scripts/seo/seo_checks.py"
+          curl -fsSL -o seo_report.py       "$RAW/scripts/seo/seo_report.py"
+          curl -fsSL -o seo_blog_audit.py   "$RAW/scripts/seo/seo_blog_audit.py"
+
+      - name: Run the audit
+        id: audit
+        env:
+          BLOG_COUNT: ${{ inputs.blog_count }}
+        run: |
+          ARGS=(--site "${{ matrix.site }}" --config seo_sites.json --output report.html)
+          if [ -n "$BLOG_COUNT" ]; then ARGS+=(--blog-count "$BLOG_COUNT"); fi
+          python3 seo_blog_audit.py "${ARGS[@]}"
+
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: seo-report-${{ matrix.site }}
+          path: report.html
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Send report to Telegram
+        if: steps.audit.outputs.has_findings == 'true'
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.SUBSCRIPTION_TELEGRAM_TOKEN }}
+          LABEL: ${{ steps.audit.outputs.label }}
+          ERRORS: ${{ steps.audit.outputs.error_count }}
+          WARNINGS: ${{ steps.audit.outputs.warn_count }}
+        run: |
+          curl -sf -X POST \
+            "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendDocument" \
+            -F chat_id="${TELEGRAM_CHAT_ID}" \
+            -F document=@report.html \
+            -F caption="Blog SEO Audit — ${LABEL}: ${ERRORS} errors, ${WARNINGS} warnings"
