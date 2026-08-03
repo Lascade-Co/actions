@@ -215,6 +215,30 @@ class GroupETest(unittest.TestCase):
     def test_e1_silent_on_valid_blocks(self):
         self.assertEqual(run_rule("E1", schema_page()), [])
 
+    def test_e1_silent_on_valid_graph_block(self):
+        """Round 3, item 3: MarineRadar wraps its structured data in a standard
+        @graph container — @context at the top, @type on each member node, no
+        @type on the container itself. That's valid JSON-LD and must not fire."""
+        graph_ld = {
+            "@context": "https://schema.org",
+            "@graph": [ARTICLE_LD, BREADCRUMB_LD, FAQ_LD],
+        }
+        page = make_page(jsonld=blocks(graph_ld))
+        self.assertEqual(run_rule("E1", page), [])
+
+    def test_e1_fires_when_graph_nodes_lack_type(self):
+        graph_ld = {
+            "@context": "https://schema.org",
+            "@graph": [{"headline": "no @type on this node"}],
+        }
+        page = make_page(jsonld=blocks(graph_ld))
+        self.assertTrue(run_rule("E1", page))
+
+    def test_e1_fires_when_graph_is_empty(self):
+        graph_ld = {"@context": "https://schema.org", "@graph": []}
+        page = make_page(jsonld=blocks(graph_ld))
+        self.assertTrue(run_rule("E1", page))
+
     def test_e2_fires_when_no_article_schema(self):
         page = schema_page(jsonld=blocks(BREADCRUMB_LD))
         self.assertEqual(run_rule("E2", page)[0].severity, SEVERITY_ERROR)

@@ -163,6 +163,196 @@ class DiscoverTest(unittest.TestCase):
         self.assertTrue(ctx.cms.ok)
         self.assertNotIn(candidate, urls)
 
+    def test_cms_candidate_redirect_resolves_to_in_section_destination_is_discovered(self):
+        """Round 3, item 1: TravelAnimator's real quirk — the CMS's own link
+        omits the /hub segment, so our derived candidate is one path segment
+        short and 308s to the correct, same-content /hub URL. Follow that one
+        hop: the destination is under listing_path, so it's genuinely in scope
+        and must be included using the destination URL (the real page), not
+        skipped as off-section."""
+        site = make_site(blog_count=1, cms_api=True)
+        candidate = "https://www.travelanimator.com/some-older-post"
+        destination = "https://www.travelanimator.com/hub/some-older-post"
+        payload = json.dumps(
+            [
+                {
+                    "slug": "some-older-post",
+                    "date": "2026-07-01T10:00:00",
+                    "modified": "2026-07-01T10:00:00",
+                    "status": "publish",
+                    "link": "https://hub.travelanimator.com/some-older-post/",
+                }
+            ]
+        )
+        transport = scripted(
+            **{
+                cms_url_for(site): (200, payload, {"content-type": "application/json"}),
+                candidate: (308, "", {"location": "/hub/some-older-post"}),
+                destination: (200, "<html></html>", None),
+            }
+        )
+        urls, ctx = discover(Fetcher(transport), site)
+        self.assertTrue(ctx.cms.ok)
+        self.assertIn(destination, urls)
+        self.assertNotIn(candidate, urls)
+
+    def test_cms_candidate_redirect_to_different_host_is_undecidable_and_skipped(self):
+        """Round 3, item 1: a redirect to a different host can't be resolved
+        with one hop of confidence — undecidable, not included, and not
+        confidently reported as off-section either."""
+        site = make_site(blog_count=1, cms_api=True)
+        candidate = "https://www.travelanimator.com/some-older-post"
+        payload = json.dumps(
+            [
+                {
+                    "slug": "some-older-post",
+                    "date": "2026-07-01T10:00:00",
+                    "modified": "2026-07-01T10:00:00",
+                    "status": "publish",
+                    "link": "https://hub.travelanimator.com/some-older-post/",
+                }
+            ]
+        )
+        transport = scripted(
+            **{
+                cms_url_for(site): (200, payload, {"content-type": "application/json"}),
+                candidate: (308, "", {"location": "https://other-domain.example.com/some-older-post"}),
+            }
+        )
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            urls, ctx = discover(Fetcher(transport), site)
+        self.assertTrue(ctx.cms.ok)
+        self.assertNotIn(candidate, urls)
+        self.assertFalse(any("other-domain.example.com" in u for u in urls))
+        self.assertIn("1 undecidable", stdout.getvalue())
+        self.assertIn("skipped 0", stdout.getvalue())
+
+    def test_cms_candidate_redirect_without_location_is_undecidable_and_skipped(self):
+        """Round 3, item 1: a 3xx with no Location header at all can't be
+        resolved — undecidable."""
+        site = make_site(blog_count=1, cms_api=True)
+        candidate = "https://www.travelanimator.com/some-older-post"
+        payload = json.dumps(
+            [
+                {
+                    "slug": "some-older-post",
+                    "date": "2026-07-01T10:00:00",
+                    "modified": "2026-07-01T10:00:00",
+                    "status": "publish",
+                    "link": "https://hub.travelanimator.com/some-older-post/",
+                }
+            ]
+        )
+        transport = scripted(
+            **{
+                cms_url_for(site): (200, payload, {"content-type": "application/json"}),
+                candidate: (308, "", None),
+            }
+        )
+        urls, ctx = discover(Fetcher(transport), site)
+        self.assertTrue(ctx.cms.ok)
+        self.assertNotIn(candidate, urls)
+
+    def test_cms_candidate_double_redirect_is_undecidable_and_skipped(self):
+        """Round 3, item 1: one hop only — if the destination itself redirects
+        again, it is not chased further, even if it might eventually land back
+        in scope."""
+        site = make_site(blog_count=1, cms_api=True)
+        candidate = "https://www.travelanimator.com/some-older-post"
+        first_hop = "https://www.travelanimator.com/blog/some-older-post"
+        final_hub_url = "https://www.travelanimator.com/hub/some-older-post"
+        payload = json.dumps(
+            [
+                {
+                    "slug": "some-older-post",
+                    "date": "2026-07-01T10:00:00",
+                    "modified": "2026-07-01T10:00:00",
+                    "status": "publish",
+                    "link": "https://hub.travelanimator.com/some-older-post/",
+                }
+            ]
+        )
+        transport = scripted(
+            **{
+                cms_url_for(site): (200, payload, {"content-type": "application/json"}),
+                candidate: (308, "", {"location": "/blog/some-older-post"}),
+                first_hop: (308, "", {"location": "/hub/some-older-post"}),
+            }
+        )
+        urls, ctx = discover(Fetcher(transport), site)
+        self.assertTrue(ctx.cms.ok)
+        self.assertNotIn(candidate, urls)
+        self.assertNotIn(first_hop, urls)
+        self.assertNotIn(final_hub_url, urls)
+
+    def test_union_walks_past_off_section_posts_to_find_in_section_candidates(self):
+        """Round 3, item 2: the union must not stop at cms.posts[:blog_count] —
+        on a site where another content type dominates recency (MarineRadar's
+        /trends), the first blog_count-by-date can be entirely off-section,
+        leaving genuinely in-scope posts further down the (date-descending)
+        list undiscovered."""
+        site = make_site(blog_count=2, cms_api=True)
+        off_section_1 = "https://www.travelanimator.com/hub/off-section-1"
+        off_section_2 = "https://www.travelanimator.com/hub/off-section-2"
+        in_section_1 = "https://www.travelanimator.com/hub/in-section-1"
+        in_section_2 = "https://www.travelanimator.com/hub/in-section-2"
+        payload = json.dumps(
+            [
+                {
+                    "slug": "off-section-1",
+                    "date": "2026-08-03T10:00:00",
+                    "modified": "",
+                    "status": "publish",
+                    "link": "https://hub.travelanimator.com/hub/off-section-1",
+                },
+                {
+                    "slug": "off-section-2",
+                    "date": "2026-08-02T10:00:00",
+                    "modified": "",
+                    "status": "publish",
+                    "link": "https://hub.travelanimator.com/hub/off-section-2",
+                },
+                {
+                    "slug": "in-section-1",
+                    "date": "2026-08-01T10:00:00",
+                    "modified": "",
+                    "status": "publish",
+                    "link": "https://hub.travelanimator.com/hub/in-section-1",
+                },
+                {
+                    "slug": "in-section-2",
+                    "date": "2026-07-31T10:00:00",
+                    "modified": "",
+                    "status": "publish",
+                    "link": "https://hub.travelanimator.com/hub/in-section-2",
+                },
+            ]
+        )
+        transport = scripted(
+            **{
+                cms_url_for(site): (200, payload, {"content-type": "application/json"}),
+                off_section_1: (
+                    308,
+                    "",
+                    {"location": "https://www.travelanimator.com/trends/off-section-1"},
+                ),
+                off_section_2: (
+                    308,
+                    "",
+                    {"location": "https://www.travelanimator.com/trends/off-section-2"},
+                ),
+                in_section_1: (200, "<html></html>", None),
+                in_section_2: (200, "<html></html>", None),
+            }
+        )
+        urls, ctx = discover(Fetcher(transport), site)
+        self.assertTrue(ctx.cms.ok)
+        self.assertIn(in_section_1, urls)
+        self.assertIn(in_section_2, urls)
+        self.assertNotIn(off_section_1, urls)
+        self.assertNotIn(off_section_2, urls)
+
     def test_cms_only_candidate_returning_200_is_discovered(self):
         """Round 2, item 1: genuinely published, missing from the listing — I1's
         whole purpose — is included when the live check confirms 200."""

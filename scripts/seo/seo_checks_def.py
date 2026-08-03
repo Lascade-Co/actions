@@ -194,6 +194,22 @@ def check_d8(page, site, urls, ctx):
 # --- Group E -----------------------------------------------------------------
 
 
+def _jsonld_entry_is_valid(entry: dict) -> bool:
+    """A top-level JSON-LD object is valid when it carries @context plus either
+    its own @type, or a non-empty @graph whose every member node carries @type
+    (the standard @graph container form — e.g. MarineRadar wraps BlogPosting/
+    BreadcrumbList/FAQPage/HowTo in one @graph block, which is valid JSON-LD
+    even though the container itself has no @type of its own)."""
+    if "@context" not in entry:
+        return False
+    if "@type" in entry:
+        return True
+    graph = entry.get("@graph")
+    return isinstance(graph, list) and bool(graph) and all(
+        isinstance(node, dict) and "@type" in node for node in graph
+    )
+
+
 def check_e1(page, site, urls, ctx):
     findings = []
     for block in page.jsonld:
@@ -212,7 +228,7 @@ def check_e1(page, site, urls, ctx):
         for entry in candidates:
             if not isinstance(entry, dict):
                 continue
-            if "@context" not in entry or "@type" not in entry:
+            if not _jsonld_entry_is_valid(entry):
                 findings.append(
                     finding(
                         E1,

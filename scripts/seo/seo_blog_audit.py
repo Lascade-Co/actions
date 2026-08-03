@@ -14,7 +14,7 @@ import traceback
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
 from seo_checks import ALL_RULES, BLOG_RULES, RULES_BY_ID, RUN_RULES
 from seo_fetch import Fetcher, RequestsTransport
@@ -49,6 +49,45 @@ def _cms_post_url(site, post) -> str:
     return f"{site.base_url}{site.listing_path}/{post.slug}"
 
 
+def _resolve_cms_candidate(fetcher: Fetcher, site, url: str):
+    """One-hop-aware verification for a CMS candidate not already in the listing.
+
+    Returns (decision, resolved_url): decision is "include", "skip", or
+    "undecidable"; resolved_url is the URL to actually audit when including —
+    the redirect's destination when we followed one, otherwise the candidate
+    itself.
+
+    Exactly one redirect is followed. A same-host destination that lands
+    under listing_path is the real page (include it, using the destination as
+    the audited URL — that's genuinely a missing-from-the-listing post, e.g.
+    when the CMS's own link omits a path segment the frontend adds back). A
+    destination outside listing_path is a different section of the site
+    (e.g. /trends) and is confidently out of scope. A missing Location, a
+    cross-host destination, or a destination that itself redirects again are
+    all ambiguous — reported as undecidable rather than chased further.
+    """
+    status = fetcher.verify(url)
+    if not status.is_redirect:
+        # 200 (published, missing from the listing — I1's whole purpose) or
+        # 4xx/5xx/unreachable (published in the CMS but broken publicly) —
+        # both belong in the audited set.
+        return "include", url
+    if not status.location:
+        return "undecidable", None
+    destination = urljoin(url, status.location)
+    if urlparse(destination).netloc.lower() != site.canonical_host.lower():
+        return "undecidable", None
+    hop = fetcher.verify(destination)
+    if hop.is_redirect:
+        # one hop only — a further redirect is ambiguous, not chased.
+        return "undecidable", None
+    prefix = site.listing_path.rstrip("/") + "/"
+    path = urlparse(destination).path
+    if path == site.listing_path or path.startswith(prefix):
+        return "include", destination
+    return "skip", None
+
+
 def discover(fetcher: Fetcher, site) -> tuple[list[str], SiteContext]:
     listing = fetcher.get(site.listing_url)
     listing_urls = parse_listing(listing.body, site.base_url, site.listing_path) if listing.ok else []
@@ -61,29 +100,34 @@ def discover(fetcher: Fetcher, site) -> tuple[list[str], SiteContext]:
             listed = set(ordered)
             included = 0
             skipped = 0
-            for post in cms.posts[: site.blog_count]:
+            undecidable = 0
+            # Walk the full fetched list (already date-descending, per the CMS
+            # request's orderby=date&order=desc) rather than stopping at the
+            # first blog_count posts — on a site where another content type
+            # dominates recency, the first blog_count-by-date can be entirely
+            # off-section, leaving genuinely-missing in-section posts
+            # undiscovered further down the list.
+            for post in cms.posts:
+                if included >= site.blog_count:
+                    break
                 url = _cms_post_url(site, post)
                 if url in listed:
                     # already in scope via the listing — fetch_blogs handles it,
                     # no need to spend a HEAD verifying what we already know.
                     continue
-                status = fetcher.verify(url)
-                if status.is_redirect:
-                    # redirected away from the blog listing entirely (e.g. WordPress
-                    # serves both /hub and /trends content through the same CMS feed,
-                    # and only a live check — not any CMS field — reveals which is
-                    # which). Out of scope for a blog-listing audit.
+                decision, resolved = _resolve_cms_candidate(fetcher, site, url)
+                if decision == "include" and resolved not in listed:
+                    ordered.append(resolved)
+                    listed.add(resolved)
+                    included += 1
+                elif decision == "skip":
                     skipped += 1
-                    continue
-                # 200 (published, missing from the listing — I1's whole purpose) or
-                # 4xx/5xx/unreachable (published in the CMS but broken publicly) —
-                # both belong in the audited set.
-                ordered.append(url)
-                listed.add(url)
-                included += 1
+                elif decision == "undecidable":
+                    undecidable += 1
             print(
                 f"{site.label}: CMS union included {included} candidate(s) missing "
-                f"from the listing, skipped {skipped} redirecting to another section"
+                f"from the listing, skipped {skipped} redirecting to another section, "
+                f"{undecidable} undecidable"
             )
 
     sitemap_urls, sitemap_ok = fetcher.fetch_sitemap(site.sitemap_url)
