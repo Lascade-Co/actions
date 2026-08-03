@@ -30,6 +30,7 @@ from seo_model import (
 )
 from seo_parse import normalize_url, parse_blog, parse_listing, slug_from_url
 from seo_report import RunSummary, counts, gate, partition, render_report
+from seo_rulekit import is_asset_url, jsonld_nodes
 
 
 def _cms_post_url(site, post) -> str:
@@ -88,7 +89,9 @@ def _resolve_cms_candidate(fetcher: Fetcher, site, url: str):
     return "skip", None
 
 
-def _fill_missing_cms_posts(fetcher: Fetcher, site, ordered: list[str], cms: CmsSnapshot) -> CmsSnapshot:
+def _fill_missing_cms_posts(
+    fetcher: Fetcher, site, ordered: list[str], cms: CmsSnapshot
+) -> tuple[CmsSnapshot, frozenset[str]]:
     """After the CMS window fetch, an audited blog's slug may be absent from
     that window purely because it sits further down the CMS's own date-ordered
     list than we fetched — not because it has no CMS post at all (e.g.
@@ -99,25 +102,35 @@ def _fill_missing_cms_posts(fetcher: Fetcher, site, ordered: list[str], cms: Cms
     Only the specific slugs missing from the window get one targeted lookup
     each — zero extra requests when the window already covers everything.
 
-    A failed or empty targeted lookup leaves the snapshot's posts (and its
-    `ok` flag) untouched: one missing slug is not a CMS outage, and flipping
-    `ok` to False here would silence the entire parity rule group via
-    _parity_enabled. Only genuine per-slug absence propagates, never a
-    request failure.
+    The targeted lookup is tri-state (see Fetcher.fetch_cms_post_by_slug_detailed):
+    found, genuinely absent, or failed (a non-200 response or unparseable body).
+    A failed lookup leaves the snapshot's posts and its `ok` flag untouched —
+    one missing slug is not a CMS outage, and flipping `ok` to False here would
+    silence the entire parity rule group via _parity_enabled — but it is also
+    NOT proof of absence. Its slug is returned separately (the second element)
+    so check_i3 can skip it instead of reporting a request failure as a
+    confirmed zombie. Only genuine per-slug absence is silently accepted here;
+    a request failure never is.
     """
     known_slugs = {post.slug for post in cms.posts}
     extra = []
+    failed: set[str] = set()
     for url in ordered:
         slug = slug_from_url(url)
         if slug in known_slugs:
             continue
-        found = fetcher.fetch_cms_post_by_slug(site.origin_host, slug)
+        found, lookup_failed = fetcher.fetch_cms_post_by_slug_detailed(site.origin_host, slug)
         if found is not None:
             extra.append(found)
             known_slugs.add(found.slug)
+        elif lookup_failed:
+            failed.add(slug)
     if not extra:
-        return cms
-    return CmsSnapshot(posts=cms.posts + tuple(extra), ok=cms.ok, error=cms.error, enabled=cms.enabled)
+        return cms, frozenset(failed)
+    return (
+        CmsSnapshot(posts=cms.posts + tuple(extra), ok=cms.ok, error=cms.error, enabled=cms.enabled),
+        frozenset(failed),
+    )
 
 
 def discover(fetcher: Fetcher, site) -> tuple[list[str], SiteContext]:
@@ -126,6 +139,7 @@ def discover(fetcher: Fetcher, site) -> tuple[list[str], SiteContext]:
     ordered = listing_urls[: site.blog_count]
 
     cms = CmsSnapshot()
+    cms_lookup_failed: frozenset[str] = frozenset()
     if site.cms_api:
         cms = fetcher.fetch_cms_posts(site.origin_host, site.blog_count * 2)
         if cms.ok:
@@ -169,7 +183,7 @@ def discover(fetcher: Fetcher, site) -> tuple[list[str], SiteContext]:
                 f"from the listing, skipped {skipped} redirecting to another section, "
                 f"{undecidable} undecidable"
             )
-            cms = _fill_missing_cms_posts(fetcher, site, ordered, cms)
+            cms, cms_lookup_failed = _fill_missing_cms_posts(fetcher, site, ordered, cms)
 
     sitemap_urls, sitemap_ok = fetcher.fetch_sitemap(site.sitemap_url)
     robots = fetcher.get(f"{site.base_url}/robots.txt")
@@ -182,23 +196,17 @@ def discover(fetcher: Fetcher, site) -> tuple[list[str], SiteContext]:
         robots_txt=robots.body if robots.ok else "",
         robots_ok=robots.ok,
         cms=cms,
+        cms_lookup_failed=cms_lookup_failed,
     )
 
 
 def fetch_blogs(fetcher: Fetcher, site, urls: list[str], ctx: SiteContext):
     """All blogs fetched concurrently — one worker per blog."""
-    listed = set(ctx.listing_urls)
-    cms_slugs = {post.slug for post in ctx.cms.posts}
 
     def one(url: str):
         slug = slug_from_url(url)
-        found = set()
-        if url in listed:
-            found.add("listing")
-        if slug in cms_slugs:
-            found.add("cms")
         response = fetcher.get(url)
-        return parse_blog(url, slug, response, frozenset(found))
+        return parse_blog(url, slug, response)
 
     if not urls:
         return []
@@ -214,21 +222,35 @@ def collect_urls(pages, site) -> tuple[set[str], set[str]]:
             if anchor.url.startswith(("http://", "https://")):
                 all_urls.add(anchor.url)
         for image in page.images:
+            # JSON-LD `image` values (spec:182) are folded into page.images by
+            # parse_blog (source="jsonld") — B3 already checks every entry
+            # here, so no separate JSON-LD walk is needed for those.
             if image.url.startswith(("http://", "https://")):
                 all_urls.add(image.url)
+        for url in page.subresources:
+            # Only origin *asset* subresources are ever consulted (A3 filters
+            # on is_asset_url) — verifying every script/style/iframe src on a
+            # Next.js page would be dozens of pointless HEADs per blog with
+            # no rule ever reading the result.
+            if url.startswith(("http://", "https://")) and is_asset_url(site, url):
+                all_urls.add(url)
         og_image = page.og.get("og:image")
         if og_image and og_image.startswith("http"):
             dimension_urls.add(og_image)
             all_urls.add(og_image)
-        for node in page.jsonld:
-            if isinstance(node.data, dict):
-                for element in node.data.get("itemListElement") or []:
-                    if isinstance(element, dict):
-                        target = element.get("item")
-                        if isinstance(target, dict):
-                            target = target.get("@id") or target.get("url")
-                        if isinstance(target, str) and target.startswith("http"):
-                            all_urls.add(target)
+        # jsonld_nodes() (not a raw walk of page.jsonld) so a BreadcrumbList
+        # nested inside a top-level @graph block is still found — a raw walk
+        # of node.data only ever sees the @graph container itself, never the
+        # nodes inside it, so breadcrumb items in that (common) shape were
+        # never verified and E3 went dead on any site using it.
+        for node in jsonld_nodes(page):
+            for element in node.get("itemListElement") or []:
+                if isinstance(element, dict):
+                    target = element.get("item")
+                    if isinstance(target, dict):
+                        target = target.get("@id") or target.get("url")
+                    if isinstance(target, str) and target.startswith("http"):
+                        all_urls.add(target)
     return all_urls, dimension_urls
 
 
@@ -237,8 +259,15 @@ def evaluate(pages, site, urls, ctx, concurrency: int):
     findings = []
 
     def for_blog(page):
+        # A non-200 blog page is one fact (the fetch failed) — H1 reports
+        # it, and running the other 29 blog-scope rules against an empty/
+        # error page just multiplies that single fact into a dozen
+        # unrelated-looking findings (missing title, no H1, no canonical,
+        # thin content, ...) for a page nobody could have fixed content on.
+        # Run-scoped rules (e.g. I1) still see this page via `pages`.
+        rules = BLOG_RULES if page.response.ok else [RULES_BY_ID["H1"]]
         produced = []
-        for rule in BLOG_RULES:
+        for rule in rules:
             try:
                 produced.extend(rule.fn(page, site, urls, ctx))
             except Exception:  # noqa: BLE001 — a broken rule must not kill the audit
@@ -290,6 +319,7 @@ def audit(site, fetcher: Fetcher) -> RunSummary:
         rules=ALL_RULES,
         started_at=started_at,
         duration_s=time.monotonic() - started,
+        ctx=ctx,
     )
 
 
@@ -377,7 +407,19 @@ def main(argv=None) -> int:
         summary = RunSummary(
             site=site,
             pages=[],
-            findings=[],
+            # ADR 0003 and spec:349: a crashed run must still render an H3
+            # finding carrying the traceback — an empty findings list here
+            # leaves error_count/warn_count both 0 even though gate() fires
+            # on summary.error, so the Telegram caption would read "0 errors,
+            # 0 warnings" for a run that never completed.
+            findings=[
+                finding(
+                    RULES_BY_ID["H3"],
+                    SEVERITY_ERROR,
+                    "the audit crashed before completing",
+                    evidence=detail,
+                )
+            ],
             rules=ALL_RULES,
             started_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
             duration_s=0.0,

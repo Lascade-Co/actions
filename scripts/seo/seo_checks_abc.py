@@ -108,7 +108,7 @@ def check_a3(page, site, urls, ctx):
         if not is_asset_url(site, url):
             continue
         status = urls.get(url)
-        if status is None:
+        if status is None or not status.verified:
             continue
         if status.status != 200:
             findings.append(
@@ -384,13 +384,21 @@ def check_c3(pages, site, urls, ctx):
                 )
                 break
     if "sitemap:" not in ctx.robots_txt.lower():
+        # Hygiene, not broken crawl correctness — and run-scoped, so an error
+        # here would page every single day forever on any site that simply
+        # never had the directive. The per-blog disallow finding above stays
+        # at error; only this run-scoped omission is downgraded.
         findings.append(
-            finding(C3, SEVERITY_ERROR, "robots.txt declares no Sitemap directive")
+            finding(C3, SEVERITY_WARN, "robots.txt declares no Sitemap directive")
         )
     return findings
 
 
 def check_c4(page, site, urls, ctx):
+    if not page.response.ok:
+        # Soft-404 (spec:193) is defined as a 200 response with thin content.
+        # A non-200 page isn't a soft 404 — it's H1's finding, not this one.
+        return []
     minimum = site.threshold("soft_404_word_count")
     lowered = page.article_text.lower()
     if page.word_count < minimum:

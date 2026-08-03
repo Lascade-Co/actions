@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from html import escape
 
-from seo_model import SEVERITY_ERROR, SEVERITY_INFO, SEVERITY_WARN, BlogPage, Finding, Rule, SiteConfig
+from seo_model import SEVERITY_ERROR, SEVERITY_INFO, SEVERITY_WARN, BlogPage, Finding, Rule, SiteConfig, SiteContext
 
 GROUPS = ("A", "B", "C", "D", "E", "F", "G", "H", "I")
 
@@ -70,6 +70,9 @@ class RunSummary:
     started_at: str
     duration_s: float
     error: str | None = None
+    # None only on the crash path (main()'s except branch), where discovery
+    # itself may never have run — every successful audit() populates this.
+    ctx: SiteContext | None = None
 
 
 def counts(findings) -> dict[str, int]:
@@ -163,7 +166,18 @@ def _per_blog(summary: RunSummary, active: list[Finding]) -> str:
     return "".join(blocks)
 
 
-def _config(site) -> str:
+def _fetched(ok: bool | None) -> str:
+    if ok is None:
+        return "unknown — crashed before discovery"
+    return "yes" if ok else "no — see report for the resulting findings"
+
+
+def _config(site, ctx: SiteContext | None) -> str:
+    # ADR 0003: silent-green is the failure mode being engineered against.
+    # A partial sitemap fetch or an unreachable listing/robots.txt now
+    # degrades to silence in the rule findings (B4/H2/C3 stay quiet rather
+    # than firing on incomplete data) — so whether discovery itself actually
+    # succeeded must always be visible somewhere, even on an all-clear run.
     rows = [
         ("canonical host", site.canonical_host),
         ("origin", site.origin_host),
@@ -172,6 +186,9 @@ def _config(site) -> str:
         ("blogs audited", str(site.blog_count)),
         ("CMS parity", "enabled" if site.cms_api else "disabled"),
         ("suppressed rules", ", ".join(sorted(site.suppress)) or "none"),
+        ("blog listing fetched", _fetched(ctx.listing_ok if ctx else None)),
+        ("sitemap.xml fetched", _fetched(ctx.sitemap_ok if ctx else None)),
+        ("robots.txt fetched", _fetched(ctx.robots_ok if ctx else None)),
     ]
     body = "".join(f"<tr><th>{escape(k)}</th><td><code>{escape(v)}</code></td></tr>" for k, v in rows)
     return f'<div class="scroll"><table>{body}</table></div>'
@@ -230,6 +247,6 @@ def render_report(summary: RunSummary) -> str:
 <h2>Per-blog detail</h2>
 {_per_blog(summary, active)}
 <h2>Configuration</h2>
-{_config(summary.site)}
+{_config(summary.site, summary.ctx)}
 </div></body></html>
 """

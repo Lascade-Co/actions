@@ -10,9 +10,9 @@ from unittest.mock import patch
 from seo_blog_audit import FixtureTransport, audit, collect_urls, discover, evaluate, main, write_github_output
 from seo_checks import ALL_RULES, BLOG_RULES, RULES_BY_ID, RUN_RULES
 from seo_fetch import Fetcher
-from seo_model import Response
+from seo_model import SEVERITY_ERROR, ImageRef, JsonLdBlock, Response
 from seo_report import counts, gate, partition
-from seo_testkit import fixture, make_page, make_site
+from seo_testkit import fixture, make_context, make_page, make_response, make_site
 
 LISTING = "https://www.travelanimator.com/hub"
 ROBOTS = "https://www.travelanimator.com/robots.txt"
@@ -549,6 +549,60 @@ class CollectUrlsTest(unittest.TestCase):
         self.assertEqual(all_urls, {shared_image})
         self.assertEqual(dimension_urls, {shared_image})
 
+    def test_subresources_are_collected_only_when_they_are_origin_assets(self):
+        """Important 5 (+ reviewer follow-up): A3's subresource branch can only
+        fire if collect_urls gathers page.subresources — but only origin
+        *asset* subresources are ever consulted (A3 filters on is_asset_url);
+        verifying every non-asset script/style/iframe src would be dozens of
+        pointless requests per blog with no rule ever reading the result."""
+        asset_subresource = "https://hub.travelanimator.com/wp-content/uploads/lib.js"
+        non_asset_subresource = "https://www.travelanimator.com/_next/static/chunk.js"
+        page = make_page(subresources=(asset_subresource, non_asset_subresource))
+        all_urls, _ = collect_urls([page], make_site())
+        self.assertIn(asset_subresource, all_urls)
+        self.assertNotIn(non_asset_subresource, all_urls)
+
+    def test_graph_nested_breadcrumb_item_is_collected(self):
+        """Important 5: a raw walk of node.data only ever sees the @graph
+        container itself, never the nodes inside it — jsonld_nodes() must be
+        used so a BreadcrumbList nested inside a top-level @graph block (the
+        shape MarineRadar actually uses) still has its itemListElement
+        targets collected for verification, keeping E3 alive on that site."""
+        breadcrumb_target = "https://www.travelanimator.com/hub/some-post"
+        page = make_page(
+            jsonld=(
+                JsonLdBlock(
+                    raw="{}",
+                    data={
+                        "@context": "https://schema.org",
+                        "@graph": [
+                            {
+                                "@type": "BreadcrumbList",
+                                "itemListElement": [
+                                    {"@type": "ListItem", "position": 1, "item": {"@id": breadcrumb_target}}
+                                ],
+                            }
+                        ],
+                    },
+                ),
+            ),
+        )
+        all_urls, _ = collect_urls([page], make_site())
+        self.assertIn(breadcrumb_target, all_urls)
+
+    def test_jsonld_sourced_image_is_collected_via_page_images(self):
+        """Reviewer follow-up to Important 5: JSON-LD `image` values (spec:182)
+        are folded into page.images by parse_blog (source="jsonld"), so
+        collect_urls picks them up through its existing page.images loop —
+        not through a separate, easily-inert JSON-LD walk of its own. See
+        test_seo_parse.py for parse_blog actually producing that ImageRef,
+        and AuditTest.test_jsonld_sourced_image_returning_404_produces_b3_finding
+        for proof a broken one is actually reported."""
+        jsonld_image = "https://hub.travelanimator.com/wp-content/uploads/jsonld-only.jpg"
+        page = make_page(images=(ImageRef(url=jsonld_image, source="jsonld"),))
+        all_urls, _ = collect_urls([page], make_site())
+        self.assertIn(jsonld_image, all_urls)
+
 
 class EvaluateTest(unittest.TestCase):
     def test_runs_blog_and_run_scoped_rules(self):
@@ -572,6 +626,19 @@ class EvaluateTest(unittest.TestCase):
         self.assertTrue(blog_scope, "expected an H3 finding from the blog-scope guard (with a blog_url)")
         self.assertTrue(run_scope, "expected an H3 finding from the run-scope guard (blog_url=None)")
 
+    def test_non_ok_page_runs_only_h1_among_blog_scope_rules(self):
+        """Critical 1: a non-200 blog page must produce exactly one blog-scope
+        finding (H1) — not all 30 blog-scope rules run against an effectively
+        empty page, which previously turned one fetch failure into up to 13
+        unrelated-looking findings."""
+        site = make_site(cms_api=False)
+        broken = make_page(response=make_response(status=502))
+        findings = evaluate([broken], site, {}, make_context(), concurrency=2)
+        blog_rule_ids = {rule.id for rule in BLOG_RULES}
+        blog_scope = [f for f in findings if f.rule in blog_rule_ids]
+        self.assertEqual(len(blog_scope), 1)
+        self.assertEqual(blog_scope[0].rule, "H1")
+
 
 class AuditTest(unittest.TestCase):
     def test_healthy_site_produces_a_summary(self):
@@ -581,14 +648,59 @@ class AuditTest(unittest.TestCase):
         self.assertIsNone(summary.error)
         self.assertEqual(len(summary.rules), 45)
 
+    def test_summary_carries_the_discovery_context(self):
+        """Reviewer follow-up: the report's Configuration table can only show
+        whether the listing/sitemap/robots.txt were actually fetched if
+        audit() actually wires discover()'s SiteContext onto the summary."""
+        site = make_site(blog_count=3, cms_api=False)
+        summary = audit(site, Fetcher(scripted()))
+        self.assertIsNotNone(summary.ctx)
+        self.assertTrue(summary.ctx.listing_ok)
+        self.assertTrue(summary.ctx.sitemap_ok)
+        self.assertTrue(summary.ctx.robots_ok)
+
     def test_broken_blog_is_reported_and_siblings_survive(self):
+        """Critical 1: strengthened from `any(f.rule == "H1" ...)` — that
+        assertion alone passes even when 12 other unrelated findings also
+        fire for the same broken blog (which they did, before the fix). The
+        broken blog must yield exactly one blog-scope finding, and it must be
+        H1; siblings must still be evaluated normally."""
         transport = scripted()
-        transport.fail.add("https://www.travelanimator.com/hub/second-blog")
+        broken_url = "https://www.travelanimator.com/hub/second-blog"
+        transport.fail.add(broken_url)
         summary = audit(make_site(blog_count=3, cms_api=False), Fetcher(transport))
         self.assertEqual(len(summary.pages), 3)
-        self.assertTrue(any(f.rule == "H1" for f in summary.findings))
+        blog_rule_ids = {rule.id for rule in BLOG_RULES}
+        blog_scope = [f for f in summary.findings if f.blog_url == broken_url and f.rule in blog_rule_ids]
+        self.assertEqual(len(blog_scope), 1)
+        self.assertEqual(blog_scope[0].rule, "H1")
         good = [p for p in summary.pages if p.slug == "good-blog"][0]
         self.assertTrue(good.response.ok)
+
+    def test_jsonld_sourced_image_returning_404_produces_b3_finding(self):
+        """Reviewer follow-up to Important 5: a check that cannot fail is
+        worse than no check. JSON-LD `image` values must be real images
+        parse_blog puts into page.images (source="jsonld") — this asserts
+        the full path end to end: a JSON-LD-only image URL that 404s must
+        actually produce a B3 finding, not silently pass because nothing
+        ever looked at it."""
+        jsonld_image = "https://hub.travelanimator.com/wp-content/uploads/2026/07/jsonld-only.jpg"
+        blog_html = fixture("good_blog.html").replace(
+            "</head>",
+            '<script type="application/ld+json">{"@context":"https://schema.org",'
+            f'"@type":"BlogPosting","image":"{jsonld_image}"}}</script></head>',
+        )
+        transport = scripted(
+            **{
+                "https://www.travelanimator.com/hub/good-blog": (200, blog_html, None),
+                jsonld_image: (404, "", None),
+            }
+        )
+        site = make_site(blog_count=1, cms_api=False)
+        summary = audit(site, Fetcher(transport))
+        b3 = [f for f in summary.findings if f.rule == "B3" and f.evidence == jsonld_image]
+        self.assertTrue(b3, "expected a B3 finding for the JSON-LD-sourced image")
+        self.assertEqual(b3[0].severity, SEVERITY_ERROR)
 
     def test_suppressed_rule_is_reported_but_does_not_open_the_gate(self):
         transport = scripted(
@@ -679,6 +791,29 @@ class AuditTest(unittest.TestCase):
         urls, ctx = discover(Fetcher(transport), site)
         self.assertTrue(ctx.cms.ok)
         self.assertEqual(ctx.cms.posts, ())
+
+    def test_failed_targeted_cms_lookup_is_recorded_as_lookup_failed(self):
+        """Critical 3: discover() must expose the failed slug on the
+        SiteContext so check_i3 can skip it, distinct from a genuine absence."""
+        site = make_site(blog_count=1, cms_api=True)
+        lookup_url = cms_slug_lookup_url_for(site, "good-blog")
+        transport = scripted(**{cms_url_for(site): (200, json.dumps([]), {"content-type": "application/json"})})
+        transport.fail.add(lookup_url)
+        _, ctx = discover(Fetcher(transport), site)
+        self.assertIn("good-blog", ctx.cms_lookup_failed)
+
+    def test_failed_targeted_cms_lookup_does_not_produce_i3(self):
+        """Critical 3: the docstring at seo_blog_audit.py previously claimed a
+        targeted lookup could never fail as a request — untrue. A failed
+        lookup (non-200/unparseable) must not be reported by I3 as a
+        zombie; only a lookup that genuinely finds nothing may."""
+        site = make_site(blog_count=1, cms_api=True)
+        lookup_url = cms_slug_lookup_url_for(site, "good-blog")
+        transport = scripted(**{cms_url_for(site): (200, json.dumps([]), {"content-type": "application/json"})})
+        transport.fail.add(lookup_url)
+        summary = audit(site, Fetcher(transport))
+        self.assertFalse(any(f.rule == "I3" for f in summary.findings))
+        self.assertTrue(summary.pages[0].response.ok)
 
 
 def _write_offline_config(directory: Path) -> Path:
@@ -821,6 +956,45 @@ class MainTest(unittest.TestCase):
             self.assertEqual(code, 0)
             self.assertIn("RuntimeError: boom", stderr.getvalue())
             self.assertTrue(Path(output).exists())
+
+    def test_crash_produces_an_h3_finding_and_nonzero_error_count(self):
+        """Important 7: ADR 0003 and spec:349 both require the crash path to
+        emit a real H3 finding carrying the traceback. Before the fix,
+        findings=[] on this path meant gate() fired (via summary.error) but
+        error_count/warn_count both read 0 — the Telegram caption would say
+        "0 errors, 0 warnings" for a run that never completed."""
+        prior_github_output = os.environ.get("GITHUB_OUTPUT")
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = _write_offline_config(Path(tmp))
+            output = str(Path(tmp) / "report.html")
+            gh_output = Path(tmp) / "gh_output.txt"
+            os.environ["GITHUB_OUTPUT"] = str(gh_output)
+            try:
+                with patch("seo_blog_audit.audit", side_effect=RuntimeError("boom")):
+                    with contextlib.redirect_stderr(io.StringIO()):
+                        code = main(
+                            [
+                                "--site",
+                                "offline-site",
+                                "--config",
+                                str(config_path),
+                                "--output",
+                                output,
+                                "--offline",
+                                tmp,
+                            ]
+                        )
+                content = gh_output.read_text(encoding="utf-8")
+                report_content = Path(output).read_text(encoding="utf-8")
+            finally:
+                if prior_github_output is None:
+                    os.environ.pop("GITHUB_OUTPUT", None)
+                else:
+                    os.environ["GITHUB_OUTPUT"] = prior_github_output
+        self.assertEqual(code, 0)
+        self.assertIn("error_count=1", content)
+        self.assertIn("has_findings=true", content)
+        self.assertIn("boom", report_content)
 
 
 class WriteGithubOutputTest(unittest.TestCase):

@@ -96,8 +96,12 @@ class ParseBlogTest(unittest.TestCase):
         self.assertEqual(pricing.text, "pricing page")
 
     def test_images_include_srcset_and_meta_sources(self):
+        """good_blog.html's BlogPosting JSON-LD carries an `image` field
+        (reviewer follow-up to Important 5) — parse_blog folds that into
+        page.images with source="jsonld" too, which is what makes B3 able
+        to see a broken JSON-LD-sourced image at all."""
         sources = {i.source for i in self.page.images}
-        self.assertEqual(sources, {"img", "srcset", "og", "twitter", "preload"})
+        self.assertEqual(sources, {"img", "srcset", "og", "twitter", "preload", "jsonld"})
 
     def test_next_image_urls_are_decoded_to_origin(self):
         origin_urls = [i.url for i in self.page.images if "hub.travelanimator.com" in i.url]
@@ -113,6 +117,39 @@ class ParseBlogTest(unittest.TestCase):
         types = [b.data["@type"] for b in self.page.jsonld]
         self.assertEqual(types, ["BlogPosting", "BreadcrumbList", "FAQPage"])
         self.assertTrue(all(b.error is None for b in self.page.jsonld))
+
+    def test_jsonld_image_bare_url_becomes_an_image_ref(self):
+        """Reviewer follow-up to Important 5: a JSON-LD `image` given as a
+        bare URL string must become a real ImageRef (source="jsonld") in
+        page.images, not merely a URL collected and forgotten — that's what
+        lets B3 actually report a broken one."""
+        body = (
+            '<html><head><script type="application/ld+json">'
+            '{"@context":"https://schema.org","@type":"BlogPosting",'
+            '"image":"https://hub.travelanimator.com/wp-content/uploads/bare.jpg"}'
+            "</script></head><body></body></html>"
+        )
+        page = parse_blog(BLOG_URL, "x", Response(url=BLOG_URL, status=200, body=body))
+        jsonld_images = [i for i in page.images if i.source == "jsonld"]
+        self.assertEqual([i.url for i in jsonld_images], [
+            "https://hub.travelanimator.com/wp-content/uploads/bare.jpg"
+        ])
+
+    def test_jsonld_image_object_and_graph_nesting_become_image_refs(self):
+        """An ImageObject form (`image: {"url": ...}`) and a BlogPosting
+        nested inside a top-level @graph block (MarineRadar's actual shape)
+        must both be found."""
+        body = (
+            '<html><head><script type="application/ld+json">'
+            '{"@context":"https://schema.org","@graph":[{"@type":"BlogPosting",'
+            '"image":{"@type":"ImageObject","url":"https://hub.travelanimator.com/wp-content/uploads/object.jpg"}}]}'
+            "</script></head><body></body></html>"
+        )
+        page = parse_blog(BLOG_URL, "x", Response(url=BLOG_URL, status=200, body=body))
+        jsonld_images = [i for i in page.images if i.source == "jsonld"]
+        self.assertEqual([i.url for i in jsonld_images], [
+            "https://hub.travelanimator.com/wp-content/uploads/object.jpg"
+        ])
 
     def test_malformed_jsonld_records_error_without_raising(self):
         body = '<html><head><script type="application/ld+json">{"a":,}</script></head><body></body></html>'

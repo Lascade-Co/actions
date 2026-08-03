@@ -167,9 +167,51 @@ def _collect_subresources(soup, base: str) -> tuple[str, ...]:
     return tuple(urls)
 
 
-def parse_blog(
-    url: str, slug: str, response: Response, found_in: frozenset[str] = frozenset()
-) -> BlogPage:
+def _jsonld_nodes(blocks) -> list[dict]:
+    """Every JSON-LD node reachable from `blocks`, @graph-nested or not. A
+    small local duplicate of seo_rulekit.jsonld_nodes — seo_rulekit imports
+    from this module, so importing it back here would be circular."""
+    nodes: list[dict] = []
+
+    def walk(value):
+        if isinstance(value, dict):
+            if "@graph" in value:
+                walk(value["@graph"])
+            nodes.append(value)
+        elif isinstance(value, list):
+            for entry in value:
+                walk(entry)
+
+    for block in blocks:
+        if block.data is not None:
+            walk(block.data)
+    return nodes
+
+
+def _jsonld_image_values(blocks) -> list[str]:
+    """Every URL reachable from a JSON-LD `image` field (spec:182) across
+    every node — a bare URL string, an ImageObject's `url`, or a list of
+    either."""
+    urls: list[str] = []
+
+    def collect(value):
+        if isinstance(value, str):
+            if value.startswith("http"):
+                urls.append(value)
+        elif isinstance(value, dict):
+            candidate = value.get("url")
+            if isinstance(candidate, str) and candidate.startswith("http"):
+                urls.append(candidate)
+        elif isinstance(value, list):
+            for item in value:
+                collect(item)
+
+    for node in _jsonld_nodes(blocks):
+        collect(node.get("image"))
+    return urls
+
+
+def parse_blog(url: str, slug: str, response: Response) -> BlogPage:
     soup = BeautifulSoup(response.body or "", "lxml")
     base = f"{urlparse(url).scheme}://{urlparse(url).netloc}"
 
@@ -186,13 +228,19 @@ def parse_blog(
         value = og.get(key) or twitter.get(key)
         if value:
             images.append(ImageRef(url=resolve_image_url(base, value), source=source))
+    jsonld_blocks = _collect_jsonld(soup)
+    # JSON-LD `image` values (spec:182) must be real images, not merely
+    # collected URLs nobody checks — appending them here (source="jsonld")
+    # is what makes B3 actually see a broken one. D6 (alt-text) already
+    # ignores any source outside CONTENT_IMAGE_SOURCES, so it's unaffected.
+    for image_url in _jsonld_image_values(jsonld_blocks):
+        images.append(ImageRef(url=resolve_image_url(base, image_url), source="jsonld"))
 
     html_tag = soup.find("html")
     return BlogPage(
         url=url,
         slug=slug,
         response=response,
-        found_in=found_in,
         title=soup.title.get_text(strip=True) if soup.title else None,
         meta_description=(description.get("content") or "").strip() if description else None,
         canonicals=tuple(
@@ -211,7 +259,7 @@ def parse_blog(
         ),
         anchors=_collect_anchors(soup, base),
         images=tuple(images),
-        jsonld=_collect_jsonld(soup),
+        jsonld=jsonld_blocks,
         article_text=_article_text(soup),
         raw_html=response.body or "",
         subresources=_collect_subresources(soup, base),

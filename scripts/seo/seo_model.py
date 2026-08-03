@@ -173,7 +173,6 @@ class BlogPage:
     url: str
     slug: str
     response: Response
-    found_in: frozenset[str] = frozenset()
     title: str | None = None
     meta_description: str | None = None
     canonicals: tuple[str, ...] = ()
@@ -232,6 +231,11 @@ class SiteContext:
     robots_txt: str = ""
     robots_ok: bool = False
     cms: CmsSnapshot = field(default_factory=CmsSnapshot)
+    # Slugs whose targeted CMS lookup (_fill_missing_cms_posts) failed — a non-200
+    # response or unparseable body, never a genuine "no such post". check_i3 must
+    # skip these rather than treat a failed request as confirmed absence. Does not
+    # affect cms.ok / _parity_enabled: one failed slug lookup is not a CMS outage.
+    cms_lookup_failed: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True)

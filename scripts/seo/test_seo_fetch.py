@@ -245,6 +245,65 @@ class FetcherSitemapTest(unittest.TestCase):
         self.assertFalse(ok)
         self.assertEqual(urls, frozenset())
 
+    def test_one_failing_child_marks_the_whole_index_not_ok(self):
+        """Critical 2: fetch_sitemap previously dropped a failing child and
+        still returned ok=True, so check_b4 concluded a blog was absent from
+        an incomplete URL set at error severity. A single failed child must
+        make the whole fetch ok=False (check_b4 already treats sitemap_ok is
+        False as 'say nothing')."""
+        index_url = "https://www.marineradar.com/sitemap.xml"
+        good_child = "https://www.marineradar.com/sitemap-blogs.xml"
+        bad_child = "https://www.marineradar.com/sitemap-pages.xml"
+        index_xml = (
+            '<?xml version="1.0"?><sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
+            f"<sitemap><loc>{good_child}</loc></sitemap>"
+            f"<sitemap><loc>{bad_child}</loc></sitemap></sitemapindex>"
+        )
+        good_child_xml = (
+            '<?xml version="1.0"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
+            "<url><loc>https://www.marineradar.com/hub/a</loc></url></urlset>"
+        )
+        transport = FakeTransport(
+            {
+                ("GET", index_url): Response(url=index_url, status=200, body=index_xml),
+                ("GET", good_child): Response(url=good_child, status=200, body=good_child_xml),
+                ("GET", bad_child): Response(url=bad_child, status=500),
+            }
+        )
+        urls, ok = Fetcher(transport).fetch_sitemap(index_url)
+        self.assertFalse(ok)
+
+    def test_all_children_succeeding_unions_their_urls_and_is_ok(self):
+        index_url = "https://www.marineradar.com/sitemap.xml"
+        child_a = "https://www.marineradar.com/sitemap-a.xml"
+        child_b = "https://www.marineradar.com/sitemap-b.xml"
+        index_xml = (
+            '<?xml version="1.0"?><sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
+            f"<sitemap><loc>{child_a}</loc></sitemap>"
+            f"<sitemap><loc>{child_b}</loc></sitemap></sitemapindex>"
+        )
+        child_a_xml = (
+            '<?xml version="1.0"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
+            "<url><loc>https://www.marineradar.com/hub/a</loc></url></urlset>"
+        )
+        child_b_xml = (
+            '<?xml version="1.0"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
+            "<url><loc>https://www.marineradar.com/hub/b</loc></url></urlset>"
+        )
+        transport = FakeTransport(
+            {
+                ("GET", index_url): Response(url=index_url, status=200, body=index_xml),
+                ("GET", child_a): Response(url=child_a, status=200, body=child_a_xml),
+                ("GET", child_b): Response(url=child_b, status=200, body=child_b_xml),
+            }
+        )
+        urls, ok = Fetcher(transport).fetch_sitemap(index_url)
+        self.assertTrue(ok)
+        self.assertEqual(
+            urls,
+            frozenset({"https://www.marineradar.com/hub/a", "https://www.marineradar.com/hub/b"}),
+        )
+
 
 class FetcherCmsTest(unittest.TestCase):
     CMS_URL = (
@@ -320,6 +379,56 @@ class FetcherCmsPostBySlugTest(unittest.TestCase):
             {("GET", self.SLUG_URL): Response(url=self.SLUG_URL, status=200, body="{oops")}
         )
         self.assertIsNone(Fetcher(transport).fetch_cms_post_by_slug("hub.travelanimator.com", "good-blog"))
+
+
+class FetcherCmsPostBySlugDetailedTest(unittest.TestCase):
+    """Critical 3: the tri-state lookup _fill_missing_cms_posts uses to tell
+    a failed request apart from a genuine absence, so check_i3 doesn't treat
+    an unreachable lookup as a confirmed zombie."""
+
+    SLUG_URL = (
+        "https://hub.travelanimator.com/wp-json/wp/v2/posts"
+        "?slug=good-blog&_fields=slug,date,modified,status,link"
+    )
+
+    def test_found_returns_post_and_not_failed(self):
+        payload = _json.dumps(
+            [
+                {
+                    "slug": "good-blog",
+                    "date": "2026-07-30T10:00:00",
+                    "modified": "2026-08-01T10:00:00",
+                    "status": "publish",
+                    "link": "https://hub.travelanimator.com/hub/good-blog",
+                }
+            ]
+        )
+        transport = FakeTransport({("GET", self.SLUG_URL): Response(url=self.SLUG_URL, status=200, body=payload)})
+        post, failed = Fetcher(transport).fetch_cms_post_by_slug_detailed("hub.travelanimator.com", "good-blog")
+        self.assertIsNotNone(post)
+        self.assertFalse(failed)
+
+    def test_genuine_absence_is_not_failed(self):
+        transport = FakeTransport(
+            {("GET", self.SLUG_URL): Response(url=self.SLUG_URL, status=200, body=_json.dumps([]))}
+        )
+        post, failed = Fetcher(transport).fetch_cms_post_by_slug_detailed("hub.travelanimator.com", "good-blog")
+        self.assertIsNone(post)
+        self.assertFalse(failed)
+
+    def test_non_200_is_failed(self):
+        transport = FakeTransport({("GET", self.SLUG_URL): Response(url=self.SLUG_URL, status=500)})
+        post, failed = Fetcher(transport).fetch_cms_post_by_slug_detailed("hub.travelanimator.com", "good-blog")
+        self.assertIsNone(post)
+        self.assertTrue(failed)
+
+    def test_malformed_json_is_failed(self):
+        transport = FakeTransport(
+            {("GET", self.SLUG_URL): Response(url=self.SLUG_URL, status=200, body="{oops")}
+        )
+        post, failed = Fetcher(transport).fetch_cms_post_by_slug_detailed("hub.travelanimator.com", "good-blog")
+        self.assertIsNone(post)
+        self.assertTrue(failed)
 
 
 class FetcherGetManyTest(unittest.TestCase):

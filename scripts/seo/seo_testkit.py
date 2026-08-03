@@ -61,7 +61,6 @@ def make_page(**over) -> BlogPage:
         "url": BLOG_URL,
         "slug": "good-blog",
         "response": make_response(),
-        "found_in": frozenset({"listing", "cms"}),
         "title": "How to Create a Travel Animation for Instagram",
         "meta_description": (
             "Learn how to create a travel animation for Instagram Stories and Reels "

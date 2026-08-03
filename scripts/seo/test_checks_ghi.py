@@ -153,7 +153,7 @@ class GroupITest(unittest.TestCase):
     def test_i1_fires_when_published_post_is_missing_from_www(self):
         ctx = make_context(cms=self.cms([CmsPost(slug="never-rendered", status="publish")]))
         page = make_page(url="https://www.travelanimator.com/hub/never-rendered", slug="never-rendered",
-                         response=make_response(status=404), found_in=frozenset({"cms"}))
+                         response=make_response(status=404))
         findings = run_rule("I1", pages=[page], ctx=ctx)
         self.assertEqual(findings[0].severity, SEVERITY_ERROR)
 
@@ -162,7 +162,7 @@ class GroupITest(unittest.TestCase):
             listing_urls=("https://www.travelanimator.com/hub/other",),
             cms=self.cms([CmsPost(slug="good-blog", status="publish")]),
         )
-        page = make_page(found_in=frozenset({"cms"}))
+        page = make_page()
         self.assertTrue(run_rule("I1", pages=[page], ctx=ctx))
 
     def test_i1_silent_for_draft_posts(self):
@@ -220,6 +220,19 @@ class GroupITest(unittest.TestCase):
         """The critical case: an empty post list must not read as every blog being a zombie."""
         ctx = make_context(cms=self.cms([], ok=False, error="HTTP 500"))
         self.assertEqual(run_rule("I3", pages=[make_page()], ctx=ctx), [])
+
+    def test_i3_silent_when_slug_lookup_failed(self):
+        """Critical 3: a slug whose targeted CMS lookup failed (non-200 or
+        unparseable — a request failure, not a genuine absence) must be
+        skipped by I3 rather than reported as a zombie."""
+        ctx = make_context(cms=self.cms([]), cms_lookup_failed=frozenset({"good-blog"}))
+        self.assertEqual(run_rule("I3", pages=[make_page()], ctx=ctx), [])
+
+    def test_i3_fires_when_absent_slug_is_not_in_the_failed_set(self):
+        """Critical 3: a slug genuinely absent from both the window and the
+        targeted lookup — i.e. not recorded as failed — must still fire I3."""
+        ctx = make_context(cms=self.cms([]), cms_lookup_failed=frozenset({"some-other-slug"}))
+        self.assertTrue(run_rule("I3", pages=[make_page()], ctx=ctx))
 
     def test_i1_silent_when_cms_unreachable(self):
         """Genuine gate test: a non-empty posts snapshot with a page whose non-200

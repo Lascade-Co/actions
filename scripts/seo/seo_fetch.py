@@ -188,16 +188,27 @@ class Fetcher:
             return dict(zip(targets, pool.map(one, targets)))
 
     def fetch_sitemap(self, url: str) -> tuple[frozenset[str], bool]:
+        """Fetch a sitemap, recursing one level into a <sitemapindex>.
+
+        Returns ok=False if the index itself fails OR any child fetch fails —
+        a partial URL set must never be reported as a complete one (check_b4
+        already treats sitemap_ok=False as "say nothing", so a partial fetch
+        becomes silence instead of false "URL absent from sitemap" accusations
+        for every URL the failed child would have covered).
+        """
         response = self.get(url)
         if not response.ok:
             return frozenset(), False
         pages, children = parse_sitemap(response.body)
+        ok = True
         for child in children:
             child_response = self.get(child)
             if child_response.ok:
                 child_pages, _ = parse_sitemap(child_response.body)
                 pages |= child_pages
-        return frozenset(pages), True
+            else:
+                ok = False
+        return frozenset(pages), ok
 
     def fetch_cms_posts(self, origin_host: str, per_page: int) -> CmsSnapshot:
         url = (
@@ -224,16 +235,18 @@ class Fetcher:
             return CmsSnapshot(posts=(), ok=False, error=f"unparseable CMS response: {exc}", enabled=True)
         return CmsSnapshot(posts=posts, ok=True, error=None, enabled=True)
 
-    def fetch_cms_post_by_slug(self, origin_host: str, slug: str) -> CmsPost | None:
-        """Single targeted lookup for one slug missing from the CMS window fetched
-        by fetch_cms_posts. Used to confirm a live blog genuinely has no CMS
-        counterpart before I3 reports it as an orphan, without re-fetching (or
-        widening) the whole window.
+    def fetch_cms_post_by_slug_detailed(self, origin_host: str, slug: str) -> tuple[CmsPost | None, bool]:
+        """Tri-state single-slug lookup: (post, failed).
 
-        Returns None on any failure — a non-200 response, unparseable JSON, or
-        an empty/no-match result. The caller must treat None as "this one slug
-        couldn't be confirmed", never as "the CMS is down": one missing slug is
-        not a CMS outage.
+        - (CmsPost, False) — the post was found.
+        - (None, False) — the request succeeded and genuinely found no matching
+          post: this slug really has no CMS counterpart.
+        - (None, True) — the request itself failed (non-200 response or
+          unparseable JSON). This slug's status could not be confirmed at all
+          and MUST NOT be treated as proof of absence — one failed lookup is
+          not a CMS outage (never flip cms.ok for it), but it is also not
+          evidence the blog is a zombie, so callers like check_i3 must skip
+          it rather than report it.
         """
         url = (
             f"https://{origin_host}/wp-json/wp/v2/posts"
@@ -241,18 +254,40 @@ class Fetcher:
         )
         response = self.get(url)
         if not response.ok:
-            return None
+            return None, True
         try:
             payload = json.loads(response.body)
             if not isinstance(payload, list) or not payload:
-                return None
+                return None, False
             item = payload[0]
-            return CmsPost(
-                slug=item["slug"],
-                date=item.get("date", ""),
-                modified=item.get("modified", ""),
-                status=item.get("status", ""),
-                link=item.get("link", ""),
+            return (
+                CmsPost(
+                    slug=item["slug"],
+                    date=item.get("date", ""),
+                    modified=item.get("modified", ""),
+                    status=item.get("status", ""),
+                    link=item.get("link", ""),
+                ),
+                False,
             )
         except (ValueError, TypeError, KeyError, IndexError):
-            return None
+            return None, True
+
+    def fetch_cms_post_by_slug(self, origin_host: str, slug: str) -> CmsPost | None:
+        """Single targeted lookup for one slug missing from the CMS window fetched
+        by fetch_cms_posts. Used to confirm a live blog genuinely has no CMS
+        counterpart before I3 reports it as an orphan, without re-fetching (or
+        widening) the whole window.
+
+        Collapses fetch_cms_post_by_slug_detailed's tri-state result to a plain
+        found/not-found value: returns None both for a genuine absence and for
+        a failed lookup (a non-200 response, unparseable JSON, or an
+        empty/no-match result) — kept for callers that only need "is there a
+        post", never "the CMS is down" from a single missing slug. Callers that
+        must distinguish a failed request from a genuine absence — as
+        _fill_missing_cms_posts does, so check_i3 doesn't treat an unreachable
+        lookup as a confirmed zombie — should call
+        fetch_cms_post_by_slug_detailed directly instead.
+        """
+        post, _failed = self.fetch_cms_post_by_slug_detailed(origin_host, slug)
+        return post

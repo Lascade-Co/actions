@@ -3,7 +3,7 @@ import unittest
 
 from seo_model import SEVERITY_ERROR, SEVERITY_INFO, SEVERITY_WARN, Finding
 from seo_report import RunSummary, counts, gate, partition, render_report
-from seo_testkit import BLOG_URL, make_page, make_site
+from seo_testkit import BLOG_URL, make_context, make_page, make_site
 
 
 def f(rule="A1", severity=SEVERITY_ERROR, message="broken", blog_url=BLOG_URL, evidence="x"):
@@ -23,7 +23,7 @@ def _is_remote_reference(value: str) -> bool:
     return bool(re.match(r"^(?:[a-zA-Z][a-zA-Z0-9+.\-]*:|//)", value.strip()))
 
 
-def summary(findings=(), *, site=None, error=None):
+def summary(findings=(), *, site=None, error=None, ctx=None):
     from seo_checks_abc import BLOG_RULES_ABC, RUN_RULES_ABC
 
     return RunSummary(
@@ -34,6 +34,7 @@ def summary(findings=(), *, site=None, error=None):
         started_at="2026-08-03T06:00:00+00:00",
         duration_s=12.5,
         error=error,
+        ctx=ctx,
     )
 
 
@@ -157,6 +158,31 @@ class RenderTest(unittest.TestCase):
 
     def test_dark_mode_styles_present(self):
         self.assertIn("prefers-color-scheme: dark", render_report(summary([])))
+
+    def test_configuration_shows_discovery_fetch_status(self):
+        """Reviewer follow-up: a partial sitemap fetch or an unreachable
+        listing/robots.txt now degrades to silence in the rule findings
+        (check_b4/check_h2/check_c3 all return [] rather than firing on
+        incomplete data) — ADR 0003 names silent-green as the exact failure
+        mode being engineered against, so whether discovery itself actually
+        succeeded must always be visible in the Configuration table."""
+        ctx = make_context(listing_ok=True, sitemap_ok=False, robots_ok=True)
+        html = render_report(summary([f()], ctx=ctx))
+        self.assertIn("blog listing fetched", html)
+        self.assertIn("sitemap.xml fetched", html)
+        self.assertIn("robots.txt fetched", html)
+        # The failing flag's row must say so, not just exist as a label.
+        rows = html.split("<tr>")
+        sitemap_row = next(r for r in rows if "sitemap.xml fetched" in r)
+        self.assertIn("no", sitemap_row)
+        listing_row = next(r for r in rows if "blog listing fetched" in r)
+        self.assertIn("yes", listing_row)
+
+    def test_configuration_handles_missing_ctx_from_the_crash_path(self):
+        """summary.ctx is None whenever a crash happens before/at discovery —
+        the Configuration table must render something sensible, not raise."""
+        html = render_report(summary([], error="boom", ctx=None))
+        self.assertIn("unknown", html)
 
 
 if __name__ == "__main__":

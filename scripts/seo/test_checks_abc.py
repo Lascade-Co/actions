@@ -79,6 +79,14 @@ class GroupATest(unittest.TestCase):
         urls = {ASSET: make_status(ASSET, status=200, content_type="image/webp")}
         self.assertEqual(run_rule("A3", page, urls=urls), [])
 
+    def test_a3_silent_on_unverified_bot_blocked_host(self):
+        """Important 4: A3 was the only status rule ignoring `verified` — a
+        403/429/timeout from the origin must not be reported as a broken
+        asset, matching B1/B3/B6's gating."""
+        page = make_page(images=(ImageRef(url=ASSET, alt="x"),))
+        urls = {ASSET: make_status(ASSET, status=403, verified=False)}
+        self.assertEqual(run_rule("A3", page, urls=urls), [])
+
     def test_a4_fires_on_bare_apex(self):
         page = make_page(anchors=(anchor("https://travelanimator.com/pricing"),))
         self.assertEqual(run_rule("A4", page)[0].severity, SEVERITY_ERROR)
@@ -241,9 +249,15 @@ class GroupCTest(unittest.TestCase):
         self.assertTrue(any(f.severity == SEVERITY_ERROR for f in findings))
 
     def test_c3_fires_when_sitemap_directive_absent(self):
+        """Severity item: a missing Sitemap directive is hygiene, not broken
+        crawl correctness, and is run-scoped — reporting it at error would
+        page every day forever on any site that simply never had it. Fixed
+        to SEVERITY_WARN; the per-blog disallow finding stays at error."""
         ctx = make_context(robots_txt="User-agent: *\nAllow: /\n")
         findings = run_rule("C3", ctx=ctx, pages=[make_page()])
-        self.assertTrue(any("Sitemap" in f.message for f in findings))
+        sitemap_findings = [f for f in findings if "Sitemap" in f.message]
+        self.assertTrue(sitemap_findings)
+        self.assertEqual(sitemap_findings[0].severity, SEVERITY_WARN)
 
     def test_c3_silent_on_healthy_robots(self):
         self.assertEqual(run_rule("C3", ctx=make_context(), pages=[make_page()]), [])
@@ -262,6 +276,13 @@ class GroupCTest(unittest.TestCase):
 
     def test_c4_silent_on_real_article(self):
         self.assertEqual(run_rule("C4", make_page()), [])
+
+    def test_c4_silent_on_non_200_response(self):
+        """Critical 1: soft-404 (spec:193) is defined as a 200 response with
+        thin content. A non-200 page is H1's finding, not a soft 404 — a 502
+        with an empty body must not also fire C4."""
+        page = make_page(response=make_response(status=502), article_text="")
+        self.assertEqual(run_rule("C4", page), [])
 
 
 class RegistryTest(unittest.TestCase):

@@ -245,6 +245,12 @@ def check_i3(pages, site, urls, ctx):
     for page in pages:
         if not page.response.ok:
             continue
+        if page.slug in ctx.cms_lookup_failed:
+            # The targeted lookup for this slug failed (non-200/unparseable),
+            # not a genuine absence — treating a request failure as confirmed
+            # absence would report a live blog as a zombie on nothing more
+            # than a transient CMS error. See _fill_missing_cms_posts.
+            continue
         post = posts.get(page.slug)
         if post is None:
             findings.append(
