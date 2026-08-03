@@ -1,0 +1,5 @@
+[
+  {"slug": "good-blog", "date": "2026-07-30T10:00:00", "modified": "2026-08-01T10:00:00", "status": "publish"},
+  {"slug": "second-blog", "date": "2026-07-29T10:00:00", "modified": "2026-07-29T10:00:00", "status": "publish"},
+  {"slug": "never-rendered-blog", "date": "2026-07-28T10:00:00", "modified": "2026-07-28T10:00:00", "status": "publish"}
+]
