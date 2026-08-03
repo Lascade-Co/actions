@@ -410,3 +410,42 @@ to widen a manual run beyond 10.
 7. `actionlint` on the new workflow; `jq empty` on `data/seo_sites.json`.
 8. `workflow_dispatch` run on `main` confirms the matrix expands to both sites and the Telegram
    send fires exactly once, for the site with findings.
+
+## First production audit findings (2026-08-04)
+
+Task 9 built the cron workflow and re-ran the verification suite directly against both live sites
+(the `workflow_dispatch`/`main` trigger itself is deferred until this branch merges — a
+`schedule`/`workflow_dispatch` workflow only becomes triggerable once it lives on the default
+branch). Local runs of `seo_blog_audit.py` against production, using the same code path the
+workflow will run, produced:
+
+- **MarineRadar**: 0 errors / 28 warnings / 10 info over 10 blogs, stable across repeated runs.
+  `F1` (`og-incomplete`) fires on all 10 blogs — the site is missing `og:url` and `og:site_name`
+  sitewide. This is a genuine, persistent finding, not noise: every blog on the site shares the
+  same incomplete Open Graph template. It is a good candidate for a real fix upstream (the
+  Next.js frontend's shared OG-tag component), at which point `F1` should drop to 0/10 and can be
+  removed from consideration for suppression — it was never suppressed here precisely because it
+  earns its keep.
+- **Travel Animator**: 2 errors / 16 warnings / 30 info over 10 blogs on a clean run, both errors
+  being `E6` (`dateModified` precedes `datePublished` in the page's JSON-LD) — a real content-data
+  defect, not a false positive. One earlier run in the same session briefly reported 4 errors: a
+  transient `HTTP 502` from `hub.travelanimator.com` on a single image asset
+  (`/wp-content/uploads/2026/06/6-600x338.png`) tripped both `A3` (asset URL check) and `B3`
+  (image check) for the same root cause. A same-minute re-run against the same blog set returned
+  cleanly to 2/16/30 with no `502`s, confirming the origin blip was transient rather than a defect
+  in the audit or a real site regression. No rule or threshold change is warranted from this: `A3`
+  and `B3` are working as designed (`A3` always treats a non-200 asset as an error regardless of
+  status verification, per the design's stated invariant), and a transient upstream 502 is exactly
+  the kind of failure a daily cron should surface rather than silently retry away — if it recurs
+  on consecutive days it becomes actionable, and if it doesn't it costs one noisy Telegram message.
+- Both sites' `suppress` lists remain empty. The earlier `["A2"]` suppression on travelanimator
+  was already removed before this task (see the site config commit) once `A2` was shown to fire
+  0/0 on blog pages — its only evidence source is the `/hub` listing page, which discovery reads
+  but no rule ever evaluates. Task 9's gate proof (verification item 5, superseding the now-moot
+  `A2` toggle) instead suppressed `F1` on marineradar: 28 active warnings dropped to 18 and
+  `suppressed_count` rose from 0 to 10 — the conserved 28 = 18 + 10 — while the report's
+  Suppressed section named `F1 ×10` by rule id. `has_findings` stayed `true` throughout, since 18
+  non-`F1` warnings remained; that is the correct behavior for a gate reading real suppress-list
+  membership, not evidence of a bug.
+- No threshold needed tuning. No rule fired in a way that looked like a false positive once
+  traced to its cause; the one transient blip was network-layer, not rule-layer.
