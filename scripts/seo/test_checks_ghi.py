@@ -137,9 +137,16 @@ class GroupHTest(unittest.TestCase):
         ctx = make_context(listing_urls=urls)
         self.assertEqual(run_rule("H2", pages=[make_page()], ctx=ctx, site=make_site(blog_count=10)), [])
 
-    def test_h2_silent_when_listing_unavailable(self):
+    def test_h2_fires_error_when_listing_unavailable(self):
+        """Fix 3: a failed listing fetch is the most likely way this audit
+        goes silently blind (ADR 0003) — it must not go quiet."""
         ctx = make_context(listing_urls=(), listing_ok=False)
-        self.assertEqual(run_rule("H2", pages=[make_page()], ctx=ctx), [])
+        site = make_site()
+        findings = run_rule("H2", pages=[make_page()], ctx=ctx, site=site)
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0].severity, SEVERITY_ERROR)
+        self.assertIn("could not be fetched", findings[0].message)
+        self.assertEqual(findings[0].evidence, site.listing_url)
 
     def test_h3_is_registered_for_the_orchestrator_to_emit(self):
         self.assertIn("H3", RULES)

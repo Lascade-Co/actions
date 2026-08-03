@@ -145,7 +145,18 @@ def check_h1(page, site, urls, ctx):
 
 def check_h2(pages, site, urls, ctx):
     if not ctx.listing_ok:
-        return []
+        # Discovery going quiet is the most likely way this audit goes
+        # silently blind (ADR 0003) — a failed listing fetch must say so,
+        # not disappear into a report that looks clean because nothing
+        # downstream had a listing to compare against.
+        return [
+            finding(
+                H2,
+                SEVERITY_ERROR,
+                "blog listing could not be fetched",
+                evidence=site.listing_url,
+            )
+        ]
     found = len(ctx.listing_urls)
     if found >= site.blog_count:
         return []

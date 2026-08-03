@@ -639,6 +639,47 @@ class EvaluateTest(unittest.TestCase):
         self.assertEqual(len(blog_scope), 1)
         self.assertEqual(blog_scope[0].rule, "H1")
 
+    def test_site_unreachable_collapses_to_a_single_h1_finding(self):
+        """Fix 2: every one of ten pages failing to fetch is one fact (the
+        site is unreachable), not ten H1s plus every other run-scoped rule's
+        artifacts on top."""
+        site = make_site(blog_count=10, cms_api=True)
+        pages = [
+            make_page(
+                url=f"https://www.travelanimator.com/hub/b{i}",
+                slug=f"b{i}",
+                response=make_response(status=403),
+            )
+            for i in range(10)
+        ]
+        findings = evaluate(pages, site, {}, make_context(), concurrency=4)
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0].rule, "H1")
+        self.assertIn("10", findings[0].message)
+        self.assertIn("unreachable", findings[0].message)
+        self.assertIn("403", findings[0].evidence)
+        self.assertIn(site.canonical_host, findings[0].evidence)
+
+    def test_site_unreachable_not_triggered_when_one_page_is_ok(self):
+        """Nine 403s and one 200 must NOT collapse — normal evaluation runs."""
+        site = make_site(blog_count=10, cms_api=False)
+        pages = [
+            make_page(
+                url=f"https://www.travelanimator.com/hub/b{i}",
+                slug=f"b{i}",
+                response=make_response(status=403),
+            )
+            for i in range(9)
+        ] + [make_page(url="https://www.travelanimator.com/hub/b9", slug="b9")]
+        findings = evaluate(pages, site, {}, make_context(), concurrency=4)
+        h1_findings = [f for f in findings if f.rule == "H1"]
+        self.assertEqual(len(h1_findings), 9)
+
+    def test_zero_pages_does_not_crash_or_collapse(self):
+        site = make_site(blog_count=10, cms_api=False)
+        findings = evaluate([], site, {}, make_context(), concurrency=4)
+        self.assertFalse(any("unreachable" in f.message for f in findings))
+
 
 class AuditTest(unittest.TestCase):
     def test_healthy_site_produces_a_summary(self):

@@ -2,7 +2,7 @@ import unittest
 
 from seo_checks_def import BLOG_RULES_DEF, RUN_RULES_DEF
 from seo_model import SEVERITY_ERROR, SEVERITY_WARN, ImageRef, JsonLdBlock
-from seo_testkit import BLOG_URL, make_context, make_page, make_site, make_status
+from seo_testkit import BLOG_URL, make_context, make_page, make_response, make_site, make_status
 
 RULES = {rule.id: rule for rule in BLOG_RULES_DEF + RUN_RULES_DEF}
 ASSET = "https://hub.travelanimator.com/wp-content/uploads/2026/07/banner.png"
@@ -175,6 +175,31 @@ class GroupDTest(unittest.TestCase):
         self.assertTrue(any("meta description" in f.message for f in findings))
         self.assertFalse(any("title" in f.message for f in findings))
         self.assertFalse(any("H1" in f.message for f in findings))
+
+    def test_d7_ignores_pages_that_failed_to_fetch(self):
+        """Fix 1: two identical 403 error pages sharing a title are an
+        artifact of the fetch failure (see check_h1), not duplicate content."""
+        pages = [
+            make_page(
+                url="https://www.travelanimator.com/hub/a",
+                response=make_response(status=403),
+                title="Access Denied",
+            ),
+            make_page(
+                url="https://www.travelanimator.com/hub/b",
+                response=make_response(status=403),
+                title="Access Denied",
+            ),
+        ]
+        self.assertEqual(run_rule("D7", pages=pages), [])
+
+    def test_d7_still_fires_when_pages_loaded_successfully(self):
+        pages = [
+            make_page(url="https://www.travelanimator.com/hub/a", title="Same Shared Title"),
+            make_page(url="https://www.travelanimator.com/hub/b", title="Same Shared Title"),
+        ]
+        findings = run_rule("D7", pages=pages)
+        self.assertTrue(any(f.severity == SEVERITY_ERROR for f in findings))
 
     def test_d7_silent_when_all_unique(self):
         pages = [

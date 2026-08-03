@@ -11,6 +11,7 @@ import os
 import sys
 import time
 import traceback
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
@@ -257,6 +258,35 @@ def collect_urls(pages, site) -> tuple[set[str], set[str]]:
 def evaluate(pages, site, urls, ctx, concurrency: int):
     """Blog rules run per blog in parallel; run-scoped rules run once over all blogs."""
     findings = []
+
+    # A wholly unreachable site (e.g. www.marineradar.com 403-ing every
+    # GitHub Actions runner IP) is one fact, not thirty. Running the full
+    # rule set against ten identical error pages turned that one fact into
+    # H1×10 plus I1×10 plus duplicate-metadata artifacts from rules comparing
+    # error pages against each other — 21 fictions about a site's SEO instead
+    # of the one true statement that the audit could not run. See ADR 0003.
+    site_unreachable = bool(pages) and all(not page.response.ok for page in pages)
+    if site_unreachable:
+        count = len(pages)
+        statuses = Counter(page.response.status for page in pages)
+        common_status, _ = statuses.most_common(1)[0]
+        if common_status == 0:
+            errors = Counter(
+                page.response.error
+                for page in pages
+                if page.response.status == 0 and page.response.error
+            )
+            detail = errors.most_common(1)[0][0] if errors else "no response"
+        else:
+            detail = f"HTTP {common_status}"
+        return [
+            finding(
+                RULES_BY_ID["H1"],
+                SEVERITY_ERROR,
+                f"all {count} blogs unreachable — the audit could not run",
+                evidence=f"{site.canonical_host} returned {detail} for all {count} blogs",
+            )
+        ]
 
     def for_blog(page):
         # A non-200 blog page is one fact (the fetch failed) — H1 reports

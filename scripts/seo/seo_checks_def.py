@@ -155,7 +155,13 @@ def check_d6(page, site, urls, ctx):
 
 
 def check_d7(pages, site, urls, ctx):
+    # A page whose fetch failed never rendered real content — every 403/500
+    # error page on a blocked site is identical, so comparing them here would
+    # report "duplicate metadata" for what is actually one fetch failure
+    # repeated ten times, not a duplicate-content problem. See check_h1 and
+    # ADR 0003.
     findings = []
+    loaded_pages = [page for page in pages if page.response.ok]
     fields = (
         ("title", lambda page: page.title),
         ("meta description", lambda page: page.meta_description),
@@ -163,7 +169,7 @@ def check_d7(pages, site, urls, ctx):
     )
     for label, getter in fields:
         groups: dict[str, list[str]] = {}
-        for page in pages:
+        for page in loaded_pages:
             value = (getter(page) or "").strip()
             if value:
                 groups.setdefault(value, []).append(page.url)
