@@ -1,0 +1,34 @@
+[
+  {
+    "name": "travelanimator",
+    "label": "Travel Animator",
+    "canonical_host": "www.travelanimator.com",
+    "origin_host": "hub.travelanimator.com",
+    "origin_asset_prefixes": ["/wp-content/uploads/"],
+    "allowed_subdomains": [
+      "model.travelanimator.com",
+      "support.travelanimator.com",
+      "viral.travelanimator.com"
+    ],
+    "listing_path": "/hub",
+    "sitemap_url": "https://www.travelanimator.com/sitemap.xml",
+    "blog_count": 10,
+    "cms_api": true,
+    "suppress": ["A2"],
+    "thresholds": {}
+  },
+  {
+    "name": "marineradar",
+    "label": "MarineRadar",
+    "canonical_host": "www.marineradar.com",
+    "origin_host": "hub.marineradar.com",
+    "origin_asset_prefixes": ["/wp-content/uploads/"],
+    "allowed_subdomains": ["support.marineradar.com"],
+    "listing_path": "/hub",
+    "sitemap_url": "https://www.marineradar.com/sitemap.xml",
+    "blog_count": 10,
+    "cms_api": true,
+    "suppress": [],
+    "thresholds": {}
+  }
+]
