@@ -155,6 +155,27 @@ class GroupDTest(unittest.TestCase):
         findings = run_rule("D7", pages=pages)
         self.assertTrue(any("H1" in f.message for f in findings))
 
+    def test_d7_fires_on_duplicate_meta_description(self):
+        pages = [
+            make_page(
+                url="https://www.travelanimator.com/hub/a",
+                title="Title A is long enough here",
+                meta_description="C" * 100,
+                headings=((1, "Heading A"),),
+            ),
+            make_page(
+                url="https://www.travelanimator.com/hub/b",
+                title="Title B is long enough here",
+                meta_description="C" * 100,
+                headings=((1, "Heading B"),),
+            ),
+        ]
+        findings = run_rule("D7", pages=pages)
+        self.assertTrue(any(f.severity == SEVERITY_ERROR for f in findings))
+        self.assertTrue(any("meta description" in f.message for f in findings))
+        self.assertFalse(any("title" in f.message for f in findings))
+        self.assertFalse(any("H1" in f.message for f in findings))
+
     def test_d7_silent_when_all_unique(self):
         pages = [
             make_page(
@@ -241,6 +262,11 @@ class GroupETest(unittest.TestCase):
     def test_e4_silent_when_question_visible(self):
         self.assertEqual(run_rule("E4", schema_page()), [])
 
+    def test_e4_silent_when_question_whitespace_differs(self):
+        messy_body = "Is   TravelAnimator\nfree to\tuse?  Yes. " + " ".join(["word"] * 400)
+        page = schema_page(article_text=messy_body)
+        self.assertEqual(run_rule("E4", page), [])
+
     def test_e4_silent_without_faq_schema(self):
         self.assertEqual(run_rule("E4", schema_page(jsonld=blocks(ARTICLE_LD, BREADCRUMB_LD))), [])
 
@@ -321,6 +347,13 @@ class GroupFTest(unittest.TestCase):
         urls = {
             ASSET: make_status(ASSET, content_type="image/webp", width=1600, height=900, byte_size=200000)
         }
+        self.assertEqual(run_rule("F4", make_page(), urls=urls), [])
+
+    def test_f4_silent_when_image_not_verified(self):
+        self.assertEqual(run_rule("F4", make_page(), urls={}), [])
+
+    def test_f4_silent_when_image_status_not_200(self):
+        urls = {ASSET: make_status(ASSET, content_type="image/webp", status=404, width=600, height=315)}
         self.assertEqual(run_rule("F4", make_page(), urls=urls), [])
 
 
