@@ -5,6 +5,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from seo_blog_audit import FixtureTransport, audit, collect_urls, discover, evaluate, main, write_github_output
 from seo_checks import ALL_RULES, BLOG_RULES, RULES_BY_ID, RUN_RULES
@@ -129,9 +130,14 @@ class DiscoverTest(unittest.TestCase):
         self.assertFalse(ctx.listing_ok)
 
     def test_cms_post_outside_listing_path_is_not_discovered(self):
-        """F: a CMS post whose real permalink lives in a different section (e.g. /trends)
-        must never be turned into a phantom /hub/<slug> URL."""
+        """Round 2, item 1: the union is redirect-aware, not path-aware. MarineRadar's
+        own CMS reports /hub/<slug> in `link` for BOTH genuine hub posts and posts
+        that live under /trends — a path check alone can't tell them apart (round 1's
+        finding). Only a live check can: a CMS-only candidate that 3xx-redirects away
+        lives in a different section of the site and must be skipped entirely, with
+        no finding — matching what a real HEAD request would show."""
         site = make_site(blog_count=1, cms_api=True)
+        candidate = "https://www.travelanimator.com/hub/six-saudi-supertankers-reroute"
         payload = json.dumps(
             [
                 {
@@ -139,15 +145,117 @@ class DiscoverTest(unittest.TestCase):
                     "date": "2026-08-01T10:00:00",
                     "modified": "2026-08-01T10:00:00",
                     "status": "publish",
-                    "link": "https://hub.travelanimator.com/trends/six-saudi-supertankers-reroute",
+                    "link": "https://hub.travelanimator.com/hub/six-saudi-supertankers-reroute",
+                }
+            ]
+        )
+        transport = scripted(
+            **{
+                cms_url_for(site): (200, payload, {"content-type": "application/json"}),
+                candidate: (
+                    308,
+                    "",
+                    {"location": "https://www.travelanimator.com/trends/six-saudi-supertankers-reroute"},
+                ),
+            }
+        )
+        urls, ctx = discover(Fetcher(transport), site)
+        self.assertTrue(ctx.cms.ok)
+        self.assertNotIn(candidate, urls)
+
+    def test_cms_only_candidate_returning_200_is_discovered(self):
+        """Round 2, item 1: genuinely published, missing from the listing — I1's
+        whole purpose — is included when the live check confirms 200."""
+        site = make_site(blog_count=1, cms_api=True)
+        candidate = "https://www.travelanimator.com/hub/newly-published-blog"
+        payload = json.dumps(
+            [
+                {
+                    "slug": "some-other-slug-not-used-for-routing",
+                    "date": "2026-07-28T10:00:00",
+                    "modified": "2026-07-28T10:00:00",
+                    "status": "publish",
+                    "link": "https://hub.travelanimator.com/hub/newly-published-blog",
+                }
+            ]
+        )
+        transport = scripted(
+            **{
+                cms_url_for(site): (200, payload, {"content-type": "application/json"}),
+                candidate: (200, "<html></html>", None),
+            }
+        )
+        urls, ctx = discover(Fetcher(transport), site)
+        self.assertTrue(ctx.cms.ok)
+        self.assertIn(candidate, urls)
+
+    def test_cms_only_candidate_returning_404_is_still_discovered(self):
+        """Round 2, item 1: published in the CMS but broken on the public site must
+        still enter the audited set, so I1 can report the break — only a redirect
+        means 'wrong section', a 404 means 'this /hub post is broken'."""
+        site = make_site(blog_count=1, cms_api=True)
+        candidate = "https://www.travelanimator.com/hub/gone-from-live-site"
+        payload = json.dumps(
+            [
+                {
+                    "slug": "some-other-slug-not-used-for-routing",
+                    "date": "2026-07-28T10:00:00",
+                    "modified": "2026-07-28T10:00:00",
+                    "status": "publish",
+                    "link": "https://hub.travelanimator.com/hub/gone-from-live-site",
+                }
+            ]
+        )
+        transport = scripted(
+            **{
+                cms_url_for(site): (200, payload, {"content-type": "application/json"}),
+                candidate: (404, "", None),
+            }
+        )
+        urls, ctx = discover(Fetcher(transport), site)
+        self.assertTrue(ctx.cms.ok)
+        self.assertIn(candidate, urls)
+
+    def test_listed_cms_candidate_is_not_redundantly_verified(self):
+        """Round 2, item 1: a candidate already in the listing set is in scope by
+        definition — no HEAD should be spent confirming what's already known."""
+        site = make_site(blog_count=1, cms_api=True)
+        already_listed = "https://www.travelanimator.com/hub/good-blog"
+        payload = json.dumps(
+            [
+                {
+                    "slug": "good-blog",
+                    "date": "2026-07-30T10:00:00",
+                    "modified": "2026-08-01T10:00:00",
+                    "status": "publish",
+                    "link": already_listed,
+                }
+            ]
+        )
+        transport = scripted(**{cms_url_for(site): (200, payload, {"content-type": "application/json"})})
+        urls, ctx = discover(Fetcher(transport), site)
+        self.assertIn(already_listed, urls)
+        self.assertNotIn(("HEAD", already_listed), transport.calls)
+
+    def test_cms_post_with_unparseable_link_falls_back_to_assembled_url(self):
+        """Round 2, item 4: a post.link that makes urlparse raise (e.g. a malformed
+        IPv6 host) must degrade to the assembled URL instead of crashing discovery."""
+        site = make_site(blog_count=1, cms_api=True)
+        payload = json.dumps(
+            [
+                {
+                    "slug": "never-rendered-blog",
+                    "date": "2026-07-28T10:00:00",
+                    "modified": "2026-07-28T10:00:00",
+                    "status": "publish",
+                    "link": "http://[::1",
                 }
             ]
         )
         transport = scripted(**{cms_url_for(site): (200, payload, {"content-type": "application/json"})})
         urls, ctx = discover(Fetcher(transport), site)
         self.assertTrue(ctx.cms.ok)
-        self.assertNotIn("https://www.travelanimator.com/trends/six-saudi-supertankers-reroute", urls)
-        self.assertNotIn("https://www.travelanimator.com/hub/six-saudi-supertankers-reroute", urls)
+        self.assertIn("https://www.travelanimator.com/hub/never-rendered-blog", urls)
 
     def test_cms_post_under_listing_path_but_missing_from_listing_is_discovered(self):
         """F: I1's whole purpose — a genuinely-published /hub post the listing doesn't
@@ -382,6 +490,56 @@ class MainTest(unittest.TestCase):
             self.assertEqual(code, 0)
             self.assertTrue(Path(output).exists())
             self.assertGreater(Path(output).stat().st_size, 0)
+
+    def test_unwritable_output_path_still_exits_zero(self):
+        """Round 2, item 2: Path(args.output).write_text(...) is outside the
+        try/except — an unwritable --output (e.g. a parent directory that doesn't
+        exist) must not turn a successful audit into a non-zero exit."""
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = _write_offline_config(Path(tmp))
+            bad_output = str(Path(tmp) / "no-such-subdir" / "report.html")
+            stderr = io.StringIO()
+            with contextlib.redirect_stderr(stderr):
+                code = main(
+                    [
+                        "--site",
+                        "offline-site",
+                        "--config",
+                        str(config_path),
+                        "--output",
+                        bad_output,
+                        "--offline",
+                        tmp,
+                    ]
+                )
+        self.assertEqual(code, 0)
+        self.assertFalse(Path(bad_output).exists())
+
+    def test_crash_inside_audit_after_site_loads_is_also_written_to_stderr(self):
+        """Round 2, item 3: previously only the 'site never loaded' branch wrote the
+        traceback to stderr — a crash inside audit() itself only reached the HTML
+        report, undiagnosable from the Actions log without downloading it."""
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = _write_offline_config(Path(tmp))
+            output = str(Path(tmp) / "report.html")
+            stderr = io.StringIO()
+            with patch("seo_blog_audit.audit", side_effect=RuntimeError("boom")):
+                with contextlib.redirect_stderr(stderr):
+                    code = main(
+                        [
+                            "--site",
+                            "offline-site",
+                            "--config",
+                            str(config_path),
+                            "--output",
+                            output,
+                            "--offline",
+                            tmp,
+                        ]
+                    )
+            self.assertEqual(code, 0)
+            self.assertIn("RuntimeError: boom", stderr.getvalue())
+            self.assertTrue(Path(output).exists())
 
 
 class WriteGithubOutputTest(unittest.TestCase):

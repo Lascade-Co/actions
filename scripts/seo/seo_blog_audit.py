@@ -32,6 +32,23 @@ from seo_parse import parse_blog, parse_listing, slug_from_url
 from seo_report import RunSummary, counts, gate, partition, render_report
 
 
+def _cms_post_url(site, post) -> str:
+    """Best-guess public URL for a CMS post: the path of its own permalink
+    mapped onto the canonical host, falling back to the assembled slug guess
+    when the CMS didn't return a usable — or parseable — link."""
+    path = ""
+    if post.link:
+        try:
+            path = urlparse(post.link).path
+        except Exception:  # noqa: BLE001 — a malformed CMS link must not crash discovery
+            path = ""
+        if len(path) > 1:
+            path = path.rstrip("/")
+    if path:
+        return f"{site.base_url}{path}"
+    return f"{site.base_url}{site.listing_path}/{post.slug}"
+
+
 def discover(fetcher: Fetcher, site) -> tuple[list[str], SiteContext]:
     listing = fetcher.get(site.listing_url)
     listing_urls = parse_listing(listing.body, site.base_url, site.listing_path) if listing.ok else []
@@ -41,22 +58,33 @@ def discover(fetcher: Fetcher, site) -> tuple[list[str], SiteContext]:
     if site.cms_api:
         cms = fetcher.fetch_cms_posts(site.origin_host, site.blog_count * 2)
         if cms.ok:
-            prefix = site.listing_path.rstrip("/") + "/"
+            listed = set(ordered)
+            included = 0
+            skipped = 0
             for post in cms.posts[: site.blog_count]:
-                path = urlparse(post.link).path if post.link else ""
-                if len(path) > 1:
-                    path = path.rstrip("/")
-                if path:
-                    if path != site.listing_path and not path.startswith(prefix):
-                        # a different section of the site (e.g. /trends) — the CMS
-                        # can return posts that don't belong to this blog listing at all.
-                        continue
-                    url = f"{site.base_url}{path}"
-                else:
-                    # no usable permalink from the CMS — degrade to the old guess.
-                    url = f"{site.base_url}{site.listing_path}/{post.slug}"
-                if url not in ordered:
-                    ordered.append(url)
+                url = _cms_post_url(site, post)
+                if url in listed:
+                    # already in scope via the listing — fetch_blogs handles it,
+                    # no need to spend a HEAD verifying what we already know.
+                    continue
+                status = fetcher.verify(url)
+                if status.is_redirect:
+                    # redirected away from the blog listing entirely (e.g. WordPress
+                    # serves both /hub and /trends content through the same CMS feed,
+                    # and only a live check — not any CMS field — reveals which is
+                    # which). Out of scope for a blog-listing audit.
+                    skipped += 1
+                    continue
+                # 200 (published, missing from the listing — I1's whole purpose) or
+                # 4xx/5xx/unreachable (published in the CMS but broken publicly) —
+                # both belong in the audited set.
+                ordered.append(url)
+                listed.add(url)
+                included += 1
+            print(
+                f"{site.label}: CMS union included {included} candidate(s) missing "
+                f"from the listing, skipped {skipped} redirecting to another section"
+            )
 
     sitemap_urls, sitemap_ok = fetcher.fetch_sitemap(site.sitemap_url)
     robots = fetcher.get(f"{site.base_url}/robots.txt")
@@ -251,12 +279,15 @@ def main(argv=None) -> int:
         summary = audit(site, fetcher)
     except Exception:  # noqa: BLE001 — a crash must still produce a deliverable report
         detail = traceback.format_exc()
+        # Written to stderr unconditionally — a failing cron run must be diagnosable
+        # from the Actions log alone, without downloading the HTML artifact, whether
+        # the crash happened before the site even loaded or inside audit() itself.
+        sys.stderr.write(detail)
         try:
             site = load_site_config(args.config, args.site)
         except Exception:
             site = None
         if site is None:
-            sys.stderr.write(detail)
             return 0
         summary = RunSummary(
             site=site,
@@ -268,8 +299,15 @@ def main(argv=None) -> int:
             error=detail,
         )
 
-    Path(args.output).write_text(render_report(summary), encoding="utf-8")
-    write_github_output(summary)
+    try:
+        Path(args.output).write_text(render_report(summary), encoding="utf-8")
+    except Exception:  # noqa: BLE001 — an unwritable --output must not raise
+        sys.stderr.write(traceback.format_exc())
+
+    try:
+        write_github_output(summary)
+    except Exception:  # noqa: BLE001 — same contract for the GITHUB_OUTPUT write
+        sys.stderr.write(traceback.format_exc())
 
     active, suppressed = partition(summary.findings, summary.site)
     tally = counts(active)
