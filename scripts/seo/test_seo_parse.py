@@ -128,6 +128,19 @@ class ParseBlogTest(unittest.TestCase):
         self.assertIn("hub.travelanimator.com", self.page.raw_html)
 
 
+class ArticleTextSelectionTest(unittest.TestCase):
+    """Regression for picking the first <article> tag instead of the real content one."""
+
+    def test_picks_the_longest_article_candidate_not_the_first(self):
+        body = fixture("multi_article.html")
+        page = parse_blog(BLOG_URL, "multi-article", Response(url=BLOG_URL, status=200, body=body))
+        self.assertIn("does not fit inside a five word promo banner", page.article_text)
+        self.assertNotIn("Get the mobile app today", page.article_text)
+        self.assertNotIn("Download now", page.article_text)
+        self.assertNotIn("Another blog in the footer", page.article_text)
+        self.assertGreater(page.word_count, 50)
+
+
 class ParseListingTest(unittest.TestCase):
     def test_returns_blog_urls_in_dom_order_deduplicated(self):
         urls = parse_listing(fixture("listing.html"), BASE, "/hub")

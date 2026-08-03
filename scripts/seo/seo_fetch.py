@@ -202,7 +202,7 @@ class Fetcher:
     def fetch_cms_posts(self, origin_host: str, per_page: int) -> CmsSnapshot:
         url = (
             f"https://{origin_host}/wp-json/wp/v2/posts"
-            f"?per_page={per_page}&_fields=slug,date,modified,status&orderby=date&order=desc"
+            f"?per_page={per_page}&_fields=slug,date,modified,status,link&orderby=date&order=desc"
         )
         response = self.get(url)
         if not response.ok:
@@ -216,6 +216,7 @@ class Fetcher:
                     date=item.get("date", ""),
                     modified=item.get("modified", ""),
                     status=item.get("status", ""),
+                    link=item.get("link", ""),
                 )
                 for item in payload
             )

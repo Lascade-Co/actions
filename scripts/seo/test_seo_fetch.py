@@ -249,7 +249,7 @@ class FetcherSitemapTest(unittest.TestCase):
 class FetcherCmsTest(unittest.TestCase):
     CMS_URL = (
         "https://hub.travelanimator.com/wp-json/wp/v2/posts"
-        "?per_page=20&_fields=slug,date,modified,status&orderby=date&order=desc"
+        "?per_page=20&_fields=slug,date,modified,status,link&orderby=date&order=desc"
     )
 
     def test_parses_posts(self):

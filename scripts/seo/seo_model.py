@@ -209,6 +209,7 @@ class CmsPost:
     date: str = ""
     modified: str = ""
     status: str = ""
+    link: str = ""
 
 
 @dataclass

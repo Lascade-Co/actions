@@ -81,11 +81,22 @@ def _meta_map(soup, attr: str, prefix: str) -> dict[str, str]:
 
 
 def _article_text(soup) -> str:
-    root = soup.find("article") or soup.find("main") or soup.body or soup
-    clone = BeautifulSoup(str(root), "lxml")
-    for tag in clone.find_all(NON_CONTENT_TAGS):
-        tag.decompose()
-    return re.sub(r"\s+", " ", clone.get_text(" ", strip=True))
+    """Pick whichever <article>/<main> candidate yields the most text.
+
+    Pages can carry more than one <article> element (e.g. a short promo
+    banner ahead of the real post body) — taking the first match understates
+    word count and misfires soft-404 / thin-content / FAQ-visibility rules.
+    """
+    candidates = soup.find_all(("article", "main")) or [soup.body or soup]
+    best = ""
+    for root in candidates:
+        clone = BeautifulSoup(str(root), "lxml")
+        for tag in clone.find_all(NON_CONTENT_TAGS):
+            tag.decompose()
+        text = re.sub(r"\s+", " ", clone.get_text(" ", strip=True))
+        if len(text) > len(best):
+            best = text
+    return best
 
 
 def _collect_images(soup, base: str) -> tuple[ImageRef, ...]:

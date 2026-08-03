@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<title>Multi Article Regression Fixture</title>
+</head>
+<body>
+<nav><a href="/hub">Latest</a></nav>
+<article class="promo-banner">Get the mobile app today</article>
+<article class="promo-banner-cta">Download now</article>
+<article class="post-body">
+<h1>The Real Post Title</h1>
+<p>This paragraph holds the genuine article body and it does not fit inside a five word promo banner at all.
+It keeps going for a while so that the extracted word count clearly and unambiguously exceeds every other
+article element on this page, proving that the longest candidate was chosen instead of the first one found
+in document order. A correct implementation must select this block of text rather than either of the two
+short promotional teasers that appear earlier in the markup, because those teasers are not the blog content
+that search engines or readers actually came here for.</p>
+</article>
+<footer>Another blog in the footer that must not be counted.</footer>
+</body>
+</html>

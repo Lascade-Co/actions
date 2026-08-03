@@ -30,7 +30,6 @@ from seo_model import (
 )
 from seo_parse import parse_blog, parse_listing, slug_from_url
 from seo_report import RunSummary, counts, gate, partition, render_report
-from seo_rulekit import is_same_registrable
 
 
 def discover(fetcher: Fetcher, site) -> tuple[list[str], SiteContext]:
@@ -42,8 +41,20 @@ def discover(fetcher: Fetcher, site) -> tuple[list[str], SiteContext]:
     if site.cms_api:
         cms = fetcher.fetch_cms_posts(site.origin_host, site.blog_count * 2)
         if cms.ok:
+            prefix = site.listing_path.rstrip("/") + "/"
             for post in cms.posts[: site.blog_count]:
-                url = f"{site.base_url}{site.listing_path}/{post.slug}"
+                path = urlparse(post.link).path if post.link else ""
+                if len(path) > 1:
+                    path = path.rstrip("/")
+                if path:
+                    if path != site.listing_path and not path.startswith(prefix):
+                        # a different section of the site (e.g. /trends) — the CMS
+                        # can return posts that don't belong to this blog listing at all.
+                        continue
+                    url = f"{site.base_url}{path}"
+                else:
+                    # no usable permalink from the CMS — degrade to the old guess.
+                    url = f"{site.base_url}{site.listing_path}/{post.slug}"
                 if url not in ordered:
                     ordered.append(url)
 
@@ -221,7 +232,14 @@ def main(argv=None) -> int:
     parser.add_argument("--output", default="report.html", help="where to write the report")
     parser.add_argument("--blog-count", type=int, default=None, help="override how many blogs to audit")
     parser.add_argument("--offline", default=None, help="serve responses from this fixture directory")
-    args = parser.parse_args(argv)
+    try:
+        args = parser.parse_args(argv)
+    except SystemExit:
+        # argparse raises SystemExit for both --help and malformed input (e.g. a
+        # missing --site or a non-integer --blog-count typed into a workflow_dispatch
+        # form). It already wrote the usage/error text to stderr — nothing here is
+        # allowed to escape as a non-zero exit. See ADR 0003.
+        return 0
 
     summary = None
     try:

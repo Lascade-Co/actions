@@ -1,7 +1,12 @@
+import contextlib
+import io
 import json
+import os
+import tempfile
 import unittest
+from pathlib import Path
 
-from seo_blog_audit import audit, collect_urls, discover, evaluate
+from seo_blog_audit import FixtureTransport, audit, collect_urls, discover, evaluate, main, write_github_output
 from seo_checks import ALL_RULES, BLOG_RULES, RULES_BY_ID, RUN_RULES
 from seo_fetch import Fetcher
 from seo_model import Response
@@ -13,8 +18,16 @@ ROBOTS = "https://www.travelanimator.com/robots.txt"
 SITEMAP = "https://www.travelanimator.com/sitemap.xml"
 CMS = (
     "https://hub.travelanimator.com/wp-json/wp/v2/posts"
-    "?per_page=20&_fields=slug,date,modified,status&orderby=date&order=desc"
+    "?per_page=20&_fields=slug,date,modified,status,link&orderby=date&order=desc"
 )
+
+
+def cms_url_for(site) -> str:
+    """The exact CMS request URL discover() will issue for this site's blog_count."""
+    return (
+        f"https://{site.origin_host}/wp-json/wp/v2/posts"
+        f"?per_page={site.blog_count * 2}&_fields=slug,date,modified,status,link&orderby=date&order=desc"
+    )
 
 
 class ScriptedTransport:
@@ -101,11 +114,9 @@ class DiscoverTest(unittest.TestCase):
 
     def test_union_adds_cms_only_slugs(self):
         site = make_site(blog_count=3, cms_api=True)
-        cms_url = (
-            f"https://{site.origin_host}/wp-json/wp/v2/posts"
-            f"?per_page={site.blog_count * 2}&_fields=slug,date,modified,status&orderby=date&order=desc"
+        transport = scripted(
+            **{cms_url_for(site): (200, fixture("cms_posts.json"), {"content-type": "application/json"})}
         )
-        transport = scripted(**{cms_url: (200, fixture("cms_posts.json"), {"content-type": "application/json"})})
         urls, ctx = discover(Fetcher(transport), site)
         self.assertTrue(ctx.cms.ok)
         self.assertIn("https://www.travelanimator.com/hub/never-rendered-blog", urls)
@@ -117,6 +128,71 @@ class DiscoverTest(unittest.TestCase):
         self.assertEqual(urls, [])
         self.assertFalse(ctx.listing_ok)
 
+    def test_cms_post_outside_listing_path_is_not_discovered(self):
+        """F: a CMS post whose real permalink lives in a different section (e.g. /trends)
+        must never be turned into a phantom /hub/<slug> URL."""
+        site = make_site(blog_count=1, cms_api=True)
+        payload = json.dumps(
+            [
+                {
+                    "slug": "six-saudi-supertankers-reroute",
+                    "date": "2026-08-01T10:00:00",
+                    "modified": "2026-08-01T10:00:00",
+                    "status": "publish",
+                    "link": "https://hub.travelanimator.com/trends/six-saudi-supertankers-reroute",
+                }
+            ]
+        )
+        transport = scripted(**{cms_url_for(site): (200, payload, {"content-type": "application/json"})})
+        urls, ctx = discover(Fetcher(transport), site)
+        self.assertTrue(ctx.cms.ok)
+        self.assertNotIn("https://www.travelanimator.com/trends/six-saudi-supertankers-reroute", urls)
+        self.assertNotIn("https://www.travelanimator.com/hub/six-saudi-supertankers-reroute", urls)
+
+    def test_cms_post_under_listing_path_but_missing_from_listing_is_discovered(self):
+        """F: I1's whole purpose — a genuinely-published /hub post the listing doesn't
+        show yet must still be pulled in, using the CMS's own permalink path (not the
+        slug field), so a rewritten slug is still resolved correctly."""
+        site = make_site(blog_count=1, cms_api=True)
+        payload = json.dumps(
+            [
+                {
+                    "slug": "some-other-slug-not-used-for-routing",
+                    "date": "2026-07-28T10:00:00",
+                    "modified": "2026-07-28T10:00:00",
+                    "status": "publish",
+                    "link": "https://hub.travelanimator.com/hub/never-rendered-blog",
+                }
+            ]
+        )
+        transport = scripted(**{cms_url_for(site): (200, payload, {"content-type": "application/json"})})
+        urls, ctx = discover(Fetcher(transport), site)
+        self.assertTrue(ctx.cms.ok)
+        self.assertIn("https://www.travelanimator.com/hub/never-rendered-blog", urls)
+        self.assertNotIn(
+            "https://www.travelanimator.com/hub/some-other-slug-not-used-for-routing", urls
+        )
+
+    def test_cms_post_with_empty_link_falls_back_to_assembled_url(self):
+        """F: a CMS that omits/blanks the link field must degrade to the old slug guess
+        rather than discovering nothing."""
+        site = make_site(blog_count=1, cms_api=True)
+        payload = json.dumps(
+            [
+                {
+                    "slug": "never-rendered-blog",
+                    "date": "2026-07-28T10:00:00",
+                    "modified": "2026-07-28T10:00:00",
+                    "status": "publish",
+                    "link": "",
+                }
+            ]
+        )
+        transport = scripted(**{cms_url_for(site): (200, payload, {"content-type": "application/json"})})
+        urls, ctx = discover(Fetcher(transport), site)
+        self.assertTrue(ctx.cms.ok)
+        self.assertIn("https://www.travelanimator.com/hub/never-rendered-blog", urls)
+
 
 class CollectUrlsTest(unittest.TestCase):
     def test_dimension_urls_are_only_og_images(self):
@@ -126,9 +202,18 @@ class CollectUrlsTest(unittest.TestCase):
         self.assertIn(page.og["og:image"], all_urls)
 
     def test_deduplicates_across_blogs(self):
-        pages = [make_page(url="https://www.travelanimator.com/hub/a"), make_page(url="https://www.travelanimator.com/hub/b")]
-        all_urls, _ = collect_urls(pages, make_site())
-        self.assertEqual(len(all_urls), len(set(all_urls)))
+        """B: two blogs sharing an identical og:image must collapse to exactly one
+        entry, not `len(all_urls) == len(set(all_urls))`, which is tautologically
+        true for any set — including an empty one — and would pass even if
+        collect_urls did nothing."""
+        shared_image = "https://hub.travelanimator.com/wp-content/uploads/2026/07/banner.png"
+        pages = [
+            make_page(url="https://www.travelanimator.com/hub/a", slug="a"),
+            make_page(url="https://www.travelanimator.com/hub/b", slug="b"),
+        ]
+        all_urls, dimension_urls = collect_urls(pages, make_site())
+        self.assertEqual(all_urls, {shared_image})
+        self.assertEqual(dimension_urls, {shared_image})
 
 
 class EvaluateTest(unittest.TestCase):
@@ -140,10 +225,18 @@ class EvaluateTest(unittest.TestCase):
         self.assertTrue(all(f.rule in RULES_BY_ID for f in findings))
 
     def test_a_raising_rule_does_not_abort_the_run(self):
+        """D: this one broken page raises inside both a blog-scope rule (D3/D4, via
+        page.h1s) and a run-scope rule (D7, which also reads page.h1s across all
+        pages) — split so a regression that silences only one guard can't hide
+        behind the other."""
         site = make_site()
         broken = make_page(headings="not-a-tuple-of-tuples")
         findings = evaluate([broken], site, {}, __import__("seo_testkit").make_context(), concurrency=2)
-        self.assertTrue(any(f.rule == "H3" for f in findings))
+        h3 = [f for f in findings if f.rule == "H3"]
+        blog_scope = [f for f in h3 if f.blog_url is not None]
+        run_scope = [f for f in h3 if f.blog_url is None]
+        self.assertTrue(blog_scope, "expected an H3 finding from the blog-scope guard (with a blog_url)")
+        self.assertTrue(run_scope, "expected an H3 finding from the run-scope guard (blog_url=None)")
 
 
 class AuditTest(unittest.TestCase):
@@ -197,6 +290,141 @@ class AuditTest(unittest.TestCase):
         info_only = [f for f in summary.findings if f.severity == "info"]
         summary.findings = info_only
         self.assertFalse(gate(summary))
+
+
+def _write_offline_config(directory: Path) -> Path:
+    config_path = directory / "sites.json"
+    config_path.write_text(
+        json.dumps(
+            [
+                {
+                    "name": "offline-site",
+                    "label": "Offline Site",
+                    "canonical_host": "www.example.com",
+                    "origin_host": "hub.example.com",
+                    "origin_asset_prefixes": ["/wp-content/uploads/"],
+                    "allowed_subdomains": [],
+                    "listing_path": "/hub",
+                    "sitemap_url": "https://www.example.com/sitemap.xml",
+                    "blog_count": 1,
+                    "cms_api": False,
+                    "suppress": [],
+                    "thresholds": {},
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+    return config_path
+
+
+class MainTest(unittest.TestCase):
+    """C: main()'s exit-0 contract had no tests — this is exactly how A survived."""
+
+    def test_help_exits_zero(self):
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            code = main(["--help"])
+        self.assertEqual(code, 0)
+
+    def test_missing_site_argument_still_exits_zero(self):
+        """Regression test for A: argparse raises SystemExit(2) for a missing
+        required argument. Failed before the fix (SystemExit escaped main());
+        passes after."""
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            code = main([])
+        self.assertEqual(code, 0)
+
+    def test_non_integer_blog_count_still_exits_zero(self):
+        """Regression test for A: a hand-typed workflow_dispatch value like
+        '--blog-count notanumber' must not turn a cron run red. Failed before
+        the fix (SystemExit escaped main()); passes after."""
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            code = main(["--site", "travelanimator", "--blog-count", "notanumber"])
+        self.assertEqual(code, 0)
+
+    def test_nonexistent_config_still_exits_zero(self):
+        stderr = io.StringIO()
+        with tempfile.TemporaryDirectory() as tmp:
+            output = str(Path(tmp) / "report.html")
+            with contextlib.redirect_stderr(stderr):
+                code = main(
+                    [
+                        "--site",
+                        "travelanimator",
+                        "--config",
+                        str(Path(tmp) / "missing.json"),
+                        "--output",
+                        output,
+                    ]
+                )
+        self.assertEqual(code, 0)
+        self.assertIn("FileNotFoundError", stderr.getvalue())
+
+    def test_offline_run_writes_a_report_and_exits_zero(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = _write_offline_config(Path(tmp))
+            output = str(Path(tmp) / "report.html")
+            code = main(
+                [
+                    "--site",
+                    "offline-site",
+                    "--config",
+                    str(config_path),
+                    "--output",
+                    output,
+                    "--offline",
+                    tmp,
+                ]
+            )
+            self.assertEqual(code, 0)
+            self.assertTrue(Path(output).exists())
+            self.assertGreater(Path(output).stat().st_size, 0)
+
+
+class WriteGithubOutputTest(unittest.TestCase):
+    def setUp(self):
+        self._prior_github_output = os.environ.get("GITHUB_OUTPUT")
+
+    def tearDown(self):
+        if self._prior_github_output is None:
+            os.environ.pop("GITHUB_OUTPUT", None)
+        else:
+            os.environ["GITHUB_OUTPUT"] = self._prior_github_output
+
+    def _summary(self):
+        site = make_site(blog_count=1, cms_api=False)
+        return audit(site, Fetcher(scripted()))
+
+    def test_noop_when_github_output_unset(self):
+        os.environ.pop("GITHUB_OUTPUT", None)
+        write_github_output(self._summary())  # must not raise, must not write anywhere
+
+    def test_writes_expected_keys_when_set(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "gh_output.txt"
+            os.environ["GITHUB_OUTPUT"] = str(target)
+            write_github_output(self._summary())
+            content = target.read_text(encoding="utf-8")
+        for key in ("has_findings", "error_count", "warn_count", "info_count", "suppressed_count", "label"):
+            self.assertIn(f"{key}=", content)
+
+
+class FixtureTransportTest(unittest.TestCase):
+    def test_missing_fixture_file_returns_200_empty(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            transport = FixtureTransport(tmp)
+            response = transport("GET", "https://example.com/no-such-page", {}, 10)
+        self.assertEqual(response.status, 200)
+        self.assertEqual(response.body, "")
+
+    def test_nonexistent_directory_returns_200_empty(self):
+        transport = FixtureTransport("/tmp/does-not-exist-seo-fixture-dir-xyz-12345")
+        response = transport("GET", "https://example.com/no-such-page", {}, 10)
+        self.assertEqual(response.status, 200)
+        self.assertEqual(response.body, "")
 
 
 if __name__ == "__main__":
