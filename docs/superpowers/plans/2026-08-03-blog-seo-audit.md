@@ -5245,25 +5245,43 @@ Expected: `["travelanimator","marineradar"]` then `["marineradar"]` — the two 
 
 - [ ] **Step 4: Prove the gate is wired to the suppress list, not hardcoded**
 
-Temporarily drop `"A2"` from travelanimator's `suppress` and confirm the gate flips:
+The original version of this step toggled `A2` for travelanimator. That no longer proves anything:
+the first live run showed `A2` fires **0/0** on blog pages, because its evidence came from the
+`/hub` listing page, which the audit reads for discovery but never runs rules against. Both sites
+now ship with an empty `suppress` list.
+
+So pick a rule that demonstrably DOES fire and suppress it. The first live run found `F1`
+(`og-incomplete`) firing on every marineradar blog — that site is missing `og:url` and
+`og:site_name` sitewide.
 
 ```bash
 cd scripts/seo
-python3 - <<'PY'
+# Baseline: F1 active, gate open
+GITHUB_OUTPUT=/tmp/out-active.txt python3 seo_blog_audit.py --site marineradar \
+  --config ../../data/seo_sites.json --output /tmp/r-active.html
+# Now suppress F1 for marineradar only
+python3 - <<'INNER'
 import json, pathlib
 p = pathlib.Path("../../data/seo_sites.json")
-original = p.read_text()
-data = json.loads(original)
-data[0]["suppress"] = []
+data = json.loads(p.read_text())
+next(s for s in data if s["name"] == "marineradar")["suppress"] = ["F1"]
 p.write_text(json.dumps(data, indent=2) + "\n")
-PY
-GITHUB_OUTPUT=/tmp/out-unsuppressed.txt python3 seo_blog_audit.py --site travelanimator --config ../../data/seo_sites.json --output /tmp/r1.html
-git -C ../.. checkout data/seo_sites.json
-GITHUB_OUTPUT=/tmp/out-suppressed.txt python3 seo_blog_audit.py --site travelanimator --config ../../data/seo_sites.json --output /tmp/r2.html
-echo "--- without suppression ---"; grep has_findings /tmp/out-unsuppressed.txt
-echo "--- with suppression ---";    grep has_findings /tmp/out-suppressed.txt
+INNER
+GITHUB_OUTPUT=/tmp/out-suppressed.txt python3 seo_blog_audit.py --site marineradar \
+  --config ../../data/seo_sites.json --output /tmp/r-suppressed.html
+git -C ../.. checkout data/seo_sites.json     # always restore
+echo "--- F1 active ---";     grep -E "has_findings|warn_count|suppressed_count" /tmp/out-active.txt
+echo "--- F1 suppressed ---"; grep -E "has_findings|warn_count|suppressed_count" /tmp/out-suppressed.txt
 ```
-Expected: `has_findings=true` without suppression. With suppression it must be `false` **unless another error or warning is genuinely present** — if it stays `true`, read `/tmp/r2.html` and confirm the remaining findings are real defects rather than a mis-tuned threshold. Record which they are.
+
+Expected: with `F1` active, `warn_count` includes its findings and `suppressed_count=0`. With `F1`
+suppressed, `warn_count` drops by exactly that many, `suppressed_count` rises by the same number,
+and the report renders a **Suppressed** section naming `F1`. `has_findings` flips to `false` only if
+`F1` was the sole remaining error-or-warn source — if other findings persist it stays `true`, which
+is correct, not a failure. Record the actual numbers either way: the invariant being proven is
+`active + suppressed` conserved, with the gate reading the config rather than a hardcoded list.
+
+Confirm `git status` shows `data/seo_sites.json` restored before moving on.
 
 - [ ] **Step 5: Prove the CMS degradation path on a real run**
 

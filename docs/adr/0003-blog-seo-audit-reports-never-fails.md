@@ -20,12 +20,15 @@ worthless. So `info` is report-only context that can never trigger a send.
 
 **Suppression is config, not code.** `data/seo_sites.json` carries a per-site `suppress` list of
 rule IDs. A suppressed rule still evaluates and still appears in the report under its own heading
-with counts; it just cannot trigger delivery. `A2` ships suppressed for travelanimator because its
-origin exposure is structural — the Next.js flight payload serialises CMS API responses into the
-markup, so it will fire every day until the app itself changes. The alternative, alerting daily on a
-condition nobody intends to fix this quarter, ends with a muted chat and an audit that is
-decorative. Re-enabling it is deleting one string from a JSON file, which is a deliberate act that
-shows up in a diff.
+with counts; it just cannot trigger delivery. The mechanism was introduced for `A2` on travelanimator,
+whose origin exposure looked structural — the Next.js flight payload serialises CMS API responses
+into the markup. **That entry was removed on 2026-08-04**: the evidence came from the `/hub`
+listing page, and the audit runs rules only against blog pages, where A2 fires 0/0. The mechanism
+stays because the reasoning still holds for any rule whose condition is genuinely permanent; it
+currently has no subject. That reasoning: alerting daily on a condition nobody intends to fix this
+quarter ends with a muted chat and an audit that is decorative. Suppressing a rule, and later
+un-suppressing it, is a one-string edit to a JSON file — a deliberate act that shows up in a diff
+rather than a silent forget.
 
 **Considered and rejected.** *Fail on error-severity findings* — attractive until the first
 `hub.<domain>` asset 404 caused by a WordPress media edit paints `main` red for a content change.

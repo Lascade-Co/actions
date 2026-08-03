@@ -67,10 +67,17 @@ Four invariants verified empirically, so the design need not assume them:
 
 Two real defects already found during recon, which the rule set is built to catch:
 
-- travelanimator's listing HTML embeds ~130 `hub.travelanimator.com/wp-json/...` and
+- travelanimator's **blog listing** HTML embeds ~130 `hub.travelanimator.com/wp-json/...` and
   `/category/...` URLs inside the Next.js flight payload — not in a crawlable position, but the
-  origin is exposed in served markup (rule **A2**). This is structural and expected to persist,
-  which is why it ships **suppressed**.
+  origin is exposed in served markup (rule **A2**).
+  **Correction, 2026-08-04:** this evidence comes from the *listing* page, and the audit runs rules
+  only against **blog** pages, whose markup carries origin URLs solely as **asset URLs**. The first
+  live run confirmed A2 fires 0/0 on blogs. The `suppress: ["A2"]` entry this justified has been
+  removed — it silenced nothing and would have masked a genuine future leak. The suppression
+  mechanism itself is unchanged and covered by unit tests; it simply has no current subject.
+  This also exposes a **scope gap**: `/hub` is itself in `sitemap.xml`, is indexable, carries those
+  ~130 CMS API URLs, and is already fetched for discovery — yet no rules run against it. Auditing
+  the listing as a page in its own right is a candidate follow-up, deliberately out of scope here.
 - `sitemap.xml` lists `/hub/category/comparison-guide` (200) while the CMS slug is
   `comparision-guide` (308) — slug drift between sitemap and CMS (rules **B2**, **E3**).
 
