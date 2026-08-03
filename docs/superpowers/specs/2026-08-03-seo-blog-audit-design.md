@@ -150,6 +150,8 @@ mutable state and every rule testable from a fixture with no network.
 
 ## Rule catalogue
 
+**45 rules across nine groups** — A:5, B:6, C:4, D:8, E:6, F:4, G:5, H:3, I:4.
+
 Severity: **error** = crawl or index correctness actively broken · **warn** = threshold or
 hygiene · **info** = recorded for visibility, expected to be non-empty, never gates delivery.
 

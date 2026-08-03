@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** A daily cron GitHub Action that audits the 10 newest blogs on `www.travelanimator.com/hub` and `www.marineradar.com/hub` against 44 SEO rules and delivers `report.html` to Telegram only when an error- or warn-severity rule fires.
+**Goal:** A daily cron GitHub Action that audits the 10 newest blogs on `www.travelanimator.com/hub` and `www.marineradar.com/hub` against 45 SEO rules and delivers `report.html` to Telegram only when an error- or warn-severity rule fires.
 
 **Architecture:** Six modules under `scripts/seo/`, curl'd individually onto the runner as siblings (matching `scripts/catchup/`). A pure domain core (`seo_model`, `seo_parse`, `seo_checks`) that performs no I/O, an I/O shell (`seo_fetch`) with an injectable transport, a renderer (`seo_report`), and an orchestrator (`seo_blog_audit`). Blogs are fetched concurrently; every distinct URL across all blogs is verified once on a second pool with a process-wide cache.
 
@@ -21,7 +21,7 @@
 - `seo_checks.py` and `seo_parse.py` must not import `requests`, `urllib.request`, `socket`, or `os`. Rules receive data; they never fetch it.
 - The audit **always exits 0**. No finding at any severity may raise or set a non-zero exit code.
 - `info` severity can never gate delivery. `has_findings` counts only `error` and `warn` findings from rules absent from the site's `suppress` list.
-- Rule IDs are stable identifiers: `A1`–`A5`, `B1`–`B6`, `C1`–`C4`, `D1`–`D8`, `E1`–`E6`, `F1`–`F4`, `G1`–`G5`, `H1`–`H3`, `I1`–`I4`. 44 rules total.
+- Rule IDs are stable identifiers: `A1`–`A5`, `B1`–`B6`, `C1`–`C4`, `D1`–`D8`, `E1`–`E6`, `F1`–`F4`, `G1`–`G5`, `H1`–`H3`, `I1`–`I4`. 45 rules total (5+6+4 + 8+6+4 + 5+3+4).
 - Every module is curl'd from `https://raw.githubusercontent.com/Lascade-Co/actions/main/scripts/seo/<name>` and lands as a sibling in the runner's working directory. Use flat top-level imports (`from seo_model import Finding`), never package-relative imports.
 - Python 3.13. Use `X | None` unions and builtin generics; no `typing.Optional`.
 - Per-request timeout 20 s. Blog concurrency 10, URL concurrency 8.
@@ -51,7 +51,7 @@
 | `scripts/seo/test_checks_def.py` | Rules D1–D8, E1–E6, F1–F4. |
 | `scripts/seo/test_checks_ghi.py` | Rules G1–G5, H1–H3, I1–I4, including the unreachable-CMS degradation cases. |
 | `scripts/seo/test_seo_report.py` | Severity gate, suppression split, rendering, escaping, dark mode. |
-| `scripts/seo/test_seo_audit.py` | Registry completeness (all 44), discovery, orchestration against a scripted transport. |
+| `scripts/seo/test_seo_audit.py` | Registry completeness (all 45), discovery, orchestration against a scripted transport. |
 | `scripts/seo/fixtures/` | `good_blog.html`, `listing.html`, `real_blog_head.html`, `cms_posts.json`, `sitemap_index.xml`, `sitemap_child.xml`. |
 | `data/seo_sites.json` | Site configs for travelanimator and marineradar. |
 | `.github/workflows/seo-blog-audit.yml` | Discover job emits the matrix; audit job runs one site, uploads the artifact, sends to Telegram when gated. |
@@ -4642,8 +4642,8 @@ def scripted(**over):
 
 
 class RegistryTest(unittest.TestCase):
-    def test_all_44_rules_registered(self):
-        self.assertEqual(len(ALL_RULES), 44)
+    def test_all_45_rules_registered(self):
+        self.assertEqual(len(ALL_RULES), 45)
 
     def test_every_documented_id_exists(self):
         expected = (
@@ -4736,7 +4736,7 @@ class AuditTest(unittest.TestCase):
         summary = audit(site, Fetcher(scripted()))
         self.assertEqual(len(summary.pages), 3)
         self.assertIsNone(summary.error)
-        self.assertEqual(len(summary.rules), 44)
+        self.assertEqual(len(summary.rules), 45)
 
     def test_broken_blog_is_reported_and_siblings_survive(self):
         transport = scripted()
@@ -5069,7 +5069,7 @@ if __name__ == "__main__":
 - [ ] **Step 5: Run the orchestrator tests**
 
 Run: `cd scripts/seo && python3 -m unittest test_seo_audit -v`
-Expected: PASS. `test_all_44_rules_registered` is the one that catches a rule accidentally omitted from a group registry.
+Expected: PASS. `test_all_45_rules_registered` is the one that catches a rule accidentally omitted from a group registry.
 
 - [ ] **Step 6: Run the whole suite**
 
