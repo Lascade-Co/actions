@@ -277,6 +277,51 @@ class FetcherCmsTest(unittest.TestCase):
         self.assertIsNotNone(snapshot.error)
 
 
+class FetcherCmsPostBySlugTest(unittest.TestCase):
+    """Round 4, item 2: the targeted single-slug lookup discover() uses to
+    confirm whether a blog missing from the CMS window genuinely has no
+    published post, before I3 calls it an orphan."""
+
+    SLUG_URL = (
+        "https://hub.travelanimator.com/wp-json/wp/v2/posts"
+        "?slug=good-blog&_fields=slug,date,modified,status,link"
+    )
+
+    def test_parses_the_matching_post(self):
+        payload = _json.dumps(
+            [
+                {
+                    "slug": "good-blog",
+                    "date": "2026-07-30T10:00:00",
+                    "modified": "2026-08-01T10:00:00",
+                    "status": "publish",
+                    "link": "https://hub.travelanimator.com/hub/good-blog",
+                }
+            ]
+        )
+        transport = FakeTransport({("GET", self.SLUG_URL): Response(url=self.SLUG_URL, status=200, body=payload)})
+        post = Fetcher(transport).fetch_cms_post_by_slug("hub.travelanimator.com", "good-blog")
+        self.assertIsNotNone(post)
+        self.assertEqual(post.slug, "good-blog")
+        self.assertEqual(post.status, "publish")
+
+    def test_empty_result_returns_none(self):
+        transport = FakeTransport(
+            {("GET", self.SLUG_URL): Response(url=self.SLUG_URL, status=200, body=_json.dumps([]))}
+        )
+        self.assertIsNone(Fetcher(transport).fetch_cms_post_by_slug("hub.travelanimator.com", "good-blog"))
+
+    def test_non_200_returns_none_without_raising(self):
+        transport = FakeTransport({("GET", self.SLUG_URL): Response(url=self.SLUG_URL, status=500)})
+        self.assertIsNone(Fetcher(transport).fetch_cms_post_by_slug("hub.travelanimator.com", "good-blog"))
+
+    def test_malformed_json_returns_none_without_raising(self):
+        transport = FakeTransport(
+            {("GET", self.SLUG_URL): Response(url=self.SLUG_URL, status=200, body="{oops")}
+        )
+        self.assertIsNone(Fetcher(transport).fetch_cms_post_by_slug("hub.travelanimator.com", "good-blog"))
+
+
 class FetcherGetManyTest(unittest.TestCase):
     def test_one_failure_does_not_cancel_siblings(self):
         good = "https://www.travelanimator.com/hub/a"

@@ -28,7 +28,7 @@ from seo_model import (
     finding,
     load_site_config,
 )
-from seo_parse import parse_blog, parse_listing, slug_from_url
+from seo_parse import normalize_url, parse_blog, parse_listing, slug_from_url
 from seo_report import RunSummary, counts, gate, partition, render_report
 
 
@@ -88,6 +88,38 @@ def _resolve_cms_candidate(fetcher: Fetcher, site, url: str):
     return "skip", None
 
 
+def _fill_missing_cms_posts(fetcher: Fetcher, site, ordered: list[str], cms: CmsSnapshot) -> CmsSnapshot:
+    """After the CMS window fetch, an audited blog's slug may be absent from
+    that window purely because it sits further down the CMS's own date-ordered
+    list than we fetched — not because it has no CMS post at all (e.g.
+    MarineRadar's window is dominated by /trends posts, pushing genuine hub
+    posts out). I3 ("unpublished-still-live") would otherwise call every one
+    of those a zombie based on a truncated window, not genuine absence.
+
+    Only the specific slugs missing from the window get one targeted lookup
+    each — zero extra requests when the window already covers everything.
+
+    A failed or empty targeted lookup leaves the snapshot's posts (and its
+    `ok` flag) untouched: one missing slug is not a CMS outage, and flipping
+    `ok` to False here would silence the entire parity rule group via
+    _parity_enabled. Only genuine per-slug absence propagates, never a
+    request failure.
+    """
+    known_slugs = {post.slug for post in cms.posts}
+    extra = []
+    for url in ordered:
+        slug = slug_from_url(url)
+        if slug in known_slugs:
+            continue
+        found = fetcher.fetch_cms_post_by_slug(site.origin_host, slug)
+        if found is not None:
+            extra.append(found)
+            known_slugs.add(found.slug)
+    if not extra:
+        return cms
+    return CmsSnapshot(posts=cms.posts + tuple(extra), ok=cms.ok, error=cms.error, enabled=cms.enabled)
+
+
 def discover(fetcher: Fetcher, site) -> tuple[list[str], SiteContext]:
     listing = fetcher.get(site.listing_url)
     listing_urls = parse_listing(listing.body, site.base_url, site.listing_path) if listing.ok else []
@@ -98,6 +130,11 @@ def discover(fetcher: Fetcher, site) -> tuple[list[str], SiteContext]:
         cms = fetcher.fetch_cms_posts(site.origin_host, site.blog_count * 2)
         if cms.ok:
             listed = set(ordered)
+            # Absence must be tested against the FULL listing, never the
+            # blog_count-truncated `ordered` slice — a CMS post ranked just
+            # beyond the truncation is still on the listing page, not missing,
+            # and including it would double the audited set for no reason.
+            full_listing = {normalize_url(u) for u in listing_urls}
             included = 0
             skipped = 0
             undecidable = 0
@@ -111,12 +148,15 @@ def discover(fetcher: Fetcher, site) -> tuple[list[str], SiteContext]:
                 if included >= site.blog_count:
                     break
                 url = _cms_post_url(site, post)
-                if url in listed:
-                    # already in scope via the listing — fetch_blogs handles it,
-                    # no need to spend a HEAD verifying what we already know.
+                if url in listed or normalize_url(url) in full_listing:
+                    # already in the audited set, or present on the listing
+                    # page just beyond the truncated top-blog_count slice —
+                    # not missing, nothing to add.
                     continue
                 decision, resolved = _resolve_cms_candidate(fetcher, site, url)
-                if decision == "include" and resolved not in listed:
+                if decision == "include":
+                    if resolved in listed or normalize_url(resolved) in full_listing:
+                        continue
                     ordered.append(resolved)
                     listed.add(resolved)
                     included += 1
@@ -129,6 +169,7 @@ def discover(fetcher: Fetcher, site) -> tuple[list[str], SiteContext]:
                 f"from the listing, skipped {skipped} redirecting to another section, "
                 f"{undecidable} undecidable"
             )
+            cms = _fill_missing_cms_posts(fetcher, site, ordered, cms)
 
     sitemap_urls, sitemap_ok = fetcher.fetch_sitemap(site.sitemap_url)
     robots = fetcher.get(f"{site.base_url}/robots.txt")

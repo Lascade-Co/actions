@@ -31,6 +31,15 @@ def cms_url_for(site) -> str:
     )
 
 
+def cms_slug_lookup_url_for(site, slug: str) -> str:
+    """The exact targeted single-slug CMS lookup URL discover() will issue for
+    an audited blog whose slug is absent from the fetched window."""
+    return (
+        f"https://{site.origin_host}/wp-json/wp/v2/posts"
+        f"?slug={slug}&_fields=slug,date,modified,status,link"
+    )
+
+
 class ScriptedTransport:
     """Serves fixtures for known URLs, 200-empty for anything else, and records calls."""
 
@@ -491,6 +500,33 @@ class DiscoverTest(unittest.TestCase):
         self.assertTrue(ctx.cms.ok)
         self.assertIn("https://www.travelanimator.com/hub/never-rendered-blog", urls)
 
+    def test_cms_candidate_within_full_listing_but_beyond_truncation_is_not_added(self):
+        """Round 4, item 1: 'missing from the listing' must be tested against
+        the FULL ctx.listing_urls, not the blog_count-truncated `ordered`
+        slice. listing.html has 3 blog anchors; with blog_count=2, `ordered`
+        is only the first 2 — but the 3rd ('third-blog') is still genuinely on
+        the listing page, just beyond the truncation, so a CMS candidate for
+        it must not be added (it isn't missing, and adding it would silently
+        double the audited set the way TravelAnimator's real listing did)."""
+        site = make_site(blog_count=2, cms_api=True)
+        payload = json.dumps(
+            [
+                {
+                    "slug": "third-blog",
+                    "date": "2026-07-29T10:00:00",
+                    "modified": "2026-07-29T10:00:00",
+                    "status": "publish",
+                    "link": "https://hub.travelanimator.com/hub/third-blog",
+                }
+            ]
+        )
+        transport = scripted(**{cms_url_for(site): (200, payload, {"content-type": "application/json"})})
+        urls, ctx = discover(Fetcher(transport), site)
+        self.assertTrue(ctx.cms.ok)
+        self.assertEqual(len(urls), 2)
+        self.assertNotIn("https://www.travelanimator.com/hub/third-blog", urls)
+        self.assertNotIn(("HEAD", "https://www.travelanimator.com/hub/third-blog"), transport.calls)
+
 
 class CollectUrlsTest(unittest.TestCase):
     def test_dimension_urls_are_only_og_images(self):
@@ -588,6 +624,61 @@ class AuditTest(unittest.TestCase):
         info_only = [f for f in summary.findings if f.severity == "info"]
         summary.findings = info_only
         self.assertFalse(gate(summary))
+
+    def test_targeted_cms_lookup_finds_post_and_i3_does_not_fire(self):
+        """Round 4, item 2: 'good-blog' is absent from the (empty, here) CMS
+        window, but a targeted single-slug lookup finds it — I3 must not treat
+        absence from a truncated window as proof no CMS post exists."""
+        site = make_site(blog_count=1, cms_api=True)
+        lookup_url = cms_slug_lookup_url_for(site, "good-blog")
+        transport = scripted(
+            **{
+                cms_url_for(site): (200, json.dumps([]), {"content-type": "application/json"}),
+                lookup_url: (
+                    200,
+                    json.dumps(
+                        [
+                            {
+                                "slug": "good-blog",
+                                "date": "2026-07-30T10:00:00",
+                                "modified": "2026-08-01T10:00:00",
+                                "status": "publish",
+                                "link": "https://hub.travelanimator.com/hub/good-blog",
+                            }
+                        ]
+                    ),
+                    {"content-type": "application/json"},
+                ),
+            }
+        )
+        summary = audit(site, Fetcher(transport))
+        self.assertFalse(any(f.rule == "I3" for f in summary.findings))
+
+    def test_slug_absent_from_window_and_targeted_lookup_still_fires_i3(self):
+        """Round 4, item 2: if the targeted lookup also finds nothing, the
+        blog genuinely has no CMS post and I3 must still fire."""
+        site = make_site(blog_count=1, cms_api=True)
+        lookup_url = cms_slug_lookup_url_for(site, "good-blog")
+        transport = scripted(
+            **{
+                cms_url_for(site): (200, json.dumps([]), {"content-type": "application/json"}),
+                lookup_url: (200, json.dumps([]), {"content-type": "application/json"}),
+            }
+        )
+        summary = audit(site, Fetcher(transport))
+        self.assertTrue(any(f.rule == "I3" for f in summary.findings))
+
+    def test_failed_targeted_cms_lookup_leaves_cms_ok_true_and_does_not_fabricate(self):
+        """Round 4, item 2: a failed targeted lookup is one missing slug, not
+        a CMS outage — cms.ok must stay True (flipping it would silence group
+        I entirely via _parity_enabled), and no post may be fabricated."""
+        site = make_site(blog_count=1, cms_api=True)
+        lookup_url = cms_slug_lookup_url_for(site, "good-blog")
+        transport = scripted(**{cms_url_for(site): (200, json.dumps([]), {"content-type": "application/json"})})
+        transport.fail.add(lookup_url)
+        urls, ctx = discover(Fetcher(transport), site)
+        self.assertTrue(ctx.cms.ok)
+        self.assertEqual(ctx.cms.posts, ())
 
 
 def _write_offline_config(directory: Path) -> Path:

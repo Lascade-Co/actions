@@ -223,3 +223,36 @@ class Fetcher:
         except (ValueError, TypeError, KeyError) as exc:
             return CmsSnapshot(posts=(), ok=False, error=f"unparseable CMS response: {exc}", enabled=True)
         return CmsSnapshot(posts=posts, ok=True, error=None, enabled=True)
+
+    def fetch_cms_post_by_slug(self, origin_host: str, slug: str) -> CmsPost | None:
+        """Single targeted lookup for one slug missing from the CMS window fetched
+        by fetch_cms_posts. Used to confirm a live blog genuinely has no CMS
+        counterpart before I3 reports it as an orphan, without re-fetching (or
+        widening) the whole window.
+
+        Returns None on any failure — a non-200 response, unparseable JSON, or
+        an empty/no-match result. The caller must treat None as "this one slug
+        couldn't be confirmed", never as "the CMS is down": one missing slug is
+        not a CMS outage.
+        """
+        url = (
+            f"https://{origin_host}/wp-json/wp/v2/posts"
+            f"?slug={slug}&_fields=slug,date,modified,status,link"
+        )
+        response = self.get(url)
+        if not response.ok:
+            return None
+        try:
+            payload = json.loads(response.body)
+            if not isinstance(payload, list) or not payload:
+                return None
+            item = payload[0]
+            return CmsPost(
+                slug=item["slug"],
+                date=item.get("date", ""),
+                modified=item.get("modified", ""),
+                status=item.get("status", ""),
+                link=item.get("link", ""),
+            )
+        except (ValueError, TypeError, KeyError, IndexError):
+            return None
