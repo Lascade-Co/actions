@@ -25,7 +25,7 @@
 - Every module is curl'd from `https://raw.githubusercontent.com/Lascade-Co/actions/main/scripts/seo/<name>` and lands as a sibling in the runner's working directory. Use flat top-level imports (`from seo_model import Finding`), never package-relative imports.
 - Python 3.13. Use `X | None` unions and builtin generics; no `typing.Optional`.
 - Per-request timeout 20 s. Blog concurrency 10, URL concurrency 8.
-- Image content type must be sniffed from magic bytes, never from the URL extension — the origin serves `image/webp` for `.png` URLs via content negotiation (verified).
+- Image content type must be sniffed from magic bytes, never from the URL extension. The origin's returned type for a `.png` URL varies: WebP negotiation is real but gated on the request `Accept` header advertising WebP **and** the Cloudflare cache state, so the same URL can answer `image/webp` or `image/png` on different days. `RequestsTransport` sends only `User-Agent`, so it usually sees `image/png`. Either way the extension is not the type — which is exactly why sniffing is mandatory and why no rule may assert a specific content type beyond "is it an image".
 - Redirect rules match **any 3xx**. Never test for a specific redirect code: travelanimator's origin uses 308, marineradar's 301.
 
 ---
