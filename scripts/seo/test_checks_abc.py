@@ -126,6 +126,11 @@ class GroupBTest(unittest.TestCase):
         urls = {self.INTERNAL: make_status(self.INTERNAL)}
         self.assertEqual(run_rule("B1", page, urls=urls), [])
 
+    def test_b1_silent_on_unverified_bot_blocked_host(self):
+        page = make_page(anchors=(anchor(self.INTERNAL),))
+        urls = {self.INTERNAL: make_status(self.INTERNAL, status=403, verified=False)}
+        self.assertEqual(run_rule("B1", page, urls=urls), [])
+
     def test_b2_fires_on_any_3xx(self):
         for code in (301, 302, 308):
             page = make_page(anchors=(anchor(self.INTERNAL),))
@@ -146,6 +151,11 @@ class GroupBTest(unittest.TestCase):
     def test_b3_silent_on_healthy_image(self):
         page = make_page(images=(ImageRef(url=ASSET, alt="x"),))
         urls = {ASSET: make_status(ASSET, content_type="image/png")}
+        self.assertEqual(run_rule("B3", page, urls=urls), [])
+
+    def test_b3_silent_on_unverified_bot_blocked_host(self):
+        page = make_page(images=(ImageRef(url=ASSET, alt="x"),))
+        urls = {ASSET: make_status(ASSET, status=403, verified=False)}
         self.assertEqual(run_rule("B3", page, urls=urls), [])
 
     def test_b4_fires_when_blog_absent_from_sitemap(self):
@@ -201,9 +211,22 @@ class GroupCTest(unittest.TestCase):
     def test_c2_fires_on_duplicate_canonicals(self):
         self.assertTrue(run_rule("C2", make_page(canonicals=(BLOG_URL, BLOG_URL + "?x=1"))))
 
-    def test_c2_fires_when_canonical_points_elsewhere(self):
+    def test_c2_fires_when_canonical_is_not_self_referencing(self):
+        # Same host as canonical_host, different path: exercises the
+        # not-self-referencing branch, not the wrong-host branch.
         page = make_page(canonicals=("https://www.travelanimator.com/hub/other",))
-        self.assertTrue(run_rule("C2", page))
+        findings = run_rule("C2", page)
+        self.assertTrue(findings)
+        self.assertIn("self-referencing", findings[0].message)
+
+    def test_c2_fires_when_canonical_points_at_wrong_host(self):
+        # Neither the canonical host nor the blog's own host: exercises the
+        # wrong-host branch specifically, distinct from not-self-referencing.
+        page = make_page(canonicals=("https://hub.travelanimator.com/hub/good-blog",))
+        findings = run_rule("C2", page)
+        self.assertTrue(findings)
+        self.assertIn("not the canonical host", findings[0].message)
+        self.assertNotIn("self-referencing", findings[0].message)
 
     def test_c2_fires_on_non_https_canonical(self):
         page = make_page(canonicals=("http://www.travelanimator.com/hub/good-blog",))
