@@ -189,6 +189,24 @@ class GroupITest(unittest.TestCase):
         page = make_page(jsonld=article_block(stamp + "+00:00"))
         self.assertEqual(run_rule("I2", pages=[page], ctx=ctx), [])
 
+    def test_i2_silent_when_cms_unreachable(self):
+        """Genuine gate test: a non-empty posts snapshot whose CMS `modified` timestamp
+        is far newer than the rendered `dateModified` — the exact stale-render condition
+        from test_i2_fires_when_render_is_stale — but with ok=False. If _parity_enabled
+        were removed, this would fire a warn finding just like that test does."""
+        now = datetime.now(timezone.utc)
+        cms_modified = now.strftime("%Y-%m-%dT%H:%M:%S")
+        rendered = (now - timedelta(hours=48)).strftime("%Y-%m-%dT%H:%M:%S+00:00")
+        ctx = make_context(
+            cms=self.cms(
+                [CmsPost(slug="good-blog", status="publish", modified=cms_modified)],
+                ok=False,
+                error="HTTP 500",
+            )
+        )
+        page = make_page(jsonld=article_block(rendered))
+        self.assertEqual(run_rule("I2", pages=[page], ctx=ctx), [])
+
     def test_i3_fires_on_zombie_page(self):
         ctx = make_context(cms=self.cms([CmsPost(slug="something-else", status="publish")]))
         findings = run_rule("I3", pages=[make_page()], ctx=ctx)
@@ -204,8 +222,16 @@ class GroupITest(unittest.TestCase):
         self.assertEqual(run_rule("I3", pages=[make_page()], ctx=ctx), [])
 
     def test_i1_silent_when_cms_unreachable(self):
-        ctx = make_context(cms=self.cms([], ok=False, error="HTTP 500"))
-        self.assertEqual(run_rule("I1", pages=[make_page()], ctx=ctx), [])
+        """Genuine gate test: a non-empty posts snapshot with a page whose non-200
+        response would otherwise trigger I1 (published in CMS but www errors out).
+        An empty posts list would make this test vacuous — check_i1 iterates
+        ctx.cms.posts, so with no posts the loop body never runs regardless of the
+        gate. This fixture gives the loop something to act on."""
+        ctx = make_context(
+            cms=self.cms([CmsPost(slug="good-blog", status="publish")], ok=False, error="HTTP 500")
+        )
+        page = make_page(response=make_response(status=500))
+        self.assertEqual(run_rule("I1", pages=[page], ctx=ctx), [])
 
     def test_i4_reports_exactly_one_info_when_cms_unreachable(self):
         ctx = make_context(cms=self.cms([], ok=False, error="HTTP 401"))
