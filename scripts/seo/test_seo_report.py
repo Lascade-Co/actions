@@ -10,6 +10,19 @@ def f(rule="A1", severity=SEVERITY_ERROR, message="broken", blog_url=BLOG_URL, e
     return Finding(rule=rule, slug="some-rule", severity=severity, message=message, blog_url=blog_url, evidence=evidence)
 
 
+# Matches any src=/href=/poster=/action=/formaction= attribute value, single- or
+# double-quoted, so the self-containment check below cannot be defeated by quote style.
+REMOTE_ATTR_RE = re.compile(
+    r"""(?:src|href|poster|action|formaction)\s*=\s*(["'])(?P<value>.*?)\1""",
+    re.IGNORECASE,
+)
+
+
+def _is_remote_reference(value: str) -> bool:
+    """True for an absolute (any scheme) or protocol-relative ("//host/...") URL."""
+    return bool(re.match(r"^(?:[a-zA-Z][a-zA-Z0-9+.\-]*:|//)", value.strip()))
+
+
 def summary(findings=(), *, site=None, error=None):
     from seo_checks_abc import BLOG_RULES_ABC, RUN_RULES_ABC
 
@@ -74,10 +87,23 @@ class GateTest(unittest.TestCase):
 
 class RenderTest(unittest.TestCase):
     def test_is_self_contained(self):
+        # Findings evidence and blog URLs legitimately contain "https://..." as
+        # escaped visible *text* (e.g. inside <div class="ev">...</div>) — that is
+        # data, not a network reference, so we don't scan for "://" as raw text.
+        # Instead we structurally check every src=/href=/poster=/action=/formaction=
+        # attribute (either quote style) and the CSS block, so this test would catch
+        # an https:// reference, a single-quoted attribute, a protocol-relative
+        # "//host/..." URL, or a CSS url(...)/@import — not just the four literal
+        # substrings the old version checked for.
         html = render_report(summary([f()]))
-        self.assertNotIn("http://", html.replace("http://www.w3.org", ""))
-        for forbidden in ("<script src", "<link rel=\"stylesheet\"", "@import", "cdn."):
-            self.assertNotIn(forbidden, html)
+        self.assertNotIn("@import", html)
+        self.assertNotIn("url(", html)
+        remote = [
+            match.group(0)
+            for match in REMOTE_ATTR_RE.finditer(html)
+            if _is_remote_reference(match.group("value"))
+        ]
+        self.assertEqual(remote, [], f"found remote reference(s) in rendered HTML: {remote}")
 
     def test_contains_structural_sections(self):
         html = render_report(summary([f()]))

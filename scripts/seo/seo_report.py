@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from html import escape
 
 from seo_model import SEVERITY_ERROR, SEVERITY_INFO, SEVERITY_WARN, BlogPage, Finding, Rule, SiteConfig
