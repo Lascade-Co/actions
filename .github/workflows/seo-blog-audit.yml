@@ -30,7 +30,7 @@ jobs:
         env:
           ONLY: ${{ inputs.site }}
         run: |
-          curl -fsSL -o seo_sites.json "$RAW/data/seo_sites.json"
+          curl -fsSL --retry 3 --retry-delay 2 -o seo_sites.json "$RAW/data/seo_sites.json"
           if [ -n "$ONLY" ]; then
             SITES=$(jq -c --arg only "$ONLY" '[.[] | select(.name == $only) | .name]' seo_sites.json)
           else
@@ -57,21 +57,24 @@ jobs:
           python-version: '3.13'
 
       - name: Install dependencies
-        run: pip install --quiet requests beautifulsoup4 lxml
+        # Pinned: this is an unwatched daily cron whose HTML parser must not
+        # change under it. Versions match what's installed in the repo's
+        # .venv at the time this wave landed.
+        run: pip install --quiet requests==2.34.2 beautifulsoup4==4.15.0 lxml==6.1.1
 
       - name: Download audit scripts
         run: |
-          curl -fsSL -o seo_sites.json      "$RAW/data/seo_sites.json"
-          curl -fsSL -o seo_model.py        "$RAW/scripts/seo/seo_model.py"
-          curl -fsSL -o seo_parse.py        "$RAW/scripts/seo/seo_parse.py"
-          curl -fsSL -o seo_fetch.py        "$RAW/scripts/seo/seo_fetch.py"
-          curl -fsSL -o seo_rulekit.py      "$RAW/scripts/seo/seo_rulekit.py"
-          curl -fsSL -o seo_checks_abc.py   "$RAW/scripts/seo/seo_checks_abc.py"
-          curl -fsSL -o seo_checks_def.py   "$RAW/scripts/seo/seo_checks_def.py"
-          curl -fsSL -o seo_checks_ghi.py   "$RAW/scripts/seo/seo_checks_ghi.py"
-          curl -fsSL -o seo_checks.py       "$RAW/scripts/seo/seo_checks.py"
-          curl -fsSL -o seo_report.py       "$RAW/scripts/seo/seo_report.py"
-          curl -fsSL -o seo_blog_audit.py   "$RAW/scripts/seo/seo_blog_audit.py"
+          curl -fsSL --retry 3 --retry-delay 2 -o seo_sites.json      "$RAW/data/seo_sites.json"
+          curl -fsSL --retry 3 --retry-delay 2 -o seo_model.py        "$RAW/scripts/seo/seo_model.py"
+          curl -fsSL --retry 3 --retry-delay 2 -o seo_parse.py        "$RAW/scripts/seo/seo_parse.py"
+          curl -fsSL --retry 3 --retry-delay 2 -o seo_fetch.py        "$RAW/scripts/seo/seo_fetch.py"
+          curl -fsSL --retry 3 --retry-delay 2 -o seo_rulekit.py      "$RAW/scripts/seo/seo_rulekit.py"
+          curl -fsSL --retry 3 --retry-delay 2 -o seo_checks_abc.py   "$RAW/scripts/seo/seo_checks_abc.py"
+          curl -fsSL --retry 3 --retry-delay 2 -o seo_checks_def.py   "$RAW/scripts/seo/seo_checks_def.py"
+          curl -fsSL --retry 3 --retry-delay 2 -o seo_checks_ghi.py   "$RAW/scripts/seo/seo_checks_ghi.py"
+          curl -fsSL --retry 3 --retry-delay 2 -o seo_checks.py       "$RAW/scripts/seo/seo_checks.py"
+          curl -fsSL --retry 3 --retry-delay 2 -o seo_report.py       "$RAW/scripts/seo/seo_report.py"
+          curl -fsSL --retry 3 --retry-delay 2 -o seo_blog_audit.py   "$RAW/scripts/seo/seo_blog_audit.py"
 
       - name: Run the audit
         id: audit
