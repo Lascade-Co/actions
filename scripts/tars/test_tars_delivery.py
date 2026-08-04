@@ -514,18 +514,31 @@ class TrustedBundleFetchTest(unittest.TestCase):
             "ghcr.io/lascade-co/tada-wheel@sha256:" + "b" * 64,
             "lascade-actions[bot]",
         )
+        metadata_files = ("SHA256SUMS", "pylock.toml", "build-metadata.json")
+
+        # A pre-split schema_version 1 bundle: private wheel only.
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            for name in (
-                "SHA256SUMS",
-                "pylock.toml",
-                "build-metadata.json",
-                "tada-0.1.0-py3-none-any.whl",
-            ):
+            for name in (*metadata_files, "tada-0.1.0-py3-none-any.whl"):
                 (root / name).write_text("data", encoding="utf-8")
             validate_bundle_shape(root)
             (root / "unexpected.txt").write_text("data", encoding="utf-8")
-            with self.assertRaisesRegex(BundleFetchError, "exact four-file"):
+            with self.assertRaisesRegex(BundleFetchError, "exactly one private wheel"):
+                validate_bundle_shape(root)
+
+        # A schema_version 2 bundle: private `tada` plus public `tacli`. The two distribution
+        # names share no prefix, so the private-wheel check must not claim the public wheel.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for name in (
+                *metadata_files,
+                "tada-0.2.0-py3-none-any.whl",
+                "tacli-0.2.0-py3-none-any.whl",
+            ):
+                (root / name).write_text("data", encoding="utf-8")
+            validate_bundle_shape(root)
+            (root / "tacli-0.2.1-py3-none-any.whl").write_text("data", encoding="utf-8")
+            with self.assertRaisesRegex(BundleFetchError, "at most one public"):
                 validate_bundle_shape(root)
 
     def test_rejects_mutable_tada_or_oras_references(self) -> None:
