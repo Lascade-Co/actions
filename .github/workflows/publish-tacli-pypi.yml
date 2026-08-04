@@ -1,0 +1,165 @@
+name: Central Publish tacli to PyPI
+run-name: "tacli → pypi @ ${{ inputs.sha }}"
+
+# Publishes the PUBLIC TADA distribution, `tacli` (render engine and safe CLI). Its Python
+# import path is `tada_render`, so the wheel is globbed by `tacli-` while its modules live
+# under `tada_render/`.
+#
+# Manual only, deliberately. PyPI releases are immutable: a version can be uploaded exactly
+# once and never replaced, so this must not fire on every push to tada's main the way
+# publish-tada-wheel.yml does -- that would fail on the second push of any given version.
+# Publishing is gated on a version bump, which is a human decision.
+#
+# Auth is a stored API token (PIPY_TOKEN). A PyPI Trusted Publisher (OIDC) would avoid holding
+# a long-lived credential at all and is worth revisiting, but the token is what exists today.
+#
+# The private `tada` wheel is built here too (one build path for both distributions) but is
+# never uploaded; stage_public_wheel.sh enforces that.
+on:
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: Full 40-character tada commit SHA to publish from
+        required: true
+        type: string
+
+concurrency:
+  group: publish-tacli-pypi
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    # Optional protection: if a `pypi` environment is configured, its required reviewers
+    # gate the upload and PIPY_TOKEN can be scoped to it. Unconfigured, GitHub auto-creates
+    # it unprotected and the token resolves from repository secrets -- dispatch works
+    # either way.
+    environment: pypi
+    permissions:
+      contents: read
+    env:
+      EGL_PLATFORM: surfaceless
+      LIBGL_ALWAYS_SOFTWARE: "1"
+    steps:
+      - name: Validate the requested revision
+        run: |
+          if [[ ! "${{ inputs.sha }}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "sha must be a full lowercase 40-character Git SHA" >&2
+            exit 1
+          fi
+
+      - name: Require the PyPI API token
+        env:
+          PYPI_TOKEN: ${{ secrets.PIPY_TOKEN }}
+        run: |
+          if [[ -z "$PYPI_TOKEN" ]]; then
+            echo "PIPY_TOKEN is not set; add it before publishing." >&2
+            exit 1
+          fi
+
+      - name: Mint GitHub App token (tada + shared)
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ secrets.CI_APP_CLIENT_ID }}
+          private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
+          owner: Lascade-Co
+          repositories: |
+            tada
+            travel-animator-shared
+
+      - name: Check out TADA @ requested commit
+        uses: actions/checkout@v6
+        with:
+          repository: Lascade-Co/tada
+          ref: ${{ inputs.sha }}
+          token: ${{ steps.app-token.outputs.token }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Read pinned shared revision
+        id: shared
+        run: echo "revision=$(git rev-parse HEAD:shared)" >> "$GITHUB_OUTPUT"
+
+      - name: Check out private shared protos
+        uses: actions/checkout@v6
+        with:
+          repository: Lascade-Co/travel-animator-shared
+          ref: ${{ steps.shared.outputs.revision }}
+          path: shared
+          token: ${{ steps.app-token.outputs.token }}
+          persist-credentials: false
+
+      # Gate before the expensive build: a version already on the index should fail in
+      # seconds rather than after a full test run.
+      - name: Verify tacli is publishable
+        id: publishable
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/Lascade-Co/actions/main/scripts/tada-wheel/verify_tacli_publishable.py -o "$RUNNER_TEMP/verify_tacli_publishable.py"
+          python3 "$RUNNER_TEMP/verify_tacli_publishable.py" \
+            --pyproject tada_render/pyproject.toml
+
+      - name: Install headless OpenGL runtime
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            libegl1 \
+            libgl1 \
+            libgl1-mesa-dri
+
+      - name: Install pinned uv and Python
+        uses: astral-sh/setup-uv@v8.3.2
+        with:
+          version: "0.8.9"
+          python-version: "3.12"
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      # --all-packages --all-extras is load-bearing: grpcio-tools (protoc codegen) and the
+      # mcp SDK are declared on the tada_render member, not the workspace root. A plain
+      # `uv sync --locked` installs neither, so codegen and the MCP server tests fail --
+      # and `tacli mcp` is part of what ships, so those tests must run before publishing.
+      - name: Sync locked environment
+        run: uv sync --locked --all-packages --all-extras
+
+      - name: Generate protobuf modules
+        run: uv run --locked --all-packages --all-extras python tada_render/hatch_build.py
+
+      - name: Run tests from the lockfile
+        run: uv run --locked --all-packages --all-extras pytest
+
+      # Reuses the private path's build script so the bytes uploaded here are produced exactly
+      # the way the tested GHCR bundle's wheels are -- one build path, not two.
+      - name: Build both wheels
+        env:
+          SHARED_REVISION: ${{ steps.shared.outputs.revision }}
+          TADA_REPOSITORY: Lascade-Co/tada
+          TADA_REVISION: ${{ inputs.sha }}
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/Lascade-Co/actions/main/scripts/tada-wheel/build_tada_wheel.sh -o "$RUNNER_TEMP/build_tada_wheel.sh"
+          bash "$RUNNER_TEMP/build_tada_wheel.sh"
+
+      - name: Verify wheel contents contain no credential files
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/Lascade-Co/actions/main/scripts/tada-wheel/verify_tada_wheel.py -o "$RUNNER_TEMP/verify_tada_wheel.py"
+          uv run --locked python "$RUNNER_TEMP/verify_tada_wheel.py"
+
+      - name: Stage only the public wheel
+        env:
+          DIST: ${{ steps.publishable.outputs.dist }}
+          VERSION: ${{ steps.publishable.outputs.version }}
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/Lascade-Co/actions/main/scripts/tada-wheel/stage_public_wheel.sh -o "$RUNNER_TEMP/stage_public_wheel.sh"
+          bash "$RUNNER_TEMP/stage_public_wheel.sh"
+
+      # attestations are off because they require OIDC (id-token: write), which token auth does
+      # not provide; leaving the default on makes the action fail outright.
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          password: ${{ secrets.PIPY_TOKEN }}
+          attestations: false

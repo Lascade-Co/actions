@@ -83,14 +83,22 @@ jobs:
           enable-cache: true
           cache-dependency-glob: uv.lock
 
+      # --all-packages --all-extras is load-bearing: grpcio-tools (protoc codegen) and the
+      # mcp SDK are declared on the tada_render member, not the workspace root. A plain
+      # `uv sync --locked` installs neither, so codegen and the MCP server tests fail. The
+      # flags repeat on every `uv run` below: each step re-syncs, and must not prune them.
       - name: Sync locked environment
-        run: uv sync --locked
+        run: uv sync --locked --all-packages --all-extras
 
+      # The generator lives in the tada_render workspace member, not the repo root: only that
+      # package needs protoc codegen (the config schema and the vector-tile decoder are
+      # both its own). It resolves the `shared` submodule relative to the workspace root, so
+      # invoking it by path from here is correct.
       - name: Generate protobuf modules
-        run: uv run --locked python hatch_build.py
+        run: uv run --locked --all-packages --all-extras python tada_render/hatch_build.py
 
       - name: Run tests from the lockfile
-        run: uv run --locked pytest
+        run: uv run --locked --all-packages --all-extras pytest
 
       - name: Build wheel and runtime pylock
         env:
@@ -111,12 +119,14 @@ jobs:
           curl -sSfL https://raw.githubusercontent.com/Lascade-Co/actions/main/scripts/tada-wheel/verify_tada_wheel.py -o "$RUNNER_TEMP/verify_tada_wheel.py"
           uv run --locked python "$RUNNER_TEMP/verify_tada_wheel.py"
 
+      # Five files since the bundle grew the public tacli wheel: two wheels, pylock.toml,
+      # build-metadata.json, SHA256SUMS.
       - name: Verify release bundle
         run: |
           shopt -s nullglob
           files=(bundle/*)
-          if (( ${#files[@]} != 4 )); then
-            printf 'expected four bundle files, found:\n' >&2
+          if (( ${#files[@]} != 5 )); then
+            printf 'expected five bundle files, found:\n' >&2
             printf '  %s\n' "${files[@]}" >&2
             exit 1
           fi
@@ -185,8 +195,8 @@ jobs:
       - name: Re-verify downloaded bundle
         run: |
           files=(bundle/*)
-          if (( ${#files[@]} != 4 )); then
-            echo "downloaded release bundle must contain exactly four files" >&2
+          if (( ${#files[@]} != 5 )); then
+            echo "downloaded release bundle must contain exactly five files" >&2
             exit 1
           fi
           (
