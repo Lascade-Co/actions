@@ -14,10 +14,18 @@ set -euo pipefail
 rm -rf dist
 mkdir dist
 
+# A wheel filename carries the ESCAPED distribution name: PEP 427 collapses every run of
+# `-`, `_` or `.` to a single `_`. That was a no-op for every distribution this script has
+# seen so far (`tacli`, `tada-render` was never built here), but `travel-animator` files as
+# `travel_animator-`, so globbing on $DIST verbatim matches nothing. Match on the escaped
+# form; keep the messages in terms of $DIST, which is the name a human recognises.
+dist_file="$(printf '%s' "$DIST" | sed -E 's/[-_.]+/_/g')"
+
 shopt -s nullglob
-wheels=(bundle/"${DIST}"-*.whl)
+wheels=(bundle/"${dist_file}"-*.whl)
 if (( ${#wheels[@]} != 1 )); then
-  printf 'expected exactly one %s wheel in bundle/, found %d:\n' "$DIST" "${#wheels[@]}" >&2
+  printf 'expected exactly one %s wheel (%s-*.whl) in bundle/, found %d:\n' \
+    "$DIST" "$dist_file" "${#wheels[@]}" >&2
   printf '  %s\n' "${wheels[@]}" >&2
   exit 1
 fi
@@ -32,9 +40,9 @@ fi
 
 name="$(basename "${staged[0]}")"
 case "$name" in
-  "${DIST}-${VERSION}"-*.whl) ;;
+  "${dist_file}-${VERSION}"-*.whl) ;;
   *)
-    echo "refusing to publish unexpected artifact: $name (want ${DIST}-${VERSION}-*.whl)" >&2
+    echo "refusing to publish unexpected artifact: $name (want ${dist_file}-${VERSION}-*.whl)" >&2
     exit 1
     ;;
 esac
