@@ -119,7 +119,7 @@ jobs:
           curl -sSfL https://raw.githubusercontent.com/Lascade-Co/actions/main/scripts/tada-wheel/verify_tada_wheel.py -o "$RUNNER_TEMP/verify_tada_wheel.py"
           uv run --locked python "$RUNNER_TEMP/verify_tada_wheel.py"
 
-      # Five files since the bundle grew the public tacli wheel: two wheels, pylock.toml,
+      # Five files since the bundle grew the public travel-animator wheel: two wheels, pylock.toml,
       # build-metadata.json, SHA256SUMS.
       - name: Verify release bundle
         run: |

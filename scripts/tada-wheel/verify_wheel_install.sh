@@ -24,17 +24,17 @@ python_bin="$GITHUB_WORKSPACE/.wheel-check/bin/python"
   cd "$staging"
   uv pip sync --python "$python_bin" pylock.toml
   # --no-deps for both: every third-party dependency already came from pylock.toml above, and
-  # the private wheel's `tacli==<version>` pin must be satisfied by the sibling wheel in this
-  # directory rather than by a fetch from an index.
+  # the private wheel's `travel-animator==<version>` pin must be satisfied by the sibling
+  # wheel in this directory rather than by a fetch from an index.
   uv pip install --python "$python_bin" --no-deps ./*.whl
 )
 
 # Both console scripts, from an unrelated cwd. `tada` is the private CLI and is what a consumer
 # image build smoke-tests -- exactly what fails when the public wheel is missing, since it
-# imports tada_render at module load. `tacli` is the public CLI and proves the public
+# imports tada_render at module load. `travel-animator` is the public CLI and proves the public
 # distribution stands on its own.
 (
   cd /tmp
   "$GITHUB_WORKSPACE/.wheel-check/bin/tada" --help
-  "$GITHUB_WORKSPACE/.wheel-check/bin/tacli" --help
+  "$GITHUB_WORKSPACE/.wheel-check/bin/travel-animator" --help
 )

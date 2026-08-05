@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Stage ONLY the public wheel into dist/ for upload. Run from the directory containing bundle/.
-# Env: DIST (distribution name, e.g. tacli), VERSION (the version being published).
+# Env: DIST (distribution name, e.g. travel-animator), VERSION (the version being published).
 #
 # The upload action publishes every file in its packages-dir, so what ends up in dist/ is the
 # entire security boundary for a public release. The private `tada` wheel -- choreography

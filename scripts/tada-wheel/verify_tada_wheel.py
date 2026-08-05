@@ -1,20 +1,21 @@
 """Assert both TADA wheels carry their expected modules and no credential-like files.
 
 TADA ships two distributions from one revision: private `tada` (choreography builder and
-credentialed fetchers) and public `tacli` (render engine and safe CLI). The generated
-protobuf modules and bundled assets live in the public one. The public wheel is selected by
-its DISTRIBUTION name (`tacli-*.whl`) but its contents live under its IMPORT path
-(`tada_render/`).
+credentialed fetchers) and public `travel-animator` (render engine and safe CLI). The
+generated protobuf modules and bundled assets live in the public one. The public wheel is
+selected by its DISTRIBUTION name (`travel_animator-*.whl`, which escapes the dash) but its
+contents live under its IMPORT path (`tada_render/`).
 
-The credential scan runs over BOTH wheels. It matters most for tacli, the one that is
-publishable to a public index.
+The credential scan runs over BOTH wheels. It matters most for travel-animator, the one
+that is publishable to a public index.
 """
 from pathlib import PurePosixPath
 from zipfile import ZipFile
 import glob
 
-# `tada-*.whl` and `tacli-*.whl` are disjoint: a wheel filename starts with its distribution
-# name, and these two names share no prefix. Each pattern therefore selects exactly one wheel.
+# `tada-*.whl` and `travel_animator-*.whl` are disjoint: a wheel filename starts with its
+# distribution name, and these two names share no prefix. Each pattern therefore selects
+# exactly one wheel.
 REQUIRED_BY_WHEEL = {
     "tada-*.whl": {
         # The private package has no generated modules of its own; pin a few load-bearing
@@ -23,7 +24,7 @@ REQUIRED_BY_WHEEL = {
         "tada/cli.py",
         "tada/bundle.py",
     },
-    "tacli-*.whl": {
+    "travel_animator-*.whl": {
         "tada_render/config/proto/export_config_pb2.py",
         "tada_render/config/proto/animation_state_pb2.py",
         "tada_render/config/proto/animation_style_pb2.py",

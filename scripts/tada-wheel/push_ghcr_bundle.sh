@@ -5,14 +5,14 @@
 # Human-readable logs go to stderr; stdout is ONLY the digest (so the caller can capture it).
 #
 # The bundle carries BOTH distributions built from one revision: private tada-*.whl and public
-# tacli-*.whl. Pushing only one leaves consumers unable to install a working `tada`.
+# travel_animator-*.whl. Pushing only one leaves consumers unable to install a working `tada`.
 set -euo pipefail
 
 : "${TARGET_SHA:?}" "${TARGET_REPO:?}"
 
 shopt -s nullglob
 private_wheels=(bundle/tada-*.whl)
-render_wheels=(bundle/tacli-*.whl)
+render_wheels=(bundle/travel_animator-*.whl)
 if (( ${#private_wheels[@]} != 1 )) \
   || (( ${#render_wheels[@]} != 1 )) \
   || [[ ! -f bundle/pylock.toml ]] \
