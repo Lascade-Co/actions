@@ -65,6 +65,10 @@ RUNTIME_KEYS = (
     # Infisical, so a name absent here fails the deployment as a missing key no
     # matter what /runtime holds.
     "GRAPHHOPPER_API_KEY",
+    # The dispatcher's `tada prepare` needs this to resolve the ocean-mask
+    # source, the style, and the tile probe; TADA reports its absence as a
+    # permanent invalid_render_config, which fails the acceptance smoke render.
+    "MAPTILER_API_KEY",
 )
 REMOTE_KEYS = ("DOCR_READ_USERNAME", "DOCR_READ_PASSWORD", *RUNTIME_KEYS)
 SSH_USER = re.compile(r"[a-z_][a-z0-9_-]{0,31}\Z")
