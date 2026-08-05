@@ -60,6 +60,11 @@ RUNTIME_KEYS = (
     "GARAGE_SECRET_ACCESS_KEY",
     "ONEUPTIME_TOKEN",
     "RUNPOD_API_KEY",
+    # Must mirror deploy/deploylib.py RUNTIME_SECRETS in the TARS repository.
+    # The manager reads runtime values from this forwarded environment, not from
+    # Infisical, so a name absent here fails the deployment as a missing key no
+    # matter what /runtime holds.
+    "GRAPHHOPPER_API_KEY",
 )
 REMOTE_KEYS = ("DOCR_READ_USERNAME", "DOCR_READ_PASSWORD", *RUNTIME_KEYS)
 SSH_USER = re.compile(r"[a-z_][a-z0-9_-]{0,31}\Z")
