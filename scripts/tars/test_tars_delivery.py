@@ -574,6 +574,7 @@ class RunnerSecretsTest(unittest.TestCase):
             "ONEUPTIME_TOKEN": "oneuptime-token",
             "RUNPOD_API_KEY": "runpod-api-secret",
             "GRAPHHOPPER_API_KEY": "graphhopper-api-secret",
+            "MAPTILER_API_KEY": "maptiler-api-secret",
             "RUNPOD_ENDPOINT_ID": "stable-endpoint",
             "RUNPOD_TEMPLATE_ID": "stable-template",
             "RUNPOD_REGISTRY_AUTH_ID": "stable-auth",
@@ -702,9 +703,9 @@ class RunnerSecretsTest(unittest.TestCase):
                 [
                     "/bin/bash",
                     "-c",
-                    'source "$1"; printf "%s\\0%s\\0%s\\0%s" "$TARS_SECRET_SOURCE" '
+                    'source "$1"; printf "%s\\0%s\\0%s\\0%s\\0%s" "$TARS_SECRET_SOURCE" '
                     '"$DOCR_READ_PASSWORD" "$TARS_JWT_HS256_SECRET" '
-                    '"$GRAPHHOPPER_API_KEY"',
+                    '"$GRAPHHOPPER_API_KEY" "$MAPTILER_API_KEY"',
                     "capture-test",
                     str(output_directory / "remote-secrets.sh"),
                 ],
@@ -714,7 +715,8 @@ class RunnerSecretsTest(unittest.TestCase):
             self.assertEqual(
                 shell.stdout,
                 b"environment\0registry password with spaces\0"
-                b"issuer 'secret' with spaces\0graphhopper-api-secret",
+                b"issuer 'secret' with spaces\0graphhopper-api-secret\0"
+                b"maptiler-api-secret",
             )
             rendered = github_output.read_text(encoding="utf-8")
             self.assertIn("host<<", rendered)
