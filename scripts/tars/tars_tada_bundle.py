@@ -32,15 +32,20 @@ def validate_inputs(oras_image: str, tada_oci: str, username: str) -> None:
 
 
 def validate_bundle_shape(directory: Path) -> None:
-    # TADA ships two distributions from one revision: private `tada` and public `tacli` (the
-    # render/CLI package). A build-metadata schema_version 2 bundle carries both wheels; a
+    # TADA ships two distributions from one revision: private `tada` and public
+    # `travel-animator` (the render/CLI package, whose wheel filename escapes to
+    # `travel_animator-`). A build-metadata schema_version 2 bundle carries both wheels; a
     # schema_version 1 bundle carries only the private one. Both shapes are accepted so a
     # bundle republication and a TARS deploy can land in either order. The two names share
     # no prefix, so these membership tests cannot claim the same file.
     entries = list(directory.iterdir())
     files = {path.name for path in entries}
     private = {name for name in files if name.startswith("tada-") and name.endswith(".whl")}
-    public = {name for name in files if name.startswith("tacli-") and name.endswith(".whl")}
+    public = {
+        name
+        for name in files
+        if name.startswith("travel_animator-") and name.endswith(".whl")
+    }
     expected = {"SHA256SUMS", "pylock.toml", "build-metadata.json"} | private | public
     if len(private) != 1 or len(public) > 1 or files != expected:
         raise BundleFetchError(

@@ -1,8 +1,8 @@
-name: Central Publish tacli to PyPI
-run-name: "tacli → pypi @ ${{ inputs.sha }}"
+name: Central Publish travel-animator to PyPI
+run-name: "travel-animator → pypi @ ${{ inputs.sha }}"
 
-# Publishes the PUBLIC TADA distribution, `tacli` (render engine and safe CLI). Its Python
-# import path is `tada_render`, so the wheel is globbed by `tacli-` while its modules live
+# Publishes the PUBLIC TADA distribution, `travel-animator` (render engine and safe CLI). Its Python
+# import path is `tada_render`, so the wheel is globbed by `travel_animator-` while its modules live
 # under `tada_render/`.
 #
 # Manual only, deliberately. PyPI releases are immutable: a version can be uploaded exactly
@@ -96,7 +96,7 @@ jobs:
 
       # Gate before the expensive build: a version already on the index should fail in
       # seconds rather than after a full test run.
-      - name: Verify tacli is publishable
+      - name: Verify travel-animator is publishable
         id: publishable
         run: |
           curl -sSfL https://raw.githubusercontent.com/Lascade-Co/actions/main/scripts/tada-wheel/verify_tacli_publishable.py -o "$RUNNER_TEMP/verify_tacli_publishable.py"
@@ -122,7 +122,7 @@ jobs:
       # --all-packages --all-extras is load-bearing: grpcio-tools (protoc codegen) and the
       # mcp SDK are declared on the tada_render member, not the workspace root. A plain
       # `uv sync --locked` installs neither, so codegen and the MCP server tests fail --
-      # and `tacli mcp` is part of what ships, so those tests must run before publishing.
+      # and `travel-animator mcp` is part of what ships, so those tests must run before publishing.
       - name: Sync locked environment
         run: uv sync --locked --all-packages --all-extras
 

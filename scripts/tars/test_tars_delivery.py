@@ -526,18 +526,18 @@ class TrustedBundleFetchTest(unittest.TestCase):
             with self.assertRaisesRegex(BundleFetchError, "exactly one private wheel"):
                 validate_bundle_shape(root)
 
-        # A schema_version 2 bundle: private `tada` plus public `tacli`. The two distribution
+        # A schema_version 2 bundle: private `tada` plus public `travel-animator`. The two distribution
         # names share no prefix, so the private-wheel check must not claim the public wheel.
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             for name in (
                 *metadata_files,
                 "tada-0.2.0-py3-none-any.whl",
-                "tacli-0.2.0-py3-none-any.whl",
+                "travel_animator-0.2.0-py3-none-any.whl",
             ):
                 (root / name).write_text("data", encoding="utf-8")
             validate_bundle_shape(root)
-            (root / "tacli-0.2.1-py3-none-any.whl").write_text("data", encoding="utf-8")
+            (root / "travel_animator-0.2.1-py3-none-any.whl").write_text("data", encoding="utf-8")
             with self.assertRaisesRegex(BundleFetchError, "at most one public"):
                 validate_bundle_shape(root)
 

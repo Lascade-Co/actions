@@ -5,10 +5,10 @@
 # runs in the central actions repo. workflow_run_id/attempt stay ambient (the build runs here).
 #
 # TADA ships as TWO distributions built from one revision (ADR 0011):
-#   tada   private -- choreography builder + credentialed fetchers, server-side only
-#   tacli  public  -- render engine and the safe CLI subcommands
-# tacli's Python import path is `tada_render`: glob wheels by `tacli-`, expect module paths
-# under `tada_render/`.
+#   tada             private -- choreography builder + credentialed fetchers, server-side only
+#   travel-animator  public  -- render engine and the safe CLI subcommands
+# travel-animator's Python import path is `tada_render`, and its wheel filename escapes the
+# dash: glob wheels by `travel_animator-`, expect module paths under `tada_render/`.
 #
 # Both belong in the bundle: `tada` imports `tada_render` at module import time, so a bundle
 # carrying only the private wheel yields an install whose `tada` entry point cannot start.
@@ -20,8 +20,8 @@ rm -rf bundle
 mkdir bundle
 
 # --all-packages is load-bearing: plain `uv build` builds only the workspace ROOT (tada), so
-# the public tacli wheel is silently absent and nothing notices until a consumer's image build
-# tries to import it.
+# the public travel-animator wheel is silently absent and nothing notices until a consumer's
+# image build tries to import it.
 uv build --wheel --all-packages --out-dir bundle
 
 # --no-emit-workspace, NOT --no-emit-project. --no-emit-project omits only the root project,
@@ -42,18 +42,19 @@ uv export \
 shopt -s nullglob
 wheels=(bundle/*.whl)
 if (( ${#wheels[@]} != 2 )); then
-  printf 'expected exactly two wheels (tada + tacli), found %d:\n' "${#wheels[@]}" >&2
+  printf 'expected exactly two wheels (tada + travel-animator), found %d:\n' \
+    "${#wheels[@]}" >&2
   printf '  %s\n' "${wheels[@]}" >&2
   exit 1
 fi
 
-# The two globs are disjoint: a wheel filename starts with its distribution name, and `tacli-`
-# shares no prefix with `tada-`. Every consumer that selects one wheel by glob depends on the
-# two names staying prefix-distinct.
+# The two globs are disjoint: a wheel filename starts with its distribution name, and
+# `travel_animator-` shares no prefix with `tada-`. Every consumer that selects one wheel by
+# glob depends on the two names staying prefix-distinct.
 private_wheels=(bundle/tada-*.whl)
-render_wheels=(bundle/tacli-*.whl)
+render_wheels=(bundle/travel_animator-*.whl)
 if (( ${#private_wheels[@]} != 1 )) || (( ${#render_wheels[@]} != 1 )); then
-  echo "expected exactly one tada-*.whl and one tacli-*.whl:" >&2
+  echo "expected exactly one tada-*.whl and one travel_animator-*.whl:" >&2
   printf '  %s\n' "${wheels[@]}" >&2
   exit 1
 fi
