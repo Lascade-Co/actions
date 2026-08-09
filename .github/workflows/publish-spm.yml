@@ -62,7 +62,7 @@ jobs:
           client-id: ${{ secrets.INFISICAL_CLIENT_ID }}
           client-secret: ${{ secrets.INFISICAL_CLIENT_SECRET }}
           project-slug: ${{ github.event.client_payload.project_slug }}
-          env-slug: "production"
+          env-slug: "prod"
           domain: ${{ secrets.INFISICAL_DOMAIN }}
           secret-path: /Local-Properties
           export-type: file
