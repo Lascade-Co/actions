@@ -112,3 +112,21 @@ jobs:
           tag_name: v${{ steps.version.outputs.new_version }}
           commit_message: Update to v${{ steps.version.outputs.new_version }}
           branch: ${{ github.event.client_payload.spm_branch || 'main' }}
+
+      # `increment_version.sh` bumps gradle.properties in the SOURCE checkout, but
+      # nothing committed it, so VERSION never advanced and every run after the first
+      # recomputed the same version and died on `tag already exists`. Write it back so
+      # the version genuinely moves. Runs after the SPM commit, so a failed build never
+      # burns a version number.
+      #
+      # `[skip ci]` is load-bearing: source repos trigger this workflow on push to their
+      # default branch, so an unmarked bot commit here would dispatch another publish and
+      # loop indefinitely.
+      - name: Commit version bump back to source repo
+        uses: stefanzweifel/git-auto-commit-action@v7
+        with:
+          commit_message: "chore: bump SPM version to v${{ steps.version.outputs.new_version }} [skip ci]"
+          branch: ${{ github.event.client_payload.branch }}
+          file_pattern: gradle.properties
+          commit_user_name: github-actions[bot]
+          commit_user_email: github-actions[bot]@users.noreply.github.com
