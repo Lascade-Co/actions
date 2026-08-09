@@ -87,7 +87,14 @@ jobs:
         id: version
         run: bash ./increment_version.sh
 
+      # The iOS framework links ANGLE, whose binary is fetched from a release asset rather
+      # than committed (it is 24 MB and iOS-only). Source repos are private, so that fetch
+      # needs a token; the app token minted above is already scoped to the source repo the
+      # release lives on. Without this the build fails in :downloadAngle with
+      # "No GitHub token available to fetch ANGLE".
       - name: Build XCFramework
+        env:
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
         run: ./gradlew assembleTASharedReleaseXCFramework
 
       - name: Checkout SPM repo
