@@ -35,10 +35,19 @@ jobs:
           echo "owner=${FULL%%/*}" >> "$GITHUB_OUTPUT"
           echo "name=${FULL#*/}"   >> "$GITHUB_OUTPUT"
 
-      # Build the list of repos the App token must cover: always the source repo,
-      # plus any private SPM package repos the dispatcher declared (comma-separated
-      # names, same org). Without this the token would be org-wide, and this job
-      # runs xcodebuild over unreviewed PR-head code.
+      # Scoping the App token is opt-in, because this job runs xcodebuild over
+      # unreviewed PR-head code and an owner-wide token there is a large blast
+      # radius. A dispatcher that names its private SPM package repos in spm_repos
+      # gets a token limited to the source repo plus that list; the PR trigger — the
+      # automatic path an outside branch name can reach — does exactly that.
+      #
+      # With the field absent we emit an EMPTY list, which is not "no repositories":
+      # create-github-app-token parses `repositories` with
+      #   getInput(...).split(/[\n,]+/).map(trim).filter(x => x !== "")
+      # so an empty value and an omitted input both yield [], and [] with `owner`
+      # set takes the "token for all repositories owned by <owner>" branch. That
+      # keeps the legacy workflow_dispatch payload resolving private SPM deps
+      # exactly as it does today.
       - name: Compute token repositories
         id: token_repos
         shell: bash
@@ -46,11 +55,13 @@ jobs:
           REPO_NAME: ${{ steps.repo.outputs.name }}
           EXTRA: ${{ github.event.client_payload.spm_repos }}
         run: |
-          REPOS="$REPO_NAME"
           if [ -n "$EXTRA" ] && [ "$EXTRA" != "null" ]; then
-            REPOS="$REPOS,$EXTRA"
+            echo "spm_repos declared; scoping App token to $REPO_NAME,$EXTRA"
+            echo "list=$REPO_NAME,$EXTRA" >> "$GITHUB_OUTPUT"
+          else
+            echo "No spm_repos in payload; App token stays owner-wide"
+            echo "list=" >> "$GITHUB_OUTPUT"
           fi
-          echo "list=$REPOS" >> "$GITHUB_OUTPUT"
 
       - name: Mint GitHub App token
         id: app-token
