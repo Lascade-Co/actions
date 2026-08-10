@@ -79,24 +79,46 @@ jobs:
       # `includeBuild`, so the Gradle steps below cannot even CONFIGURE without it checked out.
       #
       # Same gitlink-then-checkout dance as `shared` above, and for the same reason: the tada
-      # checkout is NOT switched to `submodules: true` because .gitmodules records an SSH URL
-      # (git@github.com:rohittp0/rentile.git) and the runner has no key for it.
-      - name: Read pinned rentile revision
+      # checkout is NOT switched to `submodules: true` -- checkout drives all submodules with
+      # one token, and these two live under different owners.
+      #
+      # BOTH the revision and the OWNER/REPO are read out of the checkout rather than hardcoded.
+      # That is load-bearing: while the jvm-target change is in review the pin lives on a fork,
+      # and a hardcoded `repository:` would silently resolve to a repo that does not contain the
+      # pinned SHA -- failing as "Reference not found", which reads like a push problem rather
+      # than a wiring one. Deriving both from .gitmodules means the workflow follows the pin
+      # automatically when it moves back to upstream (or the submodule disappears entirely, once
+      # rentile publishes a release carrying the `jvm` variant and the Maven coordinate replaces
+      # the composite build).
+      - name: Read pinned rentile revision and origin
         id: rentile
-        run: echo "revision=$(git rev-parse HEAD:rentile)" >> "$GITHUB_OUTPUT"
+        run: |
+          set -euo pipefail
+          echo "revision=$(git rev-parse HEAD:rentile)" >> "$GITHUB_OUTPUT"
+          url="$(git config -f .gitmodules submodule.rentile.url)"
+          # Accept either remote form; strip the optional .git suffix.
+          slug="${url#git@github.com:}"
+          slug="${slug#https://github.com/}"
+          slug="${slug%.git}"
+          case "$slug" in
+            */*) ;;
+            *) echo "::error::could not parse an owner/repo out of submodule.rentile.url='$url'"; exit 1 ;;
+          esac
+          echo "repository=$slug" >> "$GITHUB_OUTPUT"
+          echo "rentile: $slug @ $(git rev-parse HEAD:rentile)"
 
       # Deliberately NOT the App token. create-github-app-token scopes to exactly ONE owner
       # (`owner:` above), and rentile lives under a personal account, so adding it to that
-      # `repositories:` list would make the mint itself fail. It needs no token anyway --
-      # rohittp0/rentile is public, and the default GITHUB_TOKEN can read any public repo
-      # regardless of which repo it was issued for.
+      # `repositories:` list would make the mint itself fail. It needs no token anyway -- the
+      # repo (and any fork we point at) is PUBLIC, and the default GITHUB_TOKEN can read any
+      # public repo regardless of which repo it was issued for.
       #
-      # If the pin ever moves to a Lascade-Co/rentile fork, change `repository:` here and keep
-      # that fork PUBLIC; a private fork would need a second App token minted for Lascade-Co.
+      # Keep whatever we point at PUBLIC. A private fork would need a second App token minted
+      # for that owner, which is the situation this arrangement exists to avoid.
       - name: Check out pinned rentile
         uses: actions/checkout@v6
         with:
-          repository: rohittp0/rentile
+          repository: ${{ steps.rentile.outputs.repository }}
           ref: ${{ steps.rentile.outputs.revision }}
           path: rentile
           token: ${{ github.token }}
