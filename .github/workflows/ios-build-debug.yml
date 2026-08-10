@@ -17,7 +17,11 @@ concurrency:
 jobs:
   build:
     runs-on: macos-latest
-    timeout-minutes: 60
+    # A cold SwiftPM cache means fetching ~7 GB of package history before the
+    # archive starts, and the cache key changes on every Xcode bump, so cold
+    # runs recur. 60 minutes killed the job before it could populate the cache,
+    # which meant the next run started cold too — the loop never broke.
+    timeout-minutes: 120
     outputs:
       version: ${{ steps.version.outputs.version }}
       app_name: ${{ steps.app_meta.outputs.app_name }}
@@ -251,8 +255,9 @@ jobs:
       # a restore is genuinely reused. Caching a hand-built SourcePackages tree
       # does nothing: SwiftPM addresses mirrors by an internal hash we cannot
       # reproduce, so it never looks at them.
-      - name: Cache SPM packages
-        uses: actions/cache@v5
+      - name: Restore SPM cache
+        id: spm_cache
+        uses: actions/cache/restore@v5
         with:
           path: ~/Library/Caches/org.swift.swiftpm
           key: spm-${{ runner.os }}-${{ steps.xcode-version.outputs.cache-key }}-${{ hashFiles('*.xcodeproj/project.pbxproj', '**/Package.resolved') }}
@@ -269,6 +274,17 @@ jobs:
           xcodebuild -resolvePackageDependencies \
             -project "${{ steps.detect.outputs.project }}" \
             -scheme "${{ steps.detect.outputs.scheme }}"
+
+      # Save as soon as the packages are on disk, not at the end of the job. A
+      # cold resolve costs ~7 GB; if the archive later fails or times out, the
+      # default post-run save would be skipped and the next run would start cold
+      # again — which is exactly the loop this pipeline was stuck in.
+      - name: Save SPM cache
+        if: steps.spm.outcome == 'success' && steps.spm_cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v5
+        with:
+          path: ~/Library/Caches/org.swift.swiftpm
+          key: ${{ steps.spm_cache.outputs.cache-primary-key }}
 
       - name: Compute build number
         id: build_number
