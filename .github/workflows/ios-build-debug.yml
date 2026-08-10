@@ -250,21 +250,6 @@ jobs:
             /usr/libexec/PlistBuddy -c "Add :provisioningProfiles:${{ steps.ids.outputs.bundle }}.MapLinkShareExtension string ${{ env.SHARE_EXT_PROFILE_UUID }}" ExportOptions.plist
           fi
 
-      # SwiftPM's shared repository cache. This is the directory it actually
-      # consults before fetching, and the names inside it are SwiftPM's own, so
-      # a restore is genuinely reused. Caching a hand-built SourcePackages tree
-      # does nothing: SwiftPM addresses mirrors by an internal hash we cannot
-      # reproduce, so it never looks at them.
-      - name: Restore SPM cache
-        id: spm_cache
-        uses: actions/cache/restore@v5
-        with:
-          path: ~/Library/Caches/org.swift.swiftpm
-          key: spm-${{ runner.os }}-${{ steps.xcode-version.outputs.cache-key }}-${{ hashFiles('*.xcodeproj/project.pbxproj', '**/Package.resolved') }}
-          restore-keys: |
-            spm-${{ runner.os }}-${{ steps.xcode-version.outputs.cache-key }}-
-            spm-${{ runner.os }}-
-
       # Let SwiftPM populate its own caches and DerivedData. Every previous
       # attempt to pre-stage them by hand was dead weight -- see the commit
       # message and docs/adr/0010.
@@ -274,17 +259,6 @@ jobs:
           xcodebuild -resolvePackageDependencies \
             -project "${{ steps.detect.outputs.project }}" \
             -scheme "${{ steps.detect.outputs.scheme }}"
-
-      # Save as soon as the packages are on disk, not at the end of the job. A
-      # cold resolve costs ~7 GB; if the archive later fails or times out, the
-      # default post-run save would be skipped and the next run would start cold
-      # again — which is exactly the loop this pipeline was stuck in.
-      - name: Save SPM cache
-        if: steps.spm.outcome == 'success' && steps.spm_cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v5
-        with:
-          path: ~/Library/Caches/org.swift.swiftpm
-          key: ${{ steps.spm_cache.outputs.cache-primary-key }}
 
       - name: Compute build number
         id: build_number
