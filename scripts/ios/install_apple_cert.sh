@@ -16,10 +16,11 @@
 #   IOS_WATCH_PROVISION_PROFILE_BASE64  – Watch app profile
 #
 # Outputs (written to GITHUB_ENV, only for profiles that were installed):
-#   APP_PROFILE_UUID,    APP_PROFILE_NAME
-#   NSE_PROFILE_UUID,    NSE_PROFILE_NAME
-#   WIDGET_PROFILE_UUID, WIDGET_PROFILE_NAME
-#   WATCH_PROFILE_UUID,  WATCH_PROFILE_NAME
+#   APP_PROFILE_UUID,    APP_PROFILE_NAME,    APP_PROFILE_TEAM_ID,    APP_PROFILE_BUNDLE_ID
+#   NSE_PROFILE_UUID,    NSE_PROFILE_NAME,    NSE_PROFILE_TEAM_ID,    NSE_PROFILE_BUNDLE_ID
+#   WIDGET_PROFILE_UUID, WIDGET_PROFILE_NAME, WIDGET_PROFILE_TEAM_ID, WIDGET_PROFILE_BUNDLE_ID
+#   WATCH_PROFILE_UUID,  WATCH_PROFILE_NAME,  WATCH_PROFILE_TEAM_ID,  WATCH_PROFILE_BUNDLE_ID
+# _PROFILE_BUNDLE_ID is omitted for wildcard profiles.
 
 set -euo pipefail
 
@@ -58,15 +59,29 @@ install_profile() {
 
   echo "$b64" | base64 --decode > "$file"
 
-  local uuid name
-  uuid=$(security cms -D -i "$file" | plutil -extract UUID raw -)
-  name=$(security cms -D -i "$file" | plutil -extract Name raw -)
+  local plist uuid name team app_id bundle
+  plist=$(security cms -D -i "$file")
+  uuid=$(plutil -extract UUID raw - <<<"$plist")
+  name=$(plutil -extract Name raw - <<<"$plist")
+  team=$(plutil -extract TeamIdentifier.0 raw - <<<"$plist")
+  app_id=$(plutil -extract Entitlements.application-identifier raw - <<<"$plist")
+  bundle="${app_id#"$team".}"
 
   cp "$file" "$PROFILE_DIR_LEGACY/$uuid.mobileprovision"
   cp "$file" "$PROFILE_DIR_NEW/$uuid.mobileprovision"
 
-  echo "${prefix}_PROFILE_UUID=$uuid" >> "$GITHUB_ENV"
-  echo "${prefix}_PROFILE_NAME=$name" >> "$GITHUB_ENV"
+  {
+    echo "${prefix}_PROFILE_UUID=$uuid"
+    echo "${prefix}_PROFILE_NAME=$name"
+    echo "${prefix}_PROFILE_TEAM_ID=$team"
+  } >> "$GITHUB_ENV"
+
+  # A wildcard profile yields "*" or "com.example.*" — useless as a bundle id,
+  # so leave it unset and let the workflow fall back to IOS_BUNDLE_ID.
+  case "$bundle" in
+    *\*) echo "Skipping ${prefix}_PROFILE_BUNDLE_ID (wildcard profile: $app_id)" ;;
+    *)   echo "${prefix}_PROFILE_BUNDLE_ID=$bundle" >> "$GITHUB_ENV" ;;
+  esac
 
   echo "Installed profile: $name ($uuid)"
   rm -f "$file"
