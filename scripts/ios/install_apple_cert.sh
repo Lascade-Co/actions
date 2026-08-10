@@ -63,8 +63,8 @@ install_profile() {
   plist=$(security cms -D -i "$file")
   uuid=$(plutil -extract UUID raw - <<<"$plist")
   name=$(plutil -extract Name raw - <<<"$plist")
-  team=$(plutil -extract TeamIdentifier.0 raw - <<<"$plist")
-  app_id=$(plutil -extract Entitlements.application-identifier raw - <<<"$plist")
+  team=$(plutil -extract TeamIdentifier.0 raw - <<<"$plist" || true)
+  app_id=$(plutil -extract Entitlements.application-identifier raw - <<<"$plist" || true)
   bundle="${app_id#"$team".}"
 
   cp "$file" "$PROFILE_DIR_LEGACY/$uuid.mobileprovision"
@@ -73,15 +73,19 @@ install_profile() {
   {
     echo "${prefix}_PROFILE_UUID=$uuid"
     echo "${prefix}_PROFILE_NAME=$name"
-    echo "${prefix}_PROFILE_TEAM_ID=$team"
+    if [ -n "$team" ]; then
+      echo "${prefix}_PROFILE_TEAM_ID=$team"
+    fi
   } >> "$GITHUB_ENV"
 
   # A wildcard profile yields "*" or "com.example.*" — useless as a bundle id,
   # so leave it unset and let the workflow fall back to IOS_BUNDLE_ID.
-  case "$bundle" in
-    *\*) echo "Skipping ${prefix}_PROFILE_BUNDLE_ID (wildcard profile: $app_id)" ;;
-    *)   echo "${prefix}_PROFILE_BUNDLE_ID=$bundle" >> "$GITHUB_ENV" ;;
-  esac
+  if [ -n "$app_id" ]; then
+    case "$bundle" in
+      *\*) echo "Skipping ${prefix}_PROFILE_BUNDLE_ID (wildcard profile: $app_id)" ;;
+      *)   echo "${prefix}_PROFILE_BUNDLE_ID=$bundle" >> "$GITHUB_ENV" ;;
+    esac
+  fi
 
   echo "Installed profile: $name ($uuid)"
   rm -f "$file"
