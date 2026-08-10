@@ -103,13 +103,43 @@ jobs:
           python3 "$RUNNER_TEMP/verify_tacli_publishable.py" \
             --pyproject tada_render/pyproject.toml
 
-      - name: Install headless OpenGL runtime
+      # Kept byte-identical to publish-tada-wheel.yml's list on purpose -- the wheels uploaded
+      # here are built by the same script, on the same runner image, and a GL stack that differs
+      # between the two paths is a difference nobody would notice until a release. Two client
+      # APIs, one Mesa stack:
+      #   * moderngl binds EGL_OPENGL_API -- DESKTOP GL, linking libGL.so.1  -> libegl1 + libgl1
+      #   * the KMP/JVM renderer binds EGL_OPENGL_ES_API and resolves
+      #     libGLESv2.so.2 at runtime via dlopen                             -> libgles2
+      # libgles2 is the addition that matters: nothing else here pulls it in, and its absence
+      # makes GLES tests SKIP rather than fail. libegl-mesa0 is Mesa's EGL vendor library behind
+      # the vendor-neutral libegl1 loader -- only a `Recommends:`, and this install passes
+      # --no-install-recommends, so it has been surviving on the runner image's preinstalled set
+      # rather than on anything we asked for. libgl1-mesa-dri is the llvmpipe Gallium driver
+      # that rasterizes for both APIs on a GPU-less runner.
+      - name: Install headless OpenGL/GLES runtime
         run: |
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends \
             libegl1 \
+            libegl-mesa0 \
+            libgles2 \
             libgl1 \
             libgl1-mesa-dri
+
+      # The JVM half of the KMP renderer migration (plan items 1.11/1.12). Only the toolchain,
+      # deliberately: the Gradle build is a composite over tada + shared + rentile, and this
+      # workflow checks out only `shared`, so there is nothing here for ./gradlew to configure
+      # yet. publish-tada-wheel.yml is where :host:taJars and :shared:jvmTest run. This is the
+      # prerequisite, staged so that wiring the JVM payload into the published wheel is one step
+      # rather than three.
+      - name: Set up JDK
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v6
 
       - name: Install pinned uv and Python
         uses: astral-sh/setup-uv@v8.3.2

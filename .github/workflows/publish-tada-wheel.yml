@@ -21,10 +21,18 @@ jobs:
   validate:
     name: Test and build wheel
     runs-on: ubuntu-latest
+    # 45 rather than 30: this job now also does a cold Gradle configure of a three-build
+    # composite (tada + shared + rentile) and runs shared's ~1,300-test jvmTest suite on top of
+    # the Python suite. Neither fits in the old budget.
     timeout-minutes: 45
     env:
       EGL_PLATFORM: surfaceless
       LIBGL_ALWAYS_SOFTWARE: "1"
+      # Mesa picks a Gallium driver by probing; a GitHub runner has no GPU, so pin the software
+      # rasterizer explicitly instead of depending on what the probe happens to land on.
+      # llvmpipe backs BOTH client APIs used here -- desktop GL for moderngl and GLES for the
+      # JVM renderer -- so this is one knob for both, and it makes the pixels deterministic.
+      GALLIUM_DRIVER: llvmpipe
     steps:
       - name: Extract owner/repo
         id: repo
@@ -67,11 +75,57 @@ jobs:
           token: ${{ steps.app-token.outputs.token }}
           persist-credentials: false
 
-      - name: Install headless OpenGL runtime
+      # tada's second submodule. The root settings.gradle.kts pulls `rentile` in as a composite
+      # `includeBuild`, so the Gradle steps below cannot even CONFIGURE without it checked out.
+      #
+      # Same gitlink-then-checkout dance as `shared` above, and for the same reason: the tada
+      # checkout is NOT switched to `submodules: true` because .gitmodules records an SSH URL
+      # (git@github.com:rohittp0/rentile.git) and the runner has no key for it.
+      - name: Read pinned rentile revision
+        id: rentile
+        run: echo "revision=$(git rev-parse HEAD:rentile)" >> "$GITHUB_OUTPUT"
+
+      # Deliberately NOT the App token. create-github-app-token scopes to exactly ONE owner
+      # (`owner:` above), and rentile lives under a personal account, so adding it to that
+      # `repositories:` list would make the mint itself fail. It needs no token anyway --
+      # rohittp0/rentile is public, and the default GITHUB_TOKEN can read any public repo
+      # regardless of which repo it was issued for.
+      #
+      # If the pin ever moves to a Lascade-Co/rentile fork, change `repository:` here and keep
+      # that fork PUBLIC; a private fork would need a second App token minted for Lascade-Co.
+      - name: Check out pinned rentile
+        uses: actions/checkout@v6
+        with:
+          repository: rohittp0/rentile
+          ref: ${{ steps.rentile.outputs.revision }}
+          path: rentile
+          token: ${{ github.token }}
+          persist-credentials: false
+
+      # Two client APIs come out of this one Mesa stack, and the package list is their union:
+      #   * moderngl binds EGL_OPENGL_API -- DESKTOP GL, linking libGL.so.1  -> libegl1 + libgl1
+      #   * the KMP/JVM renderer binds EGL_OPENGL_ES_API and resolves
+      #     libGLESv2.so.2 at runtime via dlopen                             -> libgles2
+      #
+      # libgles2 is the load-bearing addition: nothing else here pulls it in, and without it the
+      # JVM GL suite finds no driver and *skips* rather than fails -- "0 failures, 61 skipped,
+      # BUILD SUCCESSFUL", a green run that exercised no GL at all. `-PtaSharedRequireGl=true`
+      # below turns that skip into a failure; this line is what makes the test actually runnable.
+      #
+      # libegl-mesa0 is Mesa's EGL *vendor* library, which the vendor-neutral libegl1 loader
+      # dispatches to. It is only a `Recommends:` of libegl1 and this install passes
+      # --no-install-recommends, so it has been surviving purely on the runner image's
+      # preinstalled set -- not a contract. Name it.
+      #
+      # libgl1 / libgl1-mesa-dri stay: moderngl still ships in the wheel, and mesa-dri is the
+      # llvmpipe Gallium driver that actually rasterizes for BOTH APIs on a GPU-less runner.
+      - name: Install headless OpenGL/GLES runtime
         run: |
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends \
             libegl1 \
+            libegl-mesa0 \
+            libgles2 \
             libgl1 \
             libgl1-mesa-dri
 
@@ -99,6 +153,66 @@ jobs:
 
       - name: Run tests from the lockfile
         run: uv run --locked --all-packages --all-extras pytest
+
+      # -------------------------------------------------------------------------------------
+      # JVM renderer gate (KMP renderer migration, plan items 1.11/1.12).
+      #
+      # The wheel does not carry a JVM payload yet -- packaging that is a separate, later piece
+      # of work. What these steps buy today is that the two-JAR split and shared's JVM target
+      # stay green on every push to tada's main, on a machine that is not the author's laptop.
+      # -------------------------------------------------------------------------------------
+      - name: Set up JDK
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v6
+
+      - name: Make gradlew executable
+        run: chmod +x gradlew
+
+      # taJars builds ta-render.jar AND ta-prepare.jar, then runs verifyTaRenderJarSeal -- the
+      # ADR 0006/0007 gate that ta-render.jar (the one the public wheel will ship) carries no
+      # com/lascade/ta/shared/builder/** class. JVM bytecode decompiles trivially, so a leak
+      # there publishes the choreography code those ADRs exist to withhold. The task checks in
+      # both directions: it also fails if the sealed prefix has stopped matching anything, i.e.
+      # if the guard has silently stopped guarding.
+      #
+      # No GITHUB_TOKEN here, unlike publish-spm.yml's XCFramework build: shared's ANGLE
+      # download hangs off the cinterop / native-link tasks, which a JVM-only task graph never
+      # reaches. No --no-daemon either -- two Gradle invocations follow and the runner is
+      # ephemeral, so paying the JVM start and configuration cost twice buys nothing.
+      - name: Build the two JARs and verify the builder seal
+        run: ./gradlew :host:taJars
+
+      # The seal report is written before verifyTaRenderJarSeal throws, so uploading it on a RED
+      # run is the point: it names the offending classes. `warn`, not `error`, because an earlier
+      # failure (compile, dependency resolution) legitimately leaves no report to collect.
+      # `!cancelled()` rather than `always()`: this group is cancel-in-progress, and a superseded
+      # run has no evidence worth keeping.
+      - name: Upload ta-render.jar seal report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: ta-jars-seal
+          path: host/build/reports/ta-jars/seal.txt
+          if-no-files-found: warn
+          retention-days: 7
+
+      # The renderer's own suite, including the GL conformance tests ported from the Android
+      # device / iOS simulator suites.
+      #
+      # -PtaSharedRequireGl=true is not optional here. Those tests SKIP when no GL driver is
+      # reachable, by design -- macOS and Windows have no system GLES -- so on Linux there is no
+      # flag whose absence signals misconfiguration, and a missing libgles2 would read as a pass.
+      # The property makes the driver throw instead of skip.
+      #
+      # No taSharedAngleDir on Linux, deliberately: the system-GLES path installed above is
+      # exactly what is under test here. ANGLE is the macOS/Windows answer.
+      - name: Run the shared renderer JVM tests
+        run: ./gradlew :shared:jvmTest -PtaSharedRequireGl=true
 
       - name: Build wheel and runtime pylock
         env:
