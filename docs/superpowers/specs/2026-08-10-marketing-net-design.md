@@ -112,24 +112,37 @@ produces nothing, and there is no message left to carry the warning.
 
 ## Message
 
-Right-aligned columns require `<pre>` — Telegram renders everything else proportionally.
+Only the figures need `<pre>` — Telegram renders everything else proportionally, so alignment
+requires it, but putting the heading and the net inside it too just makes the whole message read
+as a wall of code. Telegram's HTML subset (`<b>`, `<i>`, `<pre>`) carries the rest.
 
-```
-Marketing net — Aug 1–10
+```html
+<b>Marketing net</b> · Aug 1–10
 
-Revenue
-  App Store      $12,430   (to Aug 9)
-  Play Store     $ 8,110
-  Total          $20,540
+<pre>Revenue
+  App Store        $3,937
+  Play Store       $5,320
+  -----------------------
+  Total            $9,257
 
 Spend
-  Influencer     $   350
-  Google Ads     $ 4,220
-  Meta Ads       $ 3,015
-  Total          $ 7,585
-
-Net              $12,955
+  Influencer         $270
+  Google Ads       $1,928
+  Meta Ads           $912
+  -----------------------
+  Total            $3,110</pre>
+<b>Net · $6,147</b>
+<i>App Store to Aug 9; every other source through today.</i>
 ```
+
+The net sits outside the table deliberately: it is the one number most readers want, and bold
+text carries further than a monospace row. The differing App Store window becomes an italic
+footnote rather than a ragged `(to Aug 9)` that widens one row and breaks the column.
+
+Tags are structure and are never escaped; everything interpolated into them always is. Each part
+occupies its own line and no tag spans a line, so line-boundary truncation cannot split one — and
+a final guard closes `<pre>` if it ever did, because an unclosed tag is a `400` and nothing
+arrives.
 
 Four rendering rules, each learned the hard way:
 

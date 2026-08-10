@@ -69,7 +69,7 @@ class RenderTest(unittest.TestCase):
             "Play Store": Unavailable("down"),
         }
         html = render(report)
-        self.assertRegex(html, r"Net\s+unavailable")
+        self.assertIn("<b>Net · unavailable</b>", html)
 
     def test_warnings_are_escaped(self):
         report = self.base()
@@ -133,22 +133,23 @@ class ReviewRegressionTest(unittest.TestCase):
         report = self.base()
         report["spend"] = {"Influencer": Unavailable("down"), "Google Ads": Unavailable("down")}
         html = render(report)
-        self.assertRegex(html, r"Net\s+unavailable")
+        self.assertIn("<b>Net · unavailable</b>", html)
         self.assertNotIn("$20,540", html.split("Net")[-1])
 
-    def test_net_figure_aligns_with_the_totals_above_it(self):
+    def test_total_rows_align_inside_the_table(self):
         html = render(self.base())
-        body = html.replace("<pre>", "").replace("</pre>", "")
-        # Right-aligned means the END of the figure lines up; the "$" itself
-        # shifts with the digit count, so compare the right edge.
+        table = html.split("<pre>")[1].split("</pre>")[0]
         ends = {
             len(line.rstrip())
-            for line in body.split("\n")
-            if line.strip().startswith(("Total", "Net")) and "$" in line
+            for line in table.split("\n")
+            if line.strip().startswith("Total")
         }
-        # <pre> exists solely for alignment; the two numbers meant to be
-        # compared must not be the only ones that fail to line up.
-        self.assertEqual(len(ends), 1, f"misaligned columns in:\n{body}")
+        self.assertEqual(len(ends), 1, f"misaligned totals in:\n{table}")
+
+    def test_net_is_its_own_bold_line_outside_the_table(self):
+        html = render(self.base())
+        self.assertIn("<b>Net · ", html)
+        self.assertNotIn("Net", html.split("<pre>")[1].split("</pre>")[0])
 
     def test_truncation_is_announced(self):
         report = self.base()
