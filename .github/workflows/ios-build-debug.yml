@@ -41,6 +41,42 @@ jobs:
           private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
           owner: ${{ steps.repo.outputs.owner }}
 
+      - name: Purge previous comments from this workflow
+        if: ${{ github.event.client_payload.pr && github.event.client_payload.pr != '' && github.event.client_payload.pr != 'null' }}
+        uses: actions/github-script@v8
+        with:
+          github-token: ${{ steps.app-token.outputs.token }}
+          script: |
+            const [owner, repo] = "${{ github.event.client_payload.repo }}".split("/");
+            const issue_number = Number("${{ github.event.client_payload.pr }}");
+            const marker = "<!-- central-ios-testflight -->";
+            const comments = await github.paginate(
+              github.rest.issues.listComments,
+              { owner, repo, issue_number, per_page: 100 }
+            );
+            let deleted = 0;
+            for (const c of comments) {
+              if ((c.body || "").includes(marker)) {
+                await github.rest.issues.deleteComment({ owner, repo, comment_id: c.id });
+                deleted++;
+              }
+            }
+            core.info(`Deleted ${deleted} prior central-ios-testflight comments`);
+
+      - name: Comment on PR that the build started
+        id: status
+        if: ${{ github.event.client_payload.pr && github.event.client_payload.pr != '' && github.event.client_payload.pr != 'null' }}
+        uses: peter-evans/create-or-update-comment@v5
+        with:
+          edit-mode: replace
+          token: ${{ steps.app-token.outputs.token }}
+          repository: ${{ github.event.client_payload.repo }}
+          issue-number: ${{ github.event.client_payload.pr }}
+          body: |
+            <!-- central-ios-testflight -->
+            🏗️ TestFlight build started.
+            Watch progress [here](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
+
       - name: Decide ref to checkout (PR HEAD or named branch)
         id: ref
         shell: bash
@@ -364,11 +400,45 @@ jobs:
           path: build/ipa/*.ipa
           if-no-files-found: error
 
+      - name: Comment on PR if the build failed
+        if: ${{ failure() && github.event.client_payload.pr && github.event.client_payload.pr != '' && github.event.client_payload.pr != 'null' }}
+        uses: actions/github-script@v8
+        with:
+          github-token: ${{ steps.app-token.outputs.token }}
+          script: |
+            const outcomes = {
+              "SPM resolution": "${{ steps.spm.outcome }}",
+              "Archive":        "${{ steps.archive.outcome }}",
+              "Export IPA":     "${{ steps.export.outcome }}",
+            };
+            const stage = Object.keys(outcomes).find(k => outcomes[k] === "failure") || "Build";
+            const [owner, repo] = "${{ github.event.client_payload.repo }}".split("/");
+            const body = [
+              "<!-- central-ios-testflight -->",
+              `❌ **${stage}** failed.`,
+              `[Check logs](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})`,
+            ].join("\n");
+            await github.rest.issues.updateComment({
+              owner, repo,
+              comment_id: Number("${{ steps.status.outputs.comment-id }}"),
+              body,
+            });
+
   publish:
     needs: build
     runs-on: macos-latest
     timeout-minutes: 25
     steps:
+      - name: Mint GitHub App token
+        id: app-token
+        if: ${{ github.event.client_payload.pr && github.event.client_payload.pr != '' && github.event.client_payload.pr != 'null' }}
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ secrets.CI_APP_CLIENT_ID }}
+          private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
+          owner: ${{ needs.build.outputs.owner }}
+          repositories: ${{ needs.build.outputs.name }}
+
       - name: Download IPA artifact
         uses: actions/download-artifact@v8
         with:
@@ -393,6 +463,24 @@ jobs:
             --apiKey "${{ secrets.APPSTORE_API_KEY_ID }}" \
             --apiIssuer "${{ secrets.APPSTORE_ISSUER_ID }}"
 
+      - name: Comment on PR with the TestFlight build
+        if: ${{ github.event.client_payload.pr && github.event.client_payload.pr != '' && github.event.client_payload.pr != 'null' }}
+        uses: peter-evans/create-or-update-comment@v5
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+          repository: ${{ github.event.client_payload.repo }}
+          issue-number: ${{ github.event.client_payload.pr }}
+          edit-mode: replace
+          body: |
+            <!-- central-ios-testflight -->
+            ✅ Uploaded to TestFlight — **${{ needs.build.outputs.app_name }}**,
+            version `${{ needs.build.outputs.version }}`, build `${{ needs.build.outputs.build_number }}`.
+
+            Find it in TestFlight under version ${{ needs.build.outputs.version }} → build ${{ needs.build.outputs.build_number }}.
+            Processing takes a few minutes after this comment appears.
+
+            Workflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
       - name: Notify Telegram (success)
         env:
           TELEGRAM_TOKEN: ${{ secrets.SUBSCRIPTION_TELEGRAM_TOKEN }}
@@ -407,7 +495,9 @@ jobs:
 
           <b>App:</b> ${{ needs.build.outputs.app_name }}
           <b>Version:</b> ${{ needs.build.outputs.version }}
+          <b>Build:</b> ${{ needs.build.outputs.build_number }}
           <b>Branch:</b> ${{ github.event.client_payload.branch }}
+          <b>PR:</b> ${{ github.event.client_payload.title || 'n/a' }}
           MSG
           )"
 
@@ -428,7 +518,21 @@ jobs:
           <b>App:</b> ${{ needs.build.outputs.app_name }}
           <b>Repo:</b> <code>${{ github.event.client_payload.repo }}</code>
           <b>Branch:</b> ${{ github.event.client_payload.branch }}
+          <b>PR:</b> ${{ github.event.client_payload.title || 'n/a' }}
 
           <a href="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}">View logs</a>
           MSG
           )"
+
+      - name: Comment on PR if the upload failed
+        if: ${{ failure() && github.event.client_payload.pr && github.event.client_payload.pr != '' && github.event.client_payload.pr != 'null' }}
+        uses: peter-evans/create-or-update-comment@v5
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+          repository: ${{ github.event.client_payload.repo }}
+          issue-number: ${{ github.event.client_payload.pr }}
+          edit-mode: replace
+          body: |
+            <!-- central-ios-testflight -->
+            ❌ **TestFlight upload** failed for build `${{ needs.build.outputs.build_number }}`.
+            [Check logs](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
