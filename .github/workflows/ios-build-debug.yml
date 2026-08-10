@@ -262,6 +262,10 @@ jobs:
           python3 << 'PYSCRIPT'
           import json, os, subprocess, hashlib, time, sys
 
+          # Never let git block on a credential prompt: output is captured, so an
+          # interactive prompt would hang the step until the job timeout.
+          os.environ["GIT_TERMINAL_PROMPT"] = "0"
+
           resolved_path = subprocess.check_output(
               ["find", ".", "-path", "*/xcshareddata/swiftpm/Package.resolved",
                "-not", "-path", "*/SourcePackages/*", "-not", "-path", "*/.build/*"],
@@ -308,29 +312,38 @@ jobs:
               else:
                   print(f"[{i}/{total}] Cloning {identity} ...", flush=True)
                   try:
-                      # Clone bare repo
+                      # Clone bare repo. --filter=blob:none makes this a partial
+                      # clone: commits and trees only, blobs fetched on demand.
+                      # A full-history mirror of these 35 packages is ~4.5 GB.
                       if not os.path.isdir(repo_path):
                           subprocess.run(
-                              ["git", "clone", "--bare", "--quiet", url, repo_path],
-                              check=True, capture_output=True, text=True
+                              ["git", "clone", "--bare", "--quiet",
+                               "--filter=blob:none", url, repo_path],
+                              check=True, capture_output=True, text=True, timeout=600
                           )
 
                       # Clone working copy
                       if not os.path.isdir(checkout_path):
                           subprocess.run(
-                              ["git", "clone", "--quiet", url, checkout_path],
-                              check=True, capture_output=True, text=True
+                              ["git", "clone", "--quiet",
+                               "--filter=blob:none", url, checkout_path],
+                              check=True, capture_output=True, text=True, timeout=600
                           )
 
                       # Checkout pinned revision
                       if revision:
                           subprocess.run(
                               ["git", "-C", checkout_path, "checkout", "--quiet", revision],
-                              capture_output=True, text=True
+                              capture_output=True, text=True, timeout=600
                           )
 
                       elapsed = int(time.time() - pkg_start)
                       print(f"[{i}/{total}] ✓ {identity} ({elapsed}s)")
+                  except subprocess.TimeoutExpired:
+                      elapsed = int(time.time() - pkg_start)
+                      print(f"[{i}/{total}] ✗ {identity} (timed out after {elapsed}s)")
+                      print(f"    timed out cloning {url}", file=sys.stderr)
+                      continue
                   except subprocess.CalledProcessError as e:
                       elapsed = int(time.time() - pkg_start)
                       print(f"[{i}/{total}] ✗ {identity} (failed after {elapsed}s)")
