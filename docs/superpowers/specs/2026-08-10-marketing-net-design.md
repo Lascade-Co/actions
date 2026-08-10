@@ -23,7 +23,7 @@ reconciliation.
 
 | Source | Origin | Window |
 | --- | --- | --- |
-| Influencer | `GET pnl.lascade.com/api/head-spend/?head=INFLUENCER_MARKETING` | calendar month, server-side |
+| Influencer | `GET pnl.lascade.com/api/head-spend/?head=INFLUENCER%20MARKETING` | calendar month, server-side |
 | App Store | App Store Connect `/v1/salesReports`, one request per day | 1st → **yesterday** |
 | Play Store | GCS `sales/` × net factor from `earnings/` | 1st → today |
 | Google Ads | Google Ads API **v25**, MCC children minus skip list | 1st → today |
@@ -40,6 +40,10 @@ and is signed (a refund-positive row reduces the line). Do not re-derive or adju
 
 `404` means the configured head key is wrong, **not** that the month is quiet. Surface it; never
 treat it as `0`.
+
+The key contains a **space**: PNL derives keys from card statement descriptors, so the shape is
+`AWS BILL`, `INFLUENCER MARKETING`. The underscored spelling `INFLUENCER_MARKETING` 404s — which is
+the rule above earning its keep, since the alternative was reporting `$0` indefinitely.
 
 ### App Store
 

@@ -26,7 +26,7 @@ class FetchHeadSpendTest(unittest.TestCase):
     def test_parses_four_decimal_string_as_decimal(self):
         get = responder(FakeResponse(200, {"spend_usd": "350.5000"}))
         self.assertEqual(
-            fetch_head_spend("https://pnl.example", "k", "INFLUENCER_MARKETING", get=get),
+            fetch_head_spend("https://pnl.example", "k", "INFLUENCER MARKETING", get=get),
             Amount(Decimal("350.5000")),
         )
 
@@ -39,9 +39,9 @@ class FetchHeadSpendTest(unittest.TestCase):
 
     def test_sends_the_key_header_and_head_param(self):
         get = responder(FakeResponse(200, {"spend_usd": "1.0000"}))
-        fetch_head_spend("https://pnl.example", "secret", "INFLUENCER_MARKETING", get=get)
+        fetch_head_spend("https://pnl.example", "secret", "INFLUENCER MARKETING", get=get)
         self.assertEqual(get.seen["headers"], {"X-Api-Key": "secret"})
-        self.assertEqual(get.seen["params"], {"head": "INFLUENCER_MARKETING"})
+        self.assertEqual(get.seen["params"], {"head": "INFLUENCER MARKETING"})
 
     def test_404_is_unavailable_not_zero(self):
         # A 404 means the configured head key is wrong, not that the month is quiet.

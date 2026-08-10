@@ -150,7 +150,7 @@ independently.
 
 **Head**:
 The PNL app's classification identity for a spend line, addressed by its `normalized_key`
-(`INFLUENCER_MARKETING`) and never by its manager-editable display name.
+(`INFLUENCER MARKETING`) and never by its manager-editable display name.
 _Avoid_: category, bucket, line item.
 
 **Unavailable**:

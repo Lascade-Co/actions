@@ -25,7 +25,11 @@ from pnl_spend import fetch_head_spend
 from pnl_telegram import DeliveryError, render, send
 
 PNL_BASE_URL = "https://pnl.lascade.com"
-HEAD = "INFLUENCER_MARKETING"
+# The normalized key, which contains a SPACE — PNL derives keys from card
+# statement descriptors, so "AWS BILL" and "INFLUENCER MARKETING" are the shape.
+# The underscored spelling 404s, which the endpoint reports rather than passing
+# off as a quiet month.
+HEAD = "INFLUENCER MARKETING"
 APPSTORE_CACHE_DIR = ".appstore-cache"
 
 REQUIRED = [
