@@ -94,8 +94,13 @@ quiet month, which is the failure this whole design guards against.
 | --- | --- | --- |
 | Any single source fails | line shows `unavailable`, warning names it, net excludes it | green |
 | Empty App Store window (the 1st) | `unavailable`, warned as `no published days in the window yet` | green |
+| A currency in a source has no USD rate | that **whole source** is `unavailable`, warning names the codes | green |
 | **No** revenue source readable | net itself renders `unavailable`, spend lines still shown | green |
 | Telegram send fails after retries | — | **red** |
+
+Currency conversion is **all or nothing per source**. Converting the priceable
+subset and reporting the remainder would produce a figure smaller than the truth and
+entirely plausible — the one failure a reader cannot detect. Refusing the whole source is loud.
 
 This is ADR-0003's rule, not a departure from it: a run is green when it produces meaningful output
 and red when infrastructure fails. Source failures still produce a message; a dead delivery path
@@ -208,6 +213,32 @@ succeeding.
 Nothing is written back. The PNL app deliberately refuses to create a revenue row for a month still
 in progress and must not gain an endpoint that changes this — that refusal is what makes its revenue
 table trustworthy.
+
+## Corrections found by running it live (2026-08-10)
+
+The design was implemented and verified against the live APIs. Four defects surfaced only
+against real data, all now fixed:
+
+1. **No hardcoded currency list.** The first implementation primed the rate table from a
+   fixed list of ~10 codes. The live App Store reports carry **44** distinct currencies and a
+   single month of Play sales carries **56** — so 33 were silently dropped and the App Store
+   read **$3,174 instead of $3,937**, a 19% understatement that looked entirely plausible.
+   Rates are now resolved on first sight, and there is no list to fall out of date.
+2. **This was also why Play was excluded.** Every one of the 34 settled months contained an
+   unpriceable currency, so no net factor could ever be derived.
+3. **A blank proceeds currency is not USD.** Apple leaves it blank on free installs (145 of
+   845 rows), always with `0.00` proceeds. Zero converts to zero from anywhere; a blank code
+   on a *non-zero* amount is now an unknown rather than being booked at par.
+4. **The rate table is primed in one request.** Since conversion is all-or-nothing, ~60
+   independent lookups meant one transient blip on one currency could discard an entire
+   source. A single USD-base request, inverted, collapses sixty chances to fail into one and
+   cuts the run from ~50s to ~15s. Inversion differs from the direct per-code rate by about
+   0.03%, which moves the reported net by at most a dollar.
+
+Live at the time of writing: App Store `$3,937`, Play Store `$5,320`, Google Ads `$1,920`,
+Meta Ads `$909`, Influencer `$0`, net `$6,428`. 58 non-USD currencies resolved, none
+unpriceable. Google and Meta both bill in AED, so the FX path is load-bearing for spend too —
+unconverted, those lines would overstate by 3.7×.
 
 ## Open items
 

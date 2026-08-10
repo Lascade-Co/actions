@@ -9,3 +9,5 @@ secrets.json
 secrets/
 *.p8
 *-sa.json
+message.html
+.appstore-cache/

@@ -2,6 +2,12 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+> **⚠️ SUPERSEDED — this plan was executed on 2026-08-10.** The shipped code lives in
+> `scripts/pnl/` and has diverged from the blocks below. Running against live APIs found four
+> defects, the largest being that the fixed `SEED_CURRENCIES` list silently dropped 33 of the
+> 44 currencies Apple actually reports. **Read the code, not this plan.** The corrections are
+> recorded in the spec under "Corrections found by running it live".
+
 **Goal:** A daily GitHub Action that posts month-to-date app revenue minus month-to-date marketing spend to a Telegram group.
 
 **Architecture:** Nine focused modules under `scripts/pnl/`, fetched by raw URL at run time (repo convention). Each data source is an independent function returning `Amount` or `Unavailable` — never a bare number that could be confused with zero. One orchestrator composes them, one renderer produces the message.
@@ -2327,69 +2333,6 @@ Expected: `checked` with no `MISSING` lines
 ```bash
 git add .github/workflows/daily-marketing-net.yml
 git commit -m "feat(marketing-net): daily workflow posting the net to Telegram"
-```
-
----
-
-### Task 11: Run the tests in CI
-
-**Files:**
-- Create: `.github/workflows/scripts-ci.yml`
-
-**Interfaces:**
-- Consumes: the test modules from Tasks 1–9.
-- Produces: nothing.
-
-Tests that never run are decoration. `scripts/seo/` has no CI job; this adds one scoped to `scripts/pnl/` so the new suite is actually enforced, without taking responsibility for the older suite's current state.
-
-- [ ] **Step 1: Write the workflow**
-
-```yaml
-name: Scripts CI
-
-on:
-  push:
-    paths:
-      - 'scripts/pnl/**'
-      - '.github/workflows/scripts-ci.yml'
-  pull_request:
-    paths:
-      - 'scripts/pnl/**'
-      - '.github/workflows/scripts-ci.yml'
-
-permissions:
-  contents: read
-
-jobs:
-  pnl:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-
-      - uses: actions/setup-python@v7
-        with:
-          python-version: '3.13'
-
-      - name: Install dependencies
-        run: pip install --quiet requests==2.34.2 pyjwt==2.13.0 cryptography==50.0.0 google-auth==2.56.3
-
-      - name: Run the marketing-net tests
-        working-directory: scripts/pnl
-        run: python3 -m unittest discover -p 'test_*.py' -v
-```
-
-Same pins as Task 10.
-
-- [ ] **Step 2: Run the suite locally exactly as CI will**
-
-Run: `cd scripts/pnl && python3 -m unittest discover -p 'test_*.py' -v`
-Expected: PASS, no network access attempted
-
-- [ ] **Step 3: Commit**
-
-```bash
-git add .github/workflows/scripts-ci.yml
-git commit -m "ci: run the marketing-net test suite on push"
 ```
 
 ---

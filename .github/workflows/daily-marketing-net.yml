@@ -1,0 +1,86 @@
+name: Daily Marketing Net
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Render without sending
+        type: boolean
+        default: false
+  schedule:
+    # 14:00 UTC. Apple publishes the previous day around 05:00 PT, which under
+    # PST is 13:00 UTC exactly — 13:00 would sit on the publication boundary.
+    - cron: '0 14 * * *'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: daily-marketing-net
+  cancel-in-progress: false
+
+env:
+  RAW: https://raw.githubusercontent.com/Lascade-Co/actions/main
+  # Hardcoded deliberately, and NOT named TELEGRAM_CHAT_ID: that key exists in
+  # the pnl Infisical project for the PNL app's own alerting, and
+  # export-type: env puts it in this job's environment.
+  MARKETING_NET_CHAT_ID: '-5466007383'
+
+jobs:
+  post:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+
+      - name: Install dependencies
+        # Pinned: an unwatched daily cron whose crypto and HTTP stack must not
+        # change under it. Resolved and test-verified on 2026-08-10.
+        run: pip install --quiet requests==2.34.2 pyjwt==2.13.0 cryptography==50.0.0 google-auth==2.56.3
+
+      - name: Import secrets from Infisical
+        uses: Infisical/secrets-action@v1.0.16
+        with:
+          method: universal
+          client-id: ${{ secrets.INFISICAL_CLIENT_ID }}
+          client-secret: ${{ secrets.INFISICAL_CLIENT_SECRET }}
+          project-slug: pnl
+          env-slug: prod
+          domain: ${{ secrets.INFISICAL_DOMAIN }}
+          secret-path: /
+          export-type: env
+
+      - name: Download scripts
+        run: |
+          for module in pnl_money pnl_fx pnl_spend pnl_appstore pnl_playstore \
+                        pnl_googleads pnl_metaads pnl_telegram marketing_net; do
+            curl -fsSL --retry 3 --retry-delay 2 -o "$module.py" "$RAW/scripts/pnl/$module.py"
+          done
+
+      - name: Restore the App Store day cache
+        # A published day is immutable, so without this a run on the 28th
+        # re-downloads 27 unchanging reports. Keyed per run so each saves a fresh
+        # entry; restore-keys pulls the newest prior one.
+        uses: actions/cache@v5
+        with:
+          path: .appstore-cache
+          key: appstore-${{ github.run_id }}
+          restore-keys: appstore-
+
+      - name: Post the marketing net
+        run: |
+          ARGS=()
+          if [ "${{ inputs.dry_run }}" = "true" ]; then ARGS+=(--dry-run); fi
+          python3 marketing_net.py "${ARGS[@]}"
+
+      - name: Upload the rendered message
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: marketing-net-message
+          path: message.html
+          if-no-files-found: warn
+          retention-days: 30
