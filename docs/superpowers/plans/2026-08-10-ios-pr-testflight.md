@@ -66,60 +66,47 @@ Removes two of the three missing Infisical keys and guarantees the values match 
 - Consumes: nothing from earlier tasks
 - Produces: two new `GITHUB_ENV` variables per installed profile — `APP_PROFILE_TEAM_ID` (string, e.g. `ZG6QASWQ43`) and `APP_PROFILE_BUNDLE_ID` (string, e.g. `com.travelanimator.routemap`). `NSE_PROFILE_TEAM_ID` / `NSE_PROFILE_BUNDLE_ID` also appear and are unused. Task 3 reads `APP_PROFILE_TEAM_ID` and `APP_PROFILE_BUNDLE_ID`.
 
-- [ ] **Step 1: Write the failing check**
+- [ ] **Step 1: Prove the extraction expressions against the real profile**
 
-Create `/tmp/check_derive.sh` (scratch, not committed):
+Do not run the whole script locally to test this. `install_apple_cert.sh` creates a keychain, imports a certificate into it, and rewrites your user keychain search list — real, persistent side effects on a developer machine. What is actually new here is four `plutil` expressions and the herestring form of feeding them a decoded plist, so verify exactly that, in isolation:
 
 ```bash
-#!/usr/bin/env bash
-# Exercises install_profile's extraction against the real App Store profile.
 set -euo pipefail
-
 PID=d3963969-c940-4fd7-84c9-7a38edaf404d
-WORK=$(mktemp -d)
-trap 'rm -rf "$WORK"' EXIT
+TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
 
-export RUNNER_TEMP="$WORK"
-export GITHUB_ENV="$WORK/github_env"
-: > "$GITHUB_ENV"
+infisical secrets get IOS_PROVISION_PROFILE_BASE64 \
+  --projectId "$PID" --env prod --path /Build --plain --silent \
+  | tr -d '\n\r ' | base64 --decode > "$TMP/app.mobileprovision"
 
-IOS_PROVISION_PROFILE_BASE64=$(infisical secrets get IOS_PROVISION_PROFILE_BASE64 \
-  --projectId "$PID" --env prod --path /Build --plain --silent)
-export IOS_PROVISION_PROFILE_BASE64
+plist=$(security cms -D -i "$TMP/app.mobileprovision")
+uuid=$(plutil -extract UUID raw - <<<"$plist")
+name=$(plutil -extract Name raw - <<<"$plist")
+team=$(plutil -extract TeamIdentifier.0 raw - <<<"$plist")
+app_id=$(plutil -extract Entitlements.application-identifier raw - <<<"$plist")
+bundle="${app_id#"$team".}"
 
-# Only the profile-installation half of the script is under test, so stub the
-# certificate half: run install_profile in isolation by sourcing nothing and
-# reimplementing the caller contract the script provides.
-cd "$WORK"
-mkdir -p "$HOME/Library/MobileDevice/Provisioning Profiles" \
-         "$HOME/Library/Developer/Xcode/UserData/Provisioning Profiles"
+printf 'uuid=%s\nname=%s\nteam=%s\nbundle=%s\n' "$uuid" "$name" "$team" "$bundle"
 
-bash -c '
-  source /dev/stdin <<< "$(sed -n "/^install_profile()/,/^}/p" '"$OLDPWD"'/scripts/ios/install_apple_cert.sh)"
-  PROFILE_DIR_LEGACY="$HOME/Library/MobileDevice/Provisioning Profiles"
-  PROFILE_DIR_NEW="$HOME/Library/Developer/Xcode/UserData/Provisioning Profiles"
-  install_profile "$IOS_PROVISION_PROFILE_BASE64" APP required
-'
-
-echo "--- GITHUB_ENV ---"
-cat "$GITHUB_ENV"
-
-grep -q '^APP_PROFILE_TEAM_ID=ZG6QASWQ43$'                  "$GITHUB_ENV" || { echo "FAIL: team id"; exit 1; }
-grep -q '^APP_PROFILE_BUNDLE_ID=com.travelanimator.routemap$' "$GITHUB_ENV" || { echo "FAIL: bundle id"; exit 1; }
-echo "PASS"
+[ "$team"   = "ZG6QASWQ43" ]                  || { echo "FAIL team";   exit 1; }
+[ "$bundle" = "com.travelanimator.routemap" ] || { echo "FAIL bundle"; exit 1; }
+[ "$name"   = "main-app" ]                    || { echo "FAIL name";   exit 1; }
+echo PASS
 ```
 
-Note: `$OLDPWD` inside the nested `bash -c` resolves to the actions repo checkout because of the `cd "$WORK"` above it. Run the script from the repo root.
+Expected:
 
-- [ ] **Step 2: Run it to verify it fails**
-
-```bash
-cd /Users/rohittp/Data/Lascade/actions && bash /tmp/check_derive.sh
+```
+uuid=38d3d2f6-0ed5-4049-bf3e-9b4063b9edb7
+name=main-app
+team=ZG6QASWQ43
+bundle=com.travelanimator.routemap
+PASS
 ```
 
-Expected: prints the current `GITHUB_ENV` containing only `APP_PROFILE_UUID` and `APP_PROFILE_NAME`, then `FAIL: team id`, exit 1.
+This is a technique check, not a red-green cycle — there is nothing to fail first, because the risk is "do these expressions yield the right values", not "does the function exist". If it fails, stop: the derivation approach is wrong and Task 3 Step 5 has no fallback source. The `GITHUB_ENV` plumbing that wraps these four values is four `echo` lines, covered by `shellcheck` in Step 3 and by the end-to-end run in Task 7.
 
-- [ ] **Step 3: Implement the derivation**
+- [ ] **Step 2: Implement the derivation**
 
 In `scripts/ios/install_apple_cert.sh`, replace the body of `install_profile` from the `local uuid name` declaration through the two `echo ... >> "$GITHUB_ENV"` lines with:
 
@@ -158,15 +145,7 @@ Also update the "Outputs" comment block at the top of the file (lines 18-22) to 
 # _PROFILE_BUNDLE_ID is omitted for wildcard profiles.
 ```
 
-- [ ] **Step 4: Run the check to verify it passes**
-
-```bash
-cd /Users/rohittp/Data/Lascade/actions && bash /tmp/check_derive.sh
-```
-
-Expected: `GITHUB_ENV` now contains four `APP_PROFILE_*` lines, then `PASS`.
-
-- [ ] **Step 5: Lint**
+- [ ] **Step 3: Lint**
 
 ```bash
 shellcheck scripts/ios/install_apple_cert.sh
@@ -174,7 +153,7 @@ shellcheck scripts/ios/install_apple_cert.sh
 
 Expected: no output (exit 0). If `SC2086` fires on a pre-existing line, leave it — do not fix unrelated warnings in this task.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 4: Commit**
 
 ```bash
 git add scripts/ios/install_apple_cert.sh
