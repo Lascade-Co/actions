@@ -62,3 +62,12 @@ class FetchHeadSpendTest(unittest.TestCase):
 
         result = fetch_head_spend("https://pnl.example", "k", "H", get=get)
         self.assertIsInstance(result, Unavailable)
+
+
+class NonNumericPayloadTest(unittest.TestCase):
+    def test_non_numeric_spend_returns_unavailable_not_raise(self):
+        # The contract is "returns a SourceValue". InvalidOperation is an
+        # ArithmeticError, so a ValueError-only guard would break that.
+        get = responder(FakeResponse(200, {"spend_usd": "n/a"}))
+        result = fetch_head_spend("https://pnl.example", "k", "H", get=get)
+        self.assertIsInstance(result, Unavailable)

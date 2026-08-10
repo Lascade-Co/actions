@@ -38,5 +38,5 @@ def fetch_head_spend(
 
     try:
         return Amount(to_decimal(response.json()["spend_usd"]))
-    except (KeyError, ValueError, TypeError) as exc:
+    except (KeyError, ValueError, TypeError, ArithmeticError) as exc:
         return Unavailable(f"PNL spend payload unreadable: {type(exc).__name__}")

@@ -150,3 +150,33 @@ class DayCacheTest(unittest.TestCase):
                            fetch_day=fetch_day, cache=cache)
             # Caching a 404 would freeze a gap Apple later fills.
             self.assertEqual(len(calls), 4)
+
+
+class CacheRobustnessTest(unittest.TestCase):
+    def test_malformed_cached_value_is_ignored_not_raised(self):
+        # decimal.InvalidOperation is an ArithmeticError, NOT a ValueError, and
+        # restore-keys carries the cache forward, so a bad entry would be sticky.
+        import json
+        import tempfile
+
+        from pnl_appstore import DayCache
+
+        with tempfile.TemporaryDirectory() as directory:
+            cache = DayCache(directory)
+            day = date(2026, 8, 2)
+            with open(cache._path(day), "w", encoding="utf-8") as handle:
+                json.dump({"USD": "not-a-number"}, handle)
+            self.assertIsNone(cache.get(day))
+
+    def test_null_cached_value_is_ignored(self):
+        import json
+        import tempfile
+
+        from pnl_appstore import DayCache
+
+        with tempfile.TemporaryDirectory() as directory:
+            cache = DayCache(directory)
+            day = date(2026, 8, 2)
+            with open(cache._path(day), "w", encoding="utf-8") as handle:
+                json.dump({"USD": None}, handle)
+            self.assertIsNone(cache.get(day))

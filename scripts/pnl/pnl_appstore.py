@@ -74,7 +74,25 @@ def parse_sales_tsv(text: str) -> dict:
     return totals
 
 
-def _fetch_day(config: dict, day: date) -> Optional[str]:
+def _fetch_day(config: dict, day: date, attempts: int = 3) -> Optional[str]:
+    """One day's report, retried on transient failure.
+
+    A month is up to 31 sequential requests and the caller refuses the whole
+    source if any one of them raises, so a single flaky response late in the
+    loop would discard thirty good ones. The cache only helps the *next* run.
+    """
+    last = None
+    for attempt in range(attempts):
+        try:
+            return _fetch_day_once(config, day)
+        except requests.RequestException as exc:
+            last = exc
+            if attempt < attempts - 1:
+                time.sleep(2 ** attempt)
+    raise last
+
+
+def _fetch_day_once(config: dict, day: date) -> Optional[str]:
     response = requests.get(
         _API,
         params={
@@ -125,7 +143,11 @@ class DayCache:
         try:
             with open(path, encoding="utf-8") as handle:
                 return {k: Decimal(v) for k, v in json.load(handle).items()}
-        except (ValueError, OSError):
+        except (ValueError, OSError, TypeError, ArithmeticError):
+            # ArithmeticError covers decimal.InvalidOperation, which is NOT a
+            # ValueError. Missing it would let one malformed entry escape into
+            # the caller, and since restore-keys carries the cache forward the
+            # bad entry would be sticky until someone purged it by hand.
             return None
 
     def put(self, day: date, totals: dict) -> None:

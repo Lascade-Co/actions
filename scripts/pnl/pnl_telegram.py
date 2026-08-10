@@ -37,27 +37,38 @@ def escape(text: str) -> str:
 
 def truncate(text: str, limit: int = _LIMIT) -> str:
     """Cut on a line boundary — never mid-entity, which would emit a half
-    written ``&am`` and reproduce the failure being defended against."""
+    written ``&am`` and reproduce the failure being defended against.
+
+    Warnings are appended after the table, so they are the first thing lost.
+    The marker keeps that visible: a silently shortened warning list reads as a
+    complete one.
+    """
     if len(text) <= limit:
         return text
+    marker = "\n… truncated"
     kept = []
-    used = 0
     for line in text.split("\n"):
-        if used + len(line) + 1 > limit:
+        candidate = "\n".join(kept + [line])
+        if len(candidate) + len(marker) > limit:
             break
         kept.append(line)
-        used += len(line) + 1
-    return "\n".join(kept)
+    if not kept:
+        return marker.lstrip("\n")
+    return "\n".join(kept) + marker
 
 
 def redact(text: str, token: str) -> str:
     return text.replace(token, "<redacted>") if token else text
 
 
-def _row(label: str, value: SourceValue, note: str = "") -> str:
+def _row(label: str, value: SourceValue, note: str = "", indent: int = 2) -> str:
+    """One aligned row. ``indent`` is absorbed into the label width so that an
+    outdented row (Net) still ends its figure in the same column as the Totals
+    it is meant to be compared against."""
     shown = format_usd(value.usd) if isinstance(value, Amount) else "unavailable"
     suffix = f"   ({note})" if note else ""
-    return f"  {label:<{_LABEL_WIDTH}}{shown:>10}{suffix}"
+    width = _LABEL_WIDTH + (2 - indent)
+    return f"{' ' * indent}{label:<{width}}{shown:>10}{suffix}"
 
 
 def render(report: dict) -> str:
@@ -85,14 +96,18 @@ def render(report: dict) -> str:
         lines.append(_row(label, value))
     lines.append(_row("Total", spend_total))
 
-    if isinstance(revenue_total, Amount):
-        net_spend = spend_total.usd if isinstance(spend_total, Amount) else Decimal("0")
-        net: SourceValue = Amount(revenue_total.usd - net_spend)
-    else:
+    if not isinstance(revenue_total, Amount):
         # A net built from spend alone reads as a catastrophic loss to anyone
         # who sees the figure before the warning.
-        net = Unavailable("no revenue source could be read")
-    lines += ["", _row("Net", net).lstrip()]
+        net: SourceValue = Unavailable("no revenue source could be read")
+    elif not isinstance(spend_total, Amount):
+        # Treating an unreadable spend total as zero would print the net as
+        # equal to gross revenue — a record month, on precisely the day every
+        # spend source broke.
+        net = Unavailable("no spend source could be read")
+    else:
+        net = Amount(revenue_total.usd - spend_total.usd)
+    lines += ["", _row("Net", net, indent=0)]
 
     body = "\n".join(lines)
     html = f"<pre>{escape(body)}</pre>"

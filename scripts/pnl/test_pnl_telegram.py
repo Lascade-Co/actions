@@ -113,3 +113,46 @@ class SendTest(unittest.TestCase):
 
         send("123:ABC", "-1", "<pre>x</pre>", post=post)
         self.assertEqual(len(calls), 1)
+
+
+class ReviewRegressionTest(unittest.TestCase):
+    """Regressions for the code-review findings of 2026-08-10."""
+
+    def base(self):
+        return {
+            "month_label": "Aug 1–10",
+            "revenue": {"App Store": Amount(Decimal("12430")), "Play Store": Amount(Decimal("8110"))},
+            "spend": {"Influencer": Amount(Decimal("350"))},
+            "appstore_window_label": None,
+            "warnings": [],
+        }
+
+    def test_unreadable_spend_total_makes_the_net_unavailable(self):
+        # Coercing it to zero prints net == gross revenue: a record month, on
+        # the very day every spend source broke.
+        report = self.base()
+        report["spend"] = {"Influencer": Unavailable("down"), "Google Ads": Unavailable("down")}
+        html = render(report)
+        self.assertRegex(html, r"Net\s+unavailable")
+        self.assertNotIn("$20,540", html.split("Net")[-1])
+
+    def test_net_figure_aligns_with_the_totals_above_it(self):
+        html = render(self.base())
+        body = html.replace("<pre>", "").replace("</pre>", "")
+        # Right-aligned means the END of the figure lines up; the "$" itself
+        # shifts with the digit count, so compare the right edge.
+        ends = {
+            len(line.rstrip())
+            for line in body.split("\n")
+            if line.strip().startswith(("Total", "Net")) and "$" in line
+        }
+        # <pre> exists solely for alignment; the two numbers meant to be
+        # compared must not be the only ones that fail to line up.
+        self.assertEqual(len(ends), 1, f"misaligned columns in:\n{body}")
+
+    def test_truncation_is_announced(self):
+        report = self.base()
+        report["warnings"] = ["x" * 6000]
+        html = render(report)
+        self.assertLessEqual(len(html), 4096)
+        self.assertIn("truncated", html)

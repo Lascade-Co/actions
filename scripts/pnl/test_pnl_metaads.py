@@ -52,7 +52,10 @@ class FetchMetaAdsTest(unittest.TestCase):
         result = fetch_meta_ads(creds, date(2026, 8, 10), self.table, insights=insights)
         self.assertIsInstance(result, Unavailable)
 
-    def test_one_bad_account_does_not_kill_the_others(self):
+    def test_one_bad_account_refuses_the_whole_source(self):
+        # Summing only the accounts that answered understates spend, and
+        # understated spend overstates the net with nothing on screen to say so.
+        # Matches Google Ads and the all-or-nothing currency rule.
         def insights(token, account_id, start, end):
             if account_id == "222":
                 raise OSError("permission denied")
@@ -60,4 +63,5 @@ class FetchMetaAdsTest(unittest.TestCase):
 
         creds = {"token": "t", "account_ids": ["111", "222"]}
         result = fetch_meta_ads(creds, date(2026, 8, 10), self.table, insights=insights)
-        self.assertEqual(result, Amount(Decimal("10")))
+        self.assertIsInstance(result, Unavailable)
+        self.assertIn("222", result.reason)

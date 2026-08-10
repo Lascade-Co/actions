@@ -161,7 +161,16 @@ def build_rate_table(
     fetch = fetch or _live_fetch
     rates = {}
     if not injected or prime is not None:
-        rates.update((prime or _usd_base_rates)(day))
+        primer = prime or _usd_base_rates
+        rates.update(primer(day))
+        if not rates:
+            # Priming is a single point of failure for every FX-bearing source:
+            # with it empty, Frankfurter's ~30 currencies cannot cover the 44-58
+            # a real month carries, so all-or-nothing conversion would refuse
+            # every source at once and deliver a message that is only warnings.
+            # Rates barely move overnight, and the day before is still in the
+            # past, so ADR-0006's no-future-date rule holds.
+            rates.update(primer(day - timedelta(days=1)))
 
     table = RateTable(rates, day, fetch=fetch)
     wanted = {c.strip().upper() for c in codes if c and c.strip().upper() != "USD"}

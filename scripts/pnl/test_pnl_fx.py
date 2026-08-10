@@ -155,3 +155,18 @@ class PrimeRateTableTest(unittest.TestCase):
         # Guards the offline suite: a bare fetch injection must not reach the network.
         table = build_rate_table(["INR"], date(2026, 8, 9), fetch=lambda c, d: Decimal("0.5"))
         self.assertEqual(table.to_usd(Decimal("2"), "INR"), Decimal("1.0"))
+
+
+class PrimeFallbackTest(unittest.TestCase):
+    def test_falls_back_to_the_previous_day_when_priming_is_empty(self):
+        # Priming is a single point of failure for every FX-bearing source.
+        seen = []
+
+        def prime(day):
+            seen.append(day)
+            return {} if day == date(2026, 8, 9) else {"INR": Decimal("0.012")}
+
+        table = build_rate_table([], date(2026, 8, 9),
+                                 fetch=lambda c, d: None, prime=prime)
+        self.assertEqual(seen, [date(2026, 8, 9), date(2026, 8, 8)])
+        self.assertEqual(table.to_usd(Decimal("100"), "INR"), Decimal("1.200"))

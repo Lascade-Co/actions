@@ -59,8 +59,12 @@ def fetch_meta_ads(
         except Exception as exc:
             failures.append(f"{account_id} ({type(exc).__name__})")
 
-    if len(failures) == len(accounts):
-        return Unavailable(f"Meta Ads: every account failed — {', '.join(failures)}")
+    if failures:
+        # Any account failing refuses the whole source, matching Google Ads and
+        # the all-or-nothing currency rule. Summing the accounts that answered
+        # would understate spend, and understated spend overstates the net —
+        # the one error a reader cannot see.
+        return Unavailable(f"Meta Ads: account(s) failed — {', '.join(failures)}")
 
     total, blocked = convert_all(by_currency, table)
     if total is None:
