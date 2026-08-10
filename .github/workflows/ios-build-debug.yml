@@ -144,8 +144,18 @@ jobs:
           # fetch-depth: 0 cost ~9 minutes per run for nothing.
           fetch-depth: 1
 
+      # Scope the credential rewrite to this org only. The App token exists for
+      # the private Lascade SPM packages; rewriting all of github.com pushed
+      # every third-party fetch (33 of the 35 packages) through an installation
+      # token that has no grant on them, which at best adds an auth handshake
+      # per fetch and at worst gets throttled.
       - name: Configure git for private SPM dependencies
-        run: git config --global url."https://x-access-token:${{ steps.app-token.outputs.token }}@github.com/".insteadOf "https://github.com/"
+        env:
+          OWNER: ${{ steps.repo.outputs.owner }}
+        run: |
+          git config --global \
+            url."https://x-access-token:${{ steps.app-token.outputs.token }}@github.com/${OWNER}/".insteadOf \
+            "https://github.com/${OWNER}/"
 
       - name: Extract version and app metadata
         id: version
