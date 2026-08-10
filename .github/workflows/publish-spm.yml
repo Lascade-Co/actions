@@ -112,6 +112,33 @@ jobs:
       - name: Copy XCFramework to SPM repo
         run: cp -r build/XCFrameworks/release/TAShared.xcframework spm-repo/TAShared.xcframework
 
+      # TAShared links @rpath/libEGL.framework/libEGL and @rpath/libGLESv2.framework/libGLESv2
+      # (ANGLE, its GLES 3.0 implementation). Publishing TAShared alone produced a package that
+      # links but dies in dyld at launch, because nothing ships those two frameworks. They are
+      # fetched into build/angle/<revision>/ by the :downloadAngle task the framework build runs,
+      # so copy them alongside — and let the publish fail loudly if they are missing rather than
+      # shipping another unloadable package.
+      #
+      # Package.swift on the SPM branch must list them as binaryTargets of the TAShared product,
+      # or SPM will not embed them into the consuming app.
+      - name: Copy ANGLE frameworks to SPM repo
+        run: |
+          set -euo pipefail
+          angle_dir="$(find build/angle -mindepth 1 -maxdepth 1 -type d | head -1)"
+          if [ -z "$angle_dir" ]; then
+            echo "::error::No ANGLE artifact under build/angle — did :downloadAngle run?"
+            exit 1
+          fi
+          for fw in libEGL libGLESv2; do
+            if [ ! -d "$angle_dir/$fw.xcframework" ]; then
+              echo "::error::$angle_dir/$fw.xcframework is missing"
+              exit 1
+            fi
+            rm -rf "spm-repo/$fw.xcframework"
+            cp -R "$angle_dir/$fw.xcframework" "spm-repo/$fw.xcframework"
+          done
+          echo "Published ANGLE from $angle_dir"
+
       - name: Commit XCFramework
         uses: stefanzweifel/git-auto-commit-action@v7
         with:
