@@ -246,157 +246,30 @@ jobs:
             /usr/libexec/PlistBuddy -c "Add :provisioningProfiles:${{ steps.ids.outputs.bundle }}.MapLinkShareExtension string ${{ env.SHARE_EXT_PROFILE_UUID }}" ExportOptions.plist
           fi
 
+      # SwiftPM's shared repository cache. This is the directory it actually
+      # consults before fetching, and the names inside it are SwiftPM's own, so
+      # a restore is genuinely reused. Caching a hand-built SourcePackages tree
+      # does nothing: SwiftPM addresses mirrors by an internal hash we cannot
+      # reproduce, so it never looks at them.
       - name: Cache SPM packages
         uses: actions/cache@v5
         with:
-          path: SourcePackages
+          path: ~/Library/Caches/org.swift.swiftpm
           key: spm-${{ runner.os }}-${{ steps.xcode-version.outputs.cache-key }}-${{ hashFiles('*.xcodeproj/project.pbxproj', '**/Package.resolved') }}
           restore-keys: |
             spm-${{ runner.os }}-${{ steps.xcode-version.outputs.cache-key }}-
             spm-${{ runner.os }}-
 
+      # Let SwiftPM populate its own caches and DerivedData. Every previous
+      # attempt to pre-stage them by hand was dead weight -- see the commit
+      # message and docs/adr/0010.
       - name: Resolve SPM dependencies
         id: spm
-        shell: bash
         run: |
-          RESOLVED=$(find . -path "*/xcshareddata/swiftpm/Package.resolved" -not -path "*/SourcePackages/*" -not -path "*/.build/*" | head -1)
-          echo "Using Package.resolved: $RESOLVED"
+          xcodebuild -resolvePackageDependencies \
+            -project "${{ steps.detect.outputs.project }}" \
+            -scheme "${{ steps.detect.outputs.scheme }}"
 
-          python3 << 'PYSCRIPT'
-          import json, os, subprocess, hashlib, time, sys
-
-          # Never let git block on a credential prompt: output is captured, so an
-          # interactive prompt would hang the step until the job timeout.
-          os.environ["GIT_TERMINAL_PROMPT"] = "0"
-
-          resolved_path = subprocess.check_output(
-              ["find", ".", "-path", "*/xcshareddata/swiftpm/Package.resolved",
-               "-not", "-path", "*/SourcePackages/*", "-not", "-path", "*/.build/*"],
-              text=True
-          ).strip().split("\n")[0]
-
-          resolved = json.load(open(resolved_path))
-          pins = resolved["pins"]
-          total = len(pins)
-
-          os.makedirs("SourcePackages/checkouts", exist_ok=True)
-          os.makedirs("SourcePackages/repositories", exist_ok=True)
-
-          deps = []
-          start_time = time.time()
-          print(f"Started at: {time.strftime('%Y-%m-%d %H:%M:%S')}")
-          print(f"Resolving {total} packages sequentially...")
-          print("---")
-
-          for i, pin in enumerate(pins, 1):
-              identity = pin["identity"]
-              url = pin["location"]
-              kind = pin.get("kind", "remoteSourceControl")
-              state = pin["state"]
-              revision = state.get("revision", "")
-              version = state.get("version")
-              branch = state.get("branch")
-
-              # Compute repository directory name: <basename>-<sha256(url.lower())[:8]>
-              basename = url.rstrip("/").split("/")[-1]
-              if basename.endswith(".git"):
-                  basename = basename[:-4]
-              url_hash = hashlib.sha256(url.lower().encode()).hexdigest()[:8]
-              repo_dir = f"{basename}-{url_hash}"
-
-              checkout_path = f"SourcePackages/checkouts/{identity}"
-              repo_path = f"SourcePackages/repositories/{repo_dir}"
-
-              pkg_start = time.time()
-
-              # Skip if already exists (cache hit)
-              if os.path.isdir(checkout_path) and os.path.isdir(repo_path):
-                  print(f"[{i}/{total}] ✓ {identity} (cached)")
-              else:
-                  print(f"[{i}/{total}] Cloning {identity} ...", flush=True)
-                  try:
-                      # Clone bare repo. --filter=blob:none makes this a partial
-                      # clone: commits and trees only, blobs fetched on demand.
-                      # A full-history mirror of these 35 packages is ~4.5 GB.
-                      if not os.path.isdir(repo_path):
-                          subprocess.run(
-                              ["git", "clone", "--bare", "--quiet",
-                               "--filter=blob:none", url, repo_path],
-                              check=True, capture_output=True, text=True, timeout=600
-                          )
-
-                      # Clone working copy
-                      if not os.path.isdir(checkout_path):
-                          subprocess.run(
-                              ["git", "clone", "--quiet",
-                               "--filter=blob:none", url, checkout_path],
-                              check=True, capture_output=True, text=True, timeout=600
-                          )
-
-                      # Checkout pinned revision
-                      if revision:
-                          subprocess.run(
-                              ["git", "-C", checkout_path, "checkout", "--quiet", revision],
-                              capture_output=True, text=True, timeout=600
-                          )
-
-                      elapsed = int(time.time() - pkg_start)
-                      print(f"[{i}/{total}] ✓ {identity} ({elapsed}s)")
-                  except subprocess.TimeoutExpired:
-                      elapsed = int(time.time() - pkg_start)
-                      print(f"[{i}/{total}] ✗ {identity} (timed out after {elapsed}s)")
-                      print(f"    timed out cloning {url}", file=sys.stderr)
-                      continue
-                  except subprocess.CalledProcessError as e:
-                      elapsed = int(time.time() - pkg_start)
-                      print(f"[{i}/{total}] ✗ {identity} (failed after {elapsed}s)")
-                      print(f"    stderr: {e.stderr.strip()}", file=sys.stderr)
-                      continue
-
-              # Build dependency entry for workspace-state.json
-              checkout_state = {"revision": revision}
-              if version:
-                  checkout_state["version"] = version
-              if branch:
-                  checkout_state["branch"] = branch
-
-              deps.append({
-                  "basedOn": None,
-                  "packageRef": {
-                      "identity": identity,
-                      "kind": kind,
-                      "location": url,
-                      "name": identity
-                  },
-                  "state": {
-                      "name": "sourceControlCheckout",
-                      "checkoutState": checkout_state
-                  },
-                  "subpath": identity
-              })
-
-          # Generate workspace-state.json
-          workspace_state = {
-              "version": 7,
-              "object": {
-                  "dependencies": deps,
-                  "artifacts": [],
-                  "prebuilts": []
-              }
-          }
-          with open("SourcePackages/workspace-state.json", "w") as f:
-              json.dump(workspace_state, f, indent=2)
-
-          total_time = int(time.time() - start_time)
-          print("---")
-          print(f"Finished at: {time.strftime('%Y-%m-%d %H:%M:%S')}")
-          print(f"Total time: {total_time}s")
-          print(f"Generated workspace-state.json with {len(deps)} dependencies")
-          PYSCRIPT
-
-      # 1000 + run_number clears the 3.9.3 train's floor of ~213; run_number
-      # supplies monotonicity. Renaming this workflow file resets run_number
-      # and breaks uploads — see docs/adr/0008-ios-build-number-scheme.md.
       - name: Compute build number
         id: build_number
         shell: bash
@@ -417,8 +290,6 @@ jobs:
             -configuration Release \
             -destination "generic/platform=iOS" \
             -archivePath build/App.xcarchive \
-            -clonedSourcePackagesDirPath SourcePackages \
-            -disableAutomaticPackageResolution \
             CURRENT_PROJECT_VERSION="${{ steps.build_number.outputs.build }}" \
             CODE_SIGN_STYLE=Manual \
             SWIFT_ACTIVE_COMPILATION_CONDITIONS='DEBUG $(inherited)' \
@@ -435,7 +306,12 @@ jobs:
       - name: Upload dSYMs to Firebase Crashlytics
         shell: bash
         run: |
-          UPLOAD_SYMBOLS=$(find SourcePackages -name "upload-symbols" -type f | head -1)
+          # firebase-ios-sdk now lives wherever SwiftPM put it, under DerivedData.
+          # The project's own Crashlytics build phase already uploads dSYMs during
+          # the archive; this step is a backstop and stays best-effort.
+          UPLOAD_SYMBOLS=$(find ~/Library/Developer/Xcode/DerivedData \
+            -path "*/SourcePackages/checkouts/firebase-ios-sdk/*" \
+            -name "upload-symbols" -type f 2>/dev/null | head -1)
           if [ -z "$UPLOAD_SYMBOLS" ]; then
             echo "Warning: upload-symbols not found, skipping dSYM upload"
             exit 0
