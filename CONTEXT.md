@@ -1,7 +1,7 @@
 # Lascade Actions
 
-The shared vocabulary for this repo's pipelines. Three have enough domain language to need it:
-**Daily Catchup**, **Blog SEO Audit**, and **Marketing Net**.
+The shared vocabulary for this repo's pipelines. Four have enough domain language to need it:
+**Daily Catchup**, **Blog SEO Audit**, **Marketing Net**, and **iOS Builds**.
 
 ## Language — Daily Catchup
 
@@ -200,6 +200,53 @@ exclusions; Meta Ads is the opposite, an explicit list of accounts to read.
 - A run is green when it delivers a message and red when the delivery itself fails — the same rule
   ADR-0003 applies to the Blog SEO Audit: findings are output, infrastructure failure is not.
 
+## Language — iOS Builds
+
+The central runners that turn an iOS repo into an uploaded binary
+(`.github/workflows/ios-build-debug.yml` and `ios-build-release.yml`), driven by triggers in
+the app repos.
+
+**TestFlight build**:
+What the `debug-ios` runner produces — **Release** configuration compiled with the `DEBUG`
+flag on, signed with the App Store distribution identity, uploaded to TestFlight. Release
+optimisation so performance is representative; `DEBUG` on so testers reach the `#if DEBUG`
+toggles.
+_Avoid_: debug build. Android's `assembleDebug` is a genuinely different artifact, and the
+shared word has cost us an afternoon already. The event type is still called `debug-ios` and
+cannot be renamed — `github.run_number` feeds the **build number** and resets if the workflow
+file is renamed.
+
+**Marketing version**:
+`MARKETING_VERSION` in the pbxproj — what a user sees, e.g. `3.9.3`. The workflow's `version`
+output is this, never the build number.
+_Avoid_: version (unqualified — it means both things to different readers).
+
+**Build number**:
+`CURRENT_PROJECT_VERSION` — what distinguishes two uploads of the same **marketing version**.
+Must strictly increase within a **train**; App Store Connect rejects anything that does not.
+_Avoid_: version, build version.
+
+**Train**:
+Every build sharing one **marketing version**. Monotonicity is enforced per train, so a train
+carries a floor: the highest build number already uploaded to it.
+
+**Central runner**:
+A workflow in this repo that does the work, invoked by `repository_dispatch` from an app repo.
+**Trigger**: the thin workflow in the app repo that dispatches to it.
+
+## Relationships — iOS Builds
+
+- A **trigger** dispatches `debug-ios` with `{repo, pr, branch, title, project_slug}`; `pr` is
+  optional, and its presence is what makes the run a PR build rather than a branch build.
+- The **central runner** reads Infisical `staging` for **TestFlight builds** and `prod` for
+  App Store releases — the signing material is identical in both, because TestFlight and the
+  App Store take the same distribution certificate and profiles.
+- A **build number** must clear its **train**'s floor. `travel-animator-ios` sits at
+  marketing version `3.9.3` with builds around `213`, which is why a bare run counter cannot
+  be used (see ADR-0008).
+- **Team ID** and **bundle ID** are derived from the App Store provisioning profile rather
+  than stored, so they cannot drift from the profile actually doing the signing.
+
 ## Example dialogue
 
 > **Dev:** "How do I keep a noisy repo out of the email?"
@@ -226,6 +273,14 @@ exclusions; Meta Ads is the opposite, an explicit list of accounts to read.
   invited the reader to assume the other two were excluded.
 - "net" — resolved: **Marketing net** is this figure only. The PNL app's `gross_profit` and
   `contribution_profit` are separate, computed differently, and this one is never called profit.
+- "debug" meant two incompatible things across the mobile pipelines — Android's
+  `assembleDebug` (a real Debug-configuration APK) and iOS's `debug-ios` (a Release archive
+  signed for the App Store). Resolved: the iOS artifact is a **TestFlight build**, and it now
+  earns the name honestly by compiling Release with the `DEBUG` flag on. The event type keeps
+  the old name for a mechanical reason, recorded above.
+- "version" meant both `MARKETING_VERSION` and `CURRENT_PROJECT_VERSION` — resolved:
+  **marketing version** and **build number**. The distinction is load-bearing; only the build
+  number has a monotonicity rule.
 - "hub" meant three things — the CMS host, the blog index page, and the articles themselves.
   Resolved: **origin** is the host, **blog listing** is the index, **blog** is one article, and
   **CMS** is the authoring system. The word "hub" survives only as the literal URL path
