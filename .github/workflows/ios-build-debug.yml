@@ -9,6 +9,7 @@ permissions:
   contents: read
   pull-requests: write
   issues: write
+  packages: write
 
 concurrency:
   group: debug-ios-${{ github.event.client_payload.repo }}-${{ github.event.client_payload.pr || github.event.client_payload.branch }}
@@ -250,6 +251,41 @@ jobs:
             /usr/libexec/PlistBuddy -c "Add :provisioningProfiles:${{ steps.ids.outputs.bundle }}.MapLinkShareExtension string ${{ env.SHARE_EXT_PROFILE_UUID }}" ExportOptions.plist
           fi
 
+      # A resolved SwiftPM cache is ~4 GB: too big for the Actions cache, whose
+      # 10 GB repo quota is already fully consumed by the Android pipeline.
+      # GHCR storage does not count against that quota and pulls from inside
+      # Actions are free bandwidth, so the bundle lives there instead. Keyed on
+      # Package.resolved so it invalidates exactly when dependencies change.
+      # macOS runners have no Docker, hence oras as a standalone binary.
+      - name: Restore SPM bundle from GHCR
+        id: spm_bundle
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ACTOR: ${{ github.actor }}
+          BUNDLE: ghcr.io/lascade-co/ios-spm-cache:spm-${{ hashFiles('**/Package.resolved') }}
+        run: |
+          set -uo pipefail
+          mkdir -p "$RUNNER_TEMP/bin"
+          curl -sSL "https://github.com/oras-project/oras/releases/download/v1.3.3/oras_1.3.3_darwin_arm64.tar.gz" \
+            | tar -xz -C "$RUNNER_TEMP/bin" oras
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+          export PATH="$RUNNER_TEMP/bin:$PATH"
+
+          printf '%s' "$GH_TOKEN" | oras login ghcr.io -u "$ACTOR" --password-stdin
+
+          mkdir -p "$HOME/Library/Caches"
+          WORK=$(mktemp -d)
+          if oras pull "$BUNDLE" -o "$WORK" && [ -f "$WORK/spm-cache.tar" ]; then
+            tar -xf "$WORK/spm-cache.tar" -C "$HOME/Library/Caches"
+            echo "hit=true" >> "$GITHUB_OUTPUT"
+            echo "Restored SPM bundle from $BUNDLE"
+          else
+            echo "hit=false" >> "$GITHUB_OUTPUT"
+            echo "No bundle at $BUNDLE - resolving cold, will publish afterwards"
+          fi
+          rm -rf "$WORK"
+
       # Let SwiftPM populate its own caches and DerivedData. Every previous
       # attempt to pre-stage them by hand was dead weight -- see the commit
       # message and docs/adr/0010.
@@ -259,6 +295,28 @@ jobs:
           xcodebuild -resolvePackageDependencies \
             -project "${{ steps.detect.outputs.project }}" \
             -scheme "${{ steps.detect.outputs.scheme }}"
+
+      # Publish as soon as the packages exist, not at end of job: whether the
+      # archive later succeeds is a separate question, and a cold resolve is
+      # expensive enough that it should never be paid twice. Best-effort — a
+      # registry hiccup must not fail a build that already has its packages.
+      - name: Publish SPM bundle to GHCR
+        if: steps.spm.outcome == 'success' && steps.spm_bundle.outputs.hit != 'true'
+        continue-on-error: true
+        shell: bash
+        env:
+          BUNDLE: ghcr.io/lascade-co/ios-spm-cache:spm-${{ hashFiles('**/Package.resolved') }}
+        run: |
+          set -euo pipefail
+          WORK=$(mktemp -d)
+          tar -cf "$WORK/spm-cache.tar" -C "$HOME/Library/Caches" org.swift.swiftpm
+          du -h "$WORK/spm-cache.tar"
+          cd "$WORK"
+          oras push "$BUNDLE" \
+            --artifact-type application/vnd.lascade.ios-spm-cache.v1 \
+            spm-cache.tar:application/octet-stream
+          echo "Published $BUNDLE"
+          rm -rf "$WORK"
 
       - name: Compute build number
         id: build_number
