@@ -1,7 +1,7 @@
 # Lascade Actions
 
-The shared vocabulary for this repo's pipelines. Two have enough domain language to need it:
-**Daily Catchup** and **Blog SEO Audit**.
+The shared vocabulary for this repo's pipelines. Three have enough domain language to need it:
+**Daily Catchup**, **Blog SEO Audit**, and **Marketing Net**.
 
 ## Language — Daily Catchup
 
@@ -133,6 +133,73 @@ never share a report.
 - **Origin** URLs are legitimate only as **asset URLs**. Any other origin URL is a **finding** —
   `error` when in a **crawlable position**, `warn` when merely present in the markup.
 
+## Language — Marketing Net
+
+The daily cron (`.github/workflows/daily-marketing-net.yml`) that posts one figure to Telegram:
+month-to-date app revenue minus month-to-date marketing spend. Nothing is persisted.
+
+**Marketing net**:
+Month-to-date revenue across the app stores minus month-to-date marketing spend.
+_Avoid_: profit (the PNL app defines `gross_profit` and `contribution_profit` by different
+formulas), influencer net, ROI, margin.
+
+**Source**:
+One contributor to the figure — **App Store** and **Play Store** on the revenue side, **Influencer**,
+**Google Ads** and **Meta Ads** on the spend side. Each is read independently and fails
+independently.
+
+**Head**:
+The PNL app's classification identity for a spend line, addressed by its `normalized_key`
+(`INFLUENCER_MARKETING`) and never by its manager-editable display name.
+_Avoid_: category, bucket, line item.
+
+**Unavailable**:
+A **source** that yielded no figure this run — shown as `unavailable` and left out of the net, never
+shown as `$0`, because a plausible zero is indistinguishable from a genuinely quiet month. Covers
+both breakage and an empty **window** (the App Store on the 1st, whose window ends before the month
+begins); the warning text distinguishes them, the state does not.
+_Avoid_: missing, failed, null, zero.
+
+**Window**:
+The date span a **source** actually covers. Windows differ per source and are stated in the message
+rather than clipped to match: the App Store stops at yesterday, every other source is fresh through
+today.
+
+**Net factor**:
+The ratio of earnings to sales taken from the most recent **settled month**, applied to Play Store
+month-to-date sales to estimate net. It exists because Google publishes no mid-month net figure.
+_Avoid_: commission rate, take rate, multiplier.
+
+**Settled month**:
+A month whose Play Store bucket holds **both** a `sales/` and an `earnings/` report — the only kind
+of month a **net factor** can come from. Earnings land around the middle of the following month.
+
+**Rate date**:
+The single date whose FX rates convert every non-USD amount in a run — always yesterday, the most
+recent day a rate exists for. One date covers the whole run, including both sides of the **net
+factor**.
+
+**Skip list**:
+The Google Ads customer ids excluded from the MCC's children. Google Ads is include-by-default with
+exclusions; Meta Ads is the opposite, an explicit list of accounts to read.
+
+## Relationships — Marketing Net
+
+- **Marketing net** = revenue **sources** − spend **sources**, each contributing over its own **window**.
+- A **source** yields either an amount or **Unavailable**; there is no third state, and **Unavailable**
+  is never coerced to `0`.
+- The **marketing net** is itself **Unavailable** when no revenue **source** could be read — a net
+  built from spend alone reads as a catastrophic loss to anyone who sees the figure before the
+  warning.
+- The **Play Store** source multiplies month-to-date sales by the **net factor** derived from the
+  latest **settled month**.
+- Every non-USD amount converts at the one **rate date** — including both sides of the **net factor**,
+  so the ratio stays immune to FX drift.
+- **Google Ads** reads the MCC's children minus the **skip list**; **Meta Ads** reads only its listed
+  accounts.
+- A run is green when it delivers a message and red when the delivery itself fails — the same rule
+  ADR-0003 applies to the Blog SEO Audit: findings are output, infrastructure failure is not.
+
 ## Example dialogue
 
 > **Dev:** "How do I keep a noisy repo out of the email?"
@@ -145,10 +212,20 @@ never share a report.
 > position**. That's why it's `warn` and not `error`. If it ever shows up in an `a[href]`,
 > that's A1 and it's an `error`."
 
+> **Dev:** "Meta's token expired overnight. Do we post $0 for it?"
+> **Maintainer:** "No — it renders **unavailable** and drops out of the **marketing net**, with a
+> warning line. A zero would read as 'we spent nothing on Meta this month', which is a different
+> claim, and a much more believable one, than 'we couldn't ask'."
+
 ## Flagged ambiguities
 
 - "summary" meant both the per-repo artifact and the emailed report — resolved: **per-repo
   summary** is the artifact, **report JSON** / email is the org-wide output.
+- "influencer net" (the handoff document's name for the figure) — superseded by **Marketing net**
+  once Google Ads and Meta Ads spend joined it; the old name described one of three spend lines and
+  invited the reader to assume the other two were excluded.
+- "net" — resolved: **Marketing net** is this figure only. The PNL app's `gross_profit` and
+  `contribution_profit` are separate, computed differently, and this one is never called profit.
 - "hub" meant three things — the CMS host, the blog index page, and the articles themselves.
   Resolved: **origin** is the host, **blog listing** is the index, **blog** is one article, and
   **CMS** is the authoring system. The word "hub" survives only as the literal URL path

@@ -5,3 +5,7 @@ trigger.sh
 *.log
 .DS_Store
 **/__pycache__/
+secrets.json
+secrets/
+*.p8
+*-sa.json
