@@ -23,7 +23,7 @@ from pnl_money import Amount, SourceValue, Unavailable
 from pnl_playstore import fetch_playstore
 from pnl_spend import fetch_head_spend
 from pnl_image import render_png
-from pnl_telegram import DeliveryError, render, render_caption, send, send_photo
+from pnl_telegram import DeliveryError, render, send, send_photo
 
 PNL_BASE_URL = "https://pnl.lascade.com"
 # The normalized key, which contains a SPACE — PNL derives keys from card
@@ -165,9 +165,7 @@ def main(argv=None) -> int:
 
     try:
         if png:
-            send_photo(
-                config["telegram_token"], config["chat_id"], png, render_caption(report)
-            )
+            send_photo(config["telegram_token"], config["chat_id"], png)
         else:
             send(config["telegram_token"], config["chat_id"], html)
     except DeliveryError as exc:

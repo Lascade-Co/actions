@@ -129,8 +129,8 @@ figure reads as "healthy" to anyone skimming, and the net is the largest element
 warnings underneath lose that argument every time. This is the plausible-figure problem the whole
 design guards against, reintroduced through colour.
 
-The **caption** carries the heading, the window footnote and any warnings — the card already has
-the figures. Note the caption limit is **1024** characters, not `sendMessage`'s 4096.
+**No caption.** The card already carries the heading, the date, the window footnote and every
+warning, so a caption only repeated it in a second typeface directly underneath.
 
 **A text rendering survives as a fallback.** If font discovery fails, `render()` produces a plain
 HTML message — bold headings, `label · figure` lines, no code block — and the run delivers that

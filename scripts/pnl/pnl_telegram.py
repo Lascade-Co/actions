@@ -20,10 +20,6 @@ _LIMIT = 4096
 _RETRIES = 3
 _TIMEOUT = 30
 
-#: Caption limit for sendPhoto, which is far tighter than sendMessage's 4096.
-_CAPTION_LIMIT = 1024
-
-
 class DeliveryError(RuntimeError):
     pass
 
@@ -125,29 +121,6 @@ def render(report: dict) -> str:
     return truncate("\n".join(parts))
 
 
-def render_caption(report: dict) -> str:
-    """What rides alongside the image.
-
-    The card carries the figures, so the caption only needs the heading, the
-    window note and any warnings — and it lives under a 1024-character limit
-    rather than 4096.
-    """
-    parts = [f"<b>Marketing net</b> · {escape(report['month_label'])}"]
-
-    window = report.get("appstore_window_label")
-    if window:
-        parts.append(
-            f"<i>{escape(f'App Store {window}; every other source through today.')}</i>"
-        )
-
-    warnings = report.get("warnings") or []
-    if warnings:
-        parts.append("")
-        parts += [f"⚠️ {escape(w)}" for w in warnings]
-
-    return truncate("\n".join(parts), limit=_CAPTION_LIMIT)
-
-
 def _deliver(token: str, method: str, call, sleep: Optional[Callable]) -> None:
     """Retry ``call`` and raise ``DeliveryError`` if it never succeeds.
 
@@ -196,7 +169,6 @@ def send_photo(
     token: str,
     chat_id: str,
     png: bytes,
-    caption: str,
     post: Optional[Callable] = None,
     sleep: Optional[Callable] = None,
 ) -> None:
@@ -207,7 +179,7 @@ def send_photo(
         "sendPhoto",
         lambda: post(
             url,
-            data={"chat_id": chat_id, "caption": caption, "parse_mode": "HTML"},
+            data={"chat_id": chat_id},
             files={"photo": ("marketing-net.png", png, "image/png")},
             timeout=_TIMEOUT,
         ),
