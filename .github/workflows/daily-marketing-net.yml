@@ -39,7 +39,13 @@ jobs:
       - name: Install dependencies
         # Pinned: an unwatched daily cron whose crypto and HTTP stack must not
         # change under it. Resolved and test-verified on 2026-08-10.
-        run: pip install --quiet requests==2.34.2 pyjwt==2.13.0 cryptography==50.0.0 google-auth==2.56.3
+        run: pip install --quiet requests==2.34.2 pyjwt==2.13.0 cryptography==50.0.0 google-auth==2.56.3 pillow==12.3.0
+
+      - name: Install the card font
+        # The report is delivered as a rendered PNG, and Pillow needs a real
+        # TrueType file. Without this the run still delivers, but falls back to
+        # a plain-text message.
+        run: sudo apt-get install -y --no-install-recommends fonts-dejavu-core
 
       - name: Import secrets from Infisical
         uses: Infisical/secrets-action@v1.0.16
@@ -56,7 +62,7 @@ jobs:
       - name: Download scripts
         run: |
           for module in pnl_money pnl_fx pnl_spend pnl_appstore pnl_playstore \
-                        pnl_googleads pnl_metaads pnl_telegram marketing_net; do
+                        pnl_googleads pnl_metaads pnl_image pnl_telegram marketing_net; do
             curl -fsSL --retry 3 --retry-delay 2 -o "$module.py" "$RAW/scripts/pnl/$module.py"
           done
 
@@ -76,11 +82,13 @@ jobs:
           if [ "${{ inputs.dry_run }}" = "true" ]; then ARGS+=(--dry-run); fi
           python3 marketing_net.py "${ARGS[@]}"
 
-      - name: Upload the rendered message
+      - name: Upload the rendered card
         if: always()
         uses: actions/upload-artifact@v7
         with:
           name: marketing-net-message
-          path: message.html
+          path: |
+            message.png
+            message.html
           if-no-files-found: warn
           retention-days: 30

@@ -52,15 +52,17 @@ class RenderTest(unittest.TestCase):
         self.assertIn("$7,585", html)
         self.assertIn("$12,955", html)
 
-    def test_uses_pre_for_monospace_columns(self):
-        self.assertIn("<pre>", render(self.base()))
+    def test_never_uses_a_code_block(self):
+        html = render(self.base())
+        for tag in ("<pre>", "<code>"):
+            self.assertNotIn(tag, html)
 
     def test_unavailable_source_never_renders_as_zero(self):
         report = self.base()
         report["spend"]["Meta Ads"] = Unavailable("token expired")
         html = render(report)
         self.assertIn("unavailable", html)
-        self.assertNotIn("Meta Ads       $0", html)
+        self.assertNotIn("Meta Ads · $0", html)
 
     def test_no_revenue_source_makes_the_net_unavailable(self):
         report = self.base()
@@ -136,20 +138,9 @@ class ReviewRegressionTest(unittest.TestCase):
         self.assertIn("<b>Net · unavailable</b>", html)
         self.assertNotIn("$20,540", html.split("Net")[-1])
 
-    def test_total_rows_align_inside_the_table(self):
-        html = render(self.base())
-        table = html.split("<pre>")[1].split("</pre>")[0]
-        ends = {
-            len(line.rstrip())
-            for line in table.split("\n")
-            if line.strip().startswith("Total")
-        }
-        self.assertEqual(len(ends), 1, f"misaligned totals in:\n{table}")
-
-    def test_net_is_its_own_bold_line_outside_the_table(self):
+    def test_net_is_its_own_bold_line(self):
         html = render(self.base())
         self.assertIn("<b>Net · ", html)
-        self.assertNotIn("Net", html.split("<pre>")[1].split("</pre>")[0])
 
     def test_truncation_is_announced(self):
         report = self.base()

@@ -20,12 +20,8 @@ _LIMIT = 4096
 _RETRIES = 3
 _TIMEOUT = 30
 
-#: Only the figures need monospace. The heading, the net and the footnote are
-#: ordinary text, so they get Telegram's bold and italic rather than being
-#: stuffed into the code block with everything else.
-_LABEL_WIDTH = 12
-_FIGURE_WIDTH = 11  # "unavailable" is the widest thing that can land here
-_RULE = "  " + "-" * (_LABEL_WIDTH + _FIGURE_WIDTH)
+#: Caption limit for sendPhoto, which is far tighter than sendMessage's 4096.
+_CAPTION_LIMIT = 1024
 
 
 class DeliveryError(RuntimeError):
@@ -71,17 +67,8 @@ def _shown(value: SourceValue) -> str:
     return format_usd(value.usd) if isinstance(value, Amount) else "unavailable"
 
 
-def _row(label: str, value: SourceValue) -> str:
-    return f"  {label:<{_LABEL_WIDTH}}{_shown(value):>{_FIGURE_WIDTH}}"
-
-
-def _section(title: str, rows: dict, total: SourceValue) -> list:
-    """A titled block of figures closed by a ruled total."""
-    lines = [title]
-    lines += [_row(label, value) for label, value in rows.items()]
-    lines.append(_RULE)
-    lines.append(_row("Total", total))
-    return lines
+def _line(label: str, value: SourceValue) -> str:
+    return f"{escape(label)} · {escape(_shown(value))}"
 
 
 def render(report: dict) -> str:
@@ -98,10 +85,6 @@ def render(report: dict) -> str:
 
     revenue_total = combine(rounded_revenue.values(), "no revenue source could be read")
     spend_total = combine(rounded_spend.values(), "no spend source could be read")
-
-    lines = _section("Revenue", rounded_revenue, revenue_total)
-    lines.append("")
-    lines += _section("Spend", rounded_spend, spend_total)
 
     if not isinstance(revenue_total, Amount):
         # A net built from spend alone reads as a catastrophic loss to anyone
@@ -121,9 +104,12 @@ def render(report: dict) -> str:
     parts = [
         f"<b>Marketing net</b> · {escape(report['month_label'])}",
         "",
-        f"<pre>{escape(chr(10).join(lines))}</pre>",
-        f"<b>Net · {escape(_shown(net))}</b>",
+        f"<b>Revenue · {escape(_shown(revenue_total))}</b>",
     ]
+    parts += [_line(label, value) for label, value in rounded_revenue.items()]
+    parts += ["", f"<b>Spend · {escape(_shown(spend_total))}</b>"]
+    parts += [_line(label, value) for label, value in rounded_spend.items()]
+    parts += ["", f"<b>Net · {escape(_shown(net))}</b>"]
 
     window = report.get("appstore_window_label")
     if window:
@@ -136,11 +122,53 @@ def render(report: dict) -> str:
         parts.append("")
         parts += [f"⚠️ {escape(w)}" for w in warnings]
 
-    html = truncate("\n".join(parts))
-    if html.count("<pre>") != html.count("</pre>"):
-        # Belt and braces: an unclosed tag is a 400 and nothing is delivered.
-        html += "</pre>"
-    return html
+    return truncate("\n".join(parts))
+
+
+def render_caption(report: dict) -> str:
+    """What rides alongside the image.
+
+    The card carries the figures, so the caption only needs the heading, the
+    window note and any warnings — and it lives under a 1024-character limit
+    rather than 4096.
+    """
+    parts = [f"<b>Marketing net</b> · {escape(report['month_label'])}"]
+
+    window = report.get("appstore_window_label")
+    if window:
+        parts.append(
+            f"<i>{escape(f'App Store {window}; every other source through today.')}</i>"
+        )
+
+    warnings = report.get("warnings") or []
+    if warnings:
+        parts.append("")
+        parts += [f"⚠️ {escape(w)}" for w in warnings]
+
+    return truncate("\n".join(parts), limit=_CAPTION_LIMIT)
+
+
+def _deliver(token: str, method: str, call, sleep: Optional[Callable]) -> None:
+    """Retry ``call`` and raise ``DeliveryError`` if it never succeeds.
+
+    Shared so the photo and text paths cannot drift apart on retry count,
+    backoff, or — the one that matters — token redaction.
+    """
+    sleep = sleep or time.sleep  # injectable so the suite does not really wait
+    last = ""
+    for attempt in range(_RETRIES):
+        try:
+            response = call()
+            if getattr(response, "status_code", 0) == 200:
+                return
+            last = f"status {getattr(response, 'status_code', '?')}"
+        except Exception as exc:
+            last = redact(str(exc), token)
+        if attempt < _RETRIES - 1:
+            sleep(2 ** attempt)
+    raise DeliveryError(
+        redact(f"Telegram {method} failed after {_RETRIES} attempts: {last}", token)
+    )
 
 
 def send(
@@ -151,21 +179,37 @@ def send(
     sleep: Optional[Callable] = None,
 ) -> None:
     post = post or requests.post
-    sleep = sleep or time.sleep  # injectable so the suite does not really wait
     url = f"https://api.telegram.org/bot{token}/sendMessage"
-    last = ""
-    for attempt in range(_RETRIES):
-        try:
-            response = post(
-                url,
-                json={"chat_id": chat_id, "text": html, "parse_mode": "HTML"},
-                timeout=_TIMEOUT,
-            )
-            if getattr(response, "status_code", 0) == 200:
-                return
-            last = f"status {getattr(response, 'status_code', '?')}"
-        except Exception as exc:
-            last = redact(str(exc), token)
-        if attempt < _RETRIES - 1:
-            sleep(2 ** attempt)
-    raise DeliveryError(redact(f"Telegram delivery failed after {_RETRIES} attempts: {last}", token))
+    _deliver(
+        token,
+        "sendMessage",
+        lambda: post(
+            url,
+            json={"chat_id": chat_id, "text": html, "parse_mode": "HTML"},
+            timeout=_TIMEOUT,
+        ),
+        sleep,
+    )
+
+
+def send_photo(
+    token: str,
+    chat_id: str,
+    png: bytes,
+    caption: str,
+    post: Optional[Callable] = None,
+    sleep: Optional[Callable] = None,
+) -> None:
+    post = post or requests.post
+    url = f"https://api.telegram.org/bot{token}/sendPhoto"
+    _deliver(
+        token,
+        "sendPhoto",
+        lambda: post(
+            url,
+            data={"chat_id": chat_id, "caption": caption, "parse_mode": "HTML"},
+            files={"photo": ("marketing-net.png", png, "image/png")},
+            timeout=_TIMEOUT,
+        ),
+        sleep,
+    )

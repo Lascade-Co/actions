@@ -112,37 +112,32 @@ produces nothing, and there is no message left to carry the warning.
 
 ## Message
 
-Only the figures need `<pre>` — Telegram renders everything else proportionally, so alignment
-requires it, but putting the heading and the net inside it too just makes the whole message read
-as a wall of code. Telegram's HTML subset (`<b>`, `<i>`, `<pre>`) carries the rest.
+**The report is delivered as a rendered PNG card** (`sendPhoto`), not as text.
 
-```html
-<b>Marketing net</b> · Aug 1–10
+Telegram renders text proportionally, so a column of figures only lines up inside a code block —
+and a code block makes the whole message read as source. An image escapes that choice entirely:
+alignment is exact, the typography is ours, and the net can carry colour (green above zero, red
+below). `pnl_image.py` draws it with Pillow; a headless browser would render nicer markup but
+costs a browser download on every run of a daily cron.
 
-<pre>Revenue
-  App Store        $3,937
-  Play Store       $5,320
-  -----------------------
-  Total            $9,257
+The canvas is measured from the row list *before* drawing, so a card with warnings grows rather
+than clipping them, and one without leaves no slab of dead space.
 
-Spend
-  Influencer         $270
-  Google Ads       $1,928
-  Meta Ads           $912
-  -----------------------
-  Total            $3,110</pre>
-<b>Net · $6,147</b>
-<i>App Store to Aug 9; every other source through today.</i>
-```
+**The net's colour carries confidence, not just sign:** green only when all five sources reported,
+amber when any is `unavailable`, red when the figure is genuinely negative. Green on an incomplete
+figure reads as "healthy" to anyone skimming, and the net is the largest element on the card — the
+warnings underneath lose that argument every time. This is the plausible-figure problem the whole
+design guards against, reintroduced through colour.
 
-The net sits outside the table deliberately: it is the one number most readers want, and bold
-text carries further than a monospace row. The differing App Store window becomes an italic
-footnote rather than a ragged `(to Aug 9)` that widens one row and breaks the column.
+The **caption** carries the heading, the window footnote and any warnings — the card already has
+the figures. Note the caption limit is **1024** characters, not `sendMessage`'s 4096.
+
+**A text rendering survives as a fallback.** If font discovery fails, `render()` produces a plain
+HTML message — bold headings, `label · figure` lines, no code block — and the run delivers that
+instead. A missing font must not cost the delivery.
 
 Tags are structure and are never escaped; everything interpolated into them always is. Each part
-occupies its own line and no tag spans a line, so line-boundary truncation cannot split one — and
-a final guard closes `<pre>` if it ever did, because an unclosed tag is a `400` and nothing
-arrives.
+occupies its own line and no tag spans a line, so line-boundary truncation can never split one.
 
 Four rendering rules, each learned the hard way:
 
@@ -171,7 +166,8 @@ Following the `scripts/seo/` precedent: focused modules, fetched by raw URL, off
 | `pnl_playstore.py` | GCS `sales/` + `earnings/` net factor |
 | `pnl_googleads.py` | Google Ads v25 |
 | `pnl_metaads.py` | Graph v26.0 |
-| `pnl_telegram.py` | render, escape, truncate, redact, send |
+| `pnl_image.py` | the PNG card |
+| `pnl_telegram.py` | caption, escape, truncate, redact, sendPhoto |
 | `marketing_net.py` | orchestrator |
 
 ## Workflow

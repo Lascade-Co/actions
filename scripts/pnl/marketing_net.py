@@ -22,7 +22,8 @@ from pnl_metaads import fetch_meta_ads
 from pnl_money import Amount, SourceValue, Unavailable
 from pnl_playstore import fetch_playstore
 from pnl_spend import fetch_head_spend
-from pnl_telegram import DeliveryError, render, send
+from pnl_image import render_png
+from pnl_telegram import DeliveryError, render, render_caption, send, send_photo
 
 PNL_BASE_URL = "https://pnl.lascade.com"
 # The normalized key, which contains a SPACE — PNL derives keys from card
@@ -144,16 +145,31 @@ def main(argv=None) -> int:
 
     report = build_report(config, today, sources, table)
     html = render(report)
-
     with open("message.html", "w", encoding="utf-8") as handle:
         handle.write(html)
 
+    # The card is the message; the text rendering survives only as a fallback,
+    # because a missing font must not cost us the delivery entirely.
+    png = None
+    try:
+        png = render_png(report)
+        with open("message.png", "wb") as handle:
+            handle.write(png)
+    except Exception as exc:
+        print(f"image rendering failed, falling back to text: {exc}", file=sys.stderr)
+
     if args.dry_run:
         print(html)
+        print(f"[dry run] image: {'message.png' if png else 'unavailable'}")
         return 0
 
     try:
-        send(config["telegram_token"], config["chat_id"], html)
+        if png:
+            send_photo(
+                config["telegram_token"], config["chat_id"], png, render_caption(report)
+            )
+        else:
+            send(config["telegram_token"], config["chat_id"], html)
     except DeliveryError as exc:
         # The only red condition: no message means no surface carrying the
         # warnings, so the workflow status is the sole remaining signal.
