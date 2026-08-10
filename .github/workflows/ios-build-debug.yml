@@ -24,14 +24,33 @@ jobs:
       build_number: ${{ steps.build_number.outputs.build }}
       owner: ${{ steps.repo.outputs.owner }}
       name: ${{ steps.repo.outputs.name }}
+      comment_id: ${{ steps.status.outputs.comment-id }}
     steps:
       - name: Extract owner/repo
         id: repo
         shell: bash
+        env:
+          FULL: ${{ github.event.client_payload.repo }}
         run: |
-          FULL="${{ github.event.client_payload.repo }}"
           echo "owner=${FULL%%/*}" >> "$GITHUB_OUTPUT"
           echo "name=${FULL#*/}"   >> "$GITHUB_OUTPUT"
+
+      # Build the list of repos the App token must cover: always the source repo,
+      # plus any private SPM package repos the dispatcher declared (comma-separated
+      # names, same org). Without this the token would be org-wide, and this job
+      # runs xcodebuild over unreviewed PR-head code.
+      - name: Compute token repositories
+        id: token_repos
+        shell: bash
+        env:
+          REPO_NAME: ${{ steps.repo.outputs.name }}
+          EXTRA: ${{ github.event.client_payload.spm_repos }}
+        run: |
+          REPOS="$REPO_NAME"
+          if [ -n "$EXTRA" ] && [ "$EXTRA" != "null" ]; then
+            REPOS="$REPOS,$EXTRA"
+          fi
+          echo "list=$REPOS" >> "$GITHUB_OUTPUT"
 
       - name: Mint GitHub App token
         id: app-token
@@ -40,15 +59,19 @@ jobs:
           client-id: ${{ secrets.CI_APP_CLIENT_ID }}
           private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
           owner: ${{ steps.repo.outputs.owner }}
+          repositories: ${{ steps.token_repos.outputs.list }}
 
       - name: Purge previous comments from this workflow
         if: ${{ github.event.client_payload.pr && github.event.client_payload.pr != '' && github.event.client_payload.pr != 'null' }}
         uses: actions/github-script@v8
+        env:
+          PAYLOAD_REPO: ${{ github.event.client_payload.repo }}
+          PAYLOAD_PR: ${{ github.event.client_payload.pr }}
         with:
           github-token: ${{ steps.app-token.outputs.token }}
           script: |
-            const [owner, repo] = "${{ github.event.client_payload.repo }}".split("/");
-            const issue_number = Number("${{ github.event.client_payload.pr }}");
+            const [owner, repo] = process.env.PAYLOAD_REPO.split("/");
+            const issue_number = Number(process.env.PAYLOAD_PR);
             const marker = "<!-- central-ios-testflight -->";
             const comments = await github.paginate(
               github.rest.issues.listComments,
@@ -66,6 +89,7 @@ jobs:
       - name: Comment on PR that the build started
         id: status
         if: ${{ github.event.client_payload.pr && github.event.client_payload.pr != '' && github.event.client_payload.pr != 'null' }}
+        continue-on-error: true
         uses: peter-evans/create-or-update-comment@v5
         with:
           edit-mode: replace
@@ -80,9 +104,10 @@ jobs:
       - name: Decide ref to checkout (PR HEAD or named branch)
         id: ref
         shell: bash
+        env:
+          PR: ${{ github.event.client_payload.pr }}
+          BR: ${{ github.event.client_payload.branch }}
         run: |
-          PR="${{ github.event.client_payload.pr }}"
-          BR="${{ github.event.client_payload.branch }}"
           if [ -n "$PR" ] && [ "$PR" != "null" ]; then
             echo "ref=refs/pull/${PR}/head" >> "$GITHUB_OUTPUT"
           elif [ -n "$BR" ]; then
@@ -348,9 +373,10 @@ jobs:
       - name: Compute build number
         id: build_number
         shell: bash
+        env:
+          PR: ${{ github.event.client_payload.pr }}
         run: |
           BUILD=$(( 1000 + ${{ github.run_number }} ))
-          PR="${{ github.event.client_payload.pr }}"
           if [ -n "$PR" ] && [ "$PR" != "null" ]; then BUILD="${BUILD}.${PR}"; fi
           echo "Build number $BUILD"
           echo "build=$BUILD" >> "$GITHUB_OUTPUT"
@@ -403,6 +429,9 @@ jobs:
       - name: Comment on PR if the build failed
         if: ${{ failure() && github.event.client_payload.pr && github.event.client_payload.pr != '' && github.event.client_payload.pr != 'null' && steps.app-token.outcome == 'success' }}
         uses: actions/github-script@v8
+        env:
+          PAYLOAD_REPO: ${{ github.event.client_payload.repo }}
+          PAYLOAD_PR: ${{ github.event.client_payload.pr }}
         with:
           github-token: ${{ steps.app-token.outputs.token }}
           script: |
@@ -412,8 +441,8 @@ jobs:
               "Export IPA":     "${{ steps.export.outcome }}",
             };
             const stage = Object.keys(outcomes).find(k => outcomes[k] === "failure") || "Build";
-            const [owner, repo] = "${{ github.event.client_payload.repo }}".split("/");
-            const issue_number = Number("${{ github.event.client_payload.pr }}");
+            const [owner, repo] = process.env.PAYLOAD_REPO.split("/");
+            const issue_number = Number(process.env.PAYLOAD_PR);
             const body = [
               "<!-- central-ios-testflight -->",
               `❌ **${stage}** failed.`,
@@ -479,11 +508,13 @@ jobs:
 
       - name: Comment on PR with the TestFlight build
         if: ${{ github.event.client_payload.pr && github.event.client_payload.pr != '' && github.event.client_payload.pr != 'null' && steps.app-token.outcome == 'success' }}
+        continue-on-error: true
         uses: peter-evans/create-or-update-comment@v5
         with:
           token: ${{ steps.app-token.outputs.token }}
           repository: ${{ github.event.client_payload.repo }}
           issue-number: ${{ github.event.client_payload.pr }}
+          comment-id: ${{ needs.build.outputs.comment_id }}
           edit-mode: replace
           body: |
             <!-- central-ios-testflight -->
@@ -495,16 +526,31 @@ jobs:
 
             Workflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
 
+      # The heredoc below is unquoted so shell variables expand; it must therefore
+      # contain no ${{ }} interpolation of payload- or build-derived text, or a
+      # branch named `feat/x$(id)` would execute in the job that holds the App
+      # Store signing key. Every such value arrives via env: and is HTML-escaped.
       - name: Notify Telegram (success)
         continue-on-error: true
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ env.TELEGRAM_CHAT_ID }}
           PR_TITLE: ${{ github.event.client_payload.title }}
+          BRANCH: ${{ github.event.client_payload.branch }}
+          APP_NAME: ${{ needs.build.outputs.app_name }}
+          APP_VERSION: ${{ needs.build.outputs.version }}
+          BUILD_NUMBER: ${{ needs.build.outputs.build_number }}
         run: |
-          ESCAPED_TITLE="${PR_TITLE//&/&amp;}"
-          ESCAPED_TITLE="${ESCAPED_TITLE//</&lt;}"
-          ESCAPED_TITLE="${ESCAPED_TITLE//>/&gt;}"
+          # & first: escaping < and > introduces ampersands we must not re-escape.
+          html_escape() {
+            local s="${1//&/&amp;}"
+            s="${s//</&lt;}"
+            printf '%s' "${s//>/&gt;}"
+          }
+          ESCAPED_TITLE="$(html_escape "$PR_TITLE")"
+          ESCAPED_BRANCH="$(html_escape "$BRANCH")"
+          ESCAPED_APP="$(html_escape "$APP_NAME")"
+          ESCAPED_VERSION="$(html_escape "$APP_VERSION")"
+          ESCAPED_BUILD="$(html_escape "$BUILD_NUMBER")"
           curl -sf -X POST "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage" \
             -d chat_id="${TELEGRAM_CHAT_ID}" \
             -d parse_mode=html \
@@ -512,25 +558,36 @@ jobs:
             -d text="$(cat <<MSG
           <b>iOS build uploaded to TestFlight</b>
 
-          <b>App:</b> ${{ needs.build.outputs.app_name }}
-          <b>Version:</b> ${{ needs.build.outputs.version }}
-          <b>Build:</b> ${{ needs.build.outputs.build_number }}
-          <b>Branch:</b> ${{ github.event.client_payload.branch }}
+          <b>App:</b> ${ESCAPED_APP}
+          <b>Version:</b> ${ESCAPED_VERSION}
+          <b>Build:</b> ${ESCAPED_BUILD}
+          <b>Branch:</b> ${ESCAPED_BRANCH}
           <b>PR:</b> ${ESCAPED_TITLE:-n/a}
           MSG
           )"
 
+      # Same rule as the success notifier: nothing payload- or build-derived may be
+      # interpolated straight into this unquoted heredoc.
       - name: Notify Telegram (FAILURE)
         if: failure()
         continue-on-error: true
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ env.TELEGRAM_CHAT_ID }}
           PR_TITLE: ${{ github.event.client_payload.title }}
+          BRANCH: ${{ github.event.client_payload.branch }}
+          PAYLOAD_REPO: ${{ github.event.client_payload.repo }}
+          APP_NAME: ${{ needs.build.outputs.app_name }}
         run: |
-          ESCAPED_TITLE="${PR_TITLE//&/&amp;}"
-          ESCAPED_TITLE="${ESCAPED_TITLE//</&lt;}"
-          ESCAPED_TITLE="${ESCAPED_TITLE//>/&gt;}"
+          # & first: escaping < and > introduces ampersands we must not re-escape.
+          html_escape() {
+            local s="${1//&/&amp;}"
+            s="${s//</&lt;}"
+            printf '%s' "${s//>/&gt;}"
+          }
+          ESCAPED_TITLE="$(html_escape "$PR_TITLE")"
+          ESCAPED_BRANCH="$(html_escape "$BRANCH")"
+          ESCAPED_REPO="$(html_escape "$PAYLOAD_REPO")"
+          ESCAPED_APP="$(html_escape "$APP_NAME")"
           curl -sf -X POST "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage" \
             -d chat_id="${TELEGRAM_CHAT_ID}" \
             -d parse_mode=html \
@@ -538,9 +595,9 @@ jobs:
             -d text="$(cat <<MSG
           <b>TestFlight upload failed</b>
 
-          <b>App:</b> ${{ needs.build.outputs.app_name }}
-          <b>Repo:</b> <code>${{ github.event.client_payload.repo }}</code>
-          <b>Branch:</b> ${{ github.event.client_payload.branch }}
+          <b>App:</b> ${ESCAPED_APP}
+          <b>Repo:</b> <code>${ESCAPED_REPO}</code>
+          <b>Branch:</b> ${ESCAPED_BRANCH}
           <b>PR:</b> ${ESCAPED_TITLE:-n/a}
 
           <a href="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}">View logs</a>
@@ -554,6 +611,7 @@ jobs:
           token: ${{ steps.app-token.outputs.token }}
           repository: ${{ github.event.client_payload.repo }}
           issue-number: ${{ github.event.client_payload.pr }}
+          comment-id: ${{ needs.build.outputs.comment_id }}
           edit-mode: replace
           body: |
             <!-- central-ios-testflight -->

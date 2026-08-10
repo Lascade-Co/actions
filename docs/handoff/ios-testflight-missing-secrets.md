@@ -4,6 +4,9 @@ For an agent with browser access and the Infisical CLI, logged in to
 `https://secrets.lascade.com` as a user with write access to the `travelanimator`
 project.
 
+The shell commands below assume macOS — `base64 -i` and `plutil` are macOS-specific
+(on Linux use `base64 -w0 < file` and any plist reader).
+
 Infisical project ID: `d3963969-c940-4fd7-84c9-7a38edaf404d`
 Secret path: `/Build`
 
