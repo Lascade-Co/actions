@@ -14,12 +14,14 @@
 #   IOS_NSE_PROVISION_PROFILE_BASE64    – NSE (OneSignal) provisioning profile
 #   IOS_WIDGET_PROVISION_PROFILE_BASE64 – Widget extension profile
 #   IOS_WATCH_PROVISION_PROFILE_BASE64  – Watch app profile
+#   IOS_SHARE_EXT_PROVISION_PROFILE_BASE64 – Share extension profile
 #
 # Outputs (written to GITHUB_ENV, only for profiles that were installed):
 #   APP_PROFILE_UUID,    APP_PROFILE_NAME,    APP_PROFILE_TEAM_ID,    APP_PROFILE_BUNDLE_ID
 #   NSE_PROFILE_UUID,    NSE_PROFILE_NAME,    NSE_PROFILE_TEAM_ID,    NSE_PROFILE_BUNDLE_ID
 #   WIDGET_PROFILE_UUID, WIDGET_PROFILE_NAME, WIDGET_PROFILE_TEAM_ID, WIDGET_PROFILE_BUNDLE_ID
 #   WATCH_PROFILE_UUID,  WATCH_PROFILE_NAME,  WATCH_PROFILE_TEAM_ID,  WATCH_PROFILE_BUNDLE_ID
+#   SHARE_PROFILE_UUID,  SHARE_PROFILE_NAME,  SHARE_PROFILE_TEAM_ID,  SHARE_PROFILE_BUNDLE_ID
 # _PROFILE_BUNDLE_ID is omitted for wildcard profiles.
 
 set -euo pipefail
@@ -95,6 +97,7 @@ install_profile "${IOS_PROVISION_PROFILE_BASE64:-}"        APP    required
 install_profile "${IOS_NSE_PROVISION_PROFILE_BASE64:-}"    NSE    optional
 install_profile "${IOS_WIDGET_PROVISION_PROFILE_BASE64:-}" WIDGET optional
 install_profile "${IOS_WATCH_PROVISION_PROFILE_BASE64:-}"  WATCH  optional
+install_profile "${IOS_SHARE_EXT_PROVISION_PROFILE_BASE64:-}" SHARE optional
 
 # --- Cleanup ---
 rm -f certificate.p12

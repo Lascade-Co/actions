@@ -213,21 +213,6 @@ jobs:
       - name: Install Apple certificate and provisioning profiles
         run: curl -sSL https://raw.githubusercontent.com/Lascade-Co/actions/main/scripts/ios/install_apple_cert.sh | bash
 
-      - name: Install additional provisioning profiles
-        shell: bash
-        run: |
-          PROFILES_DIR="$HOME/Library/MobileDevice/Provisioning Profiles"
-          if [ -n "$IOS_SHARE_EXT_PROVISION_PROFILE_BASE64" ]; then
-            TEMP_PROFILE=$(mktemp)
-            echo "$IOS_SHARE_EXT_PROVISION_PROFILE_BASE64" | base64 --decode > "$TEMP_PROFILE"
-            UUID=$(/usr/libexec/PlistBuddy -c "Print UUID" /dev/stdin \
-              <<< "$(security cms -D -i "$TEMP_PROFILE")")
-            cp "$TEMP_PROFILE" "$PROFILES_DIR/$UUID.mobileprovision"
-            rm -f "$TEMP_PROFILE"
-            echo "SHARE_EXT_PROFILE_UUID=$UUID" >> "$GITHUB_ENV"
-            echo "Installed share extension profile with UUID $UUID"
-          fi
-
       - name: Resolve team and bundle identifiers
         id: ids
         shell: bash
@@ -256,9 +241,13 @@ jobs:
           /usr/libexec/PlistBuddy -c "Add :uploadSymbols bool true" ExportOptions.plist
           /usr/libexec/PlistBuddy -c "Add :provisioningProfiles dict" ExportOptions.plist
           /usr/libexec/PlistBuddy -c "Add :provisioningProfiles:${{ steps.ids.outputs.bundle }} string ${{ env.APP_PROFILE_UUID }}" ExportOptions.plist
-          /usr/libexec/PlistBuddy -c "Add :provisioningProfiles:${{ steps.ids.outputs.bundle }}.OneSignalNotificationServiceExtension string ${{ env.NSE_PROFILE_UUID }}" ExportOptions.plist
-          if [ -n "${{ env.SHARE_EXT_PROFILE_UUID }}" ]; then
-            /usr/libexec/PlistBuddy -c "Add :provisioningProfiles:${{ steps.ids.outputs.bundle }}.MapLinkShareExtension string ${{ env.SHARE_EXT_PROFILE_UUID }}" ExportOptions.plist
+          # Key each extension off the bundle id carried by its own profile rather
+          # than a hardcoded suffix — this runner serves every iOS app in the org.
+          if [ -n "${{ env.NSE_PROFILE_BUNDLE_ID }}" ] && [ -n "${{ env.NSE_PROFILE_UUID }}" ]; then
+            /usr/libexec/PlistBuddy -c "Add :provisioningProfiles:${{ env.NSE_PROFILE_BUNDLE_ID }} string ${{ env.NSE_PROFILE_UUID }}" ExportOptions.plist
+          fi
+          if [ -n "${{ env.SHARE_PROFILE_BUNDLE_ID }}" ] && [ -n "${{ env.SHARE_PROFILE_UUID }}" ]; then
+            /usr/libexec/PlistBuddy -c "Add :provisioningProfiles:${{ env.SHARE_PROFILE_BUNDLE_ID }} string ${{ env.SHARE_PROFILE_UUID }}" ExportOptions.plist
           fi
 
       # A resolved SwiftPM cache is ~4 GB: too big for the Actions cache, whose

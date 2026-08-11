@@ -11,6 +11,7 @@ Optional (each required only when the matching target exists in the project):
     WIDGET_PROFILE_NAME        – Profile for a widget / live-activity extension
     LIVE_ACTIVITY_PROFILE_NAME – Legacy alias for WIDGET_PROFILE_NAME (backward compat)
     WATCH_PROFILE_NAME         – Profile for a watchOS companion app
+    SHARE_PROFILE_NAME         – Profile for a share extension
     IOS_TEAM_ID                – Development team; rewritten on every target when set
     PBXPROJ_PATH               – Path to project.pbxproj
                                  (default: ios/Runner.xcodeproj/project.pbxproj)
@@ -37,6 +38,7 @@ def main():
         "LIVE_ACTIVITY_PROFILE_NAME"
     )
     watch_name = os.environ.get("WATCH_PROFILE_NAME")
+    share_name = os.environ.get("SHARE_PROFILE_NAME")
 
     if not app_name:
         print("ERROR: APP_PROFILE_NAME must be set", file=sys.stderr)
@@ -58,6 +60,11 @@ def main():
                 print(f"ERROR: WATCH_PROFILE_NAME required for target {bundle}", file=sys.stderr)
                 sys.exit(1)
             return watch_name
+        if "shareextension" in bundle.lower():
+            if not share_name:
+                print(f"ERROR: SHARE_PROFILE_NAME required for target {bundle}", file=sys.stderr)
+                sys.exit(1)
+            return share_name
         if "widget" in bundle.lower() or "liveactivity" in bundle.lower():
             if not widget_name:
                 print(
