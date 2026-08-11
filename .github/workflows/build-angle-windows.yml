@@ -1,0 +1,234 @@
+name: Build ANGLE (Windows)
+run-name: "ANGLE ${{ inputs.revision }} · win-${{ inputs.target_cpu }}"
+
+# Manual only, and that is the design rather than an omission. ANGLE is rebuilt when its pinned
+# revision moves -- roughly never -- and the output is a SHA-256-pinned release asset, not a
+# per-build artifact. A push or schedule trigger would spend two hours of Windows runner time
+# reproducing a file that is already pinned by digest.
+on:
+  workflow_dispatch:
+    inputs:
+      revision:
+        description: "ANGLE revision (40 hex). Must match every other platform's."
+        required: true
+        default: be80ce591a481c12d60c50d6040d40c035b40a2b
+      target_cpu:
+        description: Windows CPU to build for
+        required: true
+        type: choice
+        options:
+          - x64
+          - arm64
+        default: x64
+      include_d3dcompiler:
+        description: "Ship d3dcompiler_47.dll (from the Windows SDK) beside the ANGLE pair"
+        required: true
+        type: boolean
+        default: true
+      acknowledge_revision_bump:
+        description: "Tick ONLY when deliberately moving off the shared pinned revision"
+        required: false
+        type: boolean
+        default: false
+      publish:
+        description: "Upload the zip to the angle-<short-rev> release on travel-animator-shared"
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+# Two runs against the same CPU would fight over the same release asset name. Not
+# cancel-in-progress: a two-hour build that gets cancelled at minute 115 has wasted a runner, and
+# nothing downstream is waiting on it.
+concurrency:
+  group: build-angle-windows-${{ inputs.target_cpu }}
+  cancel-in-progress: false
+
+# ---------------------------------------------------------------------------------------------
+# ⚠️ NOTHING IN THIS FILE HAS EVER RUN.
+#
+# Chromium's Windows build needs a Windows host with Visual Studio, and ANGLE does not support
+# cross-compiling to Windows from macOS, so this workflow could not be smoke-tested on the machine
+# it was written on -- not the gn args, not the ninja target names, not the runner's disk budget.
+# What WAS verified, and what a first run is therefore mostly re-checking:
+#
+#   * every `gn` arg name and default, read out of `gni/angle.gni` at revision be80ce59;
+#   * `libEGL` / `libGLESv2` are still the root BUILD.gn target names, and `angle_libs_suffix` is
+#     "" off Android, so the outputs really are `libEGL.dll` / `libGLESv2.dll`;
+#   * `copy_compiler_dll` exists at the root, and copies d3dcompiler_47.dll out of the Windows
+#     SDK's Redist/D3D/<cpu> folder rather than compiling it (risk R15 -- see the build script);
+#   * that ANGLE's shipped libGLESv2.dll loads d3dcompiler by name at run time, confirmed by
+#     reading the PE import and delay-import tables of Skiko's 2.1.25511 Windows build.
+#
+# The likely first-run failures, in the order they would show up: depot_tools' toolchain probe
+# (DEPOT_TOOLS_WIN_TOOLCHAIN), disk exhaustion during `gclient sync`, and the Windows SDK's
+# Redist/D3D component being absent from the runner image.
+#
+# WHY IT EXISTS. Windows' ANGLE today comes from Skiko's Maven artifact at 2.1.25511 while macOS's
+# comes from a Chrome install at 2.1.28226: two shader translators, two rasterisations of the same
+# frame. Building every platform from the ONE revision this project pins is what retires that
+# (risk R14), and it is why `revision` defaults to the shared pin and why moving off it needs a
+# second, deliberate tick.
+#
+# The publish half follows travel-animator-shared's `third_party/angle/PROVENANCE.md`: one release
+# per revision, one asset per platform, pinned downstream by SHA-256 and by REST asset id.
+# ---------------------------------------------------------------------------------------------
+jobs:
+  build:
+    name: ANGLE win-${{ inputs.target_cpu }}
+    runs-on: windows-latest
+    # ANGLE is a ~2 GB clone plus a `gclient sync` plus a from-scratch build of the translator and
+    # the D3D11 backend. Four hours is deliberately generous for a workflow with no prior run.
+    timeout-minutes: 240
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      # The R14 guard. The default is the shared pin; anything else is a decision that has to be
+      # made twice, because a Windows-only revision reintroduces exactly the split this build
+      # exists to close.
+      - name: Refuse an accidental revision bump
+        env:
+          REVISION: ${{ inputs.revision }}
+          ACKNOWLEDGED: ${{ inputs.acknowledge_revision_bump }}
+        run: |
+          $pinned = 'be80ce591a481c12d60c50d6040d40c035b40a2b'
+          if ($env:REVISION -notmatch '^[0-9a-f]{40}$') {
+            throw "revision must be a 40-character lowercase hex SHA; got '$env:REVISION'"
+          }
+          if ($env:REVISION -ne $pinned -and $env:ACKNOWLEDGED -ne 'true') {
+            throw @"
+          Refusing to build $env:REVISION: every other platform is pinned to $pinned.
+
+          One revision everywhere is the point of this workflow -- a Windows-only ANGLE is a second
+          shader translator and a second set of pixels (risk R14). If the pin really is moving,
+          re-run with acknowledge_revision_bump ticked, and move ALL of these in the same change:
+            * travel-animator-shared build.gradle.kts  -> angleRevision / angleSha256 / angleAssetUrl
+            * travel-animator-shared third_party/angle/PROVENANCE.md
+            * this workflow's `revision` default and the guard above
+          "@
+          }
+          Write-Host "revision: $env:REVISION"
+
+      # ANGLE's checkout plus its build output is comfortably the largest thing this org puts on a
+      # runner. Recording the starting figure makes a mid-sync "no space left" self-explanatory
+      # instead of mysterious.
+      - name: Report disk before
+        run: Get-PSDrive -PSProvider FileSystem | Format-Table -AutoSize | Out-String | Write-Host
+
+      - name: Fetch the build script
+        env:
+          SCRIPT_URL: https://raw.githubusercontent.com/Lascade-Co/actions/main/scripts/angle/build_angle_windows.ps1
+        run: |
+          New-Item -ItemType Directory -Force -Path ci-scripts | Out-Null
+          Invoke-WebRequest -Uri $env:SCRIPT_URL -OutFile ci-scripts/build_angle_windows.ps1
+          Write-Host "fetched $((Get-Item ci-scripts/build_angle_windows.ps1).Length) bytes"
+
+      # Everything -- depot_tools, the checkout, gn, ninja, the assertions, the packaging -- is in
+      # the script, so the exact command that produced an asset can be re-run by hand on any
+      # Windows box with the same three arguments.
+      - name: Build and package ANGLE
+        id: angle
+        run: |
+          ./ci-scripts/build_angle_windows.ps1 `
+            -Revision '${{ inputs.revision }}' `
+            -TargetCpu '${{ inputs.target_cpu }}' `
+            -IncludeD3dCompiler '${{ inputs.include_d3dcompiler }}' `
+            -OutDir "$env:GITHUB_WORKSPACE/angle-out"
+
+      - name: Report disk after
+        if: ${{ !cancelled() }}
+        run: Get-PSDrive -PSProvider FileSystem | Format-Table -AutoSize | Out-String | Write-Host
+
+      # The three lines a human has to copy into build.gradle.kts and PROVENANCE.md, printed
+      # where they can be copied from rather than dug out of a log.
+      #
+      # The doubled backticks below are not a typo and not markdown: inside a PowerShell
+      # double-quoted here-string the backtick is the escape character, so ```` `` ```` is how you
+      # emit ONE literal backtick. Collapsing them to single ones deletes the code spans.
+      - name: Summarise the artifact
+        env:
+          ZIP_NAME: ${{ steps.angle.outputs.zip_name }}
+          SHA256: ${{ steps.angle.outputs.sha256 }}
+          BYTES: ${{ steps.angle.outputs.bytes }}
+          RELEASE_TAG: ${{ steps.angle.outputs.release_tag }}
+          REVISION: ${{ inputs.revision }}
+        run: |
+          $summary = @"
+          ## ANGLE ``$env:REVISION`` - windows-${{ inputs.target_cpu }}
+
+          | | |
+          |---|---|
+          | Asset | ``$env:ZIP_NAME`` ($env:BYTES bytes) |
+          | SHA-256 | ``$env:SHA256`` |
+          | Release | ``$env:RELEASE_TAG`` on ``Lascade-Co/travel-animator-shared`` |
+          | d3dcompiler_47.dll shipped | ``${{ inputs.include_d3dcompiler }}`` |
+
+          The zip root holds ``libEGL.dll``, ``libGLESv2.dll``, ANGLE's ``LICENSE`` and
+          ``PROVENANCE.json`` - which is exactly the flat set
+          ``build_jvm_payload.py --angle-dir`` copies into a wheel's ``_jvm/angle/``.
+          ``include/`` and ``lib/`` are siblings and deliberately do not reach the wheel.
+          "@
+          Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value $summary
+
+      - name: Upload the ANGLE zip
+        uses: actions/upload-artifact@v7
+        with:
+          name: angle-windows-${{ inputs.target_cpu }}
+          path: angle-out/
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+
+      # travel-animator-shared is private and lives under Lascade-Co, so this needs an App
+      # installation token scoped to that one repo -- the same mint the wheel workflow uses.
+      - name: Mint GitHub App token (shared)
+        id: app-token
+        if: ${{ inputs.publish }}
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ secrets.CI_APP_CLIENT_ID }}
+          private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
+          owner: Lascade-Co
+          repositories: travel-animator-shared
+
+      # One release per revision, one asset per platform: the iOS zip is already attached to
+      # `angle-be80ce59`, so a Windows build at the same revision joins it rather than creating a
+      # second release. `--clobber` makes a re-run replace its own asset instead of failing.
+      - name: Publish the release asset
+        if: ${{ inputs.publish }}
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          RELEASE_TAG: ${{ steps.angle.outputs.release_tag }}
+          ZIP: ${{ steps.angle.outputs.zip }}
+          REPO: Lascade-Co/travel-animator-shared
+          REVISION: ${{ inputs.revision }}
+        run: |
+          # "Does this release exist?" is asked by letting `gh` fail, so native failures must set
+          # $LASTEXITCODE rather than throw -- which is what PowerShell 7.4 does by default under
+          # the `$ErrorActionPreference = 'stop'` the pwsh shell prepends.
+          $PSNativeCommandUseErrorActionPreference = $false
+          gh release view $env:RELEASE_TAG --repo $env:REPO 2>$null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create $env:RELEASE_TAG --repo $env:REPO `
+              --title "ANGLE $env:RELEASE_TAG" `
+              --notes "ANGLE at $env:REVISION. One revision per release; one asset per platform."
+            if ($LASTEXITCODE -ne 0) { throw 'gh release create failed' }
+          }
+          gh release upload $env:RELEASE_TAG $env:ZIP --repo $env:REPO --clobber
+          if ($LASTEXITCODE -ne 0) { throw 'gh release upload failed' }
+
+          # The asset id, not the browser URL: the repo is private, so the download path that
+          # works unauthenticated-404s. `downloadAngle` in shared's build.gradle.kts wants this
+          # REST endpoint plus the SHA-256 above.
+          $name = Split-Path -Leaf $env:ZIP
+          $id = gh api "repos/$env:REPO/releases/tags/$env:RELEASE_TAG" `
+                  --jq ".assets[] | select(.name == `"$name`") | .id"
+          if ($LASTEXITCODE -ne 0) { throw 'gh api (asset id) failed' }
+          Write-Host "asset id: $id"
+          Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value @"
+
+          Asset API URL: ``https://api.github.com/repos/$env:REPO/releases/assets/$id``
+          "@
