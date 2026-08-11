@@ -32,17 +32,6 @@ ELF_MAGIC = b"\x7fELF"
 GLIBC_SYMBOL = re.compile(rb"GLIBC_(\d+)\.(\d+)")
 TAG = re.compile(r"manylinux_(\d+)_(\d+)_")
 
-# Every external library the payload's ELFs name in DT_NEEDED that is NOT on the
-# manylinux whitelist. Anything here turning up in a `.libs/` got vendored after all.
-EXPECTED_EXTERNAL = {
-    "libEGL.so.1", "libGLESv2.so.2", "libGL.so.1",   # must be the host's driver
-    "libX11.so.6", "libfontconfig.so.1",             # Skiko links them; host-owned
-    "libXtst.so.6", "libXi.so.6", "libXrender.so.1", "libXext.so.6",
-    "libasound.so.2", "libpng16.so.16", "libuuid.so.1", "libz.so.1",
-    "libfreetype.so.6",                              # java.desktop, never loaded headless
-}
-
-
 def elf_glibc_versions(data: bytes) -> set[tuple[int, int]]:
     """Every `GLIBC_x.y` version string in the file.
 
@@ -101,8 +90,11 @@ def main() -> int:
           f"GLIBC_{worst[0]}.{worst[1]} in {worst_file}")
 
     if vendored:
-        # A `.libs/` here can only hold one of EXPECTED_EXTERNAL, every one of
-        # which must come from the host.
+        # Everything this payload needs beyond the manylinux whitelist must come from
+        # the HOST: libEGL/libGLESv2/libGL (the driver), libX11 and libfontconfig
+        # (Skiko links both directly), and the java.desktop set -- libXtst, libXi,
+        # libXrender, libXext, libasound, libpng16, libuuid, libz, libfreetype -- which
+        # is never loaded headless. A `.libs/` means auditwheel vendored one anyway.
         print(f"REFUSING: {len(vendored)} vendored libraries found, e.g. "
               f"{vendored[:3]}. Nothing in this payload may be vendored.",
               file=sys.stderr)
