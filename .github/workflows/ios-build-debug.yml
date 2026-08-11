@@ -263,6 +263,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           ACTOR: ${{ github.actor }}
           BUNDLE: ghcr.io/lascade-co/ios-spm-cache:spm-${{ hashFiles('**/Package.resolved') }}
+          FALLBACK: ghcr.io/lascade-co/ios-spm-cache:${{ steps.repo.outputs.name }}-latest
         run: |
           set -uo pipefail
           mkdir -p "$RUNNER_TEMP/bin"
@@ -278,10 +279,18 @@ jobs:
           if oras pull "$BUNDLE" -o "$WORK" && [ -f "$WORK/spm-cache.tar" ]; then
             tar -xf "$WORK/spm-cache.tar" -C "$HOME/Library/Caches"
             echo "hit=true" >> "$GITHUB_OUTPUT"
-            echo "Restored SPM bundle from $BUNDLE"
+            echo "Restored exact bundle $BUNDLE"
+          elif oras pull "$FALLBACK" -o "$WORK" && [ -f "$WORK/spm-cache.tar" ]; then
+            # Package.resolved changed, but a dependency set rarely changes
+            # wholesale. Seeding from the previous bundle leaves SwiftPM to fetch
+            # only what actually moved, instead of all 35 packages. hit stays
+            # false so the new exact tag still gets published below.
+            tar -xf "$WORK/spm-cache.tar" -C "$HOME/Library/Caches"
+            echo "hit=false" >> "$GITHUB_OUTPUT"
+            echo "No exact bundle; seeded from $FALLBACK and resolving the delta"
           else
             echo "hit=false" >> "$GITHUB_OUTPUT"
-            echo "No bundle at $BUNDLE - resolving cold, will publish afterwards"
+            echo "No bundle at $BUNDLE or $FALLBACK - resolving cold"
           fi
           rm -rf "$WORK"
 
@@ -305,6 +314,7 @@ jobs:
         shell: bash
         env:
           BUNDLE: ghcr.io/lascade-co/ios-spm-cache:spm-${{ hashFiles('**/Package.resolved') }}
+          FALLBACK: ghcr.io/lascade-co/ios-spm-cache:${{ steps.repo.outputs.name }}-latest
         run: |
           set -euo pipefail
           WORK=$(mktemp -d)
@@ -320,7 +330,10 @@ jobs:
             --artifact-type application/vnd.lascade.ios-spm-cache.v1 \
             --annotation "org.opencontainers.image.source=https://github.com/${{ github.repository }}" \
             spm-cache.tar:application/octet-stream
-          echo "Published $BUNDLE"
+          # Move the per-repo pointer so the next Package.resolved change has
+          # something to seed from. Best-effort: the exact tag is what matters.
+          oras tag "$BUNDLE" "${FALLBACK##*:}" || echo "warning: could not move $FALLBACK"
+          echo "Published $BUNDLE and moved $FALLBACK"
           rm -rf "$WORK"
 
       - name: Compute build number
