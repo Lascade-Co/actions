@@ -5,9 +5,21 @@ on:
   repository_dispatch:
     types: [publish-spm]
 
+# Queue publishes, never cancel one. A publish is not idempotent partway through: the job
+# pushes the xcframework to the SPM branch and creates tag v<new_version> BEFORE committing the
+# bumped VERSION back to the source repo. Cancelled between those two pushes, the tag exists but
+# VERSION does not advance, so the next run recomputes the same version and dies on "tag already
+# exists" — every later publish fails until someone bumps VERSION or deletes the tag by hand.
+# That exact failure has happened before, from a different cause; see the comment on the
+# "Commit version bump back to source repo" step below.
+#
+# cancel-in-progress: true is the right default for CI that only reports on a commit, because a
+# newer commit's answer supersedes an older one. It is the wrong default for a job with side
+# effects outside its own run. The cost of queueing is a slower publish when pushes come fast;
+# the cost of cancelling is a stuck pipeline needing manual repair.
 concurrency:
   group: publish-spm-${{ github.event.client_payload.repo }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   publish:
