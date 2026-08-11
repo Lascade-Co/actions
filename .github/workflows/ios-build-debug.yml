@@ -322,8 +322,14 @@ jobs:
           tar -cf "$WORK/spm-cache.tar" -C "$HOME/Library/Caches" org.swift.swiftpm
           du -h "$WORK/spm-cache.tar"
           cd "$WORK"
+          # image.source links the package to this repo, so the repo's
+          # GITHUB_TOKEN inherits read access. Without it the package belongs to
+          # whoever pushed it and later runs get a 'not found'. The bundle must
+          # stay private regardless: it contains a mirror of the private
+          # travel-animator-shared repo.
           oras push "$BUNDLE" \
             --artifact-type application/vnd.lascade.ios-spm-cache.v1 \
+            --annotation "org.opencontainers.image.source=https://github.com/${{ github.repository }}" \
             spm-cache.tar:application/octet-stream
           echo "Published $BUNDLE"
           rm -rf "$WORK"
