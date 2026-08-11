@@ -72,7 +72,7 @@ env:
 #
 # `ta-render.jar` is built ONCE and passed as an artifact, because it is architecture-neutral
 # (all six LWJGL classifiers, tada commit c8dcfec). That keeps Gradle -- a three-build composite
-# over tada + shared + rentile -- off the other four runners entirely.
+# over tada + shared -- off the other four runners entirely.
 #
 # ⚠️ NOTHING IN THIS FILE HAS EVER RUN. It was written against artifacts verified locally
 # (a real ta-render.jar, real manylinux containers, a real Debian bookworm install) but no
@@ -243,42 +243,15 @@ jobs:
           token: ${{ steps.app-token.outputs.token }}
           persist-credentials: false
 
-      # tada's second submodule. The root settings.gradle.kts pulls `rentile` in as a composite
-      # `includeBuild`, so the Gradle steps below cannot even CONFIGURE without it checked out.
+      # NO rentile checkout. It used to be tada's second submodule, pulled in as a composite
+      # `includeBuild`, and two steps here resolved its revision and owner/repo out of
+      # `.gitmodules` so the Gradle configure phase could find it. That is gone: rentile
+      # publishes to Maven Central and `shared/build.gradle.kts` asks for a version like any
+      # other dependency, so the ordinary dependency cache resolves it.
       #
-      # BOTH the revision and the OWNER/REPO are read out of the checkout rather than hardcoded.
-      # That is load-bearing: while the jvm-target change is in review the pin lives on a fork,
-      # and a hardcoded `repository:` would silently resolve to a repo that does not contain the
-      # pinned SHA -- failing as "Reference not found", which reads like a push problem rather
-      # than a wiring one.
-      - name: Read pinned rentile revision and origin
-        id: rentile
-        run: |
-          set -euo pipefail
-          echo "revision=$(git rev-parse HEAD:rentile)" >> "$GITHUB_OUTPUT"
-          url="$(git config -f .gitmodules submodule.rentile.url)"
-          slug="${url#git@github.com:}"
-          slug="${slug#https://github.com/}"
-          slug="${slug%.git}"
-          case "$slug" in
-            */*) ;;
-            *) echo "::error::could not parse an owner/repo out of submodule.rentile.url='$url'"; exit 1 ;;
-          esac
-          echo "repository=$slug" >> "$GITHUB_OUTPUT"
-          echo "rentile: $slug @ $(git rev-parse HEAD:rentile)"
-
-      # Deliberately NOT the App token. create-github-app-token scopes to exactly ONE owner,
-      # and rentile lives under a personal account, so adding it to that `repositories:` list
-      # would make the mint itself fail. It needs no token anyway -- the repo (and any fork we
-      # point at) is PUBLIC. Keep whatever we point at public.
-      - name: Check out pinned rentile
-        uses: actions/checkout@v6
-        with:
-          repository: ${{ steps.rentile.outputs.repository }}
-          ref: ${{ steps.rentile.outputs.revision }}
-          path: rentile
-          token: ${{ github.token }}
-          persist-credentials: false
+      # Do not reinstate those steps. They ran `git rev-parse HEAD:rentile` under
+      # `set -euo pipefail`, so with the submodule removed they do not degrade -- they kill the
+      # job before it configures anything.
 
       - name: Install headless OpenGL/GLES runtime
         run: |
