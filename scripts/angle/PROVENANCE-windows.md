@@ -13,6 +13,10 @@
 > `publish-tada-wheel.yml` **fails on purpose** with a message pointing here. That is the correct
 > state — see [The Windows gap](#the-windows-gap).
 
+> **Doing the build?** [`BUILDING-WINDOWS.md`](BUILDING-WINDOWS.md) beside this file is the
+> step-by-step operator guide — machine prep, the run, verification, publish, and a
+> symptom→cause→fix table. This file stays the *record* of what is pinned and why.
+
 The JVM host renderer needs GLES 3.0, and Windows has no system GLES. It therefore ships
 [ANGLE](https://chromium.googlesource.com/angle/angle) on its D3D11 backend inside the wheel, the
 same way macOS ships ANGLE on Metal.
@@ -228,9 +232,18 @@ build actually did.
    asserts this.
 2. The version string reads `ANGLE 2.1.28587 git hash: be80ce591a48`. A different number means a
    shallow clone or a different revision, not a harmless variation.
-3. A GLES 3.0 probe through the built pair: stage `ta-render.jar` + a JRE + the DLLs and run
-   `java -jar ta-render.jar self-test --angle-dir <dist>`; expect exit 0 and a `gl_probe` event with
+3. A GLES 3.0 probe through the built pair: `java -jar ta-render.jar self-test --angle-dir <dist>`;
+   expect exit 0 and a `gl_probe` event with
    `"driver":"bundled ANGLE at <dist>, backend=d3d11, os=Windows"`.
+
+   **`ta-render.jar` must be BUILT ON THE WINDOWS BOX** — it is not portable, despite appearances.
+   Verified by listing a macOS-built jar: LWJGL natives are fat (all six platforms, including
+   `windows/x64/org/lwjgl/lwjgl.dll`), but Skiko natives are host-only —
+   `libskiko-macos-{arm64,x64}.dylib` and no `skiko-windows-x64.dll`, because
+   `shared/build.gradle.kts:278` derives `skiko-awt-runtime-$skikoHostOs-$skikoHostArch` from the
+   *build host's* `os.name`. A copied jar loads, then dies at Skiko's first draw. The per-platform
+   wheel CI is unaffected (each leg builds its own jar); only hand-staging is. See
+   [`BUILDING-WINDOWS.md` §3.2](BUILDING-WINDOWS.md#32-the-gles-30-probe--you-must-build-ta-renderjar-on-this-machine).
 4. A full render compared against the reference. macOS's build produced output **bit-identical** to
    the previous reference render; Windows will not match macOS byte-for-byte (different rasterizer),
    so the comparison that matters there is against the same-platform reference, or a perceptual one.
