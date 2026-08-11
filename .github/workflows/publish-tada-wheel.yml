@@ -40,13 +40,10 @@ env:
   # Built from source on an M2, 2026-08-11, and verified to produce a BIT-IDENTICAL 695-frame
   # render to the previous reference. See travel-animator-shared third_party/angle/PROVENANCE-macos.md.
   ANGLE_SHA256_MACOS: dfe3d633b280bf2479189716ad3ab14381260180bd5c5246c3d80913eb477e30
-  # ⚠️ EMPTY ON PURPOSE, AND IT FAILS THE WINDOWS LEG. No Windows ANGLE has been built at this
-  # revision -- it needs a Windows host with Visual Studio, which nothing in this project has had.
-  # scripts/angle/PROVENANCE-windows.md is the one-time recipe and the publish commands; filling
-  # this in with the published digest is what unblocks Windows wheels. Do NOT unblock it by
-  # pointing the leg at Skiko's `skiko-awt-runtime-angle-windows-x64`: that is ANGLE 2.1.25511
-  # against our 2.1.28587, which is precisely the skew this pin exists to prevent.
-  # Built by hand 2026-08-11 (see scripts/angle/PROVENANCE-windows.md). This digest is of the
+  # Built by hand on a real Windows host 2026-08-11, published, and verified through
+  # scripts/angle/fetch_pinned_angle.py against the release. Do NOT ever replace this with Skiko's
+  # `skiko-awt-runtime-angle-windows-x64`: that is ANGLE 2.1.25511 against our 2.1.28587, which is
+  # precisely the skew this pin exists to prevent. See scripts/angle/PROVENANCE-windows.md. This digest is of the
   # REPACKED asset: the Windows build wrote its zip entries with backslash separators, which the
   # ZIP spec forbids and which extract as flat files named `include\EGL\egl.h` on Linux/macOS.
   # Only the separators changed -- all 24 entries are byte-identical to the original and every
