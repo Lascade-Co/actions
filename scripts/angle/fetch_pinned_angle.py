@@ -199,6 +199,14 @@ def unpack(archive: Path, out: Path) -> list[str]:
     dylib does not need the execute bit to be `dlopen`ed, so this is belt-and-braces --
     but the wheel's own executable-bit handling is a solved-then-regressed problem in this
     repo (see assert_wheel_exec_bit.py) and losing modes here would be one more way in.
+
+    Backslash separators are normalised. The ZIP spec mandates `/`, but the first Windows
+    ANGLE build wrote `include\\EGL\\egl.h`, which `zipfile` treats as a FILENAME on POSIX
+    -- so `include/` and `lib/` extract as a handful of flat files with backslashes in
+    their names instead of a tree, silently. The published asset is repacked and does not
+    need this; it is here so a future Windows build cannot reintroduce the problem
+    quietly. Root-level entries (the DLLs `build_jvm_payload.py` actually copies) were
+    never affected, which is exactly why this would have gone unnoticed.
     """
     if out.exists():
         shutil.rmtree(out)
@@ -206,6 +214,13 @@ def unpack(archive: Path, out: Path) -> list[str]:
     names: list[str] = []
     with zipfile.ZipFile(archive) as zf:
         for info in zf.infolist():
+            if "\\" in info.filename:
+                print(
+                    f"note: normalising backslash separators in {info.filename!r} "
+                    "-- this asset was packed on Windows against the ZIP spec",
+                    file=sys.stderr,
+                )
+                info.filename = info.filename.replace("\\", "/")
             extracted = Path(zf.extract(info, out))
             if info.is_dir():
                 continue

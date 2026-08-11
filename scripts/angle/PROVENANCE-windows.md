@@ -1,17 +1,50 @@
 # ANGLE (Windows) — provenance
 
-> ## ⚠️ STATUS: NOT BUILT YET. There is no Windows ANGLE asset.
+> ## ✅ STATUS: BUILT 2026-08-11. Not yet executed on a GPU.
 >
-> This is the **recipe**, not a record of a build. Nothing described below has been executed
-> anywhere: Chromium's Windows build needs a Windows host with Visual Studio and does not
-> cross-compile from macOS, which is the only machine this project's ANGLE work has run on. Every
-> `gn` argument, target name and output path was read out of ANGLE's own `gni/angle.gni` and
-> `BUILD.gn` **at the pinned revision** rather than recalled; the places where that reading could
-> still be wrong are called out inline. **Treat the first run as a debugging session, not a build.**
+> The recipe below has been run once, on a real Windows host, and it worked. What is **still**
+> unverified is the *runtime*: nobody has yet created a GLES context through these DLLs, so
+> `GlDriver.jvm.kt`'s `preloadWindowsGles` workaround remains untested and is the most likely
+> first failure. See [Verify before publishing](#verify-before-publishing) — step 3 is the
+> outstanding one.
 >
-> Until someone runs it once and publishes the asset, the `windows-x64` leg of
-> `publish-tada-wheel.yml` **fails on purpose** with a message pointing here. That is the correct
-> state — see [The Windows gap](#the-windows-gap).
+> | | |
+> |---|---|
+> | Asset | `angle-be80ce59-windows-x64.zip`, 4,635,030 bytes, 24 entries |
+> | SHA-256 | `8a2732e41e0e14471fe7f852c6ee13a1ace13ed2178231c8d16353e1b35a59cc` |
+> | Version string | `ANGLE 2.1.28587 git hash: be80ce591a48` — **matches the pin exactly** |
+> | Build host | Windows 10 Home Single Language · VS 2022 Build Tools 17.14.37 · MSVC 14.44.35207 · Windows SDK 10.0.26100.0 |
+>
+> **The asset was repacked before publication.** The Windows build wrote its zip entries with
+> **backslash** separators (`include\EGL\egl.h`), which the ZIP spec forbids; on Linux and macOS
+> `zipfile` treats those as filenames, so `include/` and `lib/` extract as a handful of flat files
+> instead of a tree — silently. Only the separators were changed: all 24 entries are byte-identical
+> to the original and every digest in the asset's own `PROVENANCE.json` still verifies against the
+> repack. The digest above is the repacked one. `fetch_pinned_angle.py` now normalises backslashes
+> defensively so a future build cannot reintroduce this quietly.
+> (`PROVENANCE.json`'s internal `files` map still uses backslash keys. That is deliberate — it is
+> the build's own record and was not rewritten; a consumer reading it should normalise.)
+>
+> ### Deviations from the pinned recipe — host toolchain only
+>
+> All four are recorded in the asset's `PROVENANCE.json`. None touches the ANGLE source, so the
+> shader translator is identical to the macOS and iOS builds, which is what risk R14 turns on.
+>
+> - **Windows SDK 10.0.26100.0** instead of the upstream-pinned **10.0.28000.0** — 28000 ships only
+>   with the VS 2026 Preview / Windows Insider SDK and was not obtainable via winget on this host.
+>   `SDK_VERSION` patched in `build/vs_toolchain.py` and `build/toolchain/win/setup_toolchain.py`.
+> - **`NTDDI_VERSION`** lowered from `NTDDI_WIN11_BR` (undefined in SDK 26100) to `NTDDI_WIN11_GE`
+>   (`0x0A000010`) in `build/config/win/BUILD.gn`.
+> - **`dbghelp.dll` made optional** in `_CopyDebugger` — Debugging Tools for Windows not installed;
+>   those DLLs are a symbolization convenience and are not in the shipped payload.
+> - **VS at a non-standard path** (`F:\VS\BuildTools`), located via `vs2022_install`.
+>
+> Two `gn` args were added beyond the block in [Build](#build): **`use_siso = false`** (the source
+> tree was on `F:` and the SDK on `C:`; siso cannot relativize cross-drive header paths, plain ninja
+> can) and **`angle_enable_wgpu = false`**.
+>
+> ⚠️ **This build is not guaranteed byte-identical to one produced against the pinned SDK 28000.**
+> The revision matches, so pixels should; the toolchain does not, so binaries will not.
 
 > **Doing the build?** [`BUILDING-WINDOWS.md`](BUILDING-WINDOWS.md) beside this file is the
 > step-by-step operator guide — machine prep, the run, verification, publish, and a
@@ -284,10 +317,15 @@ Then, in the same change:
   above (it is empty today, which is what fails the leg);
 - replace the STATUS banner at the top of this file with what was built, measured and verified.
 
-## The Windows gap
+## The Windows gap — closed 2026-08-11
 
-Until that upload happens, `publish-tada-wheel.yml`'s `windows-x64` leg fails at **Fetch the pinned
-ANGLE**, before it builds anything, with a message naming this file. Deliberately:
+`ANGLE_SHA256_WINDOWS_X64` is now set, so the `windows-x64` leg fetches and verifies the published
+asset like every other platform. What follows is the state it was in before, kept because it
+records *why* the leg failed loudly rather than falling back — and why it must go on doing so if
+the asset ever becomes unavailable.
+
+Before the upload, `publish-tada-wheel.yml`'s `windows-x64` leg failed at **Fetch the pinned
+ANGLE**, before it built anything, with a message naming this file. Deliberately:
 
 - There is no Windows wheel to ship without an ANGLE pair — `build_jvm_payload.py` hard-fails a
   Windows payload with no `--angle-dir`, because the wheel would install and then die at

@@ -46,7 +46,12 @@ env:
   # this in with the published digest is what unblocks Windows wheels. Do NOT unblock it by
   # pointing the leg at Skiko's `skiko-awt-runtime-angle-windows-x64`: that is ANGLE 2.1.25511
   # against our 2.1.28587, which is precisely the skew this pin exists to prevent.
-  ANGLE_SHA256_WINDOWS_X64: ""
+  # Built by hand 2026-08-11 (see scripts/angle/PROVENANCE-windows.md). This digest is of the
+  # REPACKED asset: the Windows build wrote its zip entries with backslash separators, which the
+  # ZIP spec forbids and which extract as flat files named `include\EGL\egl.h` on Linux/macOS.
+  # Only the separators changed -- all 24 entries are byte-identical to the original and every
+  # digest in the asset's own PROVENANCE.json still verifies.
+  ANGLE_SHA256_WINDOWS_X64: 8a2732e41e0e14471fe7f852c6ee13a1ace13ed2178231c8d16353e1b35a59cc
 
 # ---------------------------------------------------------------------------------------------
 # Shape (KMP renderer migration, backlog C1/C2/C3/C8/C10)
