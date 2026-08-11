@@ -15,6 +15,31 @@ run-name: "travel-animator → pypi @ ${{ inputs.sha }}"
 #
 # The private `tada` wheel is built here too (one build path for both distributions) but is
 # never uploaded; stage_public_wheel.sh enforces that.
+#
+# ---------------------------------------------------------------------------------------------
+# ⚠️ THIS WORKFLOW WILL NOW FAIL AT "Stage only the public wheel", AND THAT IS DELIBERATE.
+# ---------------------------------------------------------------------------------------------
+# `travel-animator` became a PLATFORM wheel when it started carrying the JVM renderer payload
+# (backlog C1). This workflow still builds only the pure `py3-none-any` wheel, and
+# stage_public_wheel.sh now refuses to publish one -- because a `py3-none-any` file on PyPI is
+# what every platform we did NOT build resolves to, it carries no payload, and a PyPI release
+# is IMMUTABLE: it can be yanked but never replaced.
+#
+# Failing here is strictly better than the alternative, which is one manual dispatch quietly
+# shadowing the whole matrix forever. What this workflow still owes, before the next PyPI
+# release:
+#
+#   * the same `wheel` matrix publish-tada-wheel.yml grew -- linux-x64 (manylinux_2_28),
+#     linux-arm64 (manylinux_2_34; capped by LWJGL's aarch64 native), windows-x64, and
+#     macos-arm64 once backlog C5 gives us a redistributable ANGLE
+#   * `EXPECT_WHEELS` set to that leg count, so a leg that silently failed cannot ship a
+#     partial matrix
+#   * a PyPI per-file size-limit increase (backlog C7): the measured wheels are 66-75 MB
+#     against a 100 MB default, so this is not urgent, but it is human-reviewed and slow
+#
+# Until then, `pip install travel-animator` keeps serving the last pure wheel already on the
+# index, which is the pre-migration behaviour and is exactly right: the renderer is opt-in
+# (`TADA_RENDERER=kmp`) and the default path is still Python.
 on:
   workflow_dispatch:
     inputs:

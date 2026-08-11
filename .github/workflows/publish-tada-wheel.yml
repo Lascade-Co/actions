@@ -17,14 +17,34 @@ concurrency:
 permissions:
   contents: read
 
+# ---------------------------------------------------------------------------------------------
+# Shape (KMP renderer migration, backlog C1/C2/C3/C8/C10)
+# ---------------------------------------------------------------------------------------------
+#
+#   validate-python  ubuntu-24.04   uv sync, protos, pytest                       [unchanged work]
+#   jvm-build        ubuntu-24.04   ./gradlew :host:taJars + seal + :shared:jvmTest
+#                                   -> uploads ta-render.jar ONCE
+#   wheel   (matrix) 4 runners      jlink, stage natives, inject, retag, verify, GL smoke
+#   bundle           ubuntu-24.04   the 5-file GHCR bundle, from the x86-64 leg's wheel
+#   publish          ubuntu-24.04   ORAS push + prune                           [barely changed]
+#
+# The single `validate` job could not survive, for three independent reasons (CI doc §4):
+# **jlink cannot cross-target** -- a linux-x64 JDK cannot emit a macOS-arm64 runtime;
+# **macOS ad-hoc signing needs `codesign`**, i.e. a real macOS runner; and a platform-tagged
+# wheel only installs on a matching runner, so it can only be smoke-tested on one.
+#
+# `ta-render.jar` is built ONCE and passed as an artifact, because it is architecture-neutral
+# (all six LWJGL classifiers, tada commit c8dcfec). That keeps Gradle -- a three-build composite
+# over tada + shared + rentile -- off the other four runners entirely.
+#
+# ⚠️ NOTHING IN THIS FILE HAS EVER RUN. It was written against artifacts verified locally
+# (a real ta-render.jar, real manylinux containers, a real Debian bookworm install) but no
+# GitHub runner has executed it. See the scripts it calls for what WAS executed.
 jobs:
-  validate:
-    name: Test and build wheel
+  validate-python:
+    name: Python tests
     runs-on: ubuntu-latest
-    # 45 rather than 30: this job now also does a cold Gradle configure of a three-build
-    # composite (tada + shared + rentile) and runs shared's ~1,300-test jvmTest suite on top of
-    # the Python suite. Neither fits in the old budget.
-    timeout-minutes: 45
+    timeout-minutes: 30
     env:
       EGL_PLATFORM: surfaceless
       LIBGL_ALWAYS_SOFTWARE: "1"
@@ -75,55 +95,6 @@ jobs:
           token: ${{ steps.app-token.outputs.token }}
           persist-credentials: false
 
-      # tada's second submodule. The root settings.gradle.kts pulls `rentile` in as a composite
-      # `includeBuild`, so the Gradle steps below cannot even CONFIGURE without it checked out.
-      #
-      # Same gitlink-then-checkout dance as `shared` above, and for the same reason: the tada
-      # checkout is NOT switched to `submodules: true` -- checkout drives all submodules with
-      # one token, and these two live under different owners.
-      #
-      # BOTH the revision and the OWNER/REPO are read out of the checkout rather than hardcoded.
-      # That is load-bearing: while the jvm-target change is in review the pin lives on a fork,
-      # and a hardcoded `repository:` would silently resolve to a repo that does not contain the
-      # pinned SHA -- failing as "Reference not found", which reads like a push problem rather
-      # than a wiring one. Deriving both from .gitmodules means the workflow follows the pin
-      # automatically when it moves back to upstream (or the submodule disappears entirely, once
-      # rentile publishes a release carrying the `jvm` variant and the Maven coordinate replaces
-      # the composite build).
-      - name: Read pinned rentile revision and origin
-        id: rentile
-        run: |
-          set -euo pipefail
-          echo "revision=$(git rev-parse HEAD:rentile)" >> "$GITHUB_OUTPUT"
-          url="$(git config -f .gitmodules submodule.rentile.url)"
-          # Accept either remote form; strip the optional .git suffix.
-          slug="${url#git@github.com:}"
-          slug="${slug#https://github.com/}"
-          slug="${slug%.git}"
-          case "$slug" in
-            */*) ;;
-            *) echo "::error::could not parse an owner/repo out of submodule.rentile.url='$url'"; exit 1 ;;
-          esac
-          echo "repository=$slug" >> "$GITHUB_OUTPUT"
-          echo "rentile: $slug @ $(git rev-parse HEAD:rentile)"
-
-      # Deliberately NOT the App token. create-github-app-token scopes to exactly ONE owner
-      # (`owner:` above), and rentile lives under a personal account, so adding it to that
-      # `repositories:` list would make the mint itself fail. It needs no token anyway -- the
-      # repo (and any fork we point at) is PUBLIC, and the default GITHUB_TOKEN can read any
-      # public repo regardless of which repo it was issued for.
-      #
-      # Keep whatever we point at PUBLIC. A private fork would need a second App token minted
-      # for that owner, which is the situation this arrangement exists to avoid.
-      - name: Check out pinned rentile
-        uses: actions/checkout@v6
-        with:
-          repository: ${{ steps.rentile.outputs.repository }}
-          ref: ${{ steps.rentile.outputs.revision }}
-          path: rentile
-          token: ${{ github.token }}
-          persist-credentials: false
-
       # Two client APIs come out of this one Mesa stack, and the package list is their union:
       #   * moderngl binds EGL_OPENGL_API -- DESKTOP GL, linking libGL.so.1  -> libegl1 + libgl1
       #   * the KMP/JVM renderer binds EGL_OPENGL_ES_API and resolves
@@ -131,8 +102,7 @@ jobs:
       #
       # libgles2 is the load-bearing addition: nothing else here pulls it in, and without it the
       # JVM GL suite finds no driver and *skips* rather than fails -- "0 failures, 61 skipped,
-      # BUILD SUCCESSFUL", a green run that exercised no GL at all. `-PtaSharedRequireGl=true`
-      # below turns that skip into a failure; this line is what makes the test actually runnable.
+      # BUILD SUCCESSFUL", a green run that exercised no GL at all.
       #
       # libegl-mesa0 is Mesa's EGL *vendor* library, which the vendor-neutral libegl1 loader
       # dispatches to. It is only a `Recommends:` of libegl1 and this install passes
@@ -176,13 +146,113 @@ jobs:
       - name: Run tests from the lockfile
         run: uv run --locked --all-packages --all-extras pytest
 
-      # -------------------------------------------------------------------------------------
-      # JVM renderer gate (KMP renderer migration, plan items 1.11/1.12).
+  # ---------------------------------------------------------------------------------------
+  # The JAR, built exactly once.
+  #
+  # It is architecture-neutral: `host/build.gradle.kts` declares all six LWJGL native
+  # classifiers rather than the build host's (tada c8dcfec), so one jar serves every leg.
+  # It is NOT Skiko-neutral -- `shared/build.gradle.kts` resolves
+  # `skiko-awt-runtime-$hostOs-$hostArch` from the build machine -- which is why
+  # `build_jvm_payload.py` strips `libskiko-*` out of the copy it puts in each wheel and
+  # stages the right one beside it. Backlog C4, closed at packaging time rather than in Gradle.
+  # ---------------------------------------------------------------------------------------
+  jvm-build:
+    name: Build ta-render.jar and run the renderer suite
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      EGL_PLATFORM: surfaceless
+      LIBGL_ALWAYS_SOFTWARE: "1"
+      GALLIUM_DRIVER: llvmpipe
+    steps:
+      - name: Extract owner/repo
+        id: repo
+        shell: bash
+        run: |
+          FULL="${{ github.event.client_payload.repo }}"
+          echo "owner=${FULL%%/*}" >> "$GITHUB_OUTPUT"
+          echo "name=${FULL#*/}"   >> "$GITHUB_OUTPUT"
+
+      - name: Mint GitHub App token (tada + shared)
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ secrets.CI_APP_CLIENT_ID }}
+          private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
+          owner: ${{ steps.repo.outputs.owner }}
+          repositories: |
+            ${{ steps.repo.outputs.name }}
+            travel-animator-shared
+
+      - name: Check out TADA @ dispatched commit
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ github.event.client_payload.repo }}
+          ref: ${{ github.event.client_payload.sha }}
+          token: ${{ steps.app-token.outputs.token }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Read pinned shared revision
+        id: shared
+        run: echo "revision=$(git rev-parse HEAD:shared)" >> "$GITHUB_OUTPUT"
+
+      - name: Check out private shared protos
+        uses: actions/checkout@v6
+        with:
+          repository: Lascade-Co/travel-animator-shared
+          ref: ${{ steps.shared.outputs.revision }}
+          path: shared
+          token: ${{ steps.app-token.outputs.token }}
+          persist-credentials: false
+
+      # tada's second submodule. The root settings.gradle.kts pulls `rentile` in as a composite
+      # `includeBuild`, so the Gradle steps below cannot even CONFIGURE without it checked out.
       #
-      # The wheel does not carry a JVM payload yet -- packaging that is a separate, later piece
-      # of work. What these steps buy today is that the two-JAR split and shared's JVM target
-      # stay green on every push to tada's main, on a machine that is not the author's laptop.
-      # -------------------------------------------------------------------------------------
+      # BOTH the revision and the OWNER/REPO are read out of the checkout rather than hardcoded.
+      # That is load-bearing: while the jvm-target change is in review the pin lives on a fork,
+      # and a hardcoded `repository:` would silently resolve to a repo that does not contain the
+      # pinned SHA -- failing as "Reference not found", which reads like a push problem rather
+      # than a wiring one.
+      - name: Read pinned rentile revision and origin
+        id: rentile
+        run: |
+          set -euo pipefail
+          echo "revision=$(git rev-parse HEAD:rentile)" >> "$GITHUB_OUTPUT"
+          url="$(git config -f .gitmodules submodule.rentile.url)"
+          slug="${url#git@github.com:}"
+          slug="${slug#https://github.com/}"
+          slug="${slug%.git}"
+          case "$slug" in
+            */*) ;;
+            *) echo "::error::could not parse an owner/repo out of submodule.rentile.url='$url'"; exit 1 ;;
+          esac
+          echo "repository=$slug" >> "$GITHUB_OUTPUT"
+          echo "rentile: $slug @ $(git rev-parse HEAD:rentile)"
+
+      # Deliberately NOT the App token. create-github-app-token scopes to exactly ONE owner,
+      # and rentile lives under a personal account, so adding it to that `repositories:` list
+      # would make the mint itself fail. It needs no token anyway -- the repo (and any fork we
+      # point at) is PUBLIC. Keep whatever we point at public.
+      - name: Check out pinned rentile
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ steps.rentile.outputs.repository }}
+          ref: ${{ steps.rentile.outputs.revision }}
+          path: rentile
+          token: ${{ github.token }}
+          persist-credentials: false
+
+      - name: Install headless OpenGL/GLES runtime
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            libegl1 \
+            libegl-mesa0 \
+            libgles2 \
+            libgl1 \
+            libgl1-mesa-dri
+
       - name: Set up JDK
         uses: actions/setup-java@v5
         with:
@@ -196,24 +266,20 @@ jobs:
         run: chmod +x gradlew
 
       # taJars builds ta-render.jar AND ta-prepare.jar, then runs verifyTaRenderJarSeal -- the
-      # ADR 0006/0007 gate that ta-render.jar (the one the public wheel will ship) carries no
+      # ADR 0006/0007 gate that ta-render.jar (the one the public wheel ships) carries no
       # com/lascade/ta/shared/builder/** class. JVM bytecode decompiles trivially, so a leak
       # there publishes the choreography code those ADRs exist to withhold. The task checks in
-      # both directions: it also fails if the sealed prefix has stopped matching anything, i.e.
-      # if the guard has silently stopped guarding.
+      # both directions: it also fails if the sealed prefix has stopped matching anything.
       #
-      # No GITHUB_TOKEN here, unlike publish-spm.yml's XCFramework build: shared's ANGLE
-      # download hangs off the cinterop / native-link tasks, which a JVM-only task graph never
-      # reaches. No --no-daemon either -- two Gradle invocations follow and the runner is
-      # ephemeral, so paying the JVM start and configuration cost twice buys nothing.
+      # This is NOT the last word on the seal. `verify_tada_wheel.py` re-runs it on the jar
+      # inside each finished wheel, because between here and there sit an artifact round-trip
+      # and a jar rewrite (see build_jvm_payload.py), and Gradle's check covers none of that.
       - name: Build the two JARs and verify the builder seal
         run: ./gradlew :host:taJars
 
       # The seal report is written before verifyTaRenderJarSeal throws, so uploading it on a RED
       # run is the point: it names the offending classes. `warn`, not `error`, because an earlier
       # failure (compile, dependency resolution) legitimately leaves no report to collect.
-      # `!cancelled()` rather than `always()`: this group is cancel-in-progress, and a superseded
-      # run has no evidence worth keeping.
       - name: Upload ta-render.jar seal report
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v7
@@ -236,27 +302,400 @@ jobs:
       - name: Run the shared renderer JVM tests
         run: ./gradlew :shared:jvmTest -PtaSharedRequireGl=true
 
-      - name: Build wheel and runtime pylock
+      # The one artifact every wheel leg needs. A jar is a zip, so no file modes travel with
+      # it and `upload-artifact`'s mode-stripping is irrelevant here.
+      - name: Upload ta-render.jar
+        uses: actions/upload-artifact@v7
+        with:
+          name: ta-render-jar
+          path: host/build/libs/ta-render.jar
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+
+  # ---------------------------------------------------------------------------------------
+  # One wheel per platform.
+  #
+  # Every leg does the same five things -- build the pure wheel, assemble the payload, fold it
+  # in, verify, smoke -- but on different runners, because jlink runs on the target and a
+  # platform wheel installs only where its tag matches.
+  #
+  # ⚠️ macos-arm64 IS DELIBERATELY ABSENT, and adding it is not a matter of uncommenting a
+  # line. macOS has no system EGL/GLES, so its payload MUST carry ANGLE, and the only macOS
+  # ANGLE we have is extracted from a Google Chrome install (2.1.28226). Chrome's binaries are
+  # not redistributable, so shipping them in a PyPI wheel is not an option regardless of
+  # whether it works -- and it does work: the full payload was executed on an M2 on
+  # 2026-08-11, ANGLE Metal, OpenGL ES 3.0, max_samples=4. The blocker is licensing, not
+  # engineering. Backlog C5 is the fix: build ANGLE ourselves from the recipe in
+  # shared/third_party/angle/PROVENANCE.md with target_os="mac". When that lands, add
+  #     - { platform: macos-arm64, runner: macos-14, tag: macosx_11_0_arm64 }
+  # and an ANGLE-fetch step feeding `--angle-dir`; build_jvm_payload.py already hard-fails a
+  # macOS leg with no ANGLE, so a half-wired one cannot ship silently.
+  #
+  # windows-x64 IS here and its ANGLE is fine -- Skiko publishes
+  # `skiko-awt-runtime-angle-windows-x64` to a public Maven repo. Two warnings about it:
+  # R11 (libEGL.dll resolves libGLESv2.dll by BARE NAME via LoadLibraryW, so an absolute-path
+  # load may not satisfy it) is confirmed real by PE analysis and its mitigation has never
+  # been executed; and R14, Skiko's Windows ANGLE is 2.1.25511 against macOS's 2.1.28226, two
+  # different shader translators. The GL smoke below would be the first time any Windows
+  # binary in this project has ever run.
+  #
+  # linux-arm64 needs a `ubuntu-24.04-arm` runner. Those are GA for public repos and BILLED
+  # for private ones (CI doc §8 lists this as undetermined). If the org has not enabled them
+  # the leg fails at scheduling, which is a clear failure rather than a silent gap.
+  # ---------------------------------------------------------------------------------------
+  wheel:
+    name: Wheel (${{ matrix.platform }})
+    needs: [validate-python, jvm-build]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux-x64
+            runner: ubuntu-latest
+            container: quay.io/pypa/manylinux_2_28_x86_64
+            tag: manylinux_2_28_x86_64
+          - platform: linux-arm64
+            runner: ubuntu-24.04-arm
+            container: quay.io/pypa/manylinux_2_28_aarch64
+            # NOT 2_28: LWJGL 3.3.6's aarch64 liblwjgl.so references GLIBC_2.34, so the whole
+            # wheel is capped there. Measured 2026-08-11; auditwheel refuses 2_28 outright.
+            tag: manylinux_2_34_aarch64
+          - platform: windows-x64
+            runner: windows-latest
+            container: ""
+            tag: win_amd64
+            angle_artifact: skiko-awt-runtime-angle-windows-x64
+    steps:
+      - name: Extract owner/repo
+        id: repo
+        shell: bash
+        run: |
+          FULL="${{ github.event.client_payload.repo }}"
+          echo "owner=${FULL%%/*}" >> "$GITHUB_OUTPUT"
+          echo "name=${FULL#*/}"   >> "$GITHUB_OUTPUT"
+
+      - name: Mint GitHub App token (tada + shared)
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ secrets.CI_APP_CLIENT_ID }}
+          private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
+          owner: ${{ steps.repo.outputs.owner }}
+          repositories: |
+            ${{ steps.repo.outputs.name }}
+            travel-animator-shared
+
+      - name: Check out TADA @ dispatched commit
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ github.event.client_payload.repo }}
+          ref: ${{ github.event.client_payload.sha }}
+          token: ${{ steps.app-token.outputs.token }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Read pinned shared revision
+        id: shared
+        shell: bash
+        run: echo "revision=$(git rev-parse HEAD:shared)" >> "$GITHUB_OUTPUT"
+
+      - name: Check out private shared protos
+        uses: actions/checkout@v6
+        with:
+          repository: Lascade-Co/travel-animator-shared
+          ref: ${{ steps.shared.outputs.revision }}
+          path: shared
+          token: ${{ steps.app-token.outputs.token }}
+          persist-credentials: false
+
+      - name: Install pinned uv and Python
+        uses: astral-sh/setup-uv@v8.3.2
+        with:
+          version: "0.8.9"
+          python-version: "3.12"
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Sync locked environment
+        run: uv sync --locked --all-packages --all-extras
+
+      - name: Generate protobuf modules
+        run: uv run --locked --all-packages --all-extras python tada_render/hatch_build.py
+
+      # The PURE public wheel, which every leg then folds its own payload into. Building it
+      # here rather than once centrally keeps `uv build` on the same checkout that generated
+      # the protos, and the result is identical across legs by construction.
+      - name: Build the pure wheels
+        run: uv build --wheel --all-packages --out-dir pure
+
+      - name: Download ta-render.jar
+        uses: actions/download-artifact@v8
+        with:
+          name: ta-render-jar
+          path: jar
+
+      - name: Fetch the packaging scripts
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ci-scripts
+          base=https://raw.githubusercontent.com/Lascade-Co/actions/main/scripts/tada-wheel
+          for name in build_jvm_payload.py inject_wheel_payload.py check_glibc_floor.py \
+                      assert_wheel_exec_bit.py build_linux_wheel.sh; do
+            curl -sSfL "$base/$name" -o "ci-scripts/$name"
+          done
+
+      # ---------------------------------------------------------------------------------
+      # Linux: everything glibc-sensitive happens INSIDE manylinux_2_28.
+      #
+      # `docker run` rather than a job-level `container:` on purpose. The container is needed
+      # for exactly one thing -- assembling and measuring the payload against glibc 2.28 --
+      # and putting the whole job in it would drag checkout, setup-uv, setup-java and every
+      # upload through an AlmaLinux 8 image for no benefit. It also means what runs in CI is
+      # byte-for-byte the command that was run locally to verify this, which is the only
+      # reason any of it is trusted.
+      # ---------------------------------------------------------------------------------
+      - name: Build the platform wheel (Linux, in manylinux)
+        if: ${{ matrix.container != '' }}
+        env:
+          CONTAINER: ${{ matrix.container }}
+          IO_PLATFORM: ${{ matrix.platform }}
+          MANYLINUX_TAG: ${{ matrix.tag }}
+        run: |
+          set -euo pipefail
+          docker run --rm -v "$PWD:/io" -w /io \
+            -e IO_WHEEL="/io/$(ls pure/travel_animator-*.whl)" \
+            -e IO_JAR=/io/jar/ta-render.jar \
+            -e IO_OUT=/io/platform \
+            -e IO_PLATFORM="$IO_PLATFORM" \
+            -e MANYLINUX_TAG="$MANYLINUX_TAG" \
+            "$CONTAINER" bash /io/ci-scripts/build_linux_wheel.sh
+
+      # ---------------------------------------------------------------------------------
+      # Windows: no container, and ANGLE comes from Skiko's published Maven artifact.
+      # ---------------------------------------------------------------------------------
+      - name: Set up JDK for jlink
+        if: ${{ matrix.container == '' }}
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Fetch ANGLE
+        if: ${{ matrix.container == '' && matrix.angle_artifact != '' }}
+        shell: bash
+        env:
+          ARTIFACT: ${{ matrix.angle_artifact }}
+        run: |
+          set -euo pipefail
+          # Keep the version in step with shared/build.gradle.kts's skikoVersion. R14: this is
+          # ANGLE 2.1.25511, OLDER than the macOS build (2.1.28226). Two shader translators
+          # means two rasterisations, which is a golden-frame parity problem the moment both
+          # platforms ship.
+          version=0.148.2
+          curl -sSfL --retry 5 --retry-delay 3 \
+            -o angle.jar \
+            "https://maven.pkg.jetbrains.space/public/p/compose/dev/org/jetbrains/skiko/${ARTIFACT}/${version}/${ARTIFACT}-${version}.jar"
+
+      - name: Build the platform wheel (native runner)
+        if: ${{ matrix.container == '' }}
+        shell: bash
+        env:
+          PLATFORM: ${{ matrix.platform }}
+          TAG: ${{ matrix.tag }}
+        run: |
+          set -euo pipefail
+          skiko_version=0.148.2
+          # Skiko names its runtime artifacts with the same os-arch spelling we use.
+          curl -sSfL --retry 5 --retry-delay 3 -o skiko.jar \
+            "https://repo1.maven.org/maven2/org/jetbrains/skiko/skiko-awt-runtime-${PLATFORM}/${skiko_version}/skiko-awt-runtime-${PLATFORM}-${skiko_version}.jar"
+          python ci-scripts/build_jvm_payload.py \
+            --platform "$PLATFORM" \
+            --jar jar/ta-render.jar \
+            --skiko-jar skiko.jar \
+            --angle-jar angle.jar \
+            --platform-tag "$TAG" \
+            --out payload
+          python ci-scripts/inject_wheel_payload.py \
+            --wheel "$(ls pure/travel_animator-*.whl)" \
+            --payload payload \
+            --tag "py3-none-${TAG}" \
+            --out-dir platform
+          python ci-scripts/assert_wheel_exec_bit.py "$(ls platform/*.whl)"
+          cp payload/PAYLOAD.json "platform/PAYLOAD-${PLATFORM}.json"
+
+      # ---------------------------------------------------------------------------------
+      # The smoke: install the finished wheel and make it render a GL probe through its OWN
+      # payload. This is the step that would have caught the pip/uv execute-bit divergence
+      # (pip additionally requires the regular-file type bits in the zip's external_attr;
+      # uv does not), and it is the only check that exercises the launcher, the JRE, the
+      # LWJGL shims, Skiko and the GL driver together.
+      #
+      # On Linux it runs on the HOST runner, not in manylinux: the host is where a real GL
+      # stack can be apt-installed, and a manylinux_2_28 wheel installs happily on glibc 2.39.
+      # ---------------------------------------------------------------------------------
+      - name: Install the GL runtime for the smoke (Linux)
+        if: ${{ matrix.container != '' }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            libegl1 libegl-mesa0 libgles2 libgl1 libgl1-mesa-dri libfontconfig1
+
+      - name: Smoke the packaged renderer
+        shell: bash
+        env:
+          EGL_PLATFORM: surfaceless
+          LIBGL_ALWAYS_SOFTWARE: "1"
+          GALLIUM_DRIVER: llvmpipe
+        run: |
+          set -euo pipefail
+          uv venv --python 3.12 .smoke
+          uv pip install --python .smoke --no-deps "$(ls platform/*.whl)" numpy
+          uv run --python .smoke --no-project python - <<'PY'
+          import subprocess, sys
+          from tada_render import render_bridge
+
+          command = render_bridge.packaged_runtime()
+          if command is None:
+              sys.exit("the installed wheel carries no JVM payload")
+          print("launcher:", " ".join(command))
+          env = render_bridge.child_environment()
+          print("TADA_ANGLE_DIR:", env.get(render_bridge.ANGLE_DIR_ENV, "(none: system GLES)"))
+          # exit 70 is the protocol's `gl_unavailable`; anything else is a launcher or
+          # packaging failure and must not be reported as a driver problem.
+          result = subprocess.run(command + ["self-test"], env=env,
+                                  capture_output=True, text=True)
+          print(result.stdout)
+          print(result.stderr, file=sys.stderr)
+          if result.returncode == 137 or result.returncode == -9:
+              sys.exit("SIGKILL with no stderr -- on macOS this is a TAMPERED CODE SIGNATURE, "
+                       "not a GL failure. Re-sign after any lipo/strip/install_name_tool.")
+          if result.returncode != 0:
+              sys.exit(f"self-test exited {result.returncode}")
+          PY
+
+      - name: Upload the platform wheel
+        uses: actions/upload-artifact@v7
+        with:
+          name: wheel-${{ matrix.platform }}
+          path: platform/
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+
+  # ---------------------------------------------------------------------------------------
+  # The GHCR bundle: five files, ONE platform (backlog C10).
+  #
+  # TARS declares `"target_platform": "linux/amd64"` and builds only that, so the bundle
+  # carries the manylinux x86-64 public wheel and the private wheel, not the whole matrix.
+  # PyPI is where the other platforms go. `platform_tag` in build-metadata.json is how a
+  # consumer knows which one it got, and schema_version 3 is what makes reading it mandatory.
+  # ---------------------------------------------------------------------------------------
+  bundle:
+    name: Assemble the release bundle
+    needs: [validate-python, wheel]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Extract owner/repo
+        id: repo
+        shell: bash
+        run: |
+          FULL="${{ github.event.client_payload.repo }}"
+          echo "owner=${FULL%%/*}" >> "$GITHUB_OUTPUT"
+          echo "name=${FULL#*/}"   >> "$GITHUB_OUTPUT"
+
+      - name: Mint GitHub App token (tada + shared)
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ secrets.CI_APP_CLIENT_ID }}
+          private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
+          owner: ${{ steps.repo.outputs.owner }}
+          repositories: |
+            ${{ steps.repo.outputs.name }}
+            travel-animator-shared
+
+      - name: Check out TADA @ dispatched commit
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ github.event.client_payload.repo }}
+          ref: ${{ github.event.client_payload.sha }}
+          token: ${{ steps.app-token.outputs.token }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Read pinned shared revision
+        id: shared
+        run: echo "revision=$(git rev-parse HEAD:shared)" >> "$GITHUB_OUTPUT"
+
+      - name: Check out private shared protos
+        uses: actions/checkout@v6
+        with:
+          repository: Lascade-Co/travel-animator-shared
+          ref: ${{ steps.shared.outputs.revision }}
+          path: shared
+          token: ${{ steps.app-token.outputs.token }}
+          persist-credentials: false
+
+      - name: Install pinned uv and Python
+        uses: astral-sh/setup-uv@v8.3.2
+        with:
+          version: "0.8.9"
+          python-version: "3.12"
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Sync locked environment
+        run: uv sync --locked --all-packages --all-extras
+
+      - name: Generate protobuf modules
+        run: uv run --locked --all-packages --all-extras python tada_render/hatch_build.py
+
+      # Only the x86-64 leg's wheel. The others exist as artifacts for the PyPI path and are
+      # deliberately not downloaded here -- a bundle that quietly grew a second public wheel
+      # would break every one of TARS's shape checks at deploy time rather than here.
+      - name: Download the manylinux x86-64 wheel
+        uses: actions/download-artifact@v8
+        with:
+          name: wheel-linux-x64
+          path: platform
+
+      - name: Build wheel bundle and runtime pylock
         env:
           SHARED_REVISION: ${{ steps.shared.outputs.revision }}
           TADA_REPOSITORY: ${{ github.event.client_payload.repo }}
           TADA_REVISION: ${{ github.event.client_payload.sha }}
         run: |
           curl -sSfL https://raw.githubusercontent.com/Lascade-Co/actions/main/scripts/tada-wheel/build_tada_wheel.sh -o "$RUNNER_TEMP/build_tada_wheel.sh"
-          bash "$RUNNER_TEMP/build_tada_wheel.sh"
+          PUBLIC_WHEEL="$(ls platform/travel_animator-*manylinux*x86_64.whl)" \
+            bash "$RUNNER_TEMP/build_tada_wheel.sh"
+
+      - name: Install the GL runtime
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            libegl1 libegl-mesa0 libgles2 libgl1 libgl1-mesa-dri libfontconfig1
 
       - name: Verify wheel metadata and pylock resolution
         run: |
           curl -sSfL https://raw.githubusercontent.com/Lascade-Co/actions/main/scripts/tada-wheel/verify_wheel_install.sh -o "$RUNNER_TEMP/verify_wheel_install.sh"
           bash "$RUNNER_TEMP/verify_wheel_install.sh"
 
-      - name: Verify wheel contents contain no credential files
+      # Credentials, required modules, AND -- for a platform wheel -- the builder seal
+      # re-checked on the shipped jar, the class-file major, the natives layout and the
+      # ANGLE rule. Backlog C11.
+      - name: Verify wheel contents and JVM payload
         run: |
           curl -sSfL https://raw.githubusercontent.com/Lascade-Co/actions/main/scripts/tada-wheel/verify_tada_wheel.py -o "$RUNNER_TEMP/verify_tada_wheel.py"
           uv run --locked python "$RUNNER_TEMP/verify_tada_wheel.py"
 
-      # Five files since the bundle grew the public travel-animator wheel: two wheels, pylock.toml,
-      # build-metadata.json, SHA256SUMS.
+      # Still five, and deliberately so (C10): two wheels, pylock.toml, build-metadata.json,
+      # SHA256SUMS. build_tada_wheel.sh asserts the same thing at the point it decides the
+      # shape; this is the second reader, on the artifact rather than the intent.
       - name: Verify release bundle
         run: |
           shopt -s nullglob
@@ -270,6 +709,7 @@ jobs:
             cd bundle
             sha256sum --check SHA256SUMS
           )
+          echo "platform_tag: $(python3 -c 'import json;print(json.load(open("bundle/build-metadata.json"))["platform_tag"])')"
 
       - name: Upload publish bundle
         uses: actions/upload-artifact@v7
@@ -283,7 +723,7 @@ jobs:
 
   publish:
     name: Publish latest wheel bundle
-    needs: validate
+    needs: bundle
     runs-on: ubuntu-latest
     timeout-minutes: 15
     concurrency:
