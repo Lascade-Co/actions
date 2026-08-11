@@ -18,6 +18,7 @@ DEFAULT_THRESHOLDS = {
     "description_min": 70,
     "description_max": 160,
     "word_count_min": 300,
+    "internal_links_min": 3,
     "soft_404_word_count": 50,
     "page_weight_bytes": 500 * 1024,
     "ttfb_ms": 1500,
@@ -183,6 +184,7 @@ class BlogPage:
     has_viewport: bool = False
     headings: tuple[tuple[int, str], ...] = ()
     anchors: tuple[Anchor, ...] = ()
+    content_anchors: tuple[Anchor, ...] = ()
     images: tuple[ImageRef, ...] = ()
     jsonld: tuple[JsonLdBlock, ...] = ()
     article_text: str = ""

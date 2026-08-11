@@ -184,6 +184,7 @@ def _config(site, ctx: SiteContext | None) -> str:
         ("asset prefixes", ", ".join(site.origin_asset_prefixes)),
         ("allowlisted subdomains", ", ".join(sorted(site.allowed_subdomains)) or "none"),
         ("blogs audited", str(site.blog_count)),
+        ("contextual internal links minimum", str(site.threshold("internal_links_min"))),
         ("CMS parity", "enabled" if site.cms_api else "disabled"),
         ("suppressed rules", ", ".join(sorted(site.suppress)) or "none"),
         ("blog listing fetched", _fetched(ctx.listing_ok if ctx else None)),

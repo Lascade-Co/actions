@@ -98,8 +98,14 @@ canonical, `og:url`, hreflang, JSON-LD `url`/`@id`/`item`, sitemap `loc`. A URL 
 elsewhere in the markup is not in a crawlable position.
 _Avoid_: visible link, public link.
 
+**Contextual internal link**:
+An `a[href]` inside the selected blog article body that points to a different path on the
+canonical host. Site-wide navigation, headers, footers, asides, self-links, and sibling
+subdomains do not count.
+_Avoid_: site link, local link.
+
 **Rule**:
-One named check with a fixed ID (`A1`…`G5`), a slug, and a **severity**.
+One named check with a fixed ID (`A1`…`I4`), a slug, and a **severity**.
 _Avoid_: test, validation, assertion.
 
 **Finding**:

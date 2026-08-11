@@ -301,6 +301,30 @@ def check_b6(page, site, urls, ctx):
     return _cap(findings, B6, "dead external links")
 
 
+def check_b7(page, site, urls, ctx):
+    minimum = site.threshold("internal_links_min")
+    page_path = urlparse(page.url).path.rstrip("/") or "/"
+    targets: dict[str, str] = {}
+    for anchor in page.content_anchors:
+        if not is_internal(site, anchor.url):
+            continue
+        path = urlparse(anchor.url).path.rstrip("/") or "/"
+        if path == page_path:
+            continue
+        targets.setdefault(path, f"https://{site.canonical_host}{path}")
+    if len(targets) >= minimum:
+        return []
+    return [
+        finding(
+            B7,
+            SEVERITY_WARN,
+            f"{len(targets)} contextual internal link target(s) (minimum {minimum})",
+            blog_url=page.url,
+            evidence=truncate(", ".join(targets.values()) or "none"),
+        )
+    ]
+
+
 # --- Group C -----------------------------------------------------------------
 
 
@@ -436,10 +460,11 @@ B3 = Rule("B3", "image-broken", "B", check_b3)
 B4 = Rule("B4", "blog-missing-from-sitemap", "B", check_b4)
 B5 = Rule("B5", "blog-not-linked-from-listing", "B", check_b5)
 B6 = Rule("B6", "external-link-unreachable", "B", check_b6)
+B7 = Rule("B7", "contextual-internal-links-insufficient", "B", check_b7)
 C1 = Rule("C1", "noindex-present", "C", check_c1)
 C2 = Rule("C2", "canonical-invalid", "C", check_c2)
 C3 = Rule("C3", "robots-txt-disallows", "C", check_c3, scope="run")
 C4 = Rule("C4", "soft-404", "C", check_c4)
 
-BLOG_RULES_ABC = [A1, A2, A3, A4, A5, B1, B2, B3, B4, B5, B6, C1, C2, C4]
+BLOG_RULES_ABC = [A1, A2, A3, A4, A5, B1, B2, B3, B4, B5, B6, B7, C1, C2, C4]
 RUN_RULES_ABC = [C3]

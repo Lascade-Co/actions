@@ -178,6 +178,11 @@ class RenderTest(unittest.TestCase):
         listing_row = next(r for r in rows if "blog listing fetched" in r)
         self.assertIn("yes", listing_row)
 
+    def test_configuration_shows_contextual_internal_link_minimum(self):
+        html = render_report(summary([]))
+        row = next(r for r in html.split("<tr>") if "contextual internal links minimum" in r)
+        self.assertIn(">3<", row)
+
     def test_configuration_handles_missing_ctx_from_the_crash_path(self):
         """summary.ctx is None whenever a crash happens before/at discovery —
         the Configuration table must render something sensible, not raise."""

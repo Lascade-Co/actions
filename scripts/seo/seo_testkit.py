@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from seo_model import (
+    Anchor,
     BlogPage,
     CmsSnapshot,
     Response,
@@ -84,6 +85,14 @@ def make_page(**over) -> BlogPage:
         "has_viewport": True,
         "headings": ((1, "How to Create a Travel Animation for Instagram"), (2, "Why use it")),
         "anchors": (),
+        "content_anchors": tuple(
+            Anchor(href=path, url=f"https://www.travelanimator.com{path}", text=text)
+            for path, text in (
+                ("/pricing", "pricing plans"),
+                ("/features", "animation features"),
+                ("/hub/route-animation-guide", "route animation guide"),
+            )
+        ),
         "images": (),
         "jsonld": (),
         "article_text": " ".join(["word"] * 400),

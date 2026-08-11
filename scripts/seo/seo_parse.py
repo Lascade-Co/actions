@@ -80,23 +80,22 @@ def _meta_map(soup, attr: str, prefix: str) -> dict[str, str]:
     return found
 
 
-def _article_text(soup) -> str:
+def _content_text(root) -> str:
+    clone = BeautifulSoup(str(root), "lxml")
+    for tag in clone.find_all(NON_CONTENT_TAGS):
+        tag.decompose()
+    return re.sub(r"\s+", " ", clone.get_text(" ", strip=True))
+
+
+def _article_root(soup):
     """Pick whichever <article>/<main> candidate yields the most text.
 
     Pages can carry more than one <article> element (e.g. a short promo
     banner ahead of the real post body) — taking the first match understates
-    word count and misfires soft-404 / thin-content / FAQ-visibility rules.
+    word count and can make contextual-link checks inspect the wrong block.
     """
     candidates = soup.find_all(("article", "main")) or [soup.body or soup]
-    best = ""
-    for root in candidates:
-        clone = BeautifulSoup(str(root), "lxml")
-        for tag in clone.find_all(NON_CONTENT_TAGS):
-            tag.decompose()
-        text = re.sub(r"\s+", " ", clone.get_text(" ", strip=True))
-        if len(text) > len(best):
-            best = text
-    return best
+    return max(candidates, key=lambda root: len(_content_text(root)))
 
 
 def _collect_images(soup, base: str) -> tuple[ImageRef, ...]:
@@ -144,6 +143,13 @@ def _collect_anchors(soup, base: str) -> tuple[Anchor, ...]:
             )
         )
     return tuple(anchors)
+
+
+def _collect_content_anchors(root, base: str) -> tuple[Anchor, ...]:
+    clone = BeautifulSoup(str(root), "lxml")
+    for tag in clone.find_all(NON_CONTENT_TAGS):
+        tag.decompose()
+    return _collect_anchors(clone, base)
 
 
 def _collect_jsonld(soup) -> tuple[JsonLdBlock, ...]:
@@ -214,6 +220,7 @@ def _jsonld_image_values(blocks) -> list[str]:
 def parse_blog(url: str, slug: str, response: Response) -> BlogPage:
     soup = BeautifulSoup(response.body or "", "lxml")
     base = f"{urlparse(url).scheme}://{urlparse(url).netloc}"
+    article_root = _article_root(soup)
 
     description = soup.find("meta", attrs={"name": "description"})
     robots = [
@@ -258,9 +265,10 @@ def parse_blog(url: str, slug: str, response: Response) -> BlogPage:
             for tag in soup.find_all(["h1", "h2", "h3", "h4", "h5", "h6"])
         ),
         anchors=_collect_anchors(soup, base),
+        content_anchors=_collect_content_anchors(article_root, base),
         images=tuple(images),
         jsonld=jsonld_blocks,
-        article_text=_article_text(soup),
+        article_text=_content_text(article_root),
         raw_html=response.body or "",
         subresources=_collect_subresources(soup, base),
     )

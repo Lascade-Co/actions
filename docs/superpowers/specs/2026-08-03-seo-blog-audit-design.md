@@ -135,11 +135,12 @@ mutable state and every rule testable from a fixture with no network.
    (`BLOG_CONCURRENCY`, default 10, i.e. one worker per blog so wall-clock is the slowest
    single page, not the sum). Redirects **not** followed so hops stay visible. Record status,
    headers, time-to-first-byte, body. A blog that raises does not cancel its siblings.
-4. **Parse** each into `BlogPage`: anchors (href + text), `img` src and every `srcset`
-   candidate, `link[rel]`, og/twitter meta, canonical, JSON-LD blocks, headings, article text,
-   response headers, raw HTML (needed for A2's markup scan).
-5. **Network-free rules** — A1, A2, A4, A5, C1, C2, C4, D1–D6, D8, E1, E2, E4, E5, E6, F1,
-   F2, F3, G1, G2, G4, G5. Run per blog, inside the same fan-out. **D7 is the one cross-blog
+4. **Parse** each into `BlogPage`: page-wide anchors plus contextual anchors from the selected
+   longest `<article>`/`<main>` (excluding nested navigation, headers, footers, and asides),
+   `img` src and every `srcset` candidate, `link[rel]`, og/twitter meta, canonical, JSON-LD
+   blocks, headings, article text, response headers, raw HTML (needed for A2's markup scan).
+5. **Network-free rules** — A1, A2, A4, A5, B7, C1, C2, C4, D1–D6, D8, E1, E2, E4, E5, E6,
+   F1, F2, F3, G1, G2, G4, G5. Run per blog, inside the same fan-out. **D7 is the one cross-blog
    rule** — duplicate title/description/H1 can only be judged once all 10 pages are parsed, so
    it runs after the fan-out joins, over the collected set.
 6. **Pool URLs** — union every distinct URL across all 10 blogs, verify once each on a separate
@@ -157,7 +158,7 @@ mutable state and every rule testable from a fixture with no network.
 
 ## Rule catalogue
 
-**45 rules across nine groups** — A:5, B:6, C:4, D:8, E:6, F:4, G:5, H:3, I:4.
+**46 rules across nine groups** — A:5, B:7, C:4, D:8, E:6, F:4, G:5, H:3, I:4.
 
 Severity: **error** = crawl or index correctness actively broken · **warn** = threshold or
 hygiene · **info** = recorded for visibility, expected to be non-empty, never gates delivery.
@@ -182,6 +183,7 @@ hygiene · **info** = recorded for visibility, expected to be non-empty, never g
 | B4 | `blog-missing-from-sitemap` | error | Blog URL absent from `sitemap.xml`, resolving `<sitemapindex>` children |
 | B5 | `blog-not-linked-from-listing` | error | Blog URL not present as an anchor on the blog listing |
 | B6 | `external-link-unreachable` | info | External URL returns 404, 410, or 5xx. **403, 429, and timeouts are recorded as `unverified` and never reported** — bot-blocking hosts (Apple, Instagram, Play) would otherwise cry wolf daily |
+| B7 | `contextual-internal-links-insufficient` | warn | Fewer than 3 distinct canonical-host destinations are linked from the selected article body. Navigation/footer/aside links, self-links, query/fragment duplicates, external URLs, and sibling subdomains do not count. The default of 3 is the conservative overlap of [Ahrefs' 3–5](https://ahrefs.com/blog/internal-links-for-seo/) and [Semrush's 2–5](https://www.semrush.com/blog/how-do-you-use-internal-linking-for-seo/) starting points; [Google specifies no magic number](https://developers.google.com/search/docs/crawling-indexing/links-crawlable), so this remains a configurable warning rather than a correctness error |
 
 ### C. Indexability
 
@@ -306,10 +308,10 @@ to roughly 12 page fetches instead of 10.
 ]
 ```
 
-`thresholds` overrides the defaults in `seo_blog_audit.py` (title/description lengths, word
-count, page weight, TTFB, og:image dimensions, concurrency, timeouts) per site. Empty means
-"use defaults". `suppress` holds rule IDs. `cms_api` enables group I. Adding a third site is one
-config entry — no code and no workflow edit.
+`thresholds` overrides the defaults in `seo_model.py` (title/description lengths, word count,
+contextual internal-link minimum, page weight, TTFB, og:image dimensions, concurrency,
+timeouts) per site. Empty means "use defaults". `suppress` holds rule IDs. `cms_api` enables
+group I. Adding a third site is one config entry — no code and no workflow edit.
 
 `"suppress": ["A2"]` ships enabled for travelanimator because its A2 exposure is structural —
 the Next.js flight payload serialises CMS API responses into the markup, and that will keep

@@ -95,6 +95,29 @@ class ParseBlogTest(unittest.TestCase):
         pricing = next(a for a in self.page.anchors if a.url.endswith("/pricing"))
         self.assertEqual(pricing.text, "pricing page")
 
+    def test_content_anchors_only_include_the_selected_article(self):
+        urls = {a.url for a in self.page.content_anchors}
+        self.assertEqual(
+            urls,
+            {
+                f"{BASE}/pricing",
+                f"{BASE}/features",
+                f"{BASE}/hub/route-animation-guide",
+                "https://support.travelanimator.com/articles/export",
+            },
+        )
+        self.assertNotIn(f"{BASE}/hub/other-blog", urls)
+        self.assertNotIn(f"{BASE}/hub", urls)
+
+    def test_content_anchors_exclude_navigation_nested_inside_main(self):
+        body = (
+            '<main><nav><a href="/menu">Menu</a></nav>'
+            '<p>Useful text with <a href="/pricing">pricing details</a>.</p>'
+            '<aside><a href="/sidebar">Sidebar</a></aside></main>'
+        )
+        page = parse_blog(BLOG_URL, "x", Response(url=BLOG_URL, status=200, body=body))
+        self.assertEqual([a.url for a in page.content_anchors], [f"{BASE}/pricing"])
+
     def test_images_include_srcset_and_meta_sources(self):
         """good_blog.html's BlogPosting JSON-LD carries an `image` field
         (reviewer follow-up to Important 5) — parse_blog folds that into

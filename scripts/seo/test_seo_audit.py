@@ -76,13 +76,13 @@ def scripted(**over):
 
 
 class RegistryTest(unittest.TestCase):
-    def test_all_45_rules_registered(self):
-        self.assertEqual(len(ALL_RULES), 45)
+    def test_all_46_rules_registered(self):
+        self.assertEqual(len(ALL_RULES), 46)
 
     def test_every_documented_id_exists(self):
         expected = (
             [f"A{i}" for i in range(1, 6)]
-            + [f"B{i}" for i in range(1, 7)]
+            + [f"B{i}" for i in range(1, 8)]
             + [f"C{i}" for i in range(1, 5)]
             + [f"D{i}" for i in range(1, 9)]
             + [f"E{i}" for i in range(1, 7)]
@@ -687,7 +687,23 @@ class AuditTest(unittest.TestCase):
         summary = audit(site, Fetcher(scripted()))
         self.assertEqual(len(summary.pages), 3)
         self.assertIsNone(summary.error)
-        self.assertEqual(len(summary.rules), 45)
+        self.assertEqual(len(summary.rules), 46)
+
+    def test_audit_reports_insufficient_contextual_internal_links(self):
+        sparse_blog = fixture("good_blog.html").replace(
+            '<a href="/features">animation features</a>', "animation features"
+        ).replace(
+            '<a href="/hub/route-animation-guide">route animation guide</a>',
+            "route animation guide",
+        )
+        transport = scripted(
+            **{"https://www.travelanimator.com/hub/good-blog": (200, sparse_blog, None)}
+        )
+        summary = audit(make_site(blog_count=1, cms_api=False), Fetcher(transport))
+        findings = [item for item in summary.findings if item.rule == "B7"]
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0].severity, "warn")
+        self.assertIn("1 contextual", findings[0].message)
 
     def test_summary_carries_the_discovery_context(self):
         """Reviewer follow-up: the report's Configuration table can only show

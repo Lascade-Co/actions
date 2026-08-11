@@ -200,6 +200,38 @@ class GroupBTest(unittest.TestCase):
         urls = {self.EXTERNAL: make_status(self.EXTERNAL, status=0, verified=False, error="Timeout")}
         self.assertEqual(run_rule("B6", page, urls=urls), [])
 
+    def test_b7_warns_below_three_distinct_contextual_internal_targets(self):
+        page = make_page(content_anchors=(anchor(self.INTERNAL), anchor(self.INTERNAL + "?utm=blog")))
+        findings = run_rule("B7", page)
+        self.assertEqual(findings[0].severity, SEVERITY_WARN)
+        self.assertIn("1 contextual", findings[0].message)
+        self.assertIn("minimum 3", findings[0].message)
+
+    def test_b7_silent_at_three_distinct_contextual_internal_targets(self):
+        page = make_page(
+            content_anchors=tuple(
+                anchor(f"https://www.travelanimator.com/{path}")
+                for path in ("pricing", "features", "hub/other-blog")
+            )
+        )
+        self.assertEqual(run_rule("B7", page), [])
+
+    def test_b7_excludes_self_links_external_links_and_subdomains(self):
+        page = make_page(
+            content_anchors=(
+                anchor(BLOG_URL + "#faq"),
+                anchor(self.EXTERNAL),
+                anchor("https://support.travelanimator.com/articles/export"),
+            )
+        )
+        findings = run_rule("B7", page)
+        self.assertIn("0 contextual", findings[0].message)
+
+    def test_b7_threshold_is_configurable_per_site(self):
+        page = make_page(content_anchors=(anchor(self.INTERNAL),))
+        site = make_site(thresholds={"internal_links_min": 1})
+        self.assertEqual(run_rule("B7", page, site=site), [])
+
 
 class GroupCTest(unittest.TestCase):
     def test_c1_fires_on_noindex_meta(self):
@@ -288,7 +320,7 @@ class GroupCTest(unittest.TestCase):
 class RegistryTest(unittest.TestCase):
     def test_all_ids_present_exactly_once(self):
         ids = [rule.id for rule in BLOG_RULES_ABC + RUN_RULES_ABC]
-        expected = [f"A{i}" for i in range(1, 6)] + [f"B{i}" for i in range(1, 7)] + [f"C{i}" for i in range(1, 5)]
+        expected = [f"A{i}" for i in range(1, 6)] + [f"B{i}" for i in range(1, 8)] + [f"C{i}" for i in range(1, 5)]
         self.assertEqual(sorted(ids), sorted(expected))
         self.assertEqual(len(ids), len(set(ids)))
 
