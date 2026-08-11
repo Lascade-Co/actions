@@ -1,17 +1,12 @@
 #!/usr/bin/env python3
 """Assert the JVM payload's executables kept their execute bit inside the wheel.
 
-A wheel stores unix modes in the zip's `external_attr`, and both pip and uv
-reproduce the execute bit only for entries whose recorded mode carries it. Lose
-it and the wheel still builds, still passes `twine check`, still installs
-without a word -- and then the first render dies with
-`PermissionError: [Errno 13] .../_jvm/jre/bin/java`.
-
-Every step between `jlink` and the finished wheel is a chance to lose it: a
-`zipfile`-based staging pass that defaults to 0644, a `wheel unpack`/`pack`
-round-trip through a filesystem with a restrictive umask, or
-`actions/upload-artifact`, which does NOT preserve modes and is exactly why the
-workflow tars the payload before uploading it.
+Lose the mode recorded in the zip's `external_attr` and the wheel still builds,
+passes `twine check` and installs without a word -- then the first render dies
+with `PermissionError: [Errno 13] .../_jvm/jre/bin/java`. Every step between
+`jlink` and the finished wheel can lose it: a `zipfile` staging pass defaulting to
+0644, a `wheel unpack`/`pack` round trip through a restrictive umask, or
+`actions/upload-artifact`, which does NOT preserve modes (hence the workflow's tar).
 """
 from __future__ import annotations
 
@@ -23,19 +18,15 @@ import zipfile
 def pip_would_make_executable(info: zipfile.ZipInfo) -> bool:
     """pip's own predicate, copied verbatim from `pip._internal.utils.unpacking`.
 
-    `S_ISREG` is the load-bearing clause and the reason this is not simply
-    `mode & 0o111`: an entry recorded as 0o755 WITHOUT the regular-file type
-    bits fails it, and pip then installs the file 0644. uv's equivalent check
-    omits `S_ISREG`, so a wheel with that defect installs correctly under uv and
-    is broken under pip. Asserting pip's rule rather than a looser one is the
-    whole point of this file.
+    `S_ISREG` is why this is not simply `mode & 0o111`: an entry recorded 0o755
+    WITHOUT the regular-file type bits fails it and pip installs 0644, while uv's
+    check omits `S_ISREG` and accepts it. Assert pip's rule, the stricter one.
     """
     mode = info.external_attr >> 16
     return bool(mode and stat.S_ISREG(mode) and mode & 0o111)
 
-# `bin/java` is the launcher; `bin/keytool` comes along with java.base. Only the
-# first is load-bearing, but requiring the count to be non-zero as well catches
-# a wholesale mode reset that happens to leave java alone.
+# Also requiring a non-zero executable count catches a wholesale mode reset that
+# happens to leave java alone.
 REQUIRED = "_jvm/jre/bin/java"
 
 

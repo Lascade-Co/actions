@@ -1,40 +1,18 @@
 #!/usr/bin/env bash
 # Stage ONLY the public wheels into dist/ for upload. Run from the directory containing bundle/.
 # Env: DIST (distribution name, e.g. travel-animator), VERSION (the version being published),
-#      EXPECT_WHEELS (optional; the exact number expected -- see below).
+#      EXPECT_WHEELS (optional; the exact number expected).
 #
-# The upload action publishes every file in its packages-dir, so what ends up in dist/ is the
-# entire security boundary for a public release. The private `tada` wheel -- choreography
-# builder and credentialed fetchers -- must never reach a public index. Hence: copy in by the
-# public distribution's own glob, then assert what dist/ holds rather than trusting the glob to
-# have matched only what we meant.
+# The upload action publishes every file in its packages-dir, so dist/ is the entire security
+# boundary for a public release and the private `tada` wheel must never reach a public index.
+# Hence: copy in by the public distribution's own glob, then assert what dist/ actually holds.
 #
-# ---------------------------------------------------------------------------
-# Backlog C9: this got STRONGER when the count stopped being one, not weaker
-# ---------------------------------------------------------------------------
-# The public wheel now carries a per-platform JVM payload (backlog C1), so a release is N
-# wheels, one per platform leg, not one. "Exactly one file" was doing two jobs at once --
-# excluding the private wheel AND pinning the count -- and only the first of those is the
-# security property. Replacing it with "exactly one file" relaxed to "any number of files"
-# would have thrown the boundary away, so each job is now its own assertion:
-#
-#   1. every staged file matches ${dist_file}-${VERSION}-*.whl   -- the private wheel, a
-#      stray sdist, a leftover from another version: none of them can pass this
-#   2. every platform tag is DISTINCT                            -- two files claiming the
-#      same tag means a leg ran twice, and PyPI would reject the second upload after the
-#      first has already gone out, leaving a half-published release
-#   3. NONE of them is py3-none-any                              -- the one that matters most,
-#      see below
-#   4. the count matches EXPECT_WHEELS when the caller declares it
-#
-# **Why py3-none-any is fatal and not merely wrong.** Installers rank candidate wheels by tag
-# specificity, and `any` is compatible with every platform. A single untagged wheel uploaded
-# alongside the platform ones does not sit harmlessly beside them -- pip and uv will still
-# prefer a platform-specific tag, but `py3-none-any` is the file every OTHER platform resolves
-# to, including the ones we never built. So an accidentally-untagged upload silently ships a
-# payload-less wheel to everyone the matrix does not cover, and PyPI releases are IMMUTABLE:
-# it cannot be replaced, only yanked, and only by cutting a new version. That is why this is a
-# hard refusal at staging time rather than a warning.
+# A release is N wheels (one per platform leg), so the old "exactly one file" is split into four
+# assertions: name+version match; DISTINCT platform tags (a duplicate means a leg ran twice, and
+# PyPI rejects the second upload once the first is public, leaving a half-published release); no
+# py3-none-any; and the declared count. **py3-none-any is fatal**, not merely wrong: it is the
+# file every platform we did NOT build resolves to, so it silently ships a payload-less wheel --
+# and PyPI releases are IMMUTABLE, so it cannot be replaced, only yanked.
 set -euo pipefail
 
 : "${DIST:?}" "${VERSION:?}"
@@ -42,16 +20,13 @@ set -euo pipefail
 rm -rf dist
 mkdir dist
 
-# Any non-zero exit empties dist/ again. The workflow step failing is already enough to stop
-# the upload -- this is the second lock on the same door, because the cost of being wrong here
-# is an immutable public release of the private wheel.
+# Second lock on the same door as the failing step: the cost of being wrong here is an
+# immutable public release of the private wheel.
 trap 'status=$?; if (( status != 0 )); then rm -rf dist; echo "dist/ emptied after failure" >&2; fi' EXIT
 
-# A wheel filename carries the ESCAPED distribution name: PEP 427 collapses every run of
-# `-`, `_` or `.` to a single `_`. That was a no-op for every distribution this script has
-# seen so far (`tacli`, `tada-render` was never built here), but `travel-animator` files as
-# `travel_animator-`, so globbing on $DIST verbatim matches nothing. Match on the escaped
-# form; keep the messages in terms of $DIST, which is the name a human recognises.
+# A wheel filename carries the ESCAPED distribution name -- PEP 427 collapses every run of
+# `-`, `_` or `.` to a single `_` -- so globbing on $DIST verbatim matches nothing for
+# `travel-animator`. Match escaped; keep the messages in terms of the name a human recognises.
 dist_file="$(printf '%s' "$DIST" | sed -E 's/[-_.]+/_/g')"
 
 shopt -s nullglob
@@ -90,9 +65,8 @@ for path in "${staged[@]}"; do
       ;;
   esac
 
-  # {name}-{version}-{python}-{abi}-{platform}.whl, so the tag is the last three
-  # hyphen-separated fields. A build number (an optional 3rd field) would shift that, and we
-  # do not emit one -- if that ever changes, this is where it breaks, loudly.
+  # {name}-{version}-{python}-{abi}-{platform}.whl, so the tag is the last three fields. An
+  # optional build number would shift that; we emit none, and this is where that breaks loudly.
   stem="${name%.whl}"
   platform_tag="${stem##*-}"
   abi_tag="${stem%-*}"; abi_tag="${abi_tag##*-}"

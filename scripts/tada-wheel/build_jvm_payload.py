@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Assemble ONE platform's JVM payload for the public `travel-animator` wheel.
 
-Backlog C1/C4. Output layout, which is also what `tada_render.render_bridge`
-looks for and `verify_tada_wheel.py` asserts:
+Output layout, which is also what `tada_render.render_bridge` looks for and
+`verify_tada_wheel.py` asserts:
 
     <out>/
       ta-render.jar     the renderer jar, with the Skiko natives REMOVED
@@ -12,36 +12,21 @@ looks for and `verify_tada_wheel.py` asserts:
                         pinned SHA-256-verified release asset -- never built here)
       PAYLOAD.json      provenance -- platform tag, jar sha256, JRE version
 
-Three things about this are load-bearing and none of them are obvious.
+The jar is architecture-neutral for LWJGL but NOT for Skiko: `shared/build.gradle.kts`
+resolves `skiko-awt-runtime-$hostOs-$hostArch` from the BUILD MACHINE, so shipping it
+as-is puts a Linux libskia in a macOS wheel and throws `LibraryLoadException` at the
+first overlay draw. Hence the rewrite here, with the right native staged into
+`natives/` instead.
 
-**`ta-render.jar` is only architecture-neutral for LWJGL.** `tada`'s
-`host/build.gradle.kts` declares all six LWJGL native classifiers (commit
-c8dcfec), so those ship in every jar. Skiko does not: `shared/build.gradle.kts`
-resolves `skiko-awt-runtime-$hostOs-$hostArch` from the BUILD MACHINE, so a jar
-built on the Linux CI runner carries `libskiko-linux-x64.so` and nothing else.
-Copying that jar into a macOS wheel would ship 20 MB of dead Linux binary AND no
-macOS libskia -- a `LibraryLoadException` at the first overlay draw, long after
-the GL probe has passed. So the jar is rewritten here without any `libskiko-*`
-entry, and the right one is staged into `natives/` instead. That makes the
-SHIPPED jar genuinely platform-independent, which is why `verify_tada_wheel.py`
-re-runs the builder seal against the jar inside the wheel rather than trusting
-Gradle's check of the jar Gradle built.
+`natives/` is a real directory rather than a temp dir because both LWJGL and Skiko
+otherwise self-extract 20 MB from the classpath into `$TMPDIR` on every render.
+Skiko resolves `File(path, System.mapLibraryName("skiko-$hostId"))`, so its file must
+keep its `libskiko-linux-x64.so` name and NOT be renamed (checked against
+`LibraryLoader.findAndLoadLibrary` in skiko 0.148.2).
 
-**`natives/` is a directory, not a temp dir.** Both LWJGL and Skiko will happily
-self-extract their `.so` from the classpath into `$TMPDIR` on every single run;
-`-Dorg.lwjgl.librarypath` and `-Dskiko.library.path` (set by
-`render_bridge.packaged_runtime`) are what stop a GPU worker unpacking 20 MB per
-render. Skiko reads its property as `File(path, System.mapLibraryName("skiko-$hostId"))`
--- i.e. the file must keep its `libskiko-linux-x64.so` name, NOT be renamed to
-`libskiko.so`. Verified against `LibraryLoader.findAndLoadLibrary` bytecode in
-skiko 0.148.2.
-
-**`angle/` is absent on Linux on purpose.** `GlDriver.selectNativeLibraries`
-falls through to the system `libEGL.so.1`/`libGLESv2.so.2` only when it finds no
-bundled payload, and that system path is the one verified on Mesa llvmpipe and
-the one the NVIDIA GPU worker needs. Staging an empty `angle/` would be inert,
-but staging a populated one on Linux would silently take the container off the
-driver it is supposed to be using.
+`angle/` is absent on Linux on purpose: `GlDriver.selectNativeLibraries` falls
+through to the system `libEGL.so.1`/`libGLESv2.so.2` only when it finds no bundled
+payload, and staging one there would take the container off the NVIDIA driver.
 """
 from __future__ import annotations
 
@@ -55,14 +40,9 @@ import sys
 import zipfile
 from pathlib import Path
 
-# ---------------------------------------------------------------------------
-# Platform table
-# ---------------------------------------------------------------------------
-#
-# Three different vendors, three different spellings of the same six platforms,
-# and none of them is the wheel tag. Keeping the mapping in one literal table
-# beats deriving it: a derivation that is wrong is wrong silently, whereas a
-# missing row here is a KeyError naming the platform.
+# Platform table. Three vendors spell the same six platforms three different ways
+# and none of them is the wheel tag; a literal table fails loudly where a
+# derivation would be silently wrong.
 #
 #   lwjgl_dir   where the jar nests that platform's JNI shims  (<os>/<arch>/org/lwjgl/...)
 #   skiko_id    Skiko's `hostId`, which is part of the library FILE NAME
@@ -95,16 +75,13 @@ PLATFORMS = {
     ),
 }
 
-# The module set, from plan §4.2. `java.desktop` is not optional -- Skiko's AWT
-# runtime is the overlay rasteriser -- and `jdk.unsupported` carries `sun.misc.Unsafe`,
-# which okio and LWJGL's MemoryUtil both reach for. Everything else (jdk.jshell,
-# jdk.compiler, java.sql, the whole of java.management) is dropped.
+# `java.desktop` is not optional -- Skiko's AWT runtime is the overlay rasteriser --
+# and `jdk.unsupported` carries `sun.misc.Unsafe`, which okio and LWJGL's MemoryUtil
+# both reach for.
 JLINK_MODULES = "java.base,java.desktop,jdk.unsupported"
 
-# Skiko unpacks this from the classpath beside libskiko on Windows only
-# (`LibraryLoader(name, additionalFile = if (hostOs.isWindows) "icudtl.dat" else null)`).
-# With `skiko.library.path` set it looks for it next to the library, so it has to
-# be staged here or the first text measurement fails.
+# Windows only. With `skiko.library.path` set Skiko looks for this beside the library
+# rather than unpacking it, so it has to be staged or the first text measurement fails.
 SKIKO_WINDOWS_SIDECAR = "icudtl.dat"
 
 
@@ -119,12 +96,9 @@ def sha256(path: Path) -> str:
 def strip_skiko_natives(source: Path, target: Path) -> list[str]:
     """Copy `source` to `target` without any `libskiko-*` / `skiko-*` entry.
 
-    Entry order and per-entry compression are preserved; only the removed names
-    differ. `ZipFile.open` on the source and `writestr` with the ORIGINAL
-    `ZipInfo` keeps timestamps and external attributes intact, so the jar stays
-    byte-stable across runs for a given input -- which matters, because the
-    wheel's RECORD hash of this file is what a reproducibility check would
-    compare.
+    Writing back the ORIGINAL `ZipInfo` keeps timestamps and external attributes
+    intact, so the jar stays byte-stable across runs for a given input -- the
+    wheel's RECORD hash of this file is what a reproducibility check compares.
     """
     removed: list[str] = []
     with zipfile.ZipFile(source) as src, zipfile.ZipFile(
@@ -159,11 +133,8 @@ def extract_matching(archive: Path, wanted: dict[str, Path]) -> set[str]:
 def build_jre(java_home: Path, out: Path) -> dict[str, str]:
     """jlink, and then PROVE the result runs.
 
-    The `java -version` is not decoration: jlink is perfectly happy to emit a
-    runtime image for a module set the jar cannot actually start on, and a
-    cross-compiled or mismatched `--module-path` produces an image that dies
-    with a linker error the first time anything invokes it -- which, without
-    this, would be inside a GPU render.
+    jlink will happily emit an image that dies with a linker error the first time
+    anything invokes it -- which, without the `java -version`, is a GPU render.
     """
     jlink = java_home / "bin" / ("jlink.exe" if os.name == "nt" else "jlink")
     subprocess.run(
@@ -207,15 +178,11 @@ def main() -> int:
     parser.add_argument("--out", required=True, type=Path, help="payload directory to create")
     parser.add_argument("--skiko-jar", type=Path, required=True,
                         help="skiko-awt-runtime-<os>-<arch> jar for --platform")
-    # THE ONLY DOOR ANGLE COMES THROUGH, on purpose. There used to be a second one,
-    # `--angle-jar`, which unpacked Skiko's published
-    # `org.jetbrains.skiko:skiko-awt-runtime-angle-windows-x64` -- convenient, public, and
-    # ANGLE 2.1.25511 against the 2.1.28587 every other platform of this project renders
-    # through. Two revisions is two shader translators and two rasterisations of the same
-    # frame (risk R14), and a wheel is exactly the artifact where that ships silently. It was
-    # removed rather than documented-as-forbidden: the directory handed in here comes from a
-    # SHA-256-pinned release asset built from the one pinned revision (see
-    # scripts/angle/fetch_pinned_angle.py and the PROVENANCE documents), and nothing else can.
+    # THE ONLY DOOR ANGLE COMES THROUGH, on purpose. Do not add a convenience flag that
+    # unpacks Skiko's published ANGLE artifact: it is a different revision, and two
+    # revisions is two rasterisations of the same frame, shipped silently in a wheel.
+    # This directory comes from the SHA-256-pinned release asset built from the one
+    # pinned revision -- see scripts/angle/fetch_pinned_angle.py.
     parser.add_argument("--angle-dir", type=Path,
                         help="directory holding libEGL + libGLESv2 from the pinned, "
                              "checksum-verified release asset (macOS/Windows only)")
@@ -274,17 +241,13 @@ def main() -> int:
         print(f"ERROR: {args.skiko_jar} does not contain {skiko_library}", file=sys.stderr)
         return 1
     if spec["ext"] == ".dll" and SKIKO_WINDOWS_SIDECAR not in found:
-        # Not fatal here so the failure names the real cause at smoke time, but
-        # loud: with skiko.library.path set, Skiko looks for it beside the library.
+        # Not fatal here so the failure names the real cause at smoke time.
         print(f"WARNING: {SKIKO_WINDOWS_SIDECAR} not found in {args.skiko_jar}", file=sys.stderr)
 
-    # 4. ANGLE, when this platform has no system GLES.
-    #
-    # Both files land in ONE flat directory, and that is a hard requirement rather than
-    # tidiness: ANGLE's libEGL loads libGLESv2 BY BARE NAME out of its own module directory,
-    # so a split payload does not fail cleanly, it SIGSEGVs (plan §9.6, GlDriver.jvm.kt's
-    # header). Every top-level file in the source directory is copied alongside them, because
-    # a Windows ANGLE also wants d3dcompiler_47.dll and ANGLE's BSD-3-Clause LICENSE beside it.
+    # 4. ANGLE, when this platform has no system GLES. Both files must land in ONE flat
+    # directory: ANGLE's libEGL loads libGLESv2 BY BARE NAME out of its own module
+    # directory, so a split payload SIGSEGVs rather than failing cleanly. Sibling
+    # top-level files come too -- Windows also needs d3dcompiler_47.dll and the LICENSE.
     angle_files: list[str] = []
     if args.angle_dir:
         if not spec["angle"]:

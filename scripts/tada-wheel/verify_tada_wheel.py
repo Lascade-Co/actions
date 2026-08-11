@@ -10,46 +10,25 @@ contents live under its IMPORT path (`tada_render/`).
 The credential scan runs over BOTH wheels. It matters most for travel-animator, the one
 that is publishable to a public index.
 
----------------------------------------------------------------------------
-Backlog C8: the count is no longer two
----------------------------------------------------------------------------
-`len(all_wheels) != 2` was correct when the bundle held one private wheel and one pure
-public one. A platform matrix makes the public count N, so the assertion becomes: exactly
-one private wheel, at least one public wheel, and nothing else. Each half is checked
-separately, because "two files" was never the property that mattered -- "exactly one
-private wheel and it is the one we think" is.
+The JVM assertions each exist because of a failure that is silent without them:
 
----------------------------------------------------------------------------
-Backlog C11: the JVM assertions
----------------------------------------------------------------------------
-Everything below the credential scan is new, and each check exists because of a specific
-failure that is silent without it:
+**The nested-ZIP builder seal.** Gradle's `verifyTaRenderJarSeal` proves the jar GRADLE
+BUILT carries no `com/lascade/ta/shared/builder/**`; between that and the jar in the wheel
+sit an artifact round trip and `build_jvm_payload.py` rewriting it. JVM bytecode decompiles
+trivially (ADR 0006/0007), so a leak here publishes the choreography code to PyPI. Re-run on
+the shipped bytes, with Gradle's positive control: the renderer prefix must be PRESENT, or
+an empty jar passes a "no builder classes" test while proving nothing.
 
-**The nested-ZIP builder seal.** Gradle's `verifyTaRenderJarSeal` proves that the jar
-*Gradle built* carries no `com/lascade/ta/shared/builder/**` class. It says nothing about
-the jar *in the wheel*, and between the two sit an artifact upload, an artifact download,
-and `build_jvm_payload.py` rewriting the jar to strip Skiko's natives. Any of those could
-in principle substitute or corrupt it, and ADR 0006/0007 exist because JVM bytecode
-decompiles trivially: a leak here publishes the choreography code to PyPI. So the seal is
-re-run here, on the shipped bytes, with the same two positive controls Gradle uses -- the
-renderer prefix must be PRESENT, or an empty jar would pass a "no builder classes" test
-while proving nothing.
+**Class-file major 65.** A build on a newer JDK that lost the `jvmTarget = JVM_21` pin emits
+major 66+, and the jlink'd JRE 21 this wheel ships then throws `UnsupportedClassVersionError`
+at the first render. Package time is the only place both halves are in hand.
 
-**Class-file major 65.** `:host` and `:shared` both pin `jvmTarget = JVM_21`, but a build
-running on a newer JDK that ignored or lost that pin emits major 66+, and the jlink'd JRE 21
-this wheel ships then throws `UnsupportedClassVersionError` at the first render -- a runtime
-failure from a build that was green. Checking it at package time is the only place the two
-halves (what was compiled, what will run it) are both in hand.
+**Natives in the same directory.** ANGLE's `libEGL` loads `libGLESv2` BY BARE NAME from its
+own module directory, so a split payload SIGSEGVs rather than failing cleanly; the LWJGL
+shims must also be where `-Dorg.lwjgl.librarypath` points, which is one directory.
 
-**Natives in the same directory.** `GlDriver.jvm.kt`'s header: ANGLE's `libEGL` loads
-`libGLESv2` BY BARE NAME from its own module directory, so a split payload does not fail
-cleanly -- it SIGSEGVs (plan §9.6). The pair must be co-located, and the LWJGL shims must be
-where `-Dorg.lwjgl.librarypath` points, which is one directory.
-
-**Linux must have NO angle/.** It is the presence of a bundled payload that switches
-`GlDriver` off the system EGL/GLES, and the system path is the one the NVIDIA GPU worker
-needs. An `angle/` directory that arrived on a Linux wheel by accident would take the paid
-GPU off its own driver.
+**Linux must have NO angle/.** A bundled payload is what switches `GlDriver` off the system
+EGL/GLES, so an `angle/` arriving on a Linux wheel takes the paid GPU off its own driver.
 """
 from pathlib import PurePosixPath
 from zipfile import ZipFile
@@ -60,8 +39,7 @@ import re
 import sys
 import zipfile
 
-# `tada-*.whl` and `travel_animator-*.whl` are disjoint: a wheel filename starts with its
-# distribution name, and these two names share no prefix.
+# Disjoint: a wheel filename starts with its distribution name, and these two share no prefix.
 PRIVATE_GLOB = "bundle/tada-*.whl"
 PUBLIC_GLOB = "bundle/travel_animator-*.whl"
 
@@ -101,13 +79,11 @@ SEALED_PREFIX = "com/lascade/ta/shared/builder/"
 # above passed by being empty.
 REQUIRED_PREFIX = "com/lascade/ta/shared/render/"
 
-# Java 21. `:host/build.gradle.kts` pins `jvmTarget.set(JvmTarget.JVM_21)` for exactly this
-# reason; the jlink'd runtime is 21 and will not load anything higher.
+# Java 21: the jlink'd runtime is 21 and will not load anything higher.
 CLASS_FILE_MAJOR = 65
 
-# Per platform tag: (native library suffix, whether a bundled ANGLE is REQUIRED).
-# Linux is the only row with `False`, and it is `False` in the strong sense -- an `angle/`
-# there is a failure, not an extra.
+# Per platform tag: (native library suffix, whether a bundled ANGLE is REQUIRED). Linux's
+# `False` is the strong sense -- an `angle/` there is a failure, not an extra.
 PLATFORM_RULES = [
     (re.compile(r"manylinux_\d+_\d+_(x86_64|aarch64)$"), ".so", False),
     (re.compile(r"musllinux_\d+_\d+_(x86_64|aarch64)$"), ".so", False),
@@ -142,10 +118,8 @@ def check_credentials(wheel: str, names: set[str]) -> None:
 def check_jar(wheel: str, jar_bytes: bytes) -> None:
     """Re-run the ADR 0007 seal, and the class-file version check, on the SHIPPED jar.
 
-    A nested ZIP: the wheel is a zip, the jar inside it is a zip, and this reads the inner
-    one straight out of memory rather than extracting to disk -- so what is checked is
-    literally the bytes that will be installed, with no filesystem step in between that
-    could substitute them.
+    The inner zip is read straight out of memory rather than extracted, so what is checked
+    is literally the bytes that will be installed.
     """
     sealed: list[str] = []
     renderer = 0
@@ -161,11 +135,8 @@ def check_jar(wheel: str, jar_bytes: bytes) -> None:
                 sealed.append(name)
             if name.startswith(REQUIRED_PREFIX):
                 renderer += 1
-                # Read the class-file header of a bounded sample rather than all ~8,000:
-                # every class in this jar came out of the same compilation, so a
-                # disagreement between them is not the failure mode -- a whole jar built to
-                # the wrong target is. 40 spread across the renderer package is plenty, and
-                # keeps this check well under a second.
+                # A bounded sample rather than all ~8,000: the failure mode is a whole jar
+                # built to the wrong target, not disagreement within one compilation.
                 if len(sampled) < 40 and renderer % 50 == 1:
                     header = jar.read(name)[:8]
                     if header[:4] != b"\xca\xfe\xba\xbe":
@@ -297,8 +268,8 @@ def main() -> int:
     if missing:
         fail(f"{private[0]} is missing expected modules: {missing}")
     check_credentials(private[0], names)
-    # The private wheel is server-side only and stays pure. If it ever grows a payload the
-    # bundle's file count and TARS's shape checks both change, so say so here.
+    # The private wheel stays pure: a payload here would change the bundle's file count and
+    # TARS's shape checks.
     leaked = sorted(n for n in names if n.startswith("tada_render/_jvm/"))
     if leaked:
         fail(f"{private[0]} carries a JVM payload ({leaked[:3]}); it belongs in the public "
@@ -314,9 +285,8 @@ def main() -> int:
                 fail(f"{wheel} is missing expected modules: {missing}")
             check_credentials(wheel, names)
             if tag == "any":
-                # Not an error here -- publish-tada-wheel.yml's own bundle step decides
-                # whether a pure wheel is acceptable, and stage_public_wheel.sh refuses one
-                # outright on the PyPI path. But say clearly what is not being checked.
+                # Not an error here: the bundle step decides whether a pure wheel is
+                # acceptable, and stage_public_wheel.sh refuses one on the PyPI path.
                 print("    py3-none-any: no JVM payload, none checked. "
                       "The renderer will fall back to `ta-render` on PATH.")
                 continue

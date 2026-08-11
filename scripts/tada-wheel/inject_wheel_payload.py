@@ -1,33 +1,21 @@
 #!/usr/bin/env python3
 """Fold one platform's JVM payload into the public wheel, and retag it.
 
-Backlog C1. Input is the ordinary `travel_animator-<version>-py3-none-any.whl`
-that `uv build` produces; output is
-`travel_animator-<version>-py3-none-<platform tag>.whl` carrying
-`tada_render/_jvm/**` from `build_jvm_payload.py`.
+Input is the ordinary `travel_animator-<version>-py3-none-any.whl` that `uv build`
+produces; output is `travel_animator-<version>-py3-none-<platform tag>.whl`
+carrying `tada_render/_jvm/**` from `build_jvm_payload.py`.
 
-Why this is hand-rolled rather than `wheel unpack` + `wheel pack`:
+Hand-rolled rather than `wheel unpack` + `wheel pack` for two reasons. The
+execute bit: a round trip through the filesystem depends on the builder's umask
+and on the tool not normalising modes to 0644, either of which yields an
+installed `jre/bin/java` that cannot be exec'd. Here modes come straight off
+`os.stat`. And reproducibility: every entry gets a fixed 1980 timestamp, so the
+RECORD hashes `verify_tada_wheel.py` re-checks mean something.
 
-**The execute bit.** `jre/bin/java` is the only reason this wheel does anything
-at all, and a wheel records unix modes in the zip's `external_attr`. Both pip
-and uv reproduce the execute bit only for entries whose zip mode carries it, so
-an unpack/repack round-trip through a tool that normalises modes to 0644
-produces an installed package whose `java` cannot be exec'd -- an
-`OSError: [Errno 13] Permission denied` at the first render, from a wheel that
-installed cleanly. Round-tripping through the filesystem also depends on the
-builder's umask. Here the modes come straight off `os.stat` and the JRE's own
-bits are copied through unchanged.
-
-**Reproducibility.** Every entry is written with a fixed 1980 timestamp, so two
-runs over the same inputs produce the same bytes, and the RECORD hashes that
-`verify_tada_wheel.py` re-checks mean something.
-
-The `Tag:` line in `.dist-info/WHEEL` is what `wheel pack` and every installer
-read; it is rewritten here together with `Root-Is-Purelib: false` (the wheel now
-contains a platform-specific binary payload, so its content belongs in
-`site-packages` as platlib, not purelib) and the file is renamed to match. A
-wheel whose filename and `Tag:` disagree is accepted by some installers and
-rejected by others -- so both move, always together.
+`.dist-info/WHEEL`'s `Tag:` is rewritten together with `Root-Is-Purelib: false`
+(the payload is platform-specific, so it belongs in platlib) and the file is
+renamed to match. A wheel whose filename and `Tag:` disagree is accepted by some
+installers and rejected by others, so both move together, always.
 """
 from __future__ import annotations
 
@@ -53,17 +41,10 @@ def record_hash(data: bytes) -> str:
 def zipinfo_for(name: str, mode: int) -> zipfile.ZipInfo:
     """`mode` is a FULL `st_mode`, file-type bits included -- not `S_IMODE`.
 
-    This is not pedantry, it is the difference between a working wheel and a
-    `PermissionError`. pip decides whether to restore the execute bit with
-
-        mode = info.external_attr >> 16
-        return bool(mode and stat.S_ISREG(mode) and mode & 0o111)
-
-    -- so an entry recorded as `0o755` with no `S_IFREG` (0o100000) fails
-    `S_ISREG` and pip installs it 0644. uv's equivalent check omits `S_ISREG`,
-    so the wheel works under uv and fails under pip: a difference that only
-    shows up in a real `pip install`, and then only at the first render.
-    Measured 2026-08-11 on `python:3.12-slim-bookworm`, pip 25.0.1:
+    pip restores the execute bit only when `stat.S_ISREG(mode)` holds, so an entry
+    recorded `0o755` with no `S_IFREG` installs 0644. uv's check omits `S_ISREG`,
+    so such a wheel works under uv and fails under pip -- measured 2026-08-11 on
+    `python:3.12-slim-bookworm` / pip 25.0.1 as
     `PermissionError: [Errno 13] .../_jvm/jre/bin/java`.
     """
     info = zipfile.ZipInfo(name, date_time=FIXED_DATE)
@@ -118,10 +99,8 @@ def main() -> int:
         print(f"--tag must be <python>-<abi>-<platform>, got {args.tag!r}", file=sys.stderr)
         return 1
     if args.tag.endswith("-any"):
-        # The whole point of this script. A `py3-none-any` wheel sorts above
-        # every platform wheel for every installer on every platform, so one
-        # accidentally-untagged upload shadows the entire matrix -- for macOS
-        # users too, forever, because PyPI releases are immutable.
+        # A `py3-none-any` wheel shadows the entire matrix for every installer,
+        # and PyPI releases are immutable, so one bad upload is permanent.
         print(f"refusing to write a platform-independent wheel: --tag {args.tag}", file=sys.stderr)
         return 1
 
@@ -151,9 +130,8 @@ def main() -> int:
             if info.filename in (record_name, wheel_name):
                 continue
             if info.filename.startswith(prefix):
-                # A payload already inside the input wheel means this ran twice,
-                # or a developer's working tree leaked a staged payload into the
-                # sdist-less build. Either way the result would carry two.
+                # This ran twice, or a working tree leaked a staged payload into
+                # the build; either way the result would carry two.
                 print(f"{args.wheel} already contains {info.filename}", file=sys.stderr)
                 return 1
             data = src.read(info.filename)
@@ -191,10 +169,8 @@ def main() -> int:
                      buffer.getvalue().encode("utf-8"))
 
     if executables == 0:
-        # `jre/bin/java` at minimum. Zero means the modes were lost upstream --
-        # a `zipfile`-based staging step, a Windows checkout, or an artifact
-        # round-trip through `actions/upload-artifact`, which does NOT preserve
-        # them (see the workflow's tar note).
+        # Zero means the modes were lost upstream: a `zipfile` staging step, a
+        # Windows checkout, or `actions/upload-artifact`, which does not keep them.
         print("ERROR: no executable file in the payload; the JRE will not start.",
               file=sys.stderr)
         return 1

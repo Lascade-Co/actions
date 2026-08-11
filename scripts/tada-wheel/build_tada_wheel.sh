@@ -7,53 +7,35 @@
 # TADA ships as TWO distributions built from one revision (ADR 0011):
 #   tada             private -- choreography builder + credentialed fetchers, server-side only
 #   travel-animator  public  -- render engine and the safe CLI subcommands
-# travel-animator's Python import path is `tada_render`, and its wheel filename escapes the
-# dash: glob wheels by `travel_animator-`, expect module paths under `tada_render/`.
+# travel-animator's import path is `tada_render` and its wheel filename escapes the dash to
+# `travel_animator-`. Both belong in the bundle: `tada` imports `tada_render` at import time,
+# so a bundle carrying only the private wheel yields a `tada` entry point that cannot start.
 #
-# Both belong in the bundle: `tada` imports `tada_render` at module import time, so a bundle
-# carrying only the private wheel yields an install whose `tada` entry point cannot start.
-#
-# ---------------------------------------------------------------------------
-# Backlog C8/C10: what changed for the platform matrix
-# ---------------------------------------------------------------------------
-# The public wheel is now built per platform and carries a JVM payload, so this script no
-# longer produces the public wheel it ships. It builds BOTH wheels (the private one for real,
-# the public one as the pure input the platform legs fold their payload into), and then, if
-# PUBLIC_WHEEL is set, SWAPS the pure public wheel for the platform-tagged one built
-# elsewhere. That keeps one build path for the private wheel and the pylock, which is the
-# thing that must not fork.
-#
-# The bundle stays at FIVE files and single-platform (C10): TARS declares
-# `"target_platform": "linux/amd64"` and builds only that, so pushing four platform wheels to
-# GHCR would quadruple the pull for a consumer that uses one. PyPI gets all four; GHCR gets
-# the manylinux x86-64 one. The new `platform_tag` field in build-metadata.json is how a
-# consumer knows WHICH one it got, and `schema_version` goes 2 -> 3 to make reading that field
-# mandatory rather than optional.
+# This script builds BOTH wheels but ships the public one only as the pure input the platform
+# legs fold their payload into: if PUBLIC_WHEEL is set it SWAPS in the platform-tagged wheel
+# built elsewhere. One build path for the private wheel and the pylock is the thing that must
+# not fork. The bundle stays at FIVE files and single-platform -- TARS declares
+# `"target_platform": "linux/amd64"`, so pushing all four to GHCR would quadruple a consumer's
+# pull. PyPI gets the matrix; GHCR gets manylinux x86-64.
 set -euo pipefail
 
 : "${SHARED_REVISION:?}" "${TADA_REPOSITORY:?}" "${TADA_REVISION:?}"
 
-# Optional: a platform-tagged public wheel built by a matrix leg, to be shipped INSTEAD of the
-# pure one `uv build` produces here. Unset means the bundle carries the pure wheel, which is
-# what a pre-matrix build (and any local reproduction of it) does.
+# Optional: a platform-tagged public wheel built by a matrix leg, shipped INSTEAD of the pure
+# one `uv build` produces here. Unset means the bundle carries the pure wheel.
 PUBLIC_WHEEL="${PUBLIC_WHEEL:-}"
 
 rm -rf bundle
 mkdir bundle
 
-# --all-packages is load-bearing: plain `uv build` builds only the workspace ROOT (tada), so
-# the public travel-animator wheel is silently absent and nothing notices until a consumer's
-# image build tries to import it.
+# --all-packages is load-bearing: plain `uv build` builds only the workspace ROOT (tada), so the
+# public travel-animator wheel is silently absent until a consumer's image build cannot import it.
 uv build --wheel --all-packages --out-dir bundle
 
-# --no-emit-workspace, NOT --no-emit-project. --no-emit-project omits only the root project,
-# which left the public member in the lock as
-#     directory = { path = "tada_render", editable = true }
-# a relative path that resolves in this checkout but not in a consumer's /bundle, where
-# `uv pip sync pylock.toml` then fails with
-#     Distribution not found at: file:///bundle/tada_render
-# Both workspace members ship as wheels here, so neither belongs in the lock: it carries
-# third-party dependencies only.
+# --no-emit-workspace, NOT --no-emit-project: the latter omits only the root, leaving the public
+# member in the lock as an editable relative path that resolves here but fails in a consumer's
+# /bundle with "Distribution not found at: file:///bundle/tada_render". Both members ship as
+# wheels, so the lock carries third-party dependencies only.
 uv export \
   --locked \
   --no-dev \
@@ -63,9 +45,8 @@ uv export \
 
 shopt -s nullglob
 
-# The two globs are disjoint: a wheel filename starts with its distribution name, and
-# `travel_animator-` shares no prefix with `tada-`. Every consumer that selects one wheel by
-# glob depends on the two names staying prefix-distinct.
+# Every consumer that selects one wheel by glob depends on `tada-` and `travel_animator-`
+# staying prefix-distinct.
 private_wheels=(bundle/tada-*.whl)
 if (( ${#private_wheels[@]} != 1 )); then
   echo "expected exactly one tada-*.whl, found ${#private_wheels[@]}:" >&2
@@ -74,9 +55,8 @@ if (( ${#private_wheels[@]} != 1 )); then
 fi
 
 if [[ -n "$PUBLIC_WHEEL" ]]; then
-  # Replace, do not add. Leaving the pure wheel beside the platform one would put a
-  # `py3-none-any` file in the bundle, and that is the artifact that shadows every platform
-  # wheel for every installer -- the exact failure stage_public_wheel.sh refuses.
+  # Replace, do not add: a `py3-none-any` file left beside the platform wheel shadows it for
+  # every installer -- the exact failure stage_public_wheel.sh refuses.
   if [[ ! -f "$PUBLIC_WHEEL" ]]; then
     echo "PUBLIC_WHEEL=$PUBLIC_WHEEL does not exist" >&2
     exit 1
@@ -118,12 +98,9 @@ import platform
 import subprocess
 
 metadata = {
-    # 1 -> 2 when the bundle grew the public wheel. 2 -> 3 when that public wheel became
-    # PLATFORM-SPECIFIC (backlog C10) and the bundle started carrying `platform_tag`.
-    # Consumers that verify provenance (TARS deploy/verify_tada_bundle.py,
-    # release/validate_lock.py) branch on this, and the bump is what makes reading
-    # platform_tag mandatory: a v2 reader must not silently accept a v3 bundle whose wheel
-    # only installs on one architecture.
+    # Consumers branch on this (TARS deploy/verify_tada_bundle.py, release/validate_lock.py).
+    # 3 makes reading `platform_tag` mandatory: a v2 reader must not silently accept a bundle
+    # whose wheel only installs on one architecture.
     "schema_version": 3,
     "repository": os.environ["TADA_REPOSITORY"],
     "revision": os.environ["TADA_REVISION"],
@@ -133,14 +110,12 @@ metadata = {
     "built_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
     "python_version": platform.python_version(),
     "uv_version": subprocess.check_output(["uv", "--version"], text=True).strip(),
-    # `wheel` still names the PRIVATE wheel, exactly as it did at schema_version 1.
+    # `wheel` names the PRIVATE wheel; it has since schema_version 1.
     "wheel": os.environ["WHEEL_NAME"],
-    # New at schema_version 2: the public wheel that `tada` imports at load time. An
-    # installer that skips it produces a broken `tada` entry point.
+    # The public wheel that `tada` imports at load time; an installer that skips it produces
+    # a broken `tada` entry point.
     "render_wheel": os.environ["RENDER_WHEEL_NAME"],
-    # New at schema_version 3. The public wheel is now platform-tagged, so the bundle is
-    # only installable on a matching platform. TARS declares linux/amd64 and this is how a
-    # deploy checks that what it pulled matches what it runs -- rather than discovering it
+    # How a deploy checks that what it pulled matches what it runs, rather than discovering it
     # at `pip install` time as "no matching distribution".
     "platform_tag": os.environ["RENDER_WHEEL_PLATFORM_TAG"],
 }
@@ -156,9 +131,8 @@ PY
   sha256sum --check SHA256SUMS
 )
 
-# Five files, and the count is asserted HERE rather than only in the workflow: this script is
-# what decides the shape, so it is what should refuse to emit a wrong one. The workflow keeps
-# its own check as a second reader.
+# Asserted here as well as in the workflow: this script decides the bundle's shape, so it is
+# what should refuse to emit a wrong one.
 files=(bundle/*)
 if (( ${#files[@]} != 5 )); then
   printf 'bundle must hold exactly five files, found %d:\n' "${#files[@]}" >&2

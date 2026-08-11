@@ -27,12 +27,10 @@ private_wheel="$(basename "${private_wheels[0]}")"
 render_wheel="$(basename "${render_wheels[0]}")"
 created="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
-# Backlog C10: the bundle is deliberately SINGLE-PLATFORM. TARS declares
-# `"target_platform": "linux/amd64"` and builds only that, so pushing every platform wheel
-# here would multiply a consumer's pull for artifacts it can never install. PyPI gets the
-# whole matrix; GHCR gets one. The tag is read out of the wheel filename rather than trusted
-# from build-metadata.json, then cross-checked against it -- two independent readings of the
-# same fact, so a metadata file that disagrees with the bytes cannot be published.
+# The bundle is deliberately SINGLE-PLATFORM: TARS declares `"target_platform": "linux/amd64"`,
+# so PyPI gets the whole matrix and GHCR gets one. The tag is read from the wheel FILENAME and
+# then cross-checked against build-metadata.json -- two independent readings, so a metadata file
+# that disagrees with the bytes cannot be published.
 render_stem="${render_wheel%.whl}"
 platform_tag="${render_stem##*-}"
 if [[ "$platform_tag" != manylinux_*_x86_64 ]]; then
@@ -48,11 +46,8 @@ fi
 
 (
   cd bundle
-  # artifact-type stays at bundle.v1: the media types of the layers are unchanged and pullers
-  # select layers by filename, not by ordinal. Neither the file COUNT nor the layer set has
-  # changed at schema_version 3 -- what changed is that the public wheel is now
-  # platform-tagged, which build-metadata.json records in `platform_tag`. A puller that
-  # ignores it gets the same five files it always got, on the one platform it ever ran on.
+  # artifact-type stays at bundle.v1: the layer set and media types are unchanged at
+  # schema_version 3, and pullers select layers by filename rather than by ordinal.
   oras push "$package:latest" \
     --artifact-type application/vnd.lascade.tada-wheel.bundle.v1 \
     --annotation "org.opencontainers.image.created=$created" \

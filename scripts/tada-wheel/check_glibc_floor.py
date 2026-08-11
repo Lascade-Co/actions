@@ -2,45 +2,21 @@
 """Measure the glibc floor of every ELF in a wheel, and refuse a wheel that is
 above the consumer's.
 
-Backlog C2/C3. This is the check `auditwheel repair` was supposed to be, and
-the reason it is not is worth writing down, because "we did not use the standard
-tool" needs an argument.
+This replaces `auditwheel repair`, which measures the same floor but also VENDORS
+every external library into `<pkg>.libs/`. That is wrong here in both directions:
+the libraries it would vendor are exactly the ones that must come from the host
+(`libEGL.so.1`/`libGL.so.1` so the GPU worker gets `libEGL_nvidia.so`;
+`libfontconfig.so.1` for the host font cache), and it cannot complete on a wheel
+carrying a JRE anyway -- measured 2026-08-11, it fails resolving `libjvm.so`, then
+`libXtst.so.6`, on down java.desktop's X11 closure, and would end up patchelf-ing
+the JRE's own `$ORIGIN` RPATHs. So this script gates, and `auditwheel show` runs
+for the record only.
 
-`auditwheel repair` does two jobs: it MEASURES the ABI floor, and it VENDORS
-every external shared library into `<pkg>.libs/`, rewriting RPATHs. The second
-job is wrong for this wheel in both directions:
-
-  * The libraries it would vendor are the ones that must come from the host.
-    `libEGL.so.1`/`libGLESv2.so.2`/`libGL.so.1` are resolved at run time
-    precisely so the GPU worker gets `libEGL_nvidia.so`; `libfontconfig.so.1`
-    carries the host's font cache and `/etc/fonts`. That is backlog C3, and
-    `--exclude` covers it.
-  * It cannot COMPLETE at all on a wheel carrying a JRE. `repair` insists on
-    resolving the entire DT_NEEDED closure of every ELF, and `java.desktop`'s
-    `libawt_xawt.so` pulls in an X11 desktop stack -- `libXtst.so.6`,
-    `libXi.so.6`, `libXrender.so.1` ... -- that is absent from the manylinux
-    image, never loaded in a headless render, and must not be shipped. Measured
-    2026-08-11: it fails with `Cannot repair wheel, because required library
-    "libjvm.so" could not be located`, then `libXtst.so.6`, and so on down the
-    list. Excluding them one by one gets there eventually and still leaves
-    auditwheel patchelf-ing the JRE's own `$ORIGIN` RPATHs, which is a
-    materially riskier thing to do to a runtime image than anything it buys.
-
-So: `auditwheel show` still runs, for the human-readable record. The gate is
-this script, which measures the same thing auditwheel measures (versioned
-`GLIBC_x.y` symbol references, per ELF) and additionally asserts that nothing
-was vendored -- i.e. that the wheel is exactly as portable as it claims and no
-more.
-
-**What the manylinux tag does and does not claim here.** PEP 600 defines
-`manylinux_x_y` as "glibc >= x.y AND external dependencies limited to a short
-whitelist". This wheel meets the first half and deliberately not the second: it
-needs a system `libGL.so.1`, `libX11.so.6` and `libfontconfig.so.1`, the same
-way PyTorch's and PySide's manylinux wheels do. The tag is therefore a glibc
-claim, used by installers for compatibility selection; the GL/X/fontconfig
-requirement is a documented runtime prerequisite that no installer checks.
-TARS's GPU image satisfies it (`libgl1 libfontconfig1` explicitly, `libx11-6`
-transitively through `libgl1 -> libglx0`), verified 2026-08-11.
+The manylinux tag is a GLIBC claim only. PEP 600 also wants external dependencies
+limited to a whitelist; this wheel deliberately fails that half -- it needs a system
+`libGL.so.1`, `libX11.so.6` and `libfontconfig.so.1`, as PyTorch's and PySide's
+wheels do -- so that requirement is a runtime prerequisite no installer checks.
+TARS's GPU image satisfies it, verified 2026-08-11.
 """
 from __future__ import annotations
 
@@ -56,11 +32,10 @@ ELF_MAGIC = b"\x7fELF"
 GLIBC_SYMBOL = re.compile(rb"GLIBC_(\d+)\.(\d+)")
 TAG = re.compile(r"manylinux_(\d+)_(\d+)_")
 
-# Every external library the payload's ELFs name in DT_NEEDED that is NOT part of
-# the manylinux whitelist, with the reason it stays external. Anything appearing
-# in a `.libs/` directory would mean one of these got vendored after all.
+# Every external library the payload's ELFs name in DT_NEEDED that is NOT on the
+# manylinux whitelist. Anything here turning up in a `.libs/` got vendored after all.
 EXPECTED_EXTERNAL = {
-    "libEGL.so.1", "libGLESv2.so.2", "libGL.so.1",   # C3: must be the host's driver
+    "libEGL.so.1", "libGLESv2.so.2", "libGL.so.1",   # must be the host's driver
     "libX11.so.6", "libfontconfig.so.1",             # Skiko links them; host-owned
     "libXtst.so.6", "libXi.so.6", "libXrender.so.1", "libXext.so.6",
     "libasound.so.2", "libpng16.so.16", "libuuid.so.1", "libz.so.1",
@@ -71,11 +46,9 @@ EXPECTED_EXTERNAL = {
 def elf_glibc_versions(data: bytes) -> set[tuple[int, int]]:
     """Every `GLIBC_x.y` version string in the file.
 
-    A substring scan rather than a `.gnu.version_r` parse: the version strings
-    live in `.dynstr` as plain NUL-terminated ASCII, the scan cannot miss one,
-    and being generous is the safe direction for a floor check -- a false
-    positive fails the build loudly, a false negative ships a wheel that will
-    not load.
+    A substring scan rather than a `.gnu.version_r` parse: over-reporting is the
+    safe direction for a floor check -- a false positive fails the build loudly,
+    a false negative ships a wheel that will not load.
     """
     return {(int(a), int(b)) for a, b in GLIBC_SYMBOL.findall(data)}
 
@@ -128,9 +101,8 @@ def main() -> int:
           f"GLIBC_{worst[0]}.{worst[1]} in {worst_file}")
 
     if vendored:
-        # A `.libs/` directory means something WAS vendored. On this wheel that
-        # can only be one of EXPECTED_EXTERNAL, every one of which must come
-        # from the host -- see this module's docstring and C3.
+        # A `.libs/` here can only hold one of EXPECTED_EXTERNAL, every one of
+        # which must come from the host.
         print(f"REFUSING: {len(vendored)} vendored libraries found, e.g. "
               f"{vendored[:3]}. Nothing in this payload may be vendored.",
               file=sys.stderr)

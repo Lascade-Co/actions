@@ -5,11 +5,9 @@ on:
   repository_dispatch:
     types: [publish-tada-wheel]
 
-# A newer dispatch cancels older runs of this group. The publish job additionally
-# takes a dedicated non-cancel group to serialize concurrent GHCR mutations, and
-# re-checks that the built commit is still main's head before replacing latest.
-# (A superseding dispatch can still cancel an in-flight run; the stale-guard is what
-# guarantees a superseded commit is never what ends up published.)
+# The publish job additionally takes a non-cancel group to serialize GHCR mutations, and
+# re-checks that the built commit is still main's head before replacing latest -- that
+# stale-guard, not this cancellation, is what keeps a superseded commit from being published.
 concurrency:
   group: publish-tada-wheel-${{ github.event.client_payload.repo }}
   cancel-in-progress: true
@@ -17,62 +15,31 @@ concurrency:
 permissions:
   contents: read
 
-# ---------------------------------------------------------------------------------------------
-# ANGLE is CONSUMED here, never built here.
-# ---------------------------------------------------------------------------------------------
-#
-# macOS and Windows have no system EGL/GLES, so their wheels must carry ANGLE. It is built ONCE
-# per revision, out of band, on a machine that can build it -- an ANGLE build is a ~14 GB Chromium
-# checkout and a two-hour compile -- then published as a GitHub release asset and downloaded here
-# BY DIGEST. No workflow in this repository builds it, and adding one would be a regression: the
-# digest below is what makes the bytes in a published wheel the same bytes that were verified by
-# hand, and a per-build compile would replace that guarantee with a hope.
-#
-# The constants below are the pin. `travel-animator-shared`'s `angleRevision`/`angleSha256` (iOS)
-# and the PROVENANCE documents are the other copies; a revision bump moves ALL of them in ONE
-# change, or the platforms stop rendering the same pixels (risk R14: two ANGLE revisions means two
-# shader translators). The release tag is the revision's first 8 characters by convention, and the
-# ANGLE fetch step asserts that rather than trusting it.
+# ANGLE is CONSUMED here by digest, never built here. The digest is what makes the bytes in a
+# published wheel the bytes that were verified by hand; a per-build compile would replace that
+# guarantee with a hope. A revision bump must move these constants, `travel-animator-shared`'s
+# `angleRevision`/`angleSha256` (iOS) and the PROVENANCE documents in ONE change -- two ANGLE
+# revisions means two shader translators and two rasterisations of the same frame (risk R14).
 env:
   ANGLE_REVISION: be80ce591a481c12d60c50d6040d40c035b40a2b
   ANGLE_RELEASE_REPO: Lascade-Co/travel-animator-shared
   ANGLE_RELEASE_TAG: angle-be80ce59
-  # Built from source on an M2, 2026-08-11, and verified to produce a BIT-IDENTICAL 695-frame
-  # render to the previous reference. See travel-animator-shared third_party/angle/PROVENANCE-macos.md.
+  # Built on an M2, 2026-08-11; bit-identical 695-frame render to the previous reference.
+  # See travel-animator-shared third_party/angle/PROVENANCE-macos.md.
   ANGLE_SHA256_MACOS: dfe3d633b280bf2479189716ad3ab14381260180bd5c5246c3d80913eb477e30
-  # Built by hand on a real Windows host 2026-08-11, published, and verified through
-  # scripts/angle/fetch_pinned_angle.py against the release. Do NOT ever replace this with Skiko's
-  # `skiko-awt-runtime-angle-windows-x64`: that is ANGLE 2.1.25511 against our 2.1.28587, which is
-  # precisely the skew this pin exists to prevent. See scripts/angle/PROVENANCE-windows.md. This digest is of the
-  # REPACKED asset: the Windows build wrote its zip entries with backslash separators, which the
-  # ZIP spec forbids and which extract as flat files named `include\EGL\egl.h` on Linux/macOS.
-  # Only the separators changed -- all 24 entries are byte-identical to the original and every
-  # digest in the asset's own PROVENANCE.json still verifies.
+  # Do NOT replace this with Skiko's `skiko-awt-runtime-angle-windows-x64`: that is ANGLE
+  # 2.1.25511 against our 2.1.28587, precisely the skew this pin exists to prevent. The digest
+  # is of the REPACKED asset -- the Windows build wrote backslash zip separators, which extract
+  # as flat `include\EGL\egl.h` files on POSIX. See scripts/angle/PROVENANCE-windows.md.
   ANGLE_SHA256_WINDOWS_X64: 8a2732e41e0e14471fe7f852c6ee13a1ace13ed2178231c8d16353e1b35a59cc
 
-# ---------------------------------------------------------------------------------------------
-# Shape (KMP renderer migration, backlog C1/C2/C3/C8/C10)
-# ---------------------------------------------------------------------------------------------
+# The wheel matrix cannot collapse back into one job (CI doc §4): jlink cannot cross-target,
+# macOS ad-hoc signing needs a real macOS runner, and a platform-tagged wheel installs only on
+# a matching one. `ta-render.jar` is built ONCE and passed as an artifact -- it is
+# architecture-neutral (all six LWJGL classifiers, tada c8dcfec) -- which keeps Gradle's
+# three-build composite off the other four runners.
 #
-#   validate-python  ubuntu-24.04   uv sync, protos, pytest                       [unchanged work]
-#   jvm-build        ubuntu-24.04   ./gradlew :host:taJars + seal + :shared:jvmTest
-#                                   -> uploads ta-render.jar ONCE
-#   wheel   (matrix) 4 runners      fetch+verify ANGLE (macOS/Windows), jlink, stage natives,
-#                                   inject, retag, verify, GL smoke
-#   bundle           ubuntu-24.04   the 5-file GHCR bundle, from the x86-64 leg's wheel
-#   publish          ubuntu-24.04   ORAS push + prune                           [barely changed]
-#
-# The single `validate` job could not survive, for three independent reasons (CI doc §4):
-# **jlink cannot cross-target** -- a linux-x64 JDK cannot emit a macOS-arm64 runtime;
-# **macOS ad-hoc signing needs `codesign`**, i.e. a real macOS runner; and a platform-tagged
-# wheel only installs on a matching runner, so it can only be smoke-tested on one.
-#
-# `ta-render.jar` is built ONCE and passed as an artifact, because it is architecture-neutral
-# (all six LWJGL classifiers, tada commit c8dcfec). That keeps Gradle -- a three-build composite
-# over tada + shared -- off the other four runners entirely.
-#
-# ⚠️ NOTHING IN THIS FILE HAS EVER RUN. It was written against artifacts verified locally
-# (a real ta-render.jar, real manylinux containers, a real Debian bookworm install) but no
+# ⚠️ NOTHING IN THIS FILE HAS EVER RUN. It was written against locally verified artifacts; no
 # GitHub runner has executed it. See the scripts it calls for what WAS executed.
 jobs:
   validate-python:
@@ -82,10 +49,8 @@ jobs:
     env:
       EGL_PLATFORM: surfaceless
       LIBGL_ALWAYS_SOFTWARE: "1"
-      # Mesa picks a Gallium driver by probing; a GitHub runner has no GPU, so pin the software
-      # rasterizer explicitly instead of depending on what the probe happens to land on.
-      # llvmpipe backs BOTH client APIs used here -- desktop GL for moderngl and GLES for the
-      # JVM renderer -- so this is one knob for both, and it makes the pixels deterministic.
+      # A runner has no GPU, so pin the software rasterizer rather than trusting Mesa's probe.
+      # llvmpipe backs both APIs used here: desktop GL for moderngl, GLES for the JVM renderer.
       GALLIUM_DRIVER: llvmpipe
     steps:
       - name: Extract owner/repo
@@ -129,22 +94,11 @@ jobs:
           token: ${{ steps.app-token.outputs.token }}
           persist-credentials: false
 
-      # Two client APIs come out of this one Mesa stack, and the package list is their union:
-      #   * moderngl binds EGL_OPENGL_API -- DESKTOP GL, linking libGL.so.1  -> libegl1 + libgl1
-      #   * the KMP/JVM renderer binds EGL_OPENGL_ES_API and resolves
-      #     libGLESv2.so.2 at runtime via dlopen                             -> libgles2
-      #
-      # libgles2 is the load-bearing addition: nothing else here pulls it in, and without it the
-      # JVM GL suite finds no driver and *skips* rather than fails -- "0 failures, 61 skipped,
-      # BUILD SUCCESSFUL", a green run that exercised no GL at all.
-      #
-      # libegl-mesa0 is Mesa's EGL *vendor* library, which the vendor-neutral libegl1 loader
-      # dispatches to. It is only a `Recommends:` of libegl1 and this install passes
-      # --no-install-recommends, so it has been surviving purely on the runner image's
-      # preinstalled set -- not a contract. Name it.
-      #
-      # libgl1 / libgl1-mesa-dri stay: moderngl still ships in the wheel, and mesa-dri is the
-      # llvmpipe Gallium driver that actually rasterizes for BOTH APIs on a GPU-less runner.
+      # The union of two client APIs: moderngl binds desktop GL (libgl1), the JVM renderer binds
+      # GLES and dlopens libGLESv2.so.2 (libgles2). Without libgles2 the JVM GL suite SKIPS
+      # rather than fails -- "61 skipped, BUILD SUCCESSFUL", a green run that ran no GL at all.
+      # libegl-mesa0 is only a `Recommends:` of libegl1, and this install passes
+      # --no-install-recommends.
       - name: Install headless OpenGL/GLES runtime
         run: |
           sudo apt-get update
@@ -163,16 +117,13 @@ jobs:
           enable-cache: true
           cache-dependency-glob: uv.lock
 
-      # --all-packages --all-extras is load-bearing: grpcio-tools (protoc codegen) and the
-      # mcp SDK are declared on the tada_render member, not the workspace root. A plain
-      # `uv sync --locked` installs neither, so codegen and the MCP server tests fail. The
-      # flags repeat on every `uv run` below: each step re-syncs, and must not prune them.
+      # --all-packages --all-extras is load-bearing, here and on every `uv run` below:
+      # grpcio-tools and the mcp SDK are declared on the tada_render member, not the workspace
+      # root, so a plain `uv sync --locked` installs neither and codegen and the MCP tests fail.
       - name: Sync locked environment
         run: uv sync --locked --all-packages --all-extras
 
-      # The generator lives in the tada_render workspace member, not the repo root: only that
-      # package needs protoc codegen (the config schema and the vector-tile decoder are
-      # both its own). It resolves the `shared` submodule relative to the workspace root, so
+      # The generator resolves the `shared` submodule relative to the workspace root, so
       # invoking it by path from here is correct.
       - name: Generate protobuf modules
         run: uv run --locked --all-packages --all-extras python tada_render/hatch_build.py
@@ -180,16 +131,10 @@ jobs:
       - name: Run tests from the lockfile
         run: uv run --locked --all-packages --all-extras pytest
 
-  # ---------------------------------------------------------------------------------------
-  # The JAR, built exactly once.
-  #
-  # It is architecture-neutral: `host/build.gradle.kts` declares all six LWJGL native
-  # classifiers rather than the build host's (tada c8dcfec), so one jar serves every leg.
-  # It is NOT Skiko-neutral -- `shared/build.gradle.kts` resolves
-  # `skiko-awt-runtime-$hostOs-$hostArch` from the build machine -- which is why
-  # `build_jvm_payload.py` strips `libskiko-*` out of the copy it puts in each wheel and
-  # stages the right one beside it. Backlog C4, closed at packaging time rather than in Gradle.
-  # ---------------------------------------------------------------------------------------
+  # The jar is architecture-neutral for LWJGL (all six classifiers) but NOT for Skiko:
+  # `shared/build.gradle.kts` resolves `skiko-awt-runtime-$hostOs-$hostArch` from the build
+  # machine, which is why `build_jvm_payload.py` strips `libskiko-*` from the copy it puts in
+  # each wheel and stages the right one beside it (backlog C4).
   jvm-build:
     name: Build ta-render.jar and run the renderer suite
     runs-on: ubuntu-latest
@@ -240,15 +185,8 @@ jobs:
           token: ${{ steps.app-token.outputs.token }}
           persist-credentials: false
 
-      # NO rentile checkout. It used to be tada's second submodule, pulled in as a composite
-      # `includeBuild`, and two steps here resolved its revision and owner/repo out of
-      # `.gitmodules` so the Gradle configure phase could find it. That is gone: rentile
-      # publishes to Maven Central and `shared/build.gradle.kts` asks for a version like any
-      # other dependency, so the ordinary dependency cache resolves it.
-      #
-      # Do not reinstate those steps. They ran `git rev-parse HEAD:rentile` under
-      # `set -euo pipefail`, so with the submodule removed they do not degrade -- they kill the
-      # job before it configures anything.
+      # No rentile checkout: it is a Maven Central dependency now, not a submodule, so the
+      # ordinary dependency cache resolves it.
 
       - name: Install headless OpenGL/GLES runtime
         run: |
@@ -272,21 +210,15 @@ jobs:
       - name: Make gradlew executable
         run: chmod +x gradlew
 
-      # taJars builds ta-render.jar AND ta-prepare.jar, then runs verifyTaRenderJarSeal -- the
-      # ADR 0006/0007 gate that ta-render.jar (the one the public wheel ships) carries no
-      # com/lascade/ta/shared/builder/** class. JVM bytecode decompiles trivially, so a leak
-      # there publishes the choreography code those ADRs exist to withhold. The task checks in
-      # both directions: it also fails if the sealed prefix has stopped matching anything.
-      #
-      # This is NOT the last word on the seal. `verify_tada_wheel.py` re-runs it on the jar
-      # inside each finished wheel, because between here and there sit an artifact round-trip
-      # and a jar rewrite (see build_jvm_payload.py), and Gradle's check covers none of that.
+      # verifyTaRenderJarSeal is the ADR 0006/0007 gate: no com/lascade/ta/shared/builder/**
+      # class in the jar the public wheel ships, because JVM bytecode decompiles trivially.
+      # Not the last word -- verify_tada_wheel.py re-runs it on the jar inside each finished
+      # wheel, since an artifact round-trip and a jar rewrite sit between here and there.
       - name: Build the two JARs and verify the builder seal
         run: ./gradlew :host:taJars
 
-      # The seal report is written before verifyTaRenderJarSeal throws, so uploading it on a RED
-      # run is the point: it names the offending classes. `warn`, not `error`, because an earlier
-      # failure (compile, dependency resolution) legitimately leaves no report to collect.
+      # The report is written before the task throws, so a RED run is when it is worth having.
+      # `warn`, not `error`: an earlier failure legitimately leaves no report to collect.
       - name: Upload ta-render.jar seal report
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v7
@@ -296,21 +228,13 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
 
-      # The renderer's own suite, including the GL conformance tests ported from the Android
-      # device / iOS simulator suites.
-      #
-      # -PtaSharedRequireGl=true is not optional here. Those tests SKIP when no GL driver is
-      # reachable, by design -- macOS and Windows have no system GLES -- so on Linux there is no
-      # flag whose absence signals misconfiguration, and a missing libgles2 would read as a pass.
-      # The property makes the driver throw instead of skip.
-      #
-      # No taSharedAngleDir on Linux, deliberately: the system-GLES path installed above is
-      # exactly what is under test here. ANGLE is the macOS/Windows answer.
+      # -PtaSharedRequireGl turns "61 skipped, BUILD SUCCESSFUL" -- what a missing libgles2
+      # produces, since these tests skip by design where there is no GLES -- into a failure.
+      # No taSharedAngleDir: Linux tests the system-GLES path; ANGLE is the macOS/Windows answer.
       - name: Run the shared renderer JVM tests
         run: ./gradlew :shared:jvmTest -PtaSharedRequireGl=true
 
-      # The one artifact every wheel leg needs. A jar is a zip, so no file modes travel with
-      # it and `upload-artifact`'s mode-stripping is irrelevant here.
+      # A jar is a zip: no file modes travel with it, so upload-artifact stripping them is moot.
       - name: Upload ta-render.jar
         uses: actions/upload-artifact@v7
         with:
@@ -320,37 +244,12 @@ jobs:
           retention-days: 1
           compression-level: 0
 
-  # ---------------------------------------------------------------------------------------
-  # One wheel per platform.
-  #
-  # Every leg does the same five things -- build the pure wheel, assemble the payload, fold it
-  # in, verify, smoke -- but on different runners, because jlink runs on the target and a
-  # platform wheel installs only where its tag matches.
-  #
-  # macos-arm64 is HERE now, and what changed is licensing, not engineering. Its payload must
-  # carry ANGLE (macOS has no system EGL/GLES), and the ANGLE it used to carry was extracted
-  # from a Google Chrome install -- which works, and is not redistributable, so it could never
-  # ship in a PyPI wheel. ANGLE is BSD-3-Clause, so building it from source removes that
-  # constraint entirely: `angle-be80ce59-macos.zip` is our own build of the pinned revision,
-  # verified on an M2 to produce a BIT-IDENTICAL 695-frame render to the Chrome-ANGLE
-  # reference. The leg downloads it and checks its SHA-256 (backlog C5, closed).
-  #
-  # ⚠️ windows-x64 IS HERE AND CURRENTLY FAILS, ON PURPOSE. There is no Windows ANGLE of ours
-  # yet -- it needs a Windows host with Visual Studio, which this project has never had -- so
-  # `ANGLE_SHA256_WINDOWS_X64` is empty and the fetch step stops the leg with a message naming
-  # scripts/angle/PROVENANCE-windows.md and the one-time build it describes. The alternative
-  # was worse: Skiko's `skiko-awt-runtime-angle-windows-x64` is public and easy, and it is
-  # ANGLE 2.1.25511 against the 2.1.28587 every other platform runs -- a second shader
-  # translator quietly rasterising the same frame differently (risk R14). A loud failure is the
-  # honest state; a silent skew in a published wheel is not. (R11 is still open besides:
-  # libEGL.dll resolves libGLESv2.dll by BARE NAME via LoadLibraryW, so the two must sit in one
-  # directory -- which the packaging guarantees, and which no Windows binary in this project
-  # has yet executed.)
-  #
-  # linux-arm64 needs a `ubuntu-24.04-arm` runner. Those are GA for public repos and BILLED
-  # for private ones (CI doc §8 lists this as undetermined). If the org has not enabled them
-  # the leg fails at scheduling, which is a clear failure rather than a silent gap.
-  # ---------------------------------------------------------------------------------------
+  # One leg per platform, because jlink runs on the target, macOS needs `codesign`, and a
+  # platform wheel installs only where its tag matches. The macOS ANGLE is our own
+  # BSD-3-Clause build of the pinned revision, which is what makes it redistributable in a
+  # PyPI wheel at all. windows-x64 FAILS ON PURPOSE until that asset exists -- see the fetch
+  # step. `ubuntu-24.04-arm` runners are billed for private repos; if the org has not enabled
+  # them the arm64 leg fails at scheduling rather than silently going missing.
   wheel:
     name: Wheel (${{ matrix.platform }})
     needs: [validate-python, jvm-build]
@@ -370,10 +269,9 @@ jobs:
             # NOT 2_28: LWJGL 3.3.6's aarch64 liblwjgl.so references GLIBC_2.34, so the whole
             # wheel is capped there. Measured 2026-08-11; auditwheel refuses 2_28 outright.
             tag: manylinux_2_34_aarch64
-          # `angle_platform` is the suffix of the release asset name -- the leg downloads
-          # `${ANGLE_RELEASE_TAG}-<angle_platform>.zip` and verifies its digest. Its absence is
-          # what marks a leg as needing no ANGLE at all; Linux renders on the system EGL/GLES
-          # and a bundled payload there would take the GPU worker off the NVIDIA driver.
+          # `angle_platform` is the release asset's suffix; its ABSENCE is what marks a leg as
+          # needing no ANGLE. Linux renders on the system EGL/GLES, and a bundled payload there
+          # would take the GPU worker off the NVIDIA driver.
           - platform: macos-arm64
             runner: macos-14
             container: ""
@@ -441,9 +339,8 @@ jobs:
       - name: Generate protobuf modules
         run: uv run --locked --all-packages --all-extras python tada_render/hatch_build.py
 
-      # The PURE public wheel, which every leg then folds its own payload into. Building it
-      # here rather than once centrally keeps `uv build` on the same checkout that generated
-      # the protos, and the result is identical across legs by construction.
+      # The PURE public wheel each leg folds its own payload into. Built per leg so `uv build`
+      # runs on the same checkout that generated the protos; identical across legs by construction.
       - name: Build the pure wheels
         run: uv build --wheel --all-packages --out-dir pure
 
@@ -464,16 +361,9 @@ jobs:
             curl -sSfL "$base/$name" -o "ci-scripts/$name"
           done
 
-      # ---------------------------------------------------------------------------------
-      # Linux: everything glibc-sensitive happens INSIDE manylinux_2_28.
-      #
-      # `docker run` rather than a job-level `container:` on purpose. The container is needed
-      # for exactly one thing -- assembling and measuring the payload against glibc 2.28 --
-      # and putting the whole job in it would drag checkout, setup-uv, setup-java and every
-      # upload through an AlmaLinux 8 image for no benefit. It also means what runs in CI is
-      # byte-for-byte the command that was run locally to verify this, which is the only
-      # reason any of it is trusted.
-      # ---------------------------------------------------------------------------------
+      # `docker run` rather than a job-level `container:`: only the payload assembly and its
+      # glibc measurement need manylinux_2_28, and putting the whole job in AlmaLinux 8 would
+      # drag checkout, setup-uv, setup-java and every upload through it for no benefit.
       - name: Build the platform wheel (Linux, in manylinux)
         if: ${{ matrix.container != '' }}
         env:
@@ -490,9 +380,6 @@ jobs:
             -e MANYLINUX_TAG="$MANYLINUX_TAG" \
             "$CONTAINER" bash /io/ci-scripts/build_linux_wheel.sh
 
-      # ---------------------------------------------------------------------------------
-      # macOS and Windows: no container, and ANGLE is DOWNLOADED -- never built here.
-      # ---------------------------------------------------------------------------------
       - name: Set up JDK for jlink
         if: ${{ matrix.container == '' }}
         uses: actions/setup-java@v5

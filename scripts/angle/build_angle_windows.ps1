@@ -4,35 +4,14 @@
     travel-animator-shared's `third_party/angle/PROVENANCE.md` packages the iOS slices.
 
 .DESCRIPTION
-    RUN THIS BY HAND, ONCE PER REVISION, ON A WINDOWS BOX. It is deliberately NOT wired to a
-    workflow: CI never builds ANGLE, it downloads a SHA-256-pinned release asset (see
-    `.github/workflows/publish-tada-wheel.yml`). A two-hour Windows runner reproducing a file
-    that is already pinned by digest buys nothing. `.github/workflows/build-angle-windows.yml`
-    existed briefly and was removed; the prose that was in it now lives in PROVENANCE-windows.md
-    beside this file, which is the document to read first -- it carries the toolchain
-    requirements, the d3dcompiler_47.dll finding, the verification checklist and the publish
-    commands.
+    RUN THIS BY HAND, ONCE PER REVISION, ON A WINDOWS BOX. Deliberately NOT wired to a workflow:
+    CI never builds ANGLE, it downloads a SHA-256-pinned release asset (see
+    `.github/workflows/publish-tada-wheel.yml`). Read PROVENANCE-windows.md beside this file
+    first -- toolchain requirements, the d3dcompiler_47.dll finding, verification and publish.
 
-    This is the Windows counterpart of the recipe in that PROVENANCE file. Same upstream, same
-    revision, same "publish one SHA-256-pinned release asset" ending -- only the `gn` args and the
-    packaging differ, because Windows produces two plain DLLs rather than two xcframeworks.
-
-    WHY IT EXISTS. Windows used to get its ANGLE from Skiko's published Maven artifact
-    (`org.jetbrains.skiko:skiko-awt-runtime-angle-windows-x64`), which is ANGLE 2.1.25511, while
-    macOS took 2.1.28226 out of a Google Chrome install. Two ANGLE builds means two shader
-    translators and two rasterisations of the same frame, which is a golden-frame parity problem
-    the moment both platforms ship (risk R14). macOS is now built from the pinned revision
-    (2.1.28587) and Windows is the last platform still missing its own build -- which is why the
-    windows-x64 wheel leg fails until this script has been run and its output published. Building
-    every platform from ONE pinned revision is the entire point of this script; the revision is
-    not a knob to turn casually.
-
-    ⚠️ THIS SCRIPT HAS NEVER BEEN EXECUTED. Chromium's Windows build needs a Windows host with
-    Visual Studio, and cross-compiling it from macOS is unsupported, so nothing here has run
-    anywhere. Every `gn` argument, target name and output path below was read out of ANGLE's own
-    `gni/angle.gni` and `BUILD.gn` AT THE PINNED REVISION rather than recalled, and the places
-    where that reading could still be wrong are called out in the comments. Treat the first run as
-    a debugging session, not a build.
+    Every platform must be built from ONE pinned revision: two ANGLE builds means two shader
+    translators and two rasterisations of the same frame, i.e. a golden-frame parity problem.
+    The revision is not a knob to turn casually.
 
 .PARAMETER Revision
     ANGLE revision to build. Must be the same 40-hex revision every other platform is built from.
@@ -42,8 +21,7 @@
 
 .PARAMETER IncludeD3dCompiler
     'true' to ship `d3dcompiler_47.dll` alongside the ANGLE pair, 'false' to build it, assert it,
-    and then leave it out. See the "d3dcompiler_47.dll" section below -- this is a licensing
-    decision, not a technical one, which is why it is a parameter and not a constant.
+    and then leave it out. A licensing decision, not a technical one, hence a parameter.
 
 .PARAMETER WorkDir
     Scratch root for depot_tools and the ANGLE checkout. Roughly 25 GB.
@@ -60,9 +38,8 @@ param(
     [ValidateSet('x64', 'arm64')]
     [string]$TargetCpu = 'x64',
 
-    # Deliberately a string, not [bool] and not [switch]. `-IncludeD3dCompiler false` bound to a
-    # [bool] parameter arrives as the non-empty string "false" and converts to $true, which is the
-    # single most common way a GitHub-Actions-to-PowerShell boundary silently inverts a flag.
+    # Deliberately a string, not [bool]/[switch]: `-IncludeD3dCompiler false` bound to a [bool]
+    # arrives as the non-empty string "false" and converts to $true, silently inverting the flag.
     [ValidateSet('true', 'false')]
     [string]$IncludeD3dCompiler = 'true',
 
@@ -73,11 +50,8 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-# PowerShell 7.4 made `$ErrorActionPreference = 'Stop'` apply to NATIVE commands too, so a non-zero
-# `gn`/`ninja` would throw a generic "Program failed" before `Invoke-Native` could say which step
-# died and with what arguments. Turn that back off and keep the explicit exit-code checks -- they
-# produce the better message, and they behave the same on Windows PowerShell 5.1, where this
-# variable does not exist and assigning it is inert.
+# PowerShell 7.4+ applies 'Stop' to NATIVE commands too, throwing a generic "Program failed" before
+# Invoke-Native can name the step that died. Off, in favour of the explicit exit-code checks below.
 $PSNativeCommandUseErrorActionPreference = $false
 
 # PowerShell does not fail a script when a native command exits non-zero; the GitHub `pwsh` shell
@@ -112,16 +86,13 @@ New-Item -ItemType Directory -Force -Path $OutDir  | Out-Null
 # 1. The three environment facts a Chromium-family checkout needs on Windows.
 # ---------------------------------------------------------------------------------------------
 #
-# DEPOT_TOOLS_WIN_TOOLCHAIN=0 is the load-bearing one. Left unset, `gn gen` runs
-# `build/vs_toolchain.py`, which tries to download Google's INTERNAL packaged MSVC toolchain from
-# a Google-only bucket; on a GitHub runner that fails with an access error that reads like a
-# network problem. `0` means "use the Visual Studio already installed on this machine", which on
-# `windows-latest` is VS 2022 with the Windows SDK.
+# Left unset, `gn gen` tries to download Google's INTERNAL packaged MSVC toolchain from a
+# Google-only bucket and fails with an access error that reads like a network problem. `0` means
+# "use the Visual Studio already installed on this machine".
 $env:DEPOT_TOOLS_WIN_TOOLCHAIN = '0'
 
-# Chromium-family checkouts contain paths past Windows' 260-character limit. Without this, the
-# failure lands somewhere in the middle of `gclient sync` as "Filename too long", after twenty
-# minutes of downloads.
+# Chromium-family checkouts contain paths past Windows' 260-character limit; without this,
+# `gclient sync` dies with "Filename too long" twenty minutes into the downloads.
 Invoke-Native 'git: allow long paths' 'git' @('config', '--global', 'core.longpaths', 'true')
 
 # A CRLF-mangled .py or .gn file is a syntax error, not a diff.
@@ -131,9 +102,8 @@ Invoke-Native 'git: disable autocrlf' 'git' @('config', '--global', 'core.autocr
 # 2. depot_tools.
 # ---------------------------------------------------------------------------------------------
 #
-# Not pinned, on purpose: depot_tools has no release tags and self-updates on first use anyway, so
-# a pin here would be decoration. It is also the only unpinned input to this build -- ANGLE itself
-# and everything `gclient sync` fetches are pinned by the revision's DEPS.
+# Not pinned, on purpose: depot_tools has no release tags and self-updates on first use anyway. It
+# is the only unpinned input -- ANGLE and everything `gclient sync` fetches come from the DEPS.
 $depotTools = Join-Path $WorkDir 'depot_tools'
 if (-not (Test-Path -LiteralPath $depotTools)) {
     Invoke-Native 'clone depot_tools' 'git' @(
@@ -142,23 +112,18 @@ if (-not (Test-Path -LiteralPath $depotTools)) {
         $depotTools
     )
 }
-# PREPENDED. depot_tools ships its own python3/ninja/gn wrappers and they must win over the
-# runner's; the `.bat` entry points are the supported ones on Windows, so they are named
-# explicitly below rather than relied on via PATHEXT.
+# PREPENDED: depot_tools' own python3/ninja/gn wrappers must win over the runner's. The `.bat`
+# entry points are the supported ones on Windows, hence named explicitly below rather than PATHEXT.
 $env:PATH = "$depotTools;$env:PATH"
 
-# First run bootstraps depot_tools' own Python and tooling. Doing it here keeps several minutes of
-# bootstrap output out of the middle of the sync log.
 Invoke-Native 'bootstrap depot_tools' (Join-Path $depotTools 'gclient.bat') @('--version')
 
 # ---------------------------------------------------------------------------------------------
 # 3. ANGLE at the pinned revision.
 # ---------------------------------------------------------------------------------------------
 #
-# A full clone, matching PROVENANCE.md's recipe. A shallow one is tempting on a runner, but
-# `gclient sync` resolves DEPS against the checked-out commit and a `--depth 1` fetch of an
-# arbitrary revision is exactly the case that breaks; the clone is a few minutes, the debugging
-# would not be.
+# A full clone. Shallow is tempting, but `gclient sync` resolves DEPS against the checked-out
+# commit and a `--depth 1` fetch of an arbitrary revision is exactly the case that breaks.
 $angle = Join-Path $WorkDir 'angle'
 if (-not (Test-Path -LiteralPath $angle)) {
     Invoke-Native 'clone ANGLE' 'git' @(
@@ -169,11 +134,8 @@ Push-Location $angle
 try {
     Invoke-Native 'checkout the pinned revision' 'git' @('checkout', '--detach', $Revision)
 
-    # Writes ANGLE's `.gclient` solution. Same two commands as PROVENANCE.md's step 1, except for
-    # which python runs them: depot_tools is FIRST on PATH and ships `python3.bat`, while the
-    # GitHub runner's own interpreter is `python` and there is no guarantee a bare `python3`
-    # resolves to anything at all on Windows. Prefer depot_tools' -- it is the one every other
-    # tool in this checkout is about to use -- and fall back rather than assume.
+    # Prefer depot_tools' `python3.bat` -- it is the interpreter every other tool in this checkout
+    # is about to use, and a bare `python3` is not guaranteed to resolve at all on Windows.
     $python = Join-Path $depotTools 'python3.bat'
     if (-not (Test-Path -LiteralPath $python)) { $python = 'python' }
     Invoke-Native 'bootstrap the gclient solution' $python @('scripts/bootstrap.py')
@@ -183,23 +145,13 @@ try {
     # 4. gn args -- the Windows/D3D11 counterpart of PROVENANCE.md's iOS/Metal block.
     # -----------------------------------------------------------------------------------------
     #
-    # Every name here was read out of `gni/angle.gni` at this revision. Two of its defaults matter
-    # and are the reason the "off" switches are worth their lines:
-    #
-    #   angle_enable_swiftshader = angle_enable_vulkan && !is_android && is_clang
-    #       -- leaving Vulkan on drags SwiftShader into the build: a whole second rasterizer,
-    #          which is both build time and, if it ever got packaged, a second set of pixels.
-    #   angle_enable_hlsl = angle_enable_d3d11
-    #       -- so the HLSL shader translator the D3D11 backend needs comes along automatically.
-    #          Do NOT "add" angle_enable_hlsl here; it is derived, and setting a derived arg is
-    #          how the two drift.
-    #
-    # angle_enable_gl is the WGL passthrough backend -- a second driver path on the same machine,
-    # which is the precise class of problem this build exists to retire. angle_enable_null is a
-    # no-op backend for ANGLE's own test suite. Neither ships.
-    #
-    # (On arm64, `angle.gni` already forces angle_enable_gl false via `is_win_arm64`. Setting it
-    # false unconditionally keeps one args block for both CPUs.)
+    # Two derived defaults in `gni/angle.gni` are why the "off" switches earn their lines:
+    #   angle_enable_swiftshader = angle_enable_vulkan && ... -- leaving Vulkan on drags in a whole
+    #     second rasterizer, i.e. a second set of pixels if it ever got packaged.
+    #   angle_enable_hlsl = angle_enable_d3d11 -- the D3D11 backend's shader translator comes along
+    #     automatically. Do NOT set angle_enable_hlsl here; setting a derived arg is how they drift.
+    # angle_enable_gl (WGL passthrough) and angle_enable_null are second driver paths that must not
+    # ship; forcing gl false unconditionally keeps one args block for both CPUs.
     $argsGn = @"
 # Generated by scripts/angle/build_angle_windows.ps1 -- do not hand-edit in the out dir.
 target_os = "win"
@@ -223,24 +175,13 @@ symbol_level = 1
     Invoke-Native 'gn gen' (Join-Path $depotTools 'gn.bat') @('gen', $outSubdir)
 
     # -----------------------------------------------------------------------------------------
-    # 5. Build -- and name `copy_compiler_dll` explicitly. (Risk R15.)
+    # 5. Build -- and name `copy_compiler_dll` explicitly.
     # -----------------------------------------------------------------------------------------
     #
-    # `d3dcompiler_47.dll` is NOT compiled from ANGLE's source. ANGLE's root BUILD.gn declares, at
-    # this revision:
-    #
-    #     _use_copy_compiler_dll = angle_has_build && is_win
-    #     copy("copy_compiler_dll") {
-    #       sources = [ "$windows_sdk_path/Redist/D3D/$target_cpu/d3dcompiler_47.dll" ]
-    #       outputs = [ "$root_out_dir/{{source_file_part}}" ]
-    #     }
-    #
-    # i.e. the build COPIES it out of the installed Windows SDK's redistributable D3D folder, and
-    # hangs that copy off `libANGLE_no_vulkan` as a `data_deps`. data_deps do reach ninja through
-    # the linked target, so `autoninja libGLESv2` alone would very probably produce it -- but
-    # "very probably" is how R15 came to be an open risk in the first place. Naming the target
-    # makes the DLL a build PRODUCT with a build failure attached, instead of a file that either
-    # shows up or does not.
+    # `d3dcompiler_47.dll` is not compiled from source: ANGLE's `copy_compiler_dll` target copies it
+    # out of the Windows SDK's Redist/D3D folder and hangs it off libANGLE_no_vulkan as a data_dep.
+    # Naming the target makes the DLL a build PRODUCT with a build failure attached, rather than a
+    # file that either shows up or does not.
     Invoke-Native 'autoninja' (Join-Path $depotTools 'autoninja.bat') @(
         '-C', $outSubdir, 'libEGL', 'libGLESv2', 'copy_compiler_dll'
     )
@@ -263,9 +204,8 @@ foreach ($name in @('libEGL.dll', 'libGLESv2.dll')) {
     }
 }
 
-# The d3dcompiler assertion runs whether or not we ship the file. Knowing the SDK component is
-# present is worth a line either way: its absence means the Redist/D3D folder is missing from the
-# runner image, which would silently change what a future `include_d3dcompiler=true` run produces.
+# Asserted whether or not we ship it: an absent file means the SDK's Redist/D3D folder is missing
+# from the image, which would silently change what a future -IncludeD3dCompiler true run produces.
 $d3dCompiler = Join-Path $built 'd3dcompiler_47.dll'
 if (-not (Test-Path -LiteralPath $d3dCompiler)) {
     throw @"
@@ -288,11 +228,9 @@ $d3dVersion = (Get-Item -LiteralPath $d3dCompiler).VersionInfo.FileVersion
 # 7. Stage the distribution.
 # ---------------------------------------------------------------------------------------------
 #
-# The zip's ROOT holds exactly what `build_jvm_payload.py --angle-dir` should copy into the
-# wheel's flat `_jvm/angle/`: it iterates top-level FILES only, so `include/` and `lib/` below are
-# available to a native consumer without reaching the wheel. ANGLE's LICENSE is at the root on
-# purpose -- BSD-3-Clause wants the notice to travel with the binary, and at the root it rides
-# into the wheel next to the DLLs it covers.
+# `build_jvm_payload.py --angle-dir` iterates top-level FILES only, so the zip ROOT is exactly what
+# reaches the wheel's flat `_jvm/angle/` and `include/`+`lib/` stay out of it. LICENSE sits at the
+# root on purpose: BSD-3-Clause wants the notice to travel with the binaries it covers.
 $dist = Join-Path $WorkDir "angle-dist-win-$TargetCpu"
 New-CleanDirectory $dist
 New-Item -ItemType Directory -Force -Path (Join-Path $dist 'include') | Out-Null
@@ -301,11 +239,9 @@ New-Item -ItemType Directory -Force -Path (Join-Path $dist 'lib') | Out-Null
 Copy-Item -LiteralPath (Join-Path $built 'libEGL.dll')    -Destination $dist
 Copy-Item -LiteralPath (Join-Path $built 'libGLESv2.dll') -Destination $dist
 if ($IncludeD3dCompiler -eq 'true') {
-    # Redistributing this file is governed by the Windows SDK licence, not by ANGLE's -- it sits
-    # in the SDK's `Redist` tree precisely because that tree is the redistributable one. Shipping
-    # it is the default because the alternative is depending on whatever the end user's Windows
-    # happens to have; flipping the parameter is how that decision gets revisited without editing
-    # this script.
+    # Redistribution is governed by the Windows SDK licence, not ANGLE's. Shipping it is the
+    # default because the alternative is depending on whatever the end user's Windows happens
+    # to have.
     Copy-Item -LiteralPath $d3dCompiler -Destination $dist
 }
 Copy-Item -LiteralPath (Join-Path $angle 'LICENSE') -Destination $dist
@@ -315,8 +251,8 @@ foreach ($headerDir in @('EGL', 'GLES2', 'GLES3', 'KHR')) {
               -Destination (Join-Path $dist 'include') -Recurse
 }
 
-# Import libraries, for anything that links ANGLE at build time rather than dlopen-ing it. Kept
-# out of the zip root so they never reach a wheel: 200 KB of dead weight per platform.
+# Import libraries, for anything that links ANGLE at build time rather than dlopen-ing it. Kept out
+# of the zip root so they never reach a wheel.
 foreach ($importLib in @('libEGL.dll.lib', 'libGLESv2.dll.lib')) {
     $path = Join-Path $built $importLib
     if (Test-Path -LiteralPath $path) { Copy-Item -LiteralPath $path -Destination (Join-Path $dist 'lib') }
@@ -379,12 +315,8 @@ Write-Host "bytes:  $bytes"
 Write-Host "sha256: $digest"
 
 # ---------------------------------------------------------------------------------------------
-# 9. What a human does next.
+# 9. What a human does next. Nothing publishes automatically, because nothing here runs in CI.
 # ---------------------------------------------------------------------------------------------
-#
-# Nothing publishes automatically, because nothing here runs in CI. The two consumers of this
-# artifact are named explicitly so neither is forgotten: the release asset is what the wheel
-# matrix downloads, and the digest is what it refuses to proceed without.
 Write-Host @"
 
 Next, by hand:
@@ -405,9 +337,12 @@ Next, by hand:
 
        ANGLE_SHA256_WINDOWS_X64: $digest
 
-     It is empty today, and that emptiness is what fails the windows-x64 wheel leg with a
-     message pointing at PROVENANCE-windows.md. Setting it is what unblocks Windows wheels.
+     A digest is already pinned there from the 2026-08-11 build. Replacing it means every
+     Windows wheel from now on carries THESE bytes, so only do so deliberately.
 
-  4. RECORD. Replace the STATUS banner at the top of PROVENANCE-windows.md with what this
-     run actually produced and measured.
+     If the zip was packed on Windows its entries may use backslash separators, which the
+     ZIP spec forbids; repack with '/' before publishing. Only the root-level DLLs reach the
+     wheel, so the fault is invisible there and shows up in include/ and lib/ instead.
+
+  4. RECORD. Update PROVENANCE-windows.md with what this run produced and measured.
 "@

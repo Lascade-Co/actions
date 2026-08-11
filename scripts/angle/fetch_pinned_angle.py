@@ -1,37 +1,21 @@
 #!/usr/bin/env python3
 """Download, verify and unpack ONE pinned ANGLE release asset.
 
-**CI never builds ANGLE.** It is built out of band -- once per revision, by hand, on a
-machine that can build it -- published as a GitHub release asset, and consumed here by
-digest. This script is the consumer. It is the Python counterpart of
-`travel-animator-shared`'s `downloadAngle` Gradle task and follows its conventions
-deliberately:
+CI never builds ANGLE: it is built out of band, published as a release asset, and consumed
+here by digest. Hence the conventions, which match `travel-animator-shared`'s `downloadAngle`
+Gradle task:
 
-  * the REST **asset** endpoint with `Accept: application/octet-stream`, because
-    `travel-animator-shared` is PRIVATE and the browser-facing
-    `github.com/.../releases/download/...` URL answers 404 to an unauthenticated client;
-  * redirects walked BY HAND, dropping `Authorization` the moment the host changes -- the
-    asset endpoint answers 302 with a pre-signed storage URL that REJECTS a request still
-    carrying a GitHub bearer token;
-  * the token resolved from `GITHUB_TOKEN`, then `GH_TOKEN`, then `gh auth token`, so CI
-    needs only its App token and a developer who has run `gh auth login` needs nothing;
-  * **a checksum mismatch is fatal.** Not a warning. The digest is the whole reason this
-    arrangement is safe: it is what makes "the asset someone uploaded" identical to "the
-    binaries that were verified".
-
-The unpacked directory is what `build_jvm_payload.py --angle-dir` consumes. That copies
-top-level FILES only, so an archive whose libraries sit in a subdirectory would produce an
-empty `angle/` in the wheel; the layout assertion at the end catches that here, where the
-message can say so, rather than three steps later.
+  * the REST **asset** endpoint, because that repo is PRIVATE and the browser-facing
+    `releases/download/...` URL answers 404 to an unauthenticated client;
+  * redirects walked by hand, dropping `Authorization` when the host changes -- the
+    pre-signed storage URL REJECTS a request still carrying a GitHub bearer token;
+  * a checksum mismatch is fatal, not a warning: the digest is what makes the downloaded
+    asset the binaries that were verified.
 
 Usage:
 
-    python fetch_pinned_angle.py \
-      --repo Lascade-Co/travel-animator-shared \
-      --tag angle-be80ce59 \
-      --asset angle-be80ce59-macos.zip \
-      --sha256 dfe3d6... \
-      --out angle
+    python fetch_pinned_angle.py --repo Lascade-Co/travel-animator-shared \
+      --tag angle-be80ce59 --asset angle-be80ce59-macos.zip --sha256 dfe3d6... --out angle
 """
 from __future__ import annotations
 
@@ -53,12 +37,11 @@ from urllib.parse import urlparse
 API = "https://api.github.com"
 USER_AGENT = "lascade-actions-fetch-pinned-angle"
 
-# Where a human goes when an asset is missing. Keyed by the platform suffix of the asset
-# name, because that is the only thing this script knows about the platform.
+# Where a human goes when an asset is missing, keyed by the platform suffix of the asset name.
 PROVENANCE = {
     "macos": "travel-animator-shared third_party/angle/PROVENANCE-macos.md",
     "windows": "Lascade-Co/actions scripts/angle/PROVENANCE-windows.md "
-               "(NOT BUILT YET -- run build_angle_windows.ps1 once on a Windows box)",
+               "(built and published 2026-08-11; rebuild with build_angle_windows.ps1)",
     "ios": "travel-animator-shared third_party/angle/PROVENANCE.md",
 }
 
@@ -193,20 +176,11 @@ def sha256(path: Path) -> str:
 
 
 def unpack(archive: Path, out: Path) -> list[str]:
-    """Extract `archive` into `out`, preserving the recorded permission bits.
+    """Extract `archive` into `out`, preserving permission bits that `extractall` drops.
 
-    `ZipFile.extractall` drops them, and the macOS asset records 0755 on its dylibs. A
-    dylib does not need the execute bit to be `dlopen`ed, so this is belt-and-braces --
-    but the wheel's own executable-bit handling is a solved-then-regressed problem in this
-    repo (see assert_wheel_exec_bit.py) and losing modes here would be one more way in.
-
-    Backslash separators are normalised. The ZIP spec mandates `/`, but the first Windows
-    ANGLE build wrote `include\\EGL\\egl.h`, which `zipfile` treats as a FILENAME on POSIX
-    -- so `include/` and `lib/` extract as a handful of flat files with backslashes in
-    their names instead of a tree, silently. The published asset is repacked and does not
-    need this; it is here so a future Windows build cannot reintroduce the problem
-    quietly. Root-level entries (the DLLs `build_jvm_payload.py` actually copies) were
-    never affected, which is exactly why this would have gone unnoticed.
+    Backslash separators are normalised: a Windows-packed archive can write
+    `include\\EGL\\egl.h`, which `zipfile` treats as a FILENAME on POSIX and extracts as
+    flat files instead of a tree, silently.
     """
     if out.exists():
         shutil.rmtree(out)
