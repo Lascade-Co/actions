@@ -30,8 +30,11 @@ run-name: "travel-animator → pypi @ ${{ inputs.sha }}"
 # release:
 #
 #   * the same `wheel` matrix publish-tada-wheel.yml grew -- linux-x64 (manylinux_2_28),
-#     linux-arm64 (manylinux_2_34; capped by LWJGL's aarch64 native), windows-x64, and
-#     macos-arm64 once backlog C5 gives us a redistributable ANGLE
+#     linux-arm64 (manylinux_2_34; capped by LWJGL's aarch64 native), macos-arm64, and
+#     windows-x64. macOS and Windows legs DOWNLOAD ANGLE from a pinned, SHA-256-verified
+#     release asset; nothing builds it in CI. Windows has no such asset yet, so that leg
+#     fails by design until one is published (Lascade-Co/actions
+#     scripts/angle/PROVENANCE-windows.md) -- copying the matrix here inherits that.
 #   * `EXPECT_WHEELS` set to that leg count, so a leg that silently failed cannot ship a
 #     partial matrix
 #   * a PyPI per-file size-limit increase (backlog C7): the measured wheels are 66-75 MB

@@ -18,13 +18,45 @@ permissions:
   contents: read
 
 # ---------------------------------------------------------------------------------------------
+# ANGLE is CONSUMED here, never built here.
+# ---------------------------------------------------------------------------------------------
+#
+# macOS and Windows have no system EGL/GLES, so their wheels must carry ANGLE. It is built ONCE
+# per revision, out of band, on a machine that can build it -- an ANGLE build is a ~14 GB Chromium
+# checkout and a two-hour compile -- then published as a GitHub release asset and downloaded here
+# BY DIGEST. No workflow in this repository builds it, and adding one would be a regression: the
+# digest below is what makes the bytes in a published wheel the same bytes that were verified by
+# hand, and a per-build compile would replace that guarantee with a hope.
+#
+# The constants below are the pin. `travel-animator-shared`'s `angleRevision`/`angleSha256` (iOS)
+# and the PROVENANCE documents are the other copies; a revision bump moves ALL of them in ONE
+# change, or the platforms stop rendering the same pixels (risk R14: two ANGLE revisions means two
+# shader translators). The release tag is the revision's first 8 characters by convention, and the
+# ANGLE fetch step asserts that rather than trusting it.
+env:
+  ANGLE_REVISION: be80ce591a481c12d60c50d6040d40c035b40a2b
+  ANGLE_RELEASE_REPO: Lascade-Co/travel-animator-shared
+  ANGLE_RELEASE_TAG: angle-be80ce59
+  # Built from source on an M2, 2026-08-11, and verified to produce a BIT-IDENTICAL 695-frame
+  # render to the previous reference. See travel-animator-shared third_party/angle/PROVENANCE-macos.md.
+  ANGLE_SHA256_MACOS: dfe3d633b280bf2479189716ad3ab14381260180bd5c5246c3d80913eb477e30
+  # ⚠️ EMPTY ON PURPOSE, AND IT FAILS THE WINDOWS LEG. No Windows ANGLE has been built at this
+  # revision -- it needs a Windows host with Visual Studio, which nothing in this project has had.
+  # scripts/angle/PROVENANCE-windows.md is the one-time recipe and the publish commands; filling
+  # this in with the published digest is what unblocks Windows wheels. Do NOT unblock it by
+  # pointing the leg at Skiko's `skiko-awt-runtime-angle-windows-x64`: that is ANGLE 2.1.25511
+  # against our 2.1.28587, which is precisely the skew this pin exists to prevent.
+  ANGLE_SHA256_WINDOWS_X64: ""
+
+# ---------------------------------------------------------------------------------------------
 # Shape (KMP renderer migration, backlog C1/C2/C3/C8/C10)
 # ---------------------------------------------------------------------------------------------
 #
 #   validate-python  ubuntu-24.04   uv sync, protos, pytest                       [unchanged work]
 #   jvm-build        ubuntu-24.04   ./gradlew :host:taJars + seal + :shared:jvmTest
 #                                   -> uploads ta-render.jar ONCE
-#   wheel   (matrix) 4 runners      jlink, stage natives, inject, retag, verify, GL smoke
+#   wheel   (matrix) 4 runners      fetch+verify ANGLE (macOS/Windows), jlink, stage natives,
+#                                   inject, retag, verify, GL smoke
 #   bundle           ubuntu-24.04   the 5-file GHCR bundle, from the x86-64 leg's wheel
 #   publish          ubuntu-24.04   ORAS push + prune                           [barely changed]
 #
@@ -320,25 +352,25 @@ jobs:
   # in, verify, smoke -- but on different runners, because jlink runs on the target and a
   # platform wheel installs only where its tag matches.
   #
-  # ⚠️ macos-arm64 IS DELIBERATELY ABSENT, and adding it is not a matter of uncommenting a
-  # line. macOS has no system EGL/GLES, so its payload MUST carry ANGLE, and the only macOS
-  # ANGLE we have is extracted from a Google Chrome install (2.1.28226). Chrome's binaries are
-  # not redistributable, so shipping them in a PyPI wheel is not an option regardless of
-  # whether it works -- and it does work: the full payload was executed on an M2 on
-  # 2026-08-11, ANGLE Metal, OpenGL ES 3.0, max_samples=4. The blocker is licensing, not
-  # engineering. Backlog C5 is the fix: build ANGLE ourselves from the recipe in
-  # shared/third_party/angle/PROVENANCE.md with target_os="mac". When that lands, add
-  #     - { platform: macos-arm64, runner: macos-14, tag: macosx_11_0_arm64 }
-  # and an ANGLE-fetch step feeding `--angle-dir`; build_jvm_payload.py already hard-fails a
-  # macOS leg with no ANGLE, so a half-wired one cannot ship silently.
+  # macos-arm64 is HERE now, and what changed is licensing, not engineering. Its payload must
+  # carry ANGLE (macOS has no system EGL/GLES), and the ANGLE it used to carry was extracted
+  # from a Google Chrome install -- which works, and is not redistributable, so it could never
+  # ship in a PyPI wheel. ANGLE is BSD-3-Clause, so building it from source removes that
+  # constraint entirely: `angle-be80ce59-macos.zip` is our own build of the pinned revision,
+  # verified on an M2 to produce a BIT-IDENTICAL 695-frame render to the Chrome-ANGLE
+  # reference. The leg downloads it and checks its SHA-256 (backlog C5, closed).
   #
-  # windows-x64 IS here and its ANGLE is fine -- Skiko publishes
-  # `skiko-awt-runtime-angle-windows-x64` to a public Maven repo. Two warnings about it:
-  # R11 (libEGL.dll resolves libGLESv2.dll by BARE NAME via LoadLibraryW, so an absolute-path
-  # load may not satisfy it) is confirmed real by PE analysis and its mitigation has never
-  # been executed; and R14, Skiko's Windows ANGLE is 2.1.25511 against macOS's 2.1.28226, two
-  # different shader translators. The GL smoke below would be the first time any Windows
-  # binary in this project has ever run.
+  # ⚠️ windows-x64 IS HERE AND CURRENTLY FAILS, ON PURPOSE. There is no Windows ANGLE of ours
+  # yet -- it needs a Windows host with Visual Studio, which this project has never had -- so
+  # `ANGLE_SHA256_WINDOWS_X64` is empty and the fetch step stops the leg with a message naming
+  # scripts/angle/PROVENANCE-windows.md and the one-time build it describes. The alternative
+  # was worse: Skiko's `skiko-awt-runtime-angle-windows-x64` is public and easy, and it is
+  # ANGLE 2.1.25511 against the 2.1.28587 every other platform runs -- a second shader
+  # translator quietly rasterising the same frame differently (risk R14). A loud failure is the
+  # honest state; a silent skew in a published wheel is not. (R11 is still open besides:
+  # libEGL.dll resolves libGLESv2.dll by BARE NAME via LoadLibraryW, so the two must sit in one
+  # directory -- which the packaging guarantees, and which no Windows binary in this project
+  # has yet executed.)
   #
   # linux-arm64 needs a `ubuntu-24.04-arm` runner. Those are GA for public repos and BILLED
   # for private ones (CI doc §8 lists this as undetermined). If the org has not enabled them
@@ -363,11 +395,20 @@ jobs:
             # NOT 2_28: LWJGL 3.3.6's aarch64 liblwjgl.so references GLIBC_2.34, so the whole
             # wheel is capped there. Measured 2026-08-11; auditwheel refuses 2_28 outright.
             tag: manylinux_2_34_aarch64
+          # `angle_platform` is the suffix of the release asset name -- the leg downloads
+          # `${ANGLE_RELEASE_TAG}-<angle_platform>.zip` and verifies its digest. Its absence is
+          # what marks a leg as needing no ANGLE at all; Linux renders on the system EGL/GLES
+          # and a bundled payload there would take the GPU worker off the NVIDIA driver.
+          - platform: macos-arm64
+            runner: macos-14
+            container: ""
+            tag: macosx_11_0_arm64
+            angle_platform: macos
           - platform: windows-x64
             runner: windows-latest
             container: ""
             tag: win_amd64
-            angle_artifact: skiko-awt-runtime-angle-windows-x64
+            angle_platform: windows-x64
     steps:
       - name: Extract owner/repo
         id: repo
@@ -475,7 +516,7 @@ jobs:
             "$CONTAINER" bash /io/ci-scripts/build_linux_wheel.sh
 
       # ---------------------------------------------------------------------------------
-      # Windows: no container, and ANGLE comes from Skiko's published Maven artifact.
+      # macOS and Windows: no container, and ANGLE is DOWNLOADED -- never built here.
       # ---------------------------------------------------------------------------------
       - name: Set up JDK for jlink
         if: ${{ matrix.container == '' }}
@@ -484,21 +525,75 @@ jobs:
           distribution: temurin
           java-version: 21
 
-      - name: Fetch ANGLE
-        if: ${{ matrix.container == '' && matrix.angle_artifact != '' }}
+      # One pinned revision, one release, one asset per platform, each pinned by SHA-256 --
+      # the same arrangement shared's `downloadAngle` task uses for iOS, for the same reason:
+      # the digest is what makes the binaries in a published wheel the binaries that were
+      # verified by hand. A mismatch FAILS the job; it is never a warning.
+      #
+      # `travel-animator-shared` is private, so this needs the App token minted above and the
+      # REST asset endpoint with `Accept: application/octet-stream` (the browser-facing
+      # releases/download URL 404s unauthenticated). fetch_pinned_angle.py does both.
+      - name: Fetch and verify the pinned ANGLE
+        if: ${{ matrix.angle_platform != '' }}
         shell: bash
         env:
-          ARTIFACT: ${{ matrix.angle_artifact }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          ANGLE_PLATFORM: ${{ matrix.angle_platform }}
         run: |
           set -euo pipefail
-          # Keep the version in step with shared/build.gradle.kts's skikoVersion. R14: this is
-          # ANGLE 2.1.25511, OLDER than the macOS build (2.1.28226). Two shader translators
-          # means two rasterisations, which is a golden-frame parity problem the moment both
-          # platforms ship.
-          version=0.148.2
-          curl -sSfL --retry 5 --retry-delay 3 \
-            -o angle.jar \
-            "https://maven.pkg.jetbrains.space/public/p/compose/dev/org/jetbrains/skiko/${ARTIFACT}/${version}/${ARTIFACT}-${version}.jar"
+
+          # The tag is the revision's first 8 characters. Asserted, not assumed: a half-edited
+          # pin would otherwise download a DIFFERENT revision that still passes its checksum.
+          if [[ "$ANGLE_RELEASE_TAG" != "angle-${ANGLE_REVISION:0:8}" ]]; then
+            echo "::error::ANGLE_RELEASE_TAG '$ANGLE_RELEASE_TAG' does not match ANGLE_REVISION" \
+                 "'$ANGLE_REVISION' (expected angle-${ANGLE_REVISION:0:8}). The pin is half-edited."
+            exit 1
+          fi
+
+          case "$ANGLE_PLATFORM" in
+            macos)       sha256="$ANGLE_SHA256_MACOS" ;;
+            windows-x64) sha256="$ANGLE_SHA256_WINDOWS_X64" ;;
+            *) echo "::error::no pinned ANGLE checksum is wired for '$ANGLE_PLATFORM'"; exit 1 ;;
+          esac
+
+          # The Windows gap, stated rather than papered over.
+          if [[ -z "$sha256" ]]; then
+            echo "::error::ANGLE for $ANGLE_PLATFORM has not been built and published yet - see scripts/angle/PROVENANCE-windows.md"
+            cat >&2 <<EOF
+
+          ================================================================================
+          No ANGLE asset is published for $ANGLE_PLATFORM at revision $ANGLE_REVISION.
+
+          CI does not build ANGLE. It consumes a prebuilt, pinned, checksummed release asset,
+          and there is no such asset for this platform, so this wheel cannot be built.
+
+          To unblock, ONCE:
+            1. On a Windows box with Visual Studio 2022 + the Windows SDK, run
+               scripts/angle/build_angle_windows.ps1 -Revision $ANGLE_REVISION -TargetCpu x64
+               following scripts/angle/PROVENANCE-windows.md.
+            2. Verify it (that document's checklist), then
+               gh release upload $ANGLE_RELEASE_TAG ${ANGLE_RELEASE_TAG}-${ANGLE_PLATFORM}.zip \\
+                 --repo $ANGLE_RELEASE_REPO
+            3. Set ANGLE_SHA256_WINDOWS_X64 in this workflow to the published digest.
+
+          Do NOT substitute Skiko's skiko-awt-runtime-angle-windows-x64. It is ANGLE 2.1.25511
+          against the 2.1.28587 every other platform of this project renders through: a second
+          shader translator, a second rasterisation of the same frame (risk R14). Failing here
+          is the intended behaviour until the asset above exists.
+          ================================================================================
+          EOF
+            exit 1
+          fi
+
+          mkdir -p ci-scripts
+          curl -sSfL https://raw.githubusercontent.com/Lascade-Co/actions/main/scripts/angle/fetch_pinned_angle.py \
+            -o ci-scripts/fetch_pinned_angle.py
+          python ci-scripts/fetch_pinned_angle.py \
+            --repo "$ANGLE_RELEASE_REPO" \
+            --tag "$ANGLE_RELEASE_TAG" \
+            --asset "${ANGLE_RELEASE_TAG}-${ANGLE_PLATFORM}.zip" \
+            --sha256 "$sha256" \
+            --out angle
 
       - name: Build the platform wheel (native runner)
         if: ${{ matrix.container == '' }}
@@ -516,7 +611,7 @@ jobs:
             --platform "$PLATFORM" \
             --jar jar/ta-render.jar \
             --skiko-jar skiko.jar \
-            --angle-jar angle.jar \
+            --angle-dir angle \
             --platform-tag "$TAG" \
             --out payload
           python ci-scripts/inject_wheel_payload.py \

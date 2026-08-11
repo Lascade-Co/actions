@@ -8,7 +8,8 @@ looks for and `verify_tada_wheel.py` asserts:
       ta-render.jar     the renderer jar, with the Skiko natives REMOVED
       jre/              jlink'd java.base + java.desktop + jdk.unsupported
       natives/          LWJGL's two JNI shims + Skiko's libskia, for THIS platform
-      angle/            libEGL + libGLESv2         (macOS/Windows only)
+      angle/            libEGL + libGLESv2         (macOS/Windows only, from the
+                        pinned SHA-256-verified release asset -- never built here)
       PAYLOAD.json      provenance -- platform tag, jar sha256, JRE version
 
 Three things about this are load-bearing and none of them are obvious.
@@ -206,15 +207,18 @@ def main() -> int:
     parser.add_argument("--out", required=True, type=Path, help="payload directory to create")
     parser.add_argument("--skiko-jar", type=Path, required=True,
                         help="skiko-awt-runtime-<os>-<arch> jar for --platform")
+    # THE ONLY DOOR ANGLE COMES THROUGH, on purpose. There used to be a second one,
+    # `--angle-jar`, which unpacked Skiko's published
+    # `org.jetbrains.skiko:skiko-awt-runtime-angle-windows-x64` -- convenient, public, and
+    # ANGLE 2.1.25511 against the 2.1.28587 every other platform of this project renders
+    # through. Two revisions is two shader translators and two rasterisations of the same
+    # frame (risk R14), and a wheel is exactly the artifact where that ships silently. It was
+    # removed rather than documented-as-forbidden: the directory handed in here comes from a
+    # SHA-256-pinned release asset built from the one pinned revision (see
+    # scripts/angle/fetch_pinned_angle.py and the PROVENANCE documents), and nothing else can.
     parser.add_argument("--angle-dir", type=Path,
-                        help="directory holding libEGL + libGLESv2 (macOS/Windows only)")
-    # Windows' ANGLE is a published Maven artifact
-    # (org.jetbrains.skiko:skiko-awt-runtime-angle-windows-<arch>), so the leg can fetch it
-    # and hand the jar straight over. macOS has no such artifact -- backlog C5 -- which is
-    # exactly why --angle-dir exists as a separate door.
-    parser.add_argument("--angle-jar", type=Path,
-                        help="jar to extract libEGL/libGLESv2 from, e.g. Skiko's "
-                             "skiko-awt-runtime-angle-windows-x64")
+                        help="directory holding libEGL + libGLESv2 from the pinned, "
+                             "checksum-verified release asset (macOS/Windows only)")
     parser.add_argument("--java-home", type=Path,
                         default=Path(os.environ.get("JAVA_HOME", "")),
                         help="JDK to jlink FROM; must target --platform (jlink cannot cross-target)")
@@ -279,10 +283,10 @@ def main() -> int:
     # Both files land in ONE flat directory, and that is a hard requirement rather than
     # tidiness: ANGLE's libEGL loads libGLESv2 BY BARE NAME out of its own module directory,
     # so a split payload does not fail cleanly, it SIGSEGVs (plan §9.6, GlDriver.jvm.kt's
-    # header). Everything else in the source directory/jar is copied alongside them, because
-    # a Windows ANGLE may also want d3dcompiler_47.dll beside it.
+    # header). Every top-level file in the source directory is copied alongside them, because
+    # a Windows ANGLE also wants d3dcompiler_47.dll and ANGLE's BSD-3-Clause LICENSE beside it.
     angle_files: list[str] = []
-    if args.angle_dir or args.angle_jar:
+    if args.angle_dir:
         if not spec["angle"]:
             print(f"ERROR: bundled ANGLE given for {args.platform}, which renders through "
                   "the system EGL/GLES. A bundled payload there takes the GPU worker off "
@@ -290,35 +294,23 @@ def main() -> int:
             return 1
         angle_out = out / "angle"
         angle_out.mkdir()
-        if args.angle_dir:
-            for entry in sorted(args.angle_dir.iterdir()):
-                if entry.is_file():
-                    shutil.copy2(entry, angle_out / entry.name)
-                    angle_files.append(entry.name)
-        else:
-            with zipfile.ZipFile(args.angle_jar) as zf:
-                for info in zf.infolist():
-                    base = info.filename.rsplit("/", 1)[-1]
-                    if info.is_dir() or base.startswith("META-INF") or not base:
-                        continue
-                    if base.endswith((".sha256", ".sha1", ".md5")):
-                        continue
-                    with zf.open(info) as source, (angle_out / base).open("wb") as handle:
-                        shutil.copyfileobj(source, handle)
-                    angle_files.append(base)
+        for entry in sorted(args.angle_dir.iterdir()):
+            if entry.is_file():
+                shutil.copy2(entry, angle_out / entry.name)
+                angle_files.append(entry.name)
         egl = [n for n in angle_files if n.startswith(("libEGL", "EGL"))]
         gles = [n for n in angle_files if n.startswith(("libGLESv2", "GLESv2"))]
         if not egl or not gles:
-            source = args.angle_dir or args.angle_jar
-            print(f"ERROR: {source} must hold BOTH an EGL and a GLESv2 library; "
-                  f"found {angle_files}", file=sys.stderr)
+            print(f"ERROR: {args.angle_dir} must hold BOTH an EGL and a GLESv2 library at its "
+                  f"top level; found {angle_files}", file=sys.stderr)
             return 1
     elif spec["angle"]:
         # macOS/Windows have no system EGL at all: GlDriver throws rather than
         # falling back, so this wheel would fail at `GlContext.createOffscreen`.
         print(f"ERROR: {args.platform} has no system EGL/GLES and no --angle-dir was given. "
-              "This payload cannot render. (macOS: backlog C5 -- our own ANGLE build; "
-              "Chrome's dylibs are not redistributable.)", file=sys.stderr)
+              "This payload cannot render. ANGLE is not built here -- it is a pinned, "
+              "SHA-256-verified release asset; see scripts/angle/fetch_pinned_angle.py and "
+              "the PROVENANCE documents beside it.", file=sys.stderr)
         return 1
 
     # 5. The JRE.

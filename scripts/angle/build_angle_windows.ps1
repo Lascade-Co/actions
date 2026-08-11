@@ -4,16 +4,28 @@
     travel-animator-shared's `third_party/angle/PROVENANCE.md` packages the iOS slices.
 
 .DESCRIPTION
+    RUN THIS BY HAND, ONCE PER REVISION, ON A WINDOWS BOX. It is deliberately NOT wired to a
+    workflow: CI never builds ANGLE, it downloads a SHA-256-pinned release asset (see
+    `.github/workflows/publish-tada-wheel.yml`). A two-hour Windows runner reproducing a file
+    that is already pinned by digest buys nothing. `.github/workflows/build-angle-windows.yml`
+    existed briefly and was removed; the prose that was in it now lives in PROVENANCE-windows.md
+    beside this file, which is the document to read first -- it carries the toolchain
+    requirements, the d3dcompiler_47.dll finding, the verification checklist and the publish
+    commands.
+
     This is the Windows counterpart of the recipe in that PROVENANCE file. Same upstream, same
     revision, same "publish one SHA-256-pinned release asset" ending -- only the `gn` args and the
     packaging differ, because Windows produces two plain DLLs rather than two xcframeworks.
 
-    WHY IT EXISTS. Windows currently gets its ANGLE from Skiko's published Maven artifact
+    WHY IT EXISTS. Windows used to get its ANGLE from Skiko's published Maven artifact
     (`org.jetbrains.skiko:skiko-awt-runtime-angle-windows-x64`), which is ANGLE 2.1.25511, while
-    macOS gets 2.1.28226 out of a Google Chrome install. Two ANGLE builds means two shader
+    macOS took 2.1.28226 out of a Google Chrome install. Two ANGLE builds means two shader
     translators and two rasterisations of the same frame, which is a golden-frame parity problem
-    the moment both platforms ship (risk R14). Building every platform from ONE pinned revision is
-    the entire point of this script; the revision is not a knob to turn casually.
+    the moment both platforms ship (risk R14). macOS is now built from the pinned revision
+    (2.1.28587) and Windows is the last platform still missing its own build -- which is why the
+    windows-x64 wheel leg fails until this script has been run and its output published. Building
+    every platform from ONE pinned revision is the entire point of this script; the revision is
+    not a knob to turn casually.
 
     ⚠️ THIS SCRIPT HAS NEVER BEEN EXECUTED. Chromium's Windows build needs a Windows host with
     Visual Studio, and cross-compiling it from macOS is unsupported, so nothing here has run
@@ -344,9 +356,8 @@ $provenance = [ordered]@{
     version_header        = $angleVersion
     files                 = $fileDigests
     built_at              = (Get-Date).ToUniversalTime().ToString('o')
-    built_by              = if ($env:GITHUB_SERVER_URL -and $env:GITHUB_REPOSITORY -and $env:GITHUB_RUN_ID) {
-        "$env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID"
-    } else { 'local' }
+    # A machine name, not a CI run URL: this build has no CI. Whoever ran it is the provenance.
+    built_by              = "$env:COMPUTERNAME (manual run of scripts/angle/build_angle_windows.ps1)"
 }
 $provenance | ConvertTo-Json -Depth 6 |
     Set-Content -LiteralPath (Join-Path $dist 'PROVENANCE.json') -Encoding utf8
@@ -367,10 +378,36 @@ Write-Host "zip:    $zipPath"
 Write-Host "bytes:  $bytes"
 Write-Host "sha256: $digest"
 
-if ($env:GITHUB_OUTPUT) {
-    Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value "zip=$zipPath"
-    Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value "zip_name=$zipName"
-    Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value "sha256=$digest"
-    Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value "bytes=$bytes"
-    Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value "release_tag=angle-$shortRevision"
-}
+# ---------------------------------------------------------------------------------------------
+# 9. What a human does next.
+# ---------------------------------------------------------------------------------------------
+#
+# Nothing publishes automatically, because nothing here runs in CI. The two consumers of this
+# artifact are named explicitly so neither is forgotten: the release asset is what the wheel
+# matrix downloads, and the digest is what it refuses to proceed without.
+Write-Host @"
+
+Next, by hand:
+
+  1. VERIFY before publishing (PROVENANCE-windows.md, "Verify before publishing"):
+     the version string must read 'ANGLE 2.1.<count> git hash: $($Revision.Substring(0, 12))'
+     where <count> is 'git rev-list HEAD --count' (28587 for be80ce59 -- a SHALLOW clone
+     produces a WRONG count from a correct revision), and a self-test through these DLLs
+     must reach a gl_probe with backend=d3d11.
+
+  2. PUBLISH (travel-animator-shared is private; the release already exists if iOS/macOS
+     published theirs at this revision):
+
+       gh release upload angle-$shortRevision "$zipPath" ``
+         --repo Lascade-Co/travel-animator-shared
+
+  3. PIN. In Lascade-Co/actions, .github/workflows/publish-tada-wheel.yml:
+
+       ANGLE_SHA256_WINDOWS_X64: $digest
+
+     It is empty today, and that emptiness is what fails the windows-x64 wheel leg with a
+     message pointing at PROVENANCE-windows.md. Setting it is what unblocks Windows wheels.
+
+  4. RECORD. Replace the STATUS banner at the top of PROVENANCE-windows.md with what this
+     run actually produced and measured.
+"@
