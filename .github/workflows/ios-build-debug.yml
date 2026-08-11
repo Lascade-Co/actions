@@ -164,13 +164,6 @@ jobs:
           VERSION=$(grep 'MARKETING_VERSION' *.xcodeproj/project.pbxproj | grep -v '1.0' | head -1 | sed 's/.*= //;s/;//;s/ //g')
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
-      - name: Extract app metadata
-        id: app_meta
-        shell: bash
-        run: |
-          APP_NAME=$(grep -m1 'PRODUCT_NAME' *.xcodeproj/project.pbxproj | sed 's/.*= //;s/;//;s/"//g;s/ //g' || echo "TravelRoute")
-          echo "app_name=$APP_NAME" >> "$GITHUB_OUTPUT"
-
       - name: Capture Xcode version
         id: xcode-version
         shell: bash
@@ -200,6 +193,16 @@ jobs:
           SCHEME=$(echo "$XCODEPROJ" | sed 's/.xcodeproj//')
           echo "project=$XCODEPROJ" >> "$GITHUB_OUTPUT"
           echo "scheme=$SCHEME"     >> "$GITHUB_OUTPUT"
+
+      - name: Extract app metadata
+        id: app_meta
+        shell: bash
+        run: |
+          APP_NAME=$(grep -m1 'PRODUCT_NAME' *.xcodeproj/project.pbxproj | sed 's/.*= //;s/;//;s/"//g;s/ //g' || true)
+          # PRODUCT_NAME is usually the literal $(TARGET_NAME), which is useless
+          # in a PR comment. Fall back to the scheme, which is the target name.
+          case "$APP_NAME" in ''|*\$*) APP_NAME="${{ steps.detect.outputs.scheme }}" ;; esac
+          echo "app_name=$APP_NAME" >> "$GITHUB_OUTPUT"
 
       - name: Decode GoogleService-Info.plist
         shell: bash
