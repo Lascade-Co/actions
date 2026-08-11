@@ -24,7 +24,7 @@ jobs:
     # which meant the next run started cold too — the loop never broke.
     timeout-minutes: 120
     outputs:
-      version: ${{ steps.version.outputs.version }}
+      version: ${{ steps.marketing.outputs.version }}
       app_name: ${{ steps.app_meta.outputs.app_name }}
       build_number: ${{ steps.build_number.outputs.build }}
       owner: ${{ steps.repo.outputs.owner }}
@@ -336,6 +336,27 @@ jobs:
           echo "Published $BUNDLE and moved $FALLBACK"
           rm -rf "$WORK"
 
+      # App Store Connect closes a version train once that version ships, and
+      # then refuses every further build for it, TestFlight included. The repo
+      # sat at 3.9.3 long after 3.9.3 was released, so uploads failed with
+      # "Invalid Pre-Release Train ... is closed for new build submissions".
+      # Ask ASC what exists and build a version that is open. Nothing is
+      # committed: pushing to a contributor's PR branch would be wrong, and on a
+      # pull_request trigger it risks a re-trigger loop.
+      - name: Determine marketing version
+        id: marketing
+        shell: bash
+        env:
+          APPSTORE_API_KEY_ID: ${{ secrets.APPSTORE_API_KEY_ID }}
+          APPSTORE_ISSUER_ID: ${{ secrets.APPSTORE_ISSUER_ID }}
+          APPSTORE_API_PRIVATE_KEY: ${{ secrets.APPSTORE_API_PRIVATE_KEY }}
+          IOS_BUNDLE_ID: ${{ steps.ids.outputs.bundle }}
+          CURRENT_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          V=$(curl -sSL https://raw.githubusercontent.com/Lascade-Co/actions/main/scripts/ios/next_version.py | python3 -)
+          echo "Building marketing version $V (project says ${CURRENT_VERSION})"
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+
       - name: Compute build number
         id: build_number
         shell: bash
@@ -357,6 +378,7 @@ jobs:
             -destination "generic/platform=iOS" \
             -archivePath build/App.xcarchive \
             CURRENT_PROJECT_VERSION="${{ steps.build_number.outputs.build }}" \
+            MARKETING_VERSION="${{ steps.marketing.outputs.version }}" \
             CODE_SIGN_STYLE=Manual \
             SWIFT_ACTIVE_COMPILATION_CONDITIONS='DEBUG $(inherited)' \
             GCC_PREPROCESSOR_DEFINITIONS='DEBUG=1 $(inherited)'
