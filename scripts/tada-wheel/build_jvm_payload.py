@@ -6,7 +6,7 @@ Output layout, which is also what `tada_render.render_bridge` looks for and
 
     <out>/
       ta-render.jar     the renderer jar, with the Skiko natives REMOVED
-      jre/              jlink'd java.base + java.desktop + jdk.unsupported
+      jre/              jlink'd, `JLINK_MODULES` wide, probed before it ships
       natives/          LWJGL's two JNI shims + Skiko's libskia, for THIS platform
       angle/            libEGL + libGLESv2         (macOS/Windows only, from the
                         pinned SHA-256-verified release asset -- never built here)
@@ -37,6 +37,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import zipfile
 from pathlib import Path
 
@@ -75,10 +76,43 @@ PLATFORMS = {
     ),
 }
 
-# `java.desktop` is not optional -- Skiko's AWT runtime is the overlay rasteriser --
-# and `jdk.unsupported` carries `sun.misc.Unsafe`, which okio and LWJGL's MemoryUtil
-# both reach for.
-JLINK_MODULES = "java.base,java.desktop,jdk.unsupported"
+# jdeps' set, plus jdk.crypto.ec, which nothing references statically.
+JLINK_MODULES = ",".join((
+    "java.base",
+    "java.desktop",     # Skiko's AWT overlay rasteriser
+    "java.instrument",
+    "java.logging",     # OkHttp's TaskRunner.<clinit>
+    "java.management",
+    "jdk.crypto.ec",    # SunEC: no ECDHE without it
+    "jdk.unsupported",  # sun.misc.Unsafe, for okio and LWJGL
+))
+
+# Runs ON the linked image, offline. `java -version` cannot fail on a missing module.
+_PROBE_CLASS = "PayloadProbe"
+_PROBE_SOURCE = """\
+import java.security.Security;
+import java.util.Arrays;
+import javax.net.ssl.SSLContext;
+
+public class PayloadProbe {
+  public static void main(String[] args) throws Exception {
+    new okhttp3.OkHttpClient();
+    if (Security.getProvider("SunEC") == null) {
+      System.err.println("SunEC provider absent -- jdk.crypto.ec is not in the image");
+      System.exit(1);
+    }
+    long ecdhe = Arrays.stream(
+            SSLContext.getDefault().getSocketFactory().getSupportedCipherSuites())
+        .filter(suite -> suite.contains("ECDHE"))
+        .count();
+    if (ecdhe == 0) {
+      System.err.println("no ECDHE cipher suites -- this image cannot reach the basemap host");
+      System.exit(1);
+    }
+    System.out.println("okhttp + " + ecdhe + " ECDHE suites");
+  }
+}
+"""
 
 # Windows only. With `skiko.library.path` set Skiko looks for this beside the library
 # rather than unpacking it, so it has to be staged or the first text measurement fails.
@@ -130,12 +164,39 @@ def extract_matching(archive: Path, wanted: dict[str, Path]) -> set[str]:
     return found
 
 
-def build_jre(java_home: Path, out: Path) -> dict[str, str]:
-    """jlink, and then PROVE the result runs.
+def module_names(command: list[str]) -> set[str]:
+    """`--list-modules` / `--print-module-deps` output as a set of bare module names."""
+    result = subprocess.run(command, check=True, capture_output=True, text=True)
+    raw = result.stdout.replace(",", "\n").splitlines()
+    return {line.split("@", 1)[0].strip() for line in raw if line.strip()}
 
-    jlink will happily emit an image that dies with a linker error the first time
-    anything invokes it -- which, without the `java -version`, is a GPU render.
-    """
+
+def probe_image(java_home: Path, java: Path, jar: Path) -> str:
+    """Compile the probe with the JDK we linked FROM, run it on the linked image."""
+    javac = java_home / "bin" / ("javac.exe" if os.name == "nt" else "javac")
+    with tempfile.TemporaryDirectory() as raw:
+        workdir = Path(raw)
+        source = workdir / f"{_PROBE_CLASS}.java"
+        source.write_text(_PROBE_SOURCE, encoding="utf-8")
+        subprocess.run(
+            [str(javac), "-cp", str(jar), "-d", str(workdir), str(source)], check=True
+        )
+        result = subprocess.run(
+            [str(java), "-cp", f"{jar}{os.pathsep}{workdir}", _PROBE_CLASS],
+            capture_output=True,
+            text=True,
+        )
+    if result.returncode != 0:
+        raise SystemExit(
+            f"ERROR: the linked JRE cannot run the renderer's HTTP/TLS stack "
+            f"(exit {result.returncode}). Add the module it names to JLINK_MODULES.\n"
+            f"{result.stdout}{result.stderr}".rstrip()
+        )
+    return result.stdout.strip()
+
+
+def build_jre(java_home: Path, out: Path, jar: Path) -> dict[str, str]:
+    """jlink, then prove the image can run `jar`: jdeps check, then the probe."""
     jlink = java_home / "bin" / ("jlink.exe" if os.name == "nt" else "jlink")
     subprocess.run(
         [
@@ -159,6 +220,21 @@ def build_jre(java_home: Path, out: Path) -> dict[str, str]:
         for line in release_file.read_text(encoding="utf-8", errors="replace").splitlines():
             key, _, value = line.partition("=")
             release[key] = value.strip('"')
+
+    # `base` only if the release file is unreadable.
+    feature = release.get("JAVA_VERSION", "").split(".")[0] or "base"
+    jdeps = java_home / "bin" / ("jdeps.exe" if os.name == "nt" else "jdeps")
+    referenced = module_names(
+        [str(jdeps), "--multi-release", feature, "--ignore-missing-deps",
+         "--print-module-deps", str(jar)]
+    )
+    absent = sorted(referenced - module_names([str(java), "--list-modules"]))
+    if absent:
+        raise SystemExit(
+            f"ERROR: {jar.name} references modules the linked JRE does not carry: "
+            f"{absent}. Add them to JLINK_MODULES."
+        )
+    print(f"jre: probe passed -- {probe_image(java_home, java, jar)}")
     return {
         "version": version.splitlines()[0] if version else "",
         "java_version": release.get("JAVA_VERSION", ""),
@@ -276,8 +352,8 @@ def main() -> int:
               "the PROVENANCE documents beside it.", file=sys.stderr)
         return 1
 
-    # 5. The JRE.
-    jre = build_jre(args.java_home, out / "jre")
+    # 5. The JRE, checked against the jar.
+    jre = build_jre(args.java_home, out / "jre", jar_out)
 
     manifest = {
         "schema_version": 1,
