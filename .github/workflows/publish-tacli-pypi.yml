@@ -1,9 +1,9 @@
 name: Central Publish travel-animator to PyPI
 run-name: "travel-animator → pypi @ ${{ inputs.sha }}"
 
-# Publishes the PUBLIC TADA distribution, `travel-animator` (render engine and safe CLI). Its Python
-# import path is `tada_render`, so the wheel is globbed by `travel_animator-` while its modules live
-# under `tada_render/`.
+# Publishes the PUBLIC TADA distribution, `travel-animator` (render engine and safe CLI). Its
+# Python import path is `tada_render`, so the wheel is globbed by `travel_animator-` while its
+# modules live under `tada_render/`.
 #
 # Manual only, deliberately. PyPI releases are immutable: a version can be uploaded exactly
 # once and never replaced, so this must not fire on every push to tada's main the way
@@ -19,33 +19,21 @@ run-name: "travel-animator → pypi @ ${{ inputs.sha }}"
 # must not be: this workflow's output goes to a public index.
 #
 # ---------------------------------------------------------------------------------------------
-# ⚠️ THIS WORKFLOW WILL NOW FAIL AT "Stage only the public wheel", AND THAT IS DELIBERATE.
-# ---------------------------------------------------------------------------------------------
 # `travel-animator` became a PLATFORM wheel when it started carrying the JVM renderer payload
-# (backlog C1). This workflow still builds only the pure `py3-none-any` wheel, and
-# stage_public_wheel.sh now refuses to publish one -- because a `py3-none-any` file on PyPI is
-# what every platform we did NOT build resolves to, it carries no payload, and a PyPI release
-# is IMMUTABLE: it can be yanked but never replaced.
+# (backlog C1), and this workflow publishes FOUR of them -- linux-x64 (manylinux_2_28),
+# linux-arm64 (manylinux_2_34; capped by LWJGL's aarch64 native), macos-arm64 and windows-x64.
+# The matrix is `_tada-wheels.yml`, shared with publish-tada-wheel.yml so the pinned ANGLE
+# digests exist in exactly one file.
 #
-# Failing here is strictly better than the alternative, which is one manual dispatch quietly
-# shadowing the whole matrix forever. What this workflow still owes, before the next PyPI
-# release:
+# It used to build only the pure `py3-none-any` wheel and fail at staging, on purpose: a
+# `py3-none-any` file on PyPI is what every platform we did NOT build resolves to, it carries
+# no payload, and a PyPI release is IMMUTABLE -- yankable, never replaceable. That guard is
+# still there (`EXPECT_WHEELS: 4` plus stage_public_wheel.sh's refusal of `any`); what changed
+# is that the four wheels it wants now exist.
 #
-#   * the same `wheel` matrix publish-tada-wheel.yml grew -- linux-x64 (manylinux_2_28),
-#     linux-arm64 (manylinux_2_34; capped by LWJGL's aarch64 native), macos-arm64, and
-#     windows-x64. macOS and Windows legs DOWNLOAD ANGLE from a pinned, SHA-256-verified
-#     release asset; nothing builds it in CI, so copying the matrix here inherits those pins
-#     and the digests that go with them (Lascade-Co/actions
-#     scripts/angle/PROVENANCE-windows.md).
-#   * `EXPECT_WHEELS` set to that leg count, so a leg that silently failed cannot ship a
-#     partial matrix
-#   * a PyPI per-file size-limit increase (backlog C7): the measured wheels are 66-75 MB
-#     against a 100 MB default, so this is not urgent, but it is human-reviewed and slow
-#
-# Until then, `pip install travel-animator` keeps serving the last pure wheel already on the
-# index. That wheel predates the KMP migration, so it never carried a payload to lose --
-# leaving it in place is the honest state, and publishing a new pure one over the top of the
-# matrix is the failure this guard exists to prevent.
+# Still owed: a PyPI per-file size-limit increase if these keep growing (backlog C7). Measured
+# 2026-08-12 they are 80-83 MB against a 100 MB default -- fine, but the JRE is what grows.
+# ---------------------------------------------------------------------------------------------
 on:
   workflow_dispatch:
     inputs:
@@ -62,33 +50,26 @@ permissions:
   contents: read
 
 jobs:
-  publish:
+  # Everything that can refuse the release before a runner-minute is spent on wheels, plus the
+  # jar the matrix folds into all four of them.
+  validate:
+    name: Tests and jars
     runs-on: ubuntu-latest
     timeout-minutes: 45
-    # Optional protection: if a `pypi` environment is configured, its required reviewers
-    # gate the upload and PIPY_TOKEN can be scoped to it. Unconfigured, GitHub auto-creates
-    # it unprotected and the token resolves from repository secrets -- dispatch works
-    # either way.
-    environment: pypi
     permissions:
       contents: read
     env:
       EGL_PLATFORM: surfaceless
       LIBGL_ALWAYS_SOFTWARE: "1"
+    outputs:
+      dist: ${{ steps.publishable.outputs.dist }}
+      version: ${{ steps.publishable.outputs.version }}
+      shared_revision: ${{ steps.shared.outputs.revision }}
     steps:
       - name: Validate the requested revision
         run: |
           if [[ ! "${{ inputs.sha }}" =~ ^[0-9a-f]{40}$ ]]; then
             echo "sha must be a full lowercase 40-character Git SHA" >&2
-            exit 1
-          fi
-
-      - name: Require the PyPI API token
-        env:
-          PYPI_TOKEN: ${{ secrets.PIPY_TOKEN }}
-        run: |
-          if [[ -z "$PYPI_TOKEN" ]]; then
-            echo "PIPY_TOKEN is not set; add it before publishing." >&2
             exit 1
           fi
 
@@ -126,7 +107,7 @@ jobs:
           persist-credentials: false
 
       # Gate before the expensive build: a version already on the index should fail in
-      # seconds rather than after a full test run.
+      # seconds rather than after a full test run and four wheel legs.
       - name: Verify travel-animator is publishable
         id: publishable
         run: |
@@ -157,9 +138,9 @@ jobs:
             libgl1 \
             libgl1-mesa-dri
 
-      # Gradle is here for ta-prepare.jar (below) and nothing else; publish-tada-wheel.yml is
-      # where :shared:jvmTest runs. tada + shared -- both checked out above -- are the whole
-      # build, because rentile resolves from Maven Central.
+      # Gradle is here for the two jars and nothing else; publish-tada-wheel.yml is where
+      # :shared:jvmTest runs. tada + shared -- both checked out above -- are the whole build,
+      # because rentile resolves from Maven Central.
       - name: Set up JDK
         uses: actions/setup-java@v5
         with:
@@ -190,41 +171,171 @@ jobs:
       - name: Run tests from the lockfile
         run: uv run --locked --all-packages --all-extras pytest
 
-      # The private wheel this build path produces carries ta-prepare.jar (ADR 0015), so the jar
-      # has to exist even though nothing here uploads that wheel. Building it rather than making
-      # it optional is the point: the one build path stays one build path, and the wheel this
-      # workflow discards is byte-for-byte the shape the GHCR bundle ships.
       - name: Make gradlew executable
         run: chmod +x gradlew
 
+      # verifyTaRenderJarSeal is the ADR 0006/0007 gate: no com/lascade/ta/shared/builder/**
+      # class in the jar the public wheels ship. Re-checked by verify_tada_wheel.py on the jar
+      # inside each finished wheel, since an artifact round-trip sits between here and there.
       - name: Build the two JARs and verify the builder seal
         run: ./gradlew :host:taJars
 
-      # Reuses the private path's build script so the bytes uploaded here are produced exactly
-      # the way the tested GHCR bundle's wheels are -- one build path, not two.
-      - name: Build both wheels
+      # The matrix downloads this. A jar is a zip, so upload-artifact stripping modes is moot.
+      - name: Upload ta-render.jar
+        uses: actions/upload-artifact@v7
+        with:
+          name: ta-render-jar
+          path: host/build/libs/ta-render.jar
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+
+      # A SEPARATE artifact: this is the one carrying the sealed `builder/` package, and only
+      # the publish job -- which builds the private wheel it goes into -- pulls it.
+      - name: Upload ta-prepare.jar
+        uses: actions/upload-artifact@v7
+        with:
+          name: ta-prepare-jar
+          path: host/build/libs/ta-prepare.jar
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+
+  wheels:
+    name: Wheels
+    needs: validate
+    uses: ./.github/workflows/_tada-wheels.yml
+    with:
+      repo: Lascade-Co/tada
+      sha: ${{ inputs.sha }}
+    secrets: inherit
+
+  publish:
+    name: Publish to PyPI
+    needs: [validate, wheels]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # Optional protection: if a `pypi` environment is configured, its required reviewers
+    # gate the upload and PIPY_TOKEN can be scoped to it. Unconfigured, GitHub auto-creates
+    # it unprotected and the token resolves from repository secrets -- dispatch works
+    # either way. The token check lives in THIS job for that reason: an environment-scoped
+    # secret is not readable from `validate`, so checking it earlier would fail on a
+    # correctly configured repository.
+    environment: pypi
+    permissions:
+      contents: read
+    steps:
+      - name: Require the PyPI API token
         env:
-          SHARED_REVISION: ${{ steps.shared.outputs.revision }}
+          PYPI_TOKEN: ${{ secrets.PIPY_TOKEN }}
+        run: |
+          if [[ -z "$PYPI_TOKEN" ]]; then
+            echo "PIPY_TOKEN is not set; add it before publishing." >&2
+            exit 1
+          fi
+
+      - name: Mint GitHub App token (tada + shared)
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ secrets.CI_APP_CLIENT_ID }}
+          private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
+          owner: Lascade-Co
+          repositories: |
+            tada
+            travel-animator-shared
+
+      - name: Check out TADA @ requested commit
+        uses: actions/checkout@v6
+        with:
+          repository: Lascade-Co/tada
+          ref: ${{ inputs.sha }}
+          token: ${{ steps.app-token.outputs.token }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Check out private shared protos
+        uses: actions/checkout@v6
+        with:
+          repository: Lascade-Co/travel-animator-shared
+          ref: ${{ needs.validate.outputs.shared_revision }}
+          path: shared
+          token: ${{ steps.app-token.outputs.token }}
+          persist-credentials: false
+
+      - name: Install pinned uv and Python
+        uses: astral-sh/setup-uv@v8.3.2
+        with:
+          version: "0.8.9"
+          python-version: "3.12"
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Sync locked environment
+        run: uv sync --locked --all-packages --all-extras
+
+      - name: Generate protobuf modules
+        run: uv run --locked --all-packages --all-extras python tada_render/hatch_build.py
+
+      - name: Download ta-prepare.jar
+        uses: actions/download-artifact@v8
+        with:
+          name: ta-prepare-jar
+          path: jar
+
+      # All four legs, flattened into one directory. Each artifact also carries its
+      # PAYLOAD-<platform>.json, which is provenance rather than a publishable file and is
+      # therefore never copied into bundle/.
+      - name: Download every platform wheel
+        uses: actions/download-artifact@v8
+        with:
+          pattern: wheel-*
+          merge-multiple: true
+          path: wheels
+
+      # Reuses the private path's build script so the bytes uploaded here are produced exactly
+      # the way the tested GHCR bundle's wheels are -- one build path, not two. That script is
+      # deliberately single-platform (it asserts a five-file bundle), so it takes the manylinux
+      # x86-64 wheel and the other three are added after it has had its say.
+      - name: Assemble the bundle and add the remaining platform wheels
+        env:
+          SHARED_REVISION: ${{ needs.validate.outputs.shared_revision }}
           TADA_REPOSITORY: Lascade-Co/tada
           TADA_REVISION: ${{ inputs.sha }}
-          PREPARE_JAR: host/build/libs/ta-prepare.jar
+          PREPARE_JAR: jar/ta-prepare.jar
         run: |
+          set -euo pipefail
           mkdir -p "$RUNNER_TEMP/tada-wheel"
           base=https://raw.githubusercontent.com/Lascade-Co/actions/main/scripts/tada-wheel
           for name in build_tada_wheel.sh build_prepare_payload.py inject_wheel_payload.py; do
             curl -sSfL "$base/$name" -o "$RUNNER_TEMP/tada-wheel/$name"
           done
-          bash "$RUNNER_TEMP/tada-wheel/build_tada_wheel.sh"
+          PUBLIC_WHEEL="$(ls wheels/travel_animator-*manylinux*x86_64.whl)" \
+            bash "$RUNNER_TEMP/tada-wheel/build_tada_wheel.sh"
+          for wheel in wheels/travel_animator-*.whl; do
+            cp -n "$wheel" bundle/
+          done
+          count=$(ls bundle/travel_animator-*.whl | wc -l)
+          if (( count != 4 )); then
+            echo "expected four public wheels in bundle/, found $count:" >&2
+            ls -1 bundle/travel_animator-*.whl >&2
+            exit 1
+          fi
 
-      - name: Verify wheel contents contain no credential files
+      # Credentials, required modules, the builder seal re-checked on each shipped jar, the
+      # class-file major, the natives layout and the ANGLE rule -- for all four wheels, plus
+      # the private one in reverse (its ta-prepare.jar must be present and must carry
+      # `builder/`). This is the last check before an immutable public upload.
+      - name: Verify wheel contents and JVM payload
         run: |
           curl -sSfL https://raw.githubusercontent.com/Lascade-Co/actions/main/scripts/tada-wheel/verify_tada_wheel.py -o "$RUNNER_TEMP/verify_tada_wheel.py"
           uv run --locked python "$RUNNER_TEMP/verify_tada_wheel.py"
 
-      - name: Stage only the public wheel
+      - name: Stage only the public wheels
         env:
-          DIST: ${{ steps.publishable.outputs.dist }}
-          VERSION: ${{ steps.publishable.outputs.version }}
+          DIST: ${{ needs.validate.outputs.dist }}
+          VERSION: ${{ needs.validate.outputs.version }}
+          EXPECT_WHEELS: "4"
         run: |
           curl -sSfL https://raw.githubusercontent.com/Lascade-Co/actions/main/scripts/tada-wheel/stage_public_wheel.sh -o "$RUNNER_TEMP/stage_public_wheel.sh"
           bash "$RUNNER_TEMP/stage_public_wheel.sh"

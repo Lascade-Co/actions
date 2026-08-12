@@ -15,37 +15,20 @@ concurrency:
 permissions:
   contents: read
 
-# ANGLE is CONSUMED here by digest, never built here. The digest is what makes the bytes in a
-# published wheel the bytes that were verified by hand; a per-build compile would replace that
-# guarantee with a hope. A revision bump must move these constants, `travel-animator-shared`'s
-# `angleRevision`/`angleSha256` (iOS) and the PROVENANCE documents in ONE change -- two ANGLE
-# revisions means two shader translators and two rasterisations of the same frame (risk R14).
-env:
-  ANGLE_REVISION: be80ce591a481c12d60c50d6040d40c035b40a2b
-  ANGLE_RELEASE_REPO: Lascade-Co/travel-animator-shared
-  ANGLE_RELEASE_TAG: angle-be80ce59
-  # Built on an M2, 2026-08-11; bit-identical 695-frame render to the previous reference.
-  # See travel-animator-shared third_party/angle/PROVENANCE-macos.md.
-  ANGLE_SHA256_MACOS: dfe3d633b280bf2479189716ad3ab14381260180bd5c5246c3d80913eb477e30
-  # Do NOT replace this with Skiko's `skiko-awt-runtime-angle-windows-x64`: that is ANGLE
-  # 2.1.25511 against our 2.1.28587, precisely the skew this pin exists to prevent. The digest
-  # is of the REPACKED asset -- the Windows build wrote backslash zip separators, which extract
-  # as flat `include\EGL\egl.h` files on POSIX. See scripts/angle/PROVENANCE-windows.md.
-  ANGLE_SHA256_WINDOWS_X64: 8a2732e41e0e14471fe7f852c6ee13a1ace13ed2178231c8d16353e1b35a59cc
-
 # The wheel matrix cannot collapse back into one job (CI doc §4): jlink cannot cross-target,
 # macOS ad-hoc signing needs a real macOS runner, and a platform-tagged wheel installs only on
-# a matching one. `ta-render.jar` is built ONCE and passed as an artifact -- it is
-# architecture-neutral (all six LWJGL classifiers, tada c8dcfec) -- which keeps Gradle's
-# three-build composite off the other four runners.
+# a matching one. It lives in `_tada-wheels.yml` because PyPI publishes the same four wheels,
+# and the ANGLE pins must not exist in two files. `ta-render.jar` is built ONCE here and passed
+# as an artifact -- it is architecture-neutral (all six LWJGL classifiers, tada c8dcfec) --
+# which keeps Gradle's three-build composite off the other four runners.
 #
 # `ta-prepare.jar` is built by the same Gradle task and travels the same way, but to ONE
 # consumer: the bundle job, which folds it into the PRIVATE wheel (ADR 0015). It is that jar
 # plus the sealed `builder/` package, so it must never reach a public wheel, and it needs no
 # per-platform work -- it borrows the public wheel's jlink'd JRE instead of shipping one.
 #
-# ⚠️ NOTHING IN THIS FILE HAS EVER RUN. It was written against locally verified artifacts; no
-# GitHub runner has executed it. See the scripts it calls for what WAS executed.
+# First executed end to end on 2026-08-12 (run 31586482741) against tada 345e9f3: all four
+# wheel legs green including the Windows GL smoke, and the bundle published to GHCR.
 jobs:
   validate-python:
     name: Python tests
@@ -261,305 +244,18 @@ jobs:
           retention-days: 1
           compression-level: 0
 
-  # One leg per platform, because jlink runs on the target, macOS needs `codesign`, and a
-  # platform wheel installs only where its tag matches. The macOS and Windows ANGLE are our
-  # own BSD-3-Clause builds of the pinned revision, which is what makes them redistributable
-  # in a PyPI wheel at all. A runner label that does not resolve -- `ubuntu-24.04-arm` being
-  # the one to watch -- fails its leg at scheduling rather than silently going missing.
+  # The four platform wheels. Defined in `_tada-wheels.yml` because PyPI publishes the same
+  # four, and one copy is what keeps the ANGLE digests from drifting between the two paths.
+  # It downloads the `ta-render-jar` artifact `jvm-build` uploaded above -- a reusable workflow
+  # shares the caller's run, so the jar is still built exactly once.
   wheel:
-    name: Wheel (${{ matrix.platform }})
+    name: Wheels
     needs: [validate-python, jvm-build]
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 45
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - platform: linux-x64
-            runner: ubuntu-latest
-            container: quay.io/pypa/manylinux_2_28_x86_64
-            tag: manylinux_2_28_x86_64
-          - platform: linux-arm64
-            runner: ubuntu-24.04-arm
-            container: quay.io/pypa/manylinux_2_28_aarch64
-            # NOT 2_28: LWJGL 3.3.6's aarch64 liblwjgl.so references GLIBC_2.34, so the whole
-            # wheel is capped there. Measured 2026-08-11; auditwheel refuses 2_28 outright.
-            tag: manylinux_2_34_aarch64
-          # `angle_platform` is the release asset's suffix; its ABSENCE is what marks a leg as
-          # needing no ANGLE. Linux renders on the system EGL/GLES, and a bundled payload there
-          # would take the GPU worker off the NVIDIA driver.
-          - platform: macos-arm64
-            runner: macos-14
-            container: ""
-            tag: macosx_11_0_arm64
-            angle_platform: macos
-          - platform: windows-x64
-            runner: windows-latest
-            container: ""
-            tag: win_amd64
-            angle_platform: windows-x64
-    steps:
-      - name: Extract owner/repo
-        id: repo
-        shell: bash
-        run: |
-          FULL="${{ github.event.client_payload.repo }}"
-          echo "owner=${FULL%%/*}" >> "$GITHUB_OUTPUT"
-          echo "name=${FULL#*/}"   >> "$GITHUB_OUTPUT"
-
-      - name: Mint GitHub App token (tada + shared)
-        id: app-token
-        uses: actions/create-github-app-token@v3
-        with:
-          client-id: ${{ secrets.CI_APP_CLIENT_ID }}
-          private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
-          owner: ${{ steps.repo.outputs.owner }}
-          repositories: |
-            ${{ steps.repo.outputs.name }}
-            travel-animator-shared
-
-      - name: Check out TADA @ dispatched commit
-        uses: actions/checkout@v6
-        with:
-          repository: ${{ github.event.client_payload.repo }}
-          ref: ${{ github.event.client_payload.sha }}
-          token: ${{ steps.app-token.outputs.token }}
-          fetch-depth: 1
-          persist-credentials: false
-
-      - name: Read pinned shared revision
-        id: shared
-        shell: bash
-        run: echo "revision=$(git rev-parse HEAD:shared)" >> "$GITHUB_OUTPUT"
-
-      - name: Check out private shared protos
-        uses: actions/checkout@v6
-        with:
-          repository: Lascade-Co/travel-animator-shared
-          ref: ${{ steps.shared.outputs.revision }}
-          path: shared
-          token: ${{ steps.app-token.outputs.token }}
-          persist-credentials: false
-
-      - name: Install pinned uv and Python
-        uses: astral-sh/setup-uv@v8.3.2
-        with:
-          version: "0.8.9"
-          python-version: "3.12"
-          enable-cache: true
-          cache-dependency-glob: uv.lock
-
-      - name: Sync locked environment
-        run: uv sync --locked --all-packages --all-extras
-
-      - name: Generate protobuf modules
-        run: uv run --locked --all-packages --all-extras python tada_render/hatch_build.py
-
-      # The PURE public wheel each leg folds its own payload into. Built per leg so `uv build`
-      # runs on the same checkout that generated the protos; identical across legs by construction.
-      - name: Build the pure wheels
-        run: uv build --wheel --all-packages --out-dir pure
-
-      - name: Download ta-render.jar
-        uses: actions/download-artifact@v8
-        with:
-          name: ta-render-jar
-          path: jar
-
-      - name: Fetch the packaging scripts
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p ci-scripts
-          base=https://raw.githubusercontent.com/Lascade-Co/actions/main/scripts/tada-wheel
-          for name in build_jvm_payload.py inject_wheel_payload.py check_glibc_floor.py \
-                      assert_wheel_exec_bit.py build_linux_wheel.sh; do
-            curl -sSfL "$base/$name" -o "ci-scripts/$name"
-          done
-
-      # `docker run` rather than a job-level `container:`: only the payload assembly and its
-      # glibc measurement need manylinux_2_28, and putting the whole job in AlmaLinux 8 would
-      # drag checkout, setup-uv, setup-java and every upload through it for no benefit.
-      - name: Build the platform wheel (Linux, in manylinux)
-        if: ${{ matrix.container != '' }}
-        env:
-          CONTAINER: ${{ matrix.container }}
-          IO_PLATFORM: ${{ matrix.platform }}
-          MANYLINUX_TAG: ${{ matrix.tag }}
-        run: |
-          set -euo pipefail
-          docker run --rm -v "$PWD:/io" -w /io \
-            -e IO_WHEEL="/io/$(ls pure/travel_animator-*.whl)" \
-            -e IO_JAR=/io/jar/ta-render.jar \
-            -e IO_OUT=/io/platform \
-            -e IO_PLATFORM="$IO_PLATFORM" \
-            -e MANYLINUX_TAG="$MANYLINUX_TAG" \
-            "$CONTAINER" bash /io/ci-scripts/build_linux_wheel.sh
-
-      - name: Set up JDK for jlink
-        if: ${{ matrix.container == '' }}
-        uses: actions/setup-java@v5
-        with:
-          distribution: temurin
-          java-version: 21
-
-      # One pinned revision, one release, one asset per platform, each pinned by SHA-256 --
-      # the same arrangement shared's `downloadAngle` task uses for iOS, for the same reason:
-      # the digest is what makes the binaries in a published wheel the binaries that were
-      # verified by hand. A mismatch FAILS the job; it is never a warning.
-      #
-      # `travel-animator-shared` is private, so this needs the App token minted above and the
-      # REST asset endpoint with `Accept: application/octet-stream` (the browser-facing
-      # releases/download URL 404s unauthenticated). fetch_pinned_angle.py does both.
-      - name: Fetch and verify the pinned ANGLE
-        if: ${{ matrix.angle_platform != '' }}
-        shell: bash
-        env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          ANGLE_PLATFORM: ${{ matrix.angle_platform }}
-        run: |
-          set -euo pipefail
-
-          # The tag is the revision's first 8 characters. Asserted, not assumed: a half-edited
-          # pin would otherwise download a DIFFERENT revision that still passes its checksum.
-          if [[ "$ANGLE_RELEASE_TAG" != "angle-${ANGLE_REVISION:0:8}" ]]; then
-            echo "::error::ANGLE_RELEASE_TAG '$ANGLE_RELEASE_TAG' does not match ANGLE_REVISION" \
-                 "'$ANGLE_REVISION' (expected angle-${ANGLE_REVISION:0:8}). The pin is half-edited."
-            exit 1
-          fi
-
-          case "$ANGLE_PLATFORM" in
-            macos)       sha256="$ANGLE_SHA256_MACOS" ;;
-            windows-x64) sha256="$ANGLE_SHA256_WINDOWS_X64" ;;
-            *) echo "::error::no pinned ANGLE checksum is wired for '$ANGLE_PLATFORM'"; exit 1 ;;
-          esac
-
-          # Dormant while every wired platform carries a digest. This is what a platform whose
-          # ANGLE asset has not been built and published yet would fail with -- loudly, and
-          # naming the one-time procedure, rather than falling back to a different ANGLE.
-          if [[ -z "$sha256" ]]; then
-            echo "::error::ANGLE for $ANGLE_PLATFORM has not been built and published yet - see scripts/angle/PROVENANCE-windows.md"
-            cat >&2 <<EOF
-
-          ================================================================================
-          No ANGLE asset is published for $ANGLE_PLATFORM at revision $ANGLE_REVISION.
-
-          CI does not build ANGLE. It consumes a prebuilt, pinned, checksummed release asset,
-          and there is no such asset for this platform, so this wheel cannot be built.
-
-          To unblock, ONCE:
-            1. On a Windows box with Visual Studio 2022 + the Windows SDK, run
-               scripts/angle/build_angle_windows.ps1 -Revision $ANGLE_REVISION -TargetCpu x64
-               following scripts/angle/PROVENANCE-windows.md.
-            2. Verify it (that document's checklist), then
-               gh release upload $ANGLE_RELEASE_TAG ${ANGLE_RELEASE_TAG}-${ANGLE_PLATFORM}.zip \\
-                 --repo $ANGLE_RELEASE_REPO
-            3. Set ANGLE_SHA256_WINDOWS_X64 in this workflow to the published digest.
-
-          Do NOT substitute Skiko's skiko-awt-runtime-angle-windows-x64. It is ANGLE 2.1.25511
-          against the 2.1.28587 every other platform of this project renders through: a second
-          shader translator, a second rasterisation of the same frame (risk R14). Failing here
-          is the intended behaviour until the asset above exists.
-          ================================================================================
-          EOF
-            exit 1
-          fi
-
-          mkdir -p ci-scripts
-          curl -sSfL https://raw.githubusercontent.com/Lascade-Co/actions/main/scripts/angle/fetch_pinned_angle.py \
-            -o ci-scripts/fetch_pinned_angle.py
-          python ci-scripts/fetch_pinned_angle.py \
-            --repo "$ANGLE_RELEASE_REPO" \
-            --tag "$ANGLE_RELEASE_TAG" \
-            --asset "${ANGLE_RELEASE_TAG}-${ANGLE_PLATFORM}.zip" \
-            --sha256 "$sha256" \
-            --out angle
-
-      - name: Build the platform wheel (native runner)
-        if: ${{ matrix.container == '' }}
-        shell: bash
-        env:
-          PLATFORM: ${{ matrix.platform }}
-          TAG: ${{ matrix.tag }}
-        run: |
-          set -euo pipefail
-          skiko_version=0.148.2
-          # Skiko names its runtime artifacts with the same os-arch spelling we use.
-          curl -sSfL --retry 5 --retry-delay 3 -o skiko.jar \
-            "https://repo1.maven.org/maven2/org/jetbrains/skiko/skiko-awt-runtime-${PLATFORM}/${skiko_version}/skiko-awt-runtime-${PLATFORM}-${skiko_version}.jar"
-          python ci-scripts/build_jvm_payload.py \
-            --platform "$PLATFORM" \
-            --jar jar/ta-render.jar \
-            --skiko-jar skiko.jar \
-            --angle-dir angle \
-            --platform-tag "$TAG" \
-            --out payload
-          python ci-scripts/inject_wheel_payload.py \
-            --wheel "$(ls pure/travel_animator-*.whl)" \
-            --payload payload \
-            --tag "py3-none-${TAG}" \
-            --out-dir platform
-          python ci-scripts/assert_wheel_exec_bit.py "$(ls platform/*.whl)"
-          cp payload/PAYLOAD.json "platform/PAYLOAD-${PLATFORM}.json"
-
-      # ---------------------------------------------------------------------------------
-      # The smoke: install the finished wheel and make it render a GL probe through its OWN
-      # payload. This is the step that would have caught the pip/uv execute-bit divergence
-      # (pip additionally requires the regular-file type bits in the zip's external_attr;
-      # uv does not), and it is the only check that exercises the launcher, the JRE, the
-      # LWJGL shims, Skiko and the GL driver together.
-      #
-      # On Linux it runs on the HOST runner, not in manylinux: the host is where a real GL
-      # stack can be apt-installed, and a manylinux_2_28 wheel installs happily on glibc 2.39.
-      # ---------------------------------------------------------------------------------
-      - name: Install the GL runtime for the smoke (Linux)
-        if: ${{ matrix.container != '' }}
-        run: |
-          sudo apt-get update
-          sudo apt-get install --yes --no-install-recommends \
-            libegl1 libegl-mesa0 libgles2 libgl1 libgl1-mesa-dri libfontconfig1
-
-      - name: Smoke the packaged renderer
-        shell: bash
-        env:
-          EGL_PLATFORM: surfaceless
-          LIBGL_ALWAYS_SOFTWARE: "1"
-          GALLIUM_DRIVER: llvmpipe
-        run: |
-          set -euo pipefail
-          uv venv --python 3.12 .smoke
-          uv pip install --python .smoke --no-deps "$(ls platform/*.whl)" numpy
-          uv run --python .smoke --no-project python - <<'PY'
-          import subprocess, sys
-          from tada_render import render_bridge
-
-          command = render_bridge.packaged_runtime()
-          if command is None:
-              sys.exit("the installed wheel carries no JVM payload")
-          print("launcher:", " ".join(command))
-          env = render_bridge.child_environment()
-          print("TADA_ANGLE_DIR:", env.get(render_bridge.ANGLE_DIR_ENV, "(none: system GLES)"))
-          # exit 70 is the protocol's `gl_unavailable`; anything else is a launcher or
-          # packaging failure and must not be reported as a driver problem.
-          result = subprocess.run(command + ["self-test"], env=env,
-                                  capture_output=True, text=True)
-          print(result.stdout)
-          print(result.stderr, file=sys.stderr)
-          if result.returncode == 137 or result.returncode == -9:
-              sys.exit("SIGKILL with no stderr -- on macOS this is a TAMPERED CODE SIGNATURE, "
-                       "not a GL failure. Re-sign after any lipo/strip/install_name_tool.")
-          if result.returncode != 0:
-              sys.exit(f"self-test exited {result.returncode}")
-          PY
-
-      - name: Upload the platform wheel
-        uses: actions/upload-artifact@v7
-        with:
-          name: wheel-${{ matrix.platform }}
-          path: platform/
-          if-no-files-found: error
-          retention-days: 1
-          compression-level: 0
+    uses: ./.github/workflows/_tada-wheels.yml
+    with:
+      repo: ${{ github.event.client_payload.repo }}
+      sha: ${{ github.event.client_payload.sha }}
+    secrets: inherit
 
   # ---------------------------------------------------------------------------------------
   # The GHCR bundle: five files, ONE platform (backlog C10).
