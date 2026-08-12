@@ -8,7 +8,12 @@
 # tree and pass here while failing in every consumer that has no such tree.
 set -euo pipefail
 
-uvx --from twine==6.2.0 twine check bundle/*.whl
+# 7.0.0, and do NOT pin it back: twine <= 6.2.0 monkeypatches packaging's
+# _VALID_METADATA_VERSIONS onto a hardcoded list ending at 2.4, so it rejects what packaging
+# itself accepts. hatchling is unpinned in both [build-system] requires and now emits
+# Metadata-Version 2.5, which failed this line on wheels that were otherwise fine. 7.0.0
+# dropped the patch and defers to packaging.
+uvx --from twine==7.0.0 twine check bundle/*.whl
 
 staging="$(mktemp -d)"
 trap 'rm -rf "$staging"' EXIT
