@@ -26,9 +26,16 @@ def pip_would_make_executable(info: zipfile.ZipInfo) -> bool:
     mode = info.external_attr >> 16
     return bool(mode and stat.S_ISREG(mode) and mode & 0o111)
 
-# Also requiring a non-zero executable count catches a wholesale mode reset that
-# happens to leave java alone.
-REQUIRED = "_jvm/jre/bin/java"
+# The launcher jlink emits, whose NAME is platform-dependent: `bin/java`, except on
+# Windows, where it is `bin/java.exe`. Matching only the POSIX spelling failed the
+# win_amd64 leg on a correctly built wheel (run 31586482741) -- the one leg that had
+# never run. `verify_tada_wheel.py` accepts both; this is the same fact, second reader.
+#
+# The mode assertion still carries signal on Windows even though NTFS has no execute
+# bit: CPython's `os.stat` synthesizes 0111 for `.exe`/`.bat`/`.cmd`/`.com`, so a
+# Windows payload records the mode a POSIX one does, and a staging pass that flattened
+# everything to 0644 is caught here too.
+REQUIRED = ("_jvm/jre/bin/java", "_jvm/jre/bin/java.exe")
 
 
 def main(argv: list[str]) -> int:
@@ -41,10 +48,10 @@ def main(argv: list[str]) -> int:
         for info in zf.infolist():
             if pip_would_make_executable(info):
                 executables.append(info.filename)
-            if info.filename.endswith(REQUIRED):
+            if any(info.filename.endswith(name) for name in REQUIRED):
                 found = (info.filename, info)
     if found is None:
-        print(f"{argv[1]} contains no {REQUIRED}", file=sys.stderr)
+        print(f"{argv[1]} contains none of {', '.join(REQUIRED)}", file=sys.stderr)
         return 1
     name, info = found
     mode = info.external_attr >> 16
