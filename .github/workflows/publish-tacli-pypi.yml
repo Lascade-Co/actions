@@ -14,7 +14,9 @@ run-name: "travel-animator → pypi @ ${{ inputs.sha }}"
 # a long-lived credential at all and is worth revisiting, but the token is what exists today.
 #
 # The private `tada` wheel is built here too (one build path for both distributions) but is
-# never uploaded; stage_public_wheel.sh enforces that.
+# never uploaded; stage_public_wheel.sh enforces that. That wheel carries `ta-prepare.jar`
+# (ADR 0015) -- ta-render.jar plus the sealed `builder/` package -- which is precisely why it
+# must not be: this workflow's output goes to a public index.
 #
 # ---------------------------------------------------------------------------------------------
 # ⚠️ THIS WORKFLOW WILL NOW FAIL AT "Stage only the public wheel", AND THAT IS DELIBERATE.
@@ -154,12 +156,10 @@ jobs:
             libgl1 \
             libgl1-mesa-dri
 
-      # The JVM half of the KMP renderer migration (plan items 1.11/1.12). Only the toolchain,
-      # deliberately: the Gradle build is a composite over tada + shared + rentile, and this
-      # workflow checks out only `shared`, so there is nothing here for ./gradlew to configure
-      # yet. publish-tada-wheel.yml is where :host:taJars and :shared:jvmTest run. This is the
-      # prerequisite, staged so that wiring the JVM payload into the published wheel is one step
-      # rather than three.
+      # The JVM half of the KMP renderer migration (plan items 1.11/1.12). rentile resolves from
+      # Maven Central now, so tada + shared -- both checked out above -- are the whole build.
+      # publish-tada-wheel.yml is still where :shared:jvmTest runs; what this workflow needs
+      # ./gradlew for is ta-prepare.jar, below.
       - name: Set up JDK
         uses: actions/setup-java@v5
         with:
@@ -190,6 +190,16 @@ jobs:
       - name: Run tests from the lockfile
         run: uv run --locked --all-packages --all-extras pytest
 
+      # The private wheel this build path produces carries ta-prepare.jar (ADR 0015), so the jar
+      # has to exist even though nothing here uploads that wheel. Building it rather than making
+      # it optional is the point: the one build path stays one build path, and the wheel this
+      # workflow discards is byte-for-byte the shape the GHCR bundle ships.
+      - name: Make gradlew executable
+        run: chmod +x gradlew
+
+      - name: Build the two JARs and verify the builder seal
+        run: ./gradlew :host:taJars
+
       # Reuses the private path's build script so the bytes uploaded here are produced exactly
       # the way the tested GHCR bundle's wheels are -- one build path, not two.
       - name: Build both wheels
@@ -197,9 +207,14 @@ jobs:
           SHARED_REVISION: ${{ steps.shared.outputs.revision }}
           TADA_REPOSITORY: Lascade-Co/tada
           TADA_REVISION: ${{ inputs.sha }}
+          PREPARE_JAR: host/build/libs/ta-prepare.jar
         run: |
-          curl -sSfL https://raw.githubusercontent.com/Lascade-Co/actions/main/scripts/tada-wheel/build_tada_wheel.sh -o "$RUNNER_TEMP/build_tada_wheel.sh"
-          bash "$RUNNER_TEMP/build_tada_wheel.sh"
+          mkdir -p "$RUNNER_TEMP/tada-wheel"
+          base=https://raw.githubusercontent.com/Lascade-Co/actions/main/scripts/tada-wheel
+          for name in build_tada_wheel.sh build_prepare_payload.py inject_wheel_payload.py; do
+            curl -sSfL "$base/$name" -o "$RUNNER_TEMP/tada-wheel/$name"
+          done
+          bash "$RUNNER_TEMP/tada-wheel/build_tada_wheel.sh"
 
       - name: Verify wheel contents contain no credential files
         run: |

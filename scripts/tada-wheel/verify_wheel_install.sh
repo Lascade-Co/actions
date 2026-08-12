@@ -66,6 +66,60 @@ if result.returncode != 0:
 print("packaged renderer starts on its own JRE: OK")
 PY
 
+# ---------------------------------------------------------------------------------------
+# The cross-wheel half of ADR 0015, and the only place it is checked as one system: the jar
+# comes from the PRIVATE wheel, the JVM that runs it comes from the PUBLIC one. Everything
+# else verifies one wheel at a time and would not notice the pair being wrong.
+#
+# Resolved by path rather than through a `tada` helper, because the tada side of this lands
+# separately -- the path below (`<tada package>/_jvm/ta-prepare.jar`) is the contract, and
+# this script is written against the contract, not against the helper.
+#
+# From an unrelated cwd, and that is load-bearing here in a way it is not above. A stdin
+# script puts the cwd first on sys.path, and the TADA checkout root holds `tada/` -- a REGULAR
+# package, `__init__.py` and all -- so `import tada` from there resolves to the SOURCE tree,
+# which has no `_jvm/`, and this check would fail on a perfectly good wheel. (The block above
+# gets away with it: the root's `tada_render/` is the workspace-member directory with no
+# `__init__.py`, and PEP 420 lets a real package later on the path win over a namespace
+# portion.)
+# ---------------------------------------------------------------------------------------
+(
+cd /tmp
+"$GITHUB_WORKSPACE/.wheel-check/bin/python" - <<'PY'
+import subprocess
+from pathlib import Path
+
+import tada
+from tada_render import render_bridge
+
+jar = Path(tada.__file__).resolve().parent / "_jvm" / "ta-prepare.jar"
+if not jar.is_file():
+    raise SystemExit(f"the installed private wheel carries no {jar}; `tada prepare` drives "
+                     "that jar as a subprocess, so this install cannot prepare (ADR 0015)")
+
+# The public wheel's jlink'd runtime, which is the whole point: the private wheel ships no
+# JRE. A pure public wheel has none either, and then a system `java` is the fallback -- but
+# in the bundle the public wheel is always the platform one, so this must be there.
+java = render_bridge.payload_root() / render_bridge.PAYLOAD_JRE_DIRNAME / "bin" / "java"
+if not java.is_file():
+    raise SystemExit(f"no jlink'd JRE at {java}. The private wheel deliberately ships none "
+                     "(ADR 0015): it borrows this one, so a bundle whose public wheel is "
+                     "pure cannot prepare.")
+
+# `--help`, for the same reason the renderer smoke above uses it: this is a packaging check,
+# and it must not turn into a check of anything else. ta-prepare prints its usage to stderr
+# and exits 0.
+result = subprocess.run([str(java), "-jar", str(jar), "--help"],
+                        capture_output=True, text=True)
+if result.returncode != 0:
+    raise SystemExit(f"ta-prepare did not start on the public wheel's JRE "
+                     f"(exit {result.returncode}): {result.stderr[-400:]}")
+said = (result.stdout + result.stderr).strip().splitlines()
+print("ta-prepare starts on the public wheel's JRE: OK"
+      + (f" -- {said[0]}" if said else " (silently, which is odd but not fatal)"))
+PY
+)
+
 # Both console scripts, from an unrelated cwd. `tada` imports tada_render at module load, so it
 # is what fails when the public wheel is missing; `travel-animator` proves the public
 # distribution stands on its own.

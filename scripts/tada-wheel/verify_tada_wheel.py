@@ -12,16 +12,24 @@ that is publishable to a public index.
 
 The JVM assertions each exist because of a failure that is silent without them:
 
-**The nested-ZIP builder seal.** Gradle's `verifyTaRenderJarSeal` proves the jar GRADLE
-BUILT carries no `com/lascade/ta/shared/builder/**`; between that and the jar in the wheel
-sit an artifact round trip and `build_jvm_payload.py` rewriting it. JVM bytecode decompiles
-trivially (ADR 0006/0007), so a leak here publishes the choreography code to PyPI. Re-run on
-the shipped bytes, with Gradle's positive control: the renderer prefix must be PRESENT, or
-an empty jar passes a "no builder classes" test while proving nothing.
+**The nested-ZIP builder seal, twice, in opposite directions.** Gradle's
+`verifyTaRenderJarSeal` proves the jar GRADLE BUILT carries no
+`com/lascade/ta/shared/builder/**`; between that and the jar in the wheel sit an artifact
+round trip and `build_jvm_payload.py` rewriting it. JVM bytecode decompiles trivially (ADR
+0006/0007), so a leak here publishes the choreography code to PyPI. Re-run on the shipped
+bytes, with Gradle's positive control: the renderer prefix must be PRESENT, or an empty jar
+passes a "no builder classes" test while proving nothing.
+
+The PRIVATE wheel carries the other jar -- `ta-prepare.jar`, the same fat jar PLUS
+`builder/` (ADR 0015) -- so there the same prefix must be PRESENT, and that assertion needs
+no positive control of its own: presence cannot pass vacuously. A missing prepare jar is a
+build failure here rather than a `prepare` that dies in a customer's dispatcher.
 
 **Class-file major 65.** A build on a newer JDK that lost the `jvmTarget = JVM_21` pin emits
 major 66+, and the jlink'd JRE 21 this wheel ships then throws `UnsupportedClassVersionError`
-at the first render. Package time is the only place both halves are in hand.
+at the first render. Package time is the only place both halves are in hand. It binds the
+private wheel's jar as hard as the public one's, and for the same runtime: `ta-prepare.jar`
+has no JRE of its own, it runs on the one in the public wheel beside it.
 
 **Natives in the same directory.** ANGLE's `libEGL` loads `libGLESv2` BY BARE NAME from its
 own module directory, so a split payload SIGSEGVs rather than failing cleanly; the LWJGL
@@ -30,6 +38,8 @@ shims must also be where `-Dorg.lwjgl.librarypath` points, which is one director
 **Linux must have NO angle/.** A bundled payload is what switches `GlDriver` off the system
 EGL/GLES, so an `angle/` arriving on a Linux wheel takes the paid GPU off its own driver.
 """
+from __future__ import annotations
+
 from pathlib import PurePosixPath
 from zipfile import ZipFile
 import glob
@@ -37,7 +47,6 @@ import io
 import json
 import re
 import sys
-import zipfile
 
 # Disjoint: a wheel filename starts with its distribution name, and these two share no prefix.
 PRIVATE_GLOB = "bundle/tada-*.whl"
@@ -73,14 +82,32 @@ PAYLOAD = "tada_render/_jvm/"
 JAR = PAYLOAD + "ta-render.jar"
 MANIFEST = PAYLOAD + "PAYLOAD.json"
 
+# The private wheel's payload: one jar, no JRE, no natives (ADR 0015). `tada/` is the
+# private distribution's import package, so this installs as
+# `<site-packages>/tada/_jvm/ta-prepare.jar`.
+PREPARE_PAYLOAD = "tada/_jvm/"
+PREPARE_JAR = PREPARE_PAYLOAD + "ta-prepare.jar"
+PREPARE_MANIFEST = PREPARE_PAYLOAD + "PAYLOAD.json"
+
 # ADR 0006/0007. Must be ABSENT from ta-render.jar.
 SEALED_PREFIX = "com/lascade/ta/shared/builder/"
 # ...and this must be PRESENT, or the jar under test is not a renderer jar and the seal
 # above passed by being empty.
 REQUIRED_PREFIX = "com/lascade/ta/shared/render/"
 
+# host/build.gradle.kts pins each jar's `Main-Class` to its own program. Both jars are
+# built from one module, so the entry point is what tells them apart -- and a manifest
+# naming a class the jar does not carry is a `java -jar` that dies at runtime.
+RENDER_MAIN_CLASS = "com.lascade.tada.host.TadaHostMain"
+PREPARE_MAIN_CLASS = "com.lascade.tada.host.TadaPrepareMain"
+
 # Java 21: the jlink'd runtime is 21 and will not load anything higher.
 CLASS_FILE_MAJOR = 65
+
+# How many class files to read a header from. A bounded sample rather than all ~8,000: the
+# failure mode is a whole jar built to the wrong target, not disagreement within one
+# compilation.
+CLASS_SAMPLE_SIZE = 40
 
 # Per platform tag: (native library suffix, whether a bundled ANGLE is REQUIRED). Linux's
 # `False` is the strong sense -- an `angle/` there is a failure, not an extra.
@@ -115,59 +142,123 @@ def check_credentials(wheel: str, names: set[str]) -> None:
         fail(f"{wheel} contains credential-like files: {sorted(forbidden)}")
 
 
-def check_jar(wheel: str, jar_bytes: bytes) -> None:
-    """Re-run the ADR 0007 seal, and the class-file version check, on the SHIPPED jar.
+def jar_main_class(jar: ZipFile) -> str | None:
+    """`Main-Class` from a jar manifest, continuation lines joined first.
 
-    The inner zip is read straight out of memory rather than extracted, so what is checked
-    is literally the bytes that will be installed.
+    A manifest wraps at 72 bytes and continues with a single leading space, so reading
+    the raw lines would silently truncate a longer class name than today's and report the
+    wrong entry point -- a false failure that reads like a real one.
     """
-    sealed: list[str] = []
-    renderer = 0
-    majors: dict[int, int] = {}
-    sampled: list[str] = []
+    try:
+        raw = jar.read("META-INF/MANIFEST.MF").decode("utf-8", "replace")
+    except KeyError:
+        return None
+    lines: list[str] = []
+    for line in raw.splitlines():
+        if line.startswith(" ") and lines:
+            lines[-1] += line[1:]
+        else:
+            lines.append(line)
+    for line in lines:
+        key, _, value = line.partition(":")
+        if key.strip() == "Main-Class":
+            return value.strip()
+    return None
 
+
+def scan_jar(wheel: str, jar_name: str, jar_bytes: bytes, sample_prefix: str) -> dict:
+    """Read the SHIPPED jar out of memory: its entry point, its class counts under both
+    ADR 0007 prefixes, and the class-file major of a bounded sample under `sample_prefix`.
+
+    Read from memory rather than extracted, so what is checked is literally the bytes that
+    will be installed.
+    """
     with ZipFile(io.BytesIO(jar_bytes)) as jar:
-        for info in jar.infolist():
-            name = info.filename
-            if not name.endswith(".class"):
-                continue
-            if name.startswith(SEALED_PREFIX):
-                sealed.append(name)
-            if name.startswith(REQUIRED_PREFIX):
-                renderer += 1
-                # A bounded sample rather than all ~8,000: the failure mode is a whole jar
-                # built to the wrong target, not disagreement within one compilation.
-                if len(sampled) < 40 and renderer % 50 == 1:
-                    header = jar.read(name)[:8]
-                    if header[:4] != b"\xca\xfe\xba\xbe":
-                        fail(f"{wheel}: {name} is not a class file")
-                    major = int.from_bytes(header[6:8], "big")
-                    majors[major] = majors.get(major, 0) + 1
-                    sampled.append(name)
+        names = jar.namelist()
+        classes = [n for n in names if n.endswith(".class")]
+        sealed = [n for n in classes if n.startswith(SEALED_PREFIX)]
+        required = [n for n in classes if n.startswith(REQUIRED_PREFIX)]
+        pool = sorted(n for n in classes if n.startswith(sample_prefix))
+        # Spread the sample across the whole prefix rather than taking a prefix of it: a
+        # jar built half on one JDK is not a thing, but a sample drawn from one directory
+        # would not notice if it were.
+        step = max(1, len(pool) // CLASS_SAMPLE_SIZE)
+        majors: dict[int, int] = {}
+        sampled: list[str] = []
+        for name in pool[::step][:CLASS_SAMPLE_SIZE]:
+            header = jar.read(name)[:8]
+            if header[:4] != b"\xca\xfe\xba\xbe":
+                fail(f"{wheel}: {jar_name} entry {name} is not a class file")
+            major = int.from_bytes(header[6:8], "big")
+            majors[major] = majors.get(major, 0) + 1
+            sampled.append(name)
+        main_class = jar_main_class(jar)
 
-    if sealed:
-        fail(
-            f"{wheel} ships a ta-render.jar carrying {len(sealed)} class(es) under "
-            f"'{SEALED_PREFIX}'. The public wheel must not contain the choreography "
-            f"builder (ADR 0006/0007, plan §4.1). First offenders: {sealed[:10]}"
-        )
-    if renderer == 0:
-        fail(
-            f"{wheel} ships a ta-render.jar with NO class under '{REQUIRED_PREFIX}', so it "
-            "is not a renderer jar and the seal check above proved nothing."
-        )
-    if not sampled:
-        fail(f"{wheel}: no class files sampled from ta-render.jar")
+    # An empty sample is not failed here: `sample_prefix` is always the prefix its caller
+    # is about to assert on, so "nothing to sample" and "wrong jar" are the same fact, and
+    # the caller is the one that can say which jar it expected.
     wrong = {major: count for major, count in majors.items() if major != CLASS_FILE_MAJOR}
     if wrong:
         fail(
             f"{wheel} ships classes compiled to class-file major {sorted(wrong)} "
-            f"(expected {CLASS_FILE_MAJOR} = Java 21). The jlink'd JRE in this same wheel "
-            "is 21 and would throw UnsupportedClassVersionError at the first render. "
+            f"(expected {CLASS_FILE_MAJOR} = Java 21). The jlink'd JRE that runs this jar "
+            "is 21 and would throw UnsupportedClassVersionError at the first use. "
             "Check jvmTarget in host/build.gradle.kts and shared/build.gradle.kts."
         )
-    print(f"    jar: seal OK ({renderer} renderer classes, 0 builder), "
-          f"class-file major {CLASS_FILE_MAJOR} across {len(sampled)} sampled")
+    return {
+        "sealed": sealed,
+        "required": required,
+        "sampled": sampled,
+        "main_class": main_class,
+    }
+
+
+def check_entry_point(wheel: str, jar_name: str, facts: dict, expected: str) -> None:
+    if facts["main_class"] != expected:
+        fail(
+            f"{wheel}: {jar_name} declares Main-Class {facts['main_class']!r}, expected "
+            f"{expected!r}. The two jars are built from one module and told apart by their "
+            "entry point, so this is most likely the wrong jar."
+        )
+
+
+def check_render_jar(wheel: str, jar_bytes: bytes) -> None:
+    """The public wheel's jar: the seal, its positive control, and the entry point."""
+    facts = scan_jar(wheel, "ta-render.jar", jar_bytes, REQUIRED_PREFIX)
+    if facts["sealed"]:
+        fail(
+            f"{wheel} ships a ta-render.jar carrying {len(facts['sealed'])} class(es) under "
+            f"'{SEALED_PREFIX}'. The public wheel must not contain the choreography "
+            f"builder (ADR 0006/0007, plan §4.1). First offenders: {facts['sealed'][:10]}"
+        )
+    if not facts["required"]:
+        fail(
+            f"{wheel} ships a ta-render.jar with NO class under '{REQUIRED_PREFIX}', so it "
+            "is not a renderer jar and the seal check above proved nothing."
+        )
+    check_entry_point(wheel, "ta-render.jar", facts, RENDER_MAIN_CLASS)
+    print(f"    jar: seal OK ({len(facts['required'])} renderer classes, 0 builder), "
+          f"class-file major {CLASS_FILE_MAJOR} across {len(facts['sampled'])} sampled")
+
+
+def check_prepare_jar(wheel: str, jar_bytes: bytes) -> None:
+    """The private wheel's jar: the seal INVERTED -- `builder/` is what it is for.
+
+    Sampled under the sealed prefix rather than the renderer one: those are the classes
+    this jar exists to carry, so it is where a wrong-target build must be caught.
+    """
+    facts = scan_jar(wheel, "ta-prepare.jar", jar_bytes, SEALED_PREFIX)
+    if not facts["sealed"]:
+        fail(
+            f"{wheel} ships a ta-prepare.jar with NO class under '{SEALED_PREFIX}'. That "
+            "package is the entire reason this jar is a second artifact; without it "
+            f"{PREPARE_MAIN_CLASS} cannot load and `tada prepare` fails on the first "
+            "config. Did the builder package move, or is this ta-render.jar?"
+        )
+    check_entry_point(wheel, "ta-prepare.jar", facts, PREPARE_MAIN_CLASS)
+    print(f"    jar: {len(facts['sealed'])} builder classes present, "
+          f"Main-Class={facts['main_class']}, class-file major {CLASS_FILE_MAJOR} "
+          f"across {len(facts['sampled'])} sampled")
 
 
 def check_payload(wheel: str, names: set[str], archive: ZipFile) -> None:
@@ -181,6 +272,17 @@ def check_payload(wheel: str, names: set[str], archive: ZipFile) -> None:
     if suffix is None:
         fail(f"{wheel}: unrecognised platform tag {tag!r}; add it to PLATFORM_RULES "
              "rather than letting an unverified payload through")
+
+    # 0. No stowaway prepare jar. `check_render_jar` proves `builder/` is ABSENT from
+    # `ta-render.jar`, which says nothing about a SECOND jar at another path -- and
+    # `ta-prepare.jar` is that jar plus `builder/`. Shipping one here publishes the
+    # proprietary choreography while every seal assertion still passes, so the file set is
+    # checked by name as well as the one jar's contents (ADR 0015 §4.1).
+    stowaways = sorted(n for n in names if n.endswith("ta-prepare.jar"))
+    if stowaways:
+        fail(f"{wheel} carries {stowaways}. `ta-prepare.jar` is `ta-render.jar` PLUS "
+             f"'{SEALED_PREFIX}', and this wheel is published; the render jar's seal cannot "
+             "see a second jar beside it. The prepare jar belongs in the PRIVATE wheel only.")
 
     # 1. The jar, and the JRE that must run it.
     if JAR not in names:
@@ -236,7 +338,7 @@ def check_payload(wheel: str, names: set[str], archive: ZipFile) -> None:
              f"one here takes the NVIDIA GPU worker off its own driver. Found {angle}")
 
     # 4. The seal + class-file version, on the shipped jar.
-    check_jar(wheel, archive.read(JAR))
+    check_render_jar(wheel, archive.read(JAR))
 
     if MANIFEST in names:
         manifest = json.loads(archive.read(MANIFEST))
@@ -261,19 +363,53 @@ def main() -> int:
     if stray:
         fail(f"bundle/ holds wheels belonging to neither distribution: {stray}")
 
-    print(f"{private[0]}")
+    private_tag = platform_tag_of(private[0])
+    print(f"{private[0]}  [{private_tag}]")
     with ZipFile(private[0]) as archive:
         names = set(archive.namelist())
-    missing = sorted(REQUIRED_PRIVATE - names)
-    if missing:
-        fail(f"{private[0]} is missing expected modules: {missing}")
-    check_credentials(private[0], names)
-    # The private wheel stays pure: a payload here would change the bundle's file count and
-    # TARS's shape checks.
-    leaked = sorted(n for n in names if n.startswith("tada_render/_jvm/"))
-    if leaked:
-        fail(f"{private[0]} carries a JVM payload ({leaked[:3]}); it belongs in the public "
-             "wheel, which is the one that owns tada_render/")
+        missing = sorted(REQUIRED_PRIVATE - names)
+        if missing:
+            fail(f"{private[0]} is missing expected modules: {missing}")
+        check_credentials(private[0], names)
+        # Its payload is one jar: no JRE, no natives, nothing this wheel could be built
+        # four times for. Tagging it would be a claim nothing produces and every consumer
+        # would then have to match.
+        if private_tag != "any":
+            fail(f"{private[0]} is platform-tagged ({private_tag}). The private wheel's "
+                 "payload is a jar and nothing else -- ADR 0015 has it borrow the public "
+                 "wheel's jlink'd JRE -- so it is architecture-independent and must stay "
+                 "py3-none-any.")
+        # ADR 0015. A missing jar has to fail HERE: the alternative is a dispatcher that
+        # installs cleanly and then cannot prepare, which surfaces as a customer's failed
+        # render rather than as a red build.
+        if PREPARE_JAR not in names:
+            fail(f"{private[0]} carries no {PREPARE_JAR}. `tada prepare` drives that jar as "
+                 "a subprocess (ADR 0015/0016), so a wheel without it installs fine and "
+                 "then fails on the first config. Check that :host:taJars ran and that "
+                 "build_tada_wheel.sh was given PREPARE_JAR.")
+        check_prepare_jar(private[0], archive.read(PREPARE_JAR))
+        if PREPARE_MANIFEST in names:
+            manifest = json.loads(archive.read(PREPARE_MANIFEST))
+            if manifest.get("jre", {}).get("bundled"):
+                fail(f"{private[0]}: {PREPARE_MANIFEST} claims a bundled JRE. The private "
+                     "wheel runs on the public wheel's, and a second jlink'd runtime is "
+                     "what ADR 0015 refused.")
+            print(f"    payload: {manifest['jar']['builder_classes']} builder classes, "
+                  f"{manifest['bytes']['total'] / 1e6:.0f} MB, "
+                  f"rewritten={manifest['jar'].get('rewritten')}")
+        stray = sorted(n for n in names
+                       if n.startswith(PREPARE_PAYLOAD) and n not in {PREPARE_JAR, PREPARE_MANIFEST})
+        if stray:
+            fail(f"{private[0]}: {PREPARE_PAYLOAD} holds files beyond the jar and its "
+                 f"manifest: {stray[:5]}. A JRE or a native library here is the second "
+                 "runtime ADR 0015 refused; add it to this list only deliberately.")
+        # The OTHER wheel's payload, which is a different failure: it would mean the public
+        # distribution's platform-specific `_jvm/` rode in on a wheel tagged `any`.
+        leaked = sorted(n for n in names if n.startswith(PAYLOAD))
+        if leaked:
+            fail(f"{private[0]} carries the PUBLIC wheel's JVM payload ({leaked[:3]}); that "
+                 "belongs in travel-animator, which is the distribution that owns "
+                 "tada_render/ and is built once per platform.")
 
     for wheel in public:
         tag = platform_tag_of(wheel)
@@ -284,6 +420,17 @@ def main() -> int:
             if missing:
                 fail(f"{wheel} is missing expected modules: {missing}")
             check_credentials(wheel, names)
+            # The seal below reads ta-render.jar. A whole ta-prepare.jar riding along beside
+            # it would carry `builder/` past that check untouched, so it is refused by name
+            # -- and on the `any` path too, which never reaches the seal at all.
+            prepare = sorted(n for n in names
+                             if n.rsplit("/", 1)[-1] == "ta-prepare.jar"
+                             or n.startswith(PREPARE_PAYLOAD))
+            if prepare:
+                fail(f"{wheel} carries {prepare[:3]}. ta-prepare.jar is ta-render.jar PLUS "
+                     f"'{SEALED_PREFIX}', and this distribution is publishable to PyPI: "
+                     "shipping it here publishes the choreography builder (ADR 0006/0007). "
+                     "It belongs in the private tada wheel and nowhere else.")
             if tag == "any":
                 # Not an error here: the bundle step decides whether a pure wheel is
                 # acceptable, and stage_public_wheel.sh refuses one on the PyPI path.

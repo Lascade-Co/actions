@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Build the TADA wheel bundle (wheels + runtime pylock + build-metadata + SHA256SUMS).
-# Run from the TADA checkout root. Env: SHARED_REVISION, TADA_REPOSITORY, TADA_REVISION.
-# Identity (repository/revision) comes from TADA_* env, NOT ambient GITHUB_*, because this
-# runs in the central actions repo. workflow_run_id/attempt stay ambient (the build runs here).
+# Run from the TADA checkout root. Env: SHARED_REVISION, TADA_REPOSITORY, TADA_REVISION,
+# PREPARE_JAR. Identity (repository/revision) comes from TADA_* env, NOT ambient GITHUB_*,
+# because this runs in the central actions repo. workflow_run_id/attempt stay ambient (the
+# build runs here).
 #
 # TADA ships as TWO distributions built from one revision (ADR 0011):
 #   tada             private -- choreography builder + credentialed fetchers, server-side only
@@ -17,15 +18,40 @@
 # not fork. The bundle stays at FIVE files and single-platform -- TARS declares
 # `"target_platform": "linux/amd64"`, so pushing all four to GHCR would quadruple a consumer's
 # pull. PyPI gets the matrix; GHCR gets manylinux x86-64.
+#
+# The private wheel additionally carries `tada/_jvm/ta-prepare.jar` (ADR 0015): `tada prepare`
+# builds its Frame Plan by driving that jar as a subprocess, and it runs on the PUBLIC wheel's
+# jlink'd JRE rather than a second one. PREPARE_JAR is therefore REQUIRED, not optional -- a
+# bundle whose private wheel has no jar installs perfectly and then cannot prepare, which
+# surfaces as a customer's failed render instead of as a red build. The jar must never enter
+# the public wheel: it is ta-render.jar plus the sealed `builder/` package.
 set -euo pipefail
 
 : "${SHARED_REVISION:?}" "${TADA_REPOSITORY:?}" "${TADA_REVISION:?}"
+# `./gradlew :host:taJars` builds it, beside ta-render.jar, in host/build/libs/.
+: "${PREPARE_JAR:?set PREPARE_JAR to the ta-prepare.jar :host:taJars built}"
+
+if [[ ! -f "$PREPARE_JAR" ]]; then
+  echo "PREPARE_JAR=$PREPARE_JAR does not exist" >&2
+  exit 1
+fi
+
+# The two helpers below sit beside this script; a CI leg fetches all three into one directory
+# (see publish-tada-wheel.yml). SCRIPTS_DIR overrides that for a caller that stages them
+# elsewhere.
+SCRIPTS_DIR="${SCRIPTS_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
+for helper in build_prepare_payload.py inject_wheel_payload.py; do
+  if [[ ! -f "$SCRIPTS_DIR/$helper" ]]; then
+    echo "missing $SCRIPTS_DIR/$helper -- fetch it beside this script, or set SCRIPTS_DIR" >&2
+    exit 1
+  fi
+done
 
 # Optional: a platform-tagged public wheel built by a matrix leg, shipped INSTEAD of the pure
 # one `uv build` produces here. Unset means the bundle carries the pure wheel.
 PUBLIC_WHEEL="${PUBLIC_WHEEL:-}"
 
-rm -rf bundle
+rm -rf bundle prepare-payload injected
 mkdir bundle
 
 # --all-packages is load-bearing: plain `uv build` builds only the workspace ROOT (tada), so the
@@ -53,6 +79,28 @@ if (( ${#private_wheels[@]} != 1 )); then
   printf '  %s\n' "${private_wheels[@]}" >&2
   exit 1
 fi
+
+# The prepare jar goes in HERE rather than in a matrix leg, because this is the one place the
+# private wheel that ships is built. `--keep-tag`: the payload is a jar and nothing else, so
+# the wheel stays py3-none-any and keeps its filename -- which is what `build-metadata.json`'s
+# `wheel` field and every consumer's `tada-*.whl` glob are written against.
+python3 "$SCRIPTS_DIR/build_prepare_payload.py" --jar "$PREPARE_JAR" --out prepare-payload
+python3 "$SCRIPTS_DIR/inject_wheel_payload.py" \
+  --wheel "${private_wheels[0]}" \
+  --payload prepare-payload \
+  --keep-tag \
+  --package tada \
+  --payload-dir _jvm \
+  --out-dir injected
+# Same name in, same name out, so this replaces rather than adds. Asserted, because a stale
+# pure wheel left beside the injected one would be a second `tada-*.whl` in the bundle.
+injected_wheels=(injected/tada-*.whl)
+if (( ${#injected_wheels[@]} != 1 )); then
+  echo "expected exactly one injected private wheel, found ${#injected_wheels[@]}" >&2
+  exit 1
+fi
+mv -f "${injected_wheels[0]}" "${private_wheels[0]}"
+rmdir injected
 
 if [[ -n "$PUBLIC_WHEEL" ]]; then
   # Replace, do not add: a `py3-none-any` file left beside the platform wheel shadows it for
