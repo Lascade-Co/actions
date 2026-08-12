@@ -142,7 +142,8 @@ never share a report.
 ## Language — Marketing Net
 
 The daily cron (`.github/workflows/daily-marketing-net.yml`) that posts one figure to Telegram:
-month-to-date app revenue minus month-to-date marketing spend. Nothing is persisted.
+month-to-date app revenue minus month-to-date marketing spend. Live results are not persisted or
+booked; the closed March 2026 benchmark is retained only as an Infisical secret.
 
 **Marketing net**:
 Month-to-date revenue across the app stores minus month-to-date marketing spend.
@@ -185,6 +186,11 @@ The single date whose FX rates convert every non-USD amount in a run — always 
 recent day a rate exists for. One date covers the whole run, including both sides of the **net
 factor**.
 
+**Benchmark**:
+The closed March 2026 daily **source** data stored as base64 JSON. The comparison uses the same
+day-of-month and the same per-source **windows** as the live report, then shows current **marketing
+net** minus March **marketing net**. It is unavailable when any live **source** is unavailable.
+
 **Skip list**:
 The Google Ads customer ids excluded from the MCC's children. Google Ads is include-by-default with
 exclusions; Meta Ads is the opposite, an explicit list of accounts to read.
@@ -201,6 +207,8 @@ exclusions; Meta Ads is the opposite, an explicit list of accounts to read.
   latest **settled month**.
 - Every non-USD amount converts at the one **rate date** — including both sides of the **net factor**,
   so the ratio stays immune to FX drift.
+- The **benchmark** comparison is like-for-like by day and **window**; it never compares a partial
+  live result with the complete March result.
 - **Google Ads** reads the MCC's children minus the **skip list**; **Meta Ads** reads only its listed
   accounts.
 - A run is green when it delivers a message and red when the delivery itself fails — the same rule

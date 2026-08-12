@@ -15,6 +15,7 @@ def report(**overrides):
             "Meta Ads": Amount(Decimal("912")),
         },
         "appstore_window_label": "to Aug 9",
+        "comparison": {"label": "vs Mar 1–10", "value": Amount(Decimal("1250"))},
         "warnings": [],
     }
     base.update(overrides)
@@ -46,6 +47,13 @@ class RenderPngTest(unittest.TestCase):
         tall = Image.open(io.BytesIO(render_png(report(warnings=["a", "b", "c"]))))
         self.assertGreater(tall.height, short.height)
 
+    def test_renders_unavailable_comparison_without_raising(self):
+        png = render_png(report(comparison={
+            "label": "vs Mar 1–10",
+            "value": Unavailable("current report incomplete"),
+        }))
+        self.assertTrue(png.startswith(b"\x89PNG\r\n\x1a\n"))
+
 
 class NetColourTest(unittest.TestCase):
     """Colour carries confidence, not just sign."""
@@ -71,6 +79,7 @@ class NetColourTest(unittest.TestCase):
 
         pixels = self._net_pixels(report(
             spend={"Influencer": Amount(Decimal("270")), "Meta Ads": Unavailable("x")},
+            comparison={"label": "vs Mar 1–10", "value": Unavailable("incomplete")},
         ))
         self.assertIn(WARN, pixels)
         self.assertNotIn(POSITIVE, pixels)

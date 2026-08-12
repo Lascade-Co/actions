@@ -43,6 +43,7 @@ class RenderTest(unittest.TestCase):
                 "Meta Ads": Amount(Decimal("3015")),
             },
             "appstore_window_label": "to Aug 9",
+            "comparison": {"label": "vs Mar 1–10", "value": Amount(Decimal("1250"))},
             "warnings": [],
         }
 
@@ -81,6 +82,17 @@ class RenderTest(unittest.TestCase):
 
     def test_never_calls_it_profit(self):
         self.assertNotIn("profit", render(self.base()).lower())
+
+    def test_comparison_has_explicit_sign_and_window(self):
+        html = render(self.base())
+        self.assertIn("<b>vs Mar 1–10 · +$1,250</b>", html)
+
+    def test_unavailable_comparison_is_not_zero(self):
+        report = self.base()
+        report["comparison"]["value"] = Unavailable("incomplete")
+        html = render(report)
+        self.assertIn("vs Mar 1–10 · unavailable", html)
+        self.assertNotIn("vs Mar 1–10 · $0", html)
 
 
 class SendTest(unittest.TestCase):

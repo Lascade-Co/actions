@@ -14,7 +14,15 @@ from typing import Callable, Optional
 
 import requests
 
-from pnl_money import Amount, SourceValue, Unavailable, combine, format_usd, round_usd
+from pnl_money import (
+    Amount,
+    SourceValue,
+    Unavailable,
+    combine,
+    format_delta_usd,
+    format_usd,
+    round_usd,
+)
 
 _LIMIT = 4096
 _RETRIES = 3
@@ -106,6 +114,12 @@ def render(report: dict) -> str:
     parts += ["", f"<b>Spend · {escape(_shown(spend_total))}</b>"]
     parts += [_line(label, value) for label, value in rounded_spend.items()]
     parts += ["", f"<b>Net · {escape(_shown(net))}</b>"]
+
+    comparison = report.get("comparison")
+    if comparison:
+        value = comparison["value"]
+        shown = format_delta_usd(value.usd) if isinstance(value, Amount) else "unavailable"
+        parts.append(f"<b>{escape(comparison['label'])} · {escape(shown)}</b>")
 
     window = report.get("appstore_window_label")
     if window:

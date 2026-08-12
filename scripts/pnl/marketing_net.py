@@ -16,6 +16,7 @@ import sys
 from datetime import date, timezone, datetime
 
 from pnl_appstore import DayCache, fetch_appstore, window_days
+from pnl_benchmark import BenchmarkError, comparison, decode_benchmark
 from pnl_fx import build_rate_table, rate_date
 from pnl_googleads import fetch_google_ads
 from pnl_metaads import fetch_meta_ads
@@ -42,6 +43,7 @@ REQUIRED = [
     "PLAYSTORE_SA_JSON_B64",
     "PLAYSTORE_BUCKET",
     "ADS_CREDENTIALS_JSON_B64",
+    "MARKETING_NET_BENCHMARK_B64",
     "TELEGRAM_BOT_TOKEN",
     # Deliberately not TELEGRAM_CHAT_ID: that key exists in the same Infisical
     # project and belongs to the PNL app's own alerting. Falling back to it
@@ -67,6 +69,10 @@ def load_config(env: dict) -> dict:
     missing = [key for key in REQUIRED if not env.get(key)]
     if missing:
         raise ConfigError(f"Missing required configuration: {', '.join(missing)}")
+    try:
+        benchmark = decode_benchmark(env["MARKETING_NET_BENCHMARK_B64"])
+    except BenchmarkError as exc:
+        raise ConfigError(f"MARKETING_NET_BENCHMARK_B64 is invalid: {exc}") from exc
     return {
         "pnl_api_key": env["PNL_API_KEY"],
         "appstore": {
@@ -80,6 +86,7 @@ def load_config(env: dict) -> dict:
             "credentials": json.loads(_b64(env["PLAYSTORE_SA_JSON_B64"])),
         },
         "ads": json.loads(_b64(env["ADS_CREDENTIALS_JSON_B64"])),
+        "benchmark": benchmark,
         "telegram_token": env["TELEGRAM_BOT_TOKEN"],
         "chat_id": env["MARKETING_NET_CHAT_ID"],
     }
@@ -114,13 +121,15 @@ def build_report(config: dict, today: date, sources: dict, table=None) -> dict:
     if unpriced:
         warnings.append(f"No USD rate for: {', '.join(unpriced)}")
     days = window_days(today)
-    return {
+    report = {
         "month_label": f"{today:%b} 1–{today.day}",
         "revenue": revenue,
         "spend": spend,
         "appstore_window_label": f"to {days[-1]:%b %-d}" if days else None,
         "warnings": warnings,
     }
+    report["comparison"] = comparison(report, config["benchmark"], today)
+    return report
 
 
 def main(argv=None) -> int:

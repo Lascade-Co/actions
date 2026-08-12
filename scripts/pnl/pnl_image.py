@@ -17,7 +17,7 @@ from typing import Optional
 
 from PIL import Image, ImageDraw, ImageFont
 
-from pnl_money import Amount, SourceValue, format_usd
+from pnl_money import Amount, SourceValue, format_delta_usd, format_usd
 
 WIDTH = 900
 PAD = 56
@@ -120,6 +120,15 @@ def _rows(report: dict) -> list:
         else:
             colour = POSITIVE if net.usd >= 0 else NEGATIVE
     rows.append(("net", "Net", _shown(net), colour))
+
+    comparison = report.get("comparison")
+    if comparison:
+        value = comparison["value"]
+        shown = format_delta_usd(value.usd) if isinstance(value, Amount) else "unavailable"
+        comparison_colour = WARN
+        if isinstance(value, Amount):
+            comparison_colour = POSITIVE if value.usd >= 0 else NEGATIVE
+        rows.append(("comparison", comparison["label"], shown, comparison_colour))
     return rows
 
 
@@ -170,9 +179,19 @@ def render_png(report: dict) -> bytes:
             draw.line([(PAD, y - 12), (right, y - 12)], fill=RULE, width=2)
             y += 12
 
-        label_font = {"row": row_font, "total": total_font, "net": net_label_font}[kind]
-        figure_font = {"row": row_font, "total": total_font, "net": net_font}[kind]
-        label_fill = MUTED if kind == "row" else TEXT
+        label_font = {
+            "row": row_font,
+            "total": total_font,
+            "net": net_label_font,
+            "comparison": row_font,
+        }[kind]
+        figure_font = {
+            "row": row_font,
+            "total": total_font,
+            "net": net_font,
+            "comparison": total_font,
+        }[kind]
+        label_fill = MUTED if kind in ("row", "comparison") else TEXT
 
         draw.text((PAD, y), label, font=label_font, fill=label_fill)
         draw.text(

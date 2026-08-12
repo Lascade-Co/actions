@@ -52,6 +52,16 @@ def format_usd(value: Decimal) -> str:
     return f"${rounded:,}"
 
 
+def format_delta_usd(value: Decimal) -> str:
+    """Whole-dollar difference, with an explicit sign unless it is zero."""
+    rounded = round_usd(value)
+    if rounded == 0:
+        return "$0"
+    if rounded < 0:
+        return f"-${-rounded:,}"
+    return f"+${rounded:,}"
+
+
 def combine(values: Iterable[SourceValue], reason: str) -> SourceValue:
     """Sum the available values; ``Unavailable(reason)`` when none are."""
     amounts = [v.usd for v in values if isinstance(v, Amount)]

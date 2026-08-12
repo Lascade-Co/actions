@@ -1,7 +1,8 @@
 # Marketing Net — daily figure to Telegram
 
 A daily cron that posts one number to a Telegram group: month-to-date app revenue minus
-month-to-date marketing spend. Nothing is persisted anywhere.
+month-to-date marketing spend. The live result is not persisted or booked; a closed March 2026
+daily benchmark is stored as an Infisical secret solely for the comparison line.
 
 Vocabulary for this pipeline lives in [`CONTEXT.md`](../../../CONTEXT.md) under **Marketing Net**.
 Three decisions carry their own ADRs: [0005](../../adr/0005-marketing-net-recomputes-revenue.md)
@@ -18,6 +19,29 @@ Marketing net = (App Store + Play Store) − (Influencer + Google Ads + Meta Ads
 Called **marketing net**, never "profit" — the PNL app already defines `gross_profit` and
 `contribution_profit` by different formulas, and a third thing called profit invites a false
 reconciliation.
+
+## March benchmark
+
+The card also shows the signed difference between today's displayed marketing net and the same
+day-of-month in March 2026: `current net - March net`. The label makes the window explicit, for
+example `vs Mar 1–12 · -$3,943`.
+
+The comparison mirrors the live source windows rather than pretending they match: March App Store
+includes the 1st through the preceding day, while Play Store and all three spend sources include
+the comparison day. Both sides use the renderer's round-each-source-once arithmetic. If any current
+source is unavailable, the comparison is `unavailable`; comparing a partial current net with a
+complete benchmark would look precise and be wrong.
+
+`MARKETING_NET_BENCHMARK_B64` is base64-encoded UTF-8 JSON with all 31 dates and exact decimal
+strings for App Store, Play Store, Influencer, Google Ads and Meta Ads. Root `categories` records
+the revenue/spend grouping and the order of each day's compact five-value array. Loading is strict:
+a missing date, renamed or reordered source, JSON number, non-finite amount, wrong currency or
+unsupported schema rejects the whole secret at startup.
+
+`build_marketing_benchmark.py` produced the March data from daily App Store proceeds, settled March
+Play revenue (March earnings/sales factor applied to each sales day), daily Google Ads and Meta Ads
+spend, and March 31 FX rates. The archived March P&L carried no influencer line, so zero was asserted
+explicitly with `--influencer-zero`; the builder never silently supplies that zero.
 
 ## Sources
 
@@ -166,9 +190,11 @@ Following the `scripts/seo/` precedent: focused modules, fetched by raw URL, off
 | `pnl_playstore.py` | GCS `sales/` + `earnings/` net factor |
 | `pnl_googleads.py` | Google Ads v25 |
 | `pnl_metaads.py` | Graph v26.0 |
+| `pnl_benchmark.py` | strict secret loading and like-for-like comparison |
 | `pnl_image.py` | the PNG card |
 | `pnl_telegram.py` | caption, escape, truncate, redact, sendPhoto |
 | `marketing_net.py` | orchestrator |
+| `build_marketing_benchmark.py` | one-time closed-month daily benchmark fetcher |
 
 ## Workflow
 
@@ -188,7 +214,8 @@ than failing obscurely at first use.
 
 ### Secrets
 
-All verified present in Infisical `pnl`/`prod` on 2026-08-10.
+The source secrets were verified present in Infisical `pnl`/`prod` on 2026-08-10. The benchmark
+row below is the one operator handoff still required for this change.
 
 | Key | Status |
 | --- | --- |
@@ -196,6 +223,7 @@ All verified present in Infisical `pnl`/`prod` on 2026-08-10.
 | `APPSTORE_ISSUER_ID`, `APPSTORE_KEY_ID`, `APPSTORE_P8_B64`, `APPSTORE_VENDOR_NUMBER` | present |
 | `PLAYSTORE_SA_JSON_B64`, `PLAYSTORE_BUCKET` | present |
 | `ADS_CREDENTIALS_JSON_B64` | **created 2026-08-10**, verified to decode |
+| `MARKETING_NET_BENCHMARK_B64` | operator adds the generated March JSON as base64 |
 | `TELEGRAM_BOT_TOKEN` | present |
 
 **The chat id must not be read from `TELEGRAM_CHAT_ID`.** That key already exists in `pnl`/`prod`

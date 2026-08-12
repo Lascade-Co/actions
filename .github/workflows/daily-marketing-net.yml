@@ -62,7 +62,7 @@ jobs:
       - name: Download scripts
         run: |
           for module in pnl_money pnl_fx pnl_spend pnl_appstore pnl_playstore \
-                        pnl_googleads pnl_metaads pnl_image pnl_telegram marketing_net; do
+                        pnl_googleads pnl_metaads pnl_benchmark pnl_image pnl_telegram marketing_net; do
             curl -fsSL --retry 3 --retry-delay 2 -o "$module.py" "$RAW/scripts/pnl/$module.py"
           done
 
@@ -70,7 +70,7 @@ jobs:
         # A published day is immutable, so without this a run on the 28th
         # re-downloads 27 unchanging reports. Keyed per run so each saves a fresh
         # entry; restore-keys pulls the newest prior one.
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: .appstore-cache
           key: appstore-${{ github.run_id }}

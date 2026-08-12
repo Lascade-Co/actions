@@ -5,6 +5,7 @@ from pnl_money import (
     Amount,
     Unavailable,
     combine,
+    format_delta_usd,
     format_usd,
     round_usd,
     to_decimal,
@@ -44,6 +45,17 @@ class FormatUsdTest(unittest.TestCase):
 
     def test_small_positive_is_plain_zero(self):
         self.assertEqual(format_usd(Decimal("0.4")), "$0")
+
+
+class FormatDeltaUsdTest(unittest.TestCase):
+    def test_positive_has_explicit_plus(self):
+        self.assertEqual(format_delta_usd(Decimal("1200.4")), "+$1,200")
+
+    def test_negative_keeps_minus_before_dollar(self):
+        self.assertEqual(format_delta_usd(Decimal("-1200.4")), "-$1,200")
+
+    def test_zero_has_no_sign(self):
+        self.assertEqual(format_delta_usd(Decimal("0.4")), "$0")
 
 
 class CombineTest(unittest.TestCase):
