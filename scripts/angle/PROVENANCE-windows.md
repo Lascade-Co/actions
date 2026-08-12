@@ -314,7 +314,7 @@ what `scripts/angle/fetch_pinned_angle.py` and shared's `downloadAngle` task bot
 Then, in the same change:
 
 - set **`ANGLE_SHA256_WINDOWS_X64`** in `.github/workflows/publish-tada-wheel.yml` to the digest
-  above (it is empty today, which is what fails the leg);
+  above (a digest is pinned there today; left empty, the leg fails at the fetch step);
 - replace the STATUS banner at the top of this file with what was built, measured and verified.
 
 ## The Windows gap — closed 2026-08-11

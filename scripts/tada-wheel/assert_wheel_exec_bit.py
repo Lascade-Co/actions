@@ -6,7 +6,8 @@ passes `twine check` and installs without a word -- then the first render dies
 with `PermissionError: [Errno 13] .../_jvm/jre/bin/java`. Every step between
 `jlink` and the finished wheel can lose it: a `zipfile` staging pass defaulting to
 0644, a `wheel unpack`/`pack` round trip through a restrictive umask, or
-`actions/upload-artifact`, which does NOT preserve modes (hence the workflow's tar).
+`actions/upload-artifact`, which does NOT preserve modes -- which is why the wheel
+itself, a zip that carries its own modes, is what travels between jobs.
 """
 from __future__ import annotations
 

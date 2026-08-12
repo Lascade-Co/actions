@@ -190,8 +190,7 @@ jobs:
           token: ${{ steps.app-token.outputs.token }}
           persist-credentials: false
 
-      # No rentile checkout: it is a Maven Central dependency now, not a submodule, so the
-      # ordinary dependency cache resolves it.
+      # No rentile checkout: it resolves from Maven Central, so the dependency cache has it.
 
       - name: Install headless OpenGL/GLES runtime
         run: |
@@ -263,11 +262,10 @@ jobs:
           compression-level: 0
 
   # One leg per platform, because jlink runs on the target, macOS needs `codesign`, and a
-  # platform wheel installs only where its tag matches. The macOS ANGLE is our own
-  # BSD-3-Clause build of the pinned revision, which is what makes it redistributable in a
-  # PyPI wheel at all. windows-x64 FAILS ON PURPOSE until that asset exists -- see the fetch
-  # step. `ubuntu-24.04-arm` runners are billed for private repos; if the org has not enabled
-  # them the arm64 leg fails at scheduling rather than silently going missing.
+  # platform wheel installs only where its tag matches. The macOS and Windows ANGLE are our
+  # own BSD-3-Clause builds of the pinned revision, which is what makes them redistributable
+  # in a PyPI wheel at all. A runner label that does not resolve -- `ubuntu-24.04-arm` being
+  # the one to watch -- fails its leg at scheduling rather than silently going missing.
   wheel:
     name: Wheel (${{ matrix.platform }})
     needs: [validate-python, jvm-build]
@@ -436,7 +434,9 @@ jobs:
             *) echo "::error::no pinned ANGLE checksum is wired for '$ANGLE_PLATFORM'"; exit 1 ;;
           esac
 
-          # The Windows gap, stated rather than papered over.
+          # Dormant while every wired platform carries a digest. This is what a platform whose
+          # ANGLE asset has not been built and published yet would fail with -- loudly, and
+          # naming the one-time procedure, rather than falling back to a different ANGLE.
           if [[ -z "$sha256" ]]; then
             echo "::error::ANGLE for $ANGLE_PLATFORM has not been built and published yet - see scripts/angle/PROVENANCE-windows.md"
             cat >&2 <<EOF

@@ -5,10 +5,11 @@
 > when the build is published. This file is the *walkthrough*: what to do, in order, on a bare
 > Windows box, and what to do when a step fails.
 >
-> ⚠️ **This build has never been executed.** Every argument, target name and path here was read out
-> of ANGLE's own `gni/angle.gni` and `BUILD.gn` at the pinned revision, not recalled from a run.
-> Budget a day, treat the first attempt as a debugging session, and write down what actually
-> happened — see [Report back](#report-back).
+> ⚠️ **This walkthrough has been run once (2026-08-11) and needed host-toolchain deviations that
+> are recorded in `PROVENANCE-windows.md`, not here.** The *runtime* half is still unverified —
+> nobody has created a GLES context through the resulting DLLs, so §3.2 and §3.3 are the
+> outstanding steps. Budget a day, treat an attempt as a debugging session, and write down what
+> actually happened — see [Report back](#report-back).
 
 ---
 
@@ -262,8 +263,10 @@ Get-FileHash angle-out\angle-be80ce59-windows-x64.zip -Algorithm SHA256
 
 Then, **in the same change**:
 
-1. Set `ANGLE_SHA256_WINDOWS_X64` in `.github/workflows/publish-tada-wheel.yml` to that digest. It
-   is empty today, which is what deliberately fails the `windows-x64` leg.
+1. Set `ANGLE_SHA256_WINDOWS_X64` in `.github/workflows/publish-tada-wheel.yml` to that digest. A
+   digest from the 2026-08-11 build is pinned there already, so replacing it changes the bytes
+   every Windows wheel carries from that point on — do it deliberately. Left empty, the
+   `windows-x64` leg fails at the fetch step rather than substituting a different ANGLE.
 2. Replace the STATUS banner at the top of `PROVENANCE-windows.md` with what was built and measured.
 
 `travel-animator-shared` is **private**, so the browser `releases/download/...` URL 404s for an

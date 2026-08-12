@@ -34,17 +34,18 @@ run-name: "travel-animator → pypi @ ${{ inputs.sha }}"
 #   * the same `wheel` matrix publish-tada-wheel.yml grew -- linux-x64 (manylinux_2_28),
 #     linux-arm64 (manylinux_2_34; capped by LWJGL's aarch64 native), macos-arm64, and
 #     windows-x64. macOS and Windows legs DOWNLOAD ANGLE from a pinned, SHA-256-verified
-#     release asset; nothing builds it in CI. Windows has no such asset yet, so that leg
-#     fails by design until one is published (Lascade-Co/actions
-#     scripts/angle/PROVENANCE-windows.md) -- copying the matrix here inherits that.
+#     release asset; nothing builds it in CI, so copying the matrix here inherits those pins
+#     and the digests that go with them (Lascade-Co/actions
+#     scripts/angle/PROVENANCE-windows.md).
 #   * `EXPECT_WHEELS` set to that leg count, so a leg that silently failed cannot ship a
 #     partial matrix
 #   * a PyPI per-file size-limit increase (backlog C7): the measured wheels are 66-75 MB
 #     against a 100 MB default, so this is not urgent, but it is human-reviewed and slow
 #
 # Until then, `pip install travel-animator` keeps serving the last pure wheel already on the
-# index, which is the pre-migration behaviour and is exactly right: the renderer is opt-in
-# (`TADA_RENDERER=kmp`) and the default path is still Python.
+# index. That wheel predates the KMP migration, so it never carried a payload to lose --
+# leaving it in place is the honest state, and publishing a new pure one over the top of the
+# matrix is the failure this guard exists to prevent.
 on:
   workflow_dispatch:
     inputs:
@@ -156,10 +157,9 @@ jobs:
             libgl1 \
             libgl1-mesa-dri
 
-      # The JVM half of the KMP renderer migration (plan items 1.11/1.12). rentile resolves from
-      # Maven Central now, so tada + shared -- both checked out above -- are the whole build.
-      # publish-tada-wheel.yml is still where :shared:jvmTest runs; what this workflow needs
-      # ./gradlew for is ta-prepare.jar, below.
+      # Gradle is here for ta-prepare.jar (below) and nothing else; publish-tada-wheel.yml is
+      # where :shared:jvmTest runs. tada + shared -- both checked out above -- are the whole
+      # build, because rentile resolves from Maven Central.
       - name: Set up JDK
         uses: actions/setup-java@v5
         with:

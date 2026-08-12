@@ -7,12 +7,12 @@
 # boundary for a public release and the private `tada` wheel must never reach a public index.
 # Hence: copy in by the public distribution's own glob, then assert what dist/ actually holds.
 #
-# A release is N wheels (one per platform leg), so the old "exactly one file" is split into four
-# assertions: name+version match; DISTINCT platform tags (a duplicate means a leg ran twice, and
-# PyPI rejects the second upload once the first is public, leaving a half-published release); no
-# py3-none-any; and the declared count. **py3-none-any is fatal**, not merely wrong: it is the
-# file every platform we did NOT build resolves to, so it silently ships a payload-less wheel --
-# and PyPI releases are IMMUTABLE, so it cannot be replaced, only yanked.
+# A release is N wheels (one per platform leg), so dist/ is checked four ways: name+version match;
+# DISTINCT platform tags (a duplicate means a leg ran twice, and PyPI rejects the second upload
+# once the first is public, leaving a half-published release); no py3-none-any; and the declared
+# count. **py3-none-any is fatal**, not merely wrong: it is the file every platform we did NOT
+# build resolves to, so it silently ships a payload-less wheel -- and PyPI releases are
+# IMMUTABLE, so it cannot be replaced, only yanked.
 set -euo pipefail
 
 : "${DIST:?}" "${VERSION:?}"
