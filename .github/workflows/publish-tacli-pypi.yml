@@ -14,7 +14,38 @@ run-name: "travel-animator → pypi @ ${{ inputs.sha }}"
 # a long-lived credential at all and is worth revisiting, but the token is what exists today.
 #
 # The private `tada` wheel is built here too (one build path for both distributions) but is
-# never uploaded; stage_public_wheel.sh enforces that.
+# never uploaded; stage_public_wheel.sh enforces that. That wheel carries `ta-prepare.jar`
+# (ADR 0015) -- ta-render.jar plus the sealed `builder/` package -- which is precisely why it
+# must not be: this workflow's output goes to a public index.
+#
+# ---------------------------------------------------------------------------------------------
+# ⚠️ THIS WORKFLOW WILL NOW FAIL AT "Stage only the public wheel", AND THAT IS DELIBERATE.
+# ---------------------------------------------------------------------------------------------
+# `travel-animator` became a PLATFORM wheel when it started carrying the JVM renderer payload
+# (backlog C1). This workflow still builds only the pure `py3-none-any` wheel, and
+# stage_public_wheel.sh now refuses to publish one -- because a `py3-none-any` file on PyPI is
+# what every platform we did NOT build resolves to, it carries no payload, and a PyPI release
+# is IMMUTABLE: it can be yanked but never replaced.
+#
+# Failing here is strictly better than the alternative, which is one manual dispatch quietly
+# shadowing the whole matrix forever. What this workflow still owes, before the next PyPI
+# release:
+#
+#   * the same `wheel` matrix publish-tada-wheel.yml grew -- linux-x64 (manylinux_2_28),
+#     linux-arm64 (manylinux_2_34; capped by LWJGL's aarch64 native), macos-arm64, and
+#     windows-x64. macOS and Windows legs DOWNLOAD ANGLE from a pinned, SHA-256-verified
+#     release asset; nothing builds it in CI, so copying the matrix here inherits those pins
+#     and the digests that go with them (Lascade-Co/actions
+#     scripts/angle/PROVENANCE-windows.md).
+#   * `EXPECT_WHEELS` set to that leg count, so a leg that silently failed cannot ship a
+#     partial matrix
+#   * a PyPI per-file size-limit increase (backlog C7): the measured wheels are 66-75 MB
+#     against a 100 MB default, so this is not urgent, but it is human-reviewed and slow
+#
+# Until then, `pip install travel-animator` keeps serving the last pure wheel already on the
+# index. That wheel predates the KMP migration, so it never carried a payload to lose --
+# leaving it in place is the honest state, and publishing a new pure one over the top of the
+# matrix is the failure this guard exists to prevent.
 on:
   workflow_dispatch:
     inputs:
@@ -103,13 +134,40 @@ jobs:
           python3 "$RUNNER_TEMP/verify_tacli_publishable.py" \
             --pyproject tada_render/pyproject.toml
 
-      - name: Install headless OpenGL runtime
+      # Kept byte-identical to publish-tada-wheel.yml's list on purpose -- the wheels uploaded
+      # here are built by the same script, on the same runner image, and a GL stack that differs
+      # between the two paths is a difference nobody would notice until a release. Two client
+      # APIs, one Mesa stack:
+      #   * moderngl binds EGL_OPENGL_API -- DESKTOP GL, linking libGL.so.1  -> libegl1 + libgl1
+      #   * the KMP/JVM renderer binds EGL_OPENGL_ES_API and resolves
+      #     libGLESv2.so.2 at runtime via dlopen                             -> libgles2
+      # libgles2 is the addition that matters: nothing else here pulls it in, and its absence
+      # makes GLES tests SKIP rather than fail. libegl-mesa0 is Mesa's EGL vendor library behind
+      # the vendor-neutral libegl1 loader -- only a `Recommends:`, and this install passes
+      # --no-install-recommends, so it has been surviving on the runner image's preinstalled set
+      # rather than on anything we asked for. libgl1-mesa-dri is the llvmpipe Gallium driver
+      # that rasterizes for both APIs on a GPU-less runner.
+      - name: Install headless OpenGL/GLES runtime
         run: |
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends \
             libegl1 \
+            libegl-mesa0 \
+            libgles2 \
             libgl1 \
             libgl1-mesa-dri
+
+      # Gradle is here for ta-prepare.jar (below) and nothing else; publish-tada-wheel.yml is
+      # where :shared:jvmTest runs. tada + shared -- both checked out above -- are the whole
+      # build, because rentile resolves from Maven Central.
+      - name: Set up JDK
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v6
 
       - name: Install pinned uv and Python
         uses: astral-sh/setup-uv@v8.3.2
@@ -132,6 +190,16 @@ jobs:
       - name: Run tests from the lockfile
         run: uv run --locked --all-packages --all-extras pytest
 
+      # The private wheel this build path produces carries ta-prepare.jar (ADR 0015), so the jar
+      # has to exist even though nothing here uploads that wheel. Building it rather than making
+      # it optional is the point: the one build path stays one build path, and the wheel this
+      # workflow discards is byte-for-byte the shape the GHCR bundle ships.
+      - name: Make gradlew executable
+        run: chmod +x gradlew
+
+      - name: Build the two JARs and verify the builder seal
+        run: ./gradlew :host:taJars
+
       # Reuses the private path's build script so the bytes uploaded here are produced exactly
       # the way the tested GHCR bundle's wheels are -- one build path, not two.
       - name: Build both wheels
@@ -139,9 +207,14 @@ jobs:
           SHARED_REVISION: ${{ steps.shared.outputs.revision }}
           TADA_REPOSITORY: Lascade-Co/tada
           TADA_REVISION: ${{ inputs.sha }}
+          PREPARE_JAR: host/build/libs/ta-prepare.jar
         run: |
-          curl -sSfL https://raw.githubusercontent.com/Lascade-Co/actions/main/scripts/tada-wheel/build_tada_wheel.sh -o "$RUNNER_TEMP/build_tada_wheel.sh"
-          bash "$RUNNER_TEMP/build_tada_wheel.sh"
+          mkdir -p "$RUNNER_TEMP/tada-wheel"
+          base=https://raw.githubusercontent.com/Lascade-Co/actions/main/scripts/tada-wheel
+          for name in build_tada_wheel.sh build_prepare_payload.py inject_wheel_payload.py; do
+            curl -sSfL "$base/$name" -o "$RUNNER_TEMP/tada-wheel/$name"
+          done
+          bash "$RUNNER_TEMP/tada-wheel/build_tada_wheel.sh"
 
       - name: Verify wheel contents contain no credential files
         run: |
