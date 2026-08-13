@@ -161,12 +161,6 @@ def release_values(
         {
             "NGINX_IMAGE": nginx,
             "POSTGRES_IMAGE": postgres,
-            # Every host `tada prepare` may resolve a style's own sources from: the
-            # maps API itself, plus one entry per tile provider the catalog's styles
-            # point at. A catalog style whose host is missing here fails preflight
-            # with a non-retryable `outbound_url_not_allowed` and renders no frame,
-            # so this list has to grow whenever a map on a new provider ships.
-            # tiles.stadiamaps.com serves maps 80 (Satellite) and 81 (Watercolor 2).
             "TADA_ALLOWED_HOSTS": (
                 "dashboard.lascade.com,api.maptiler.com,server.arcgisonline.com,"
                 "firebasestorage.googleapis.com,tiles.stadiamaps.com"
