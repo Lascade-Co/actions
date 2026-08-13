@@ -163,7 +163,7 @@ def release_values(
             "POSTGRES_IMAGE": postgres,
             "TADA_ALLOWED_HOSTS": (
                 "dashboard.lascade.com,api.maptiler.com,server.arcgisonline.com,"
-                "firebasestorage.googleapis.com"
+                "firebasestorage.googleapis.com,tiles.stadiamaps.com"
             ),
             "TADA_ESTIMATE_HD_REALTIME_FACTOR": "5.5",
             "TADA_ESTIMATE_4K_REALTIME_FACTOR": "4.0",

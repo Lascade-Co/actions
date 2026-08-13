@@ -403,7 +403,8 @@ class LockReleaseEnvironmentTest(unittest.TestCase):
             )
             self.assertIn(
                 "TADA_ALLOWED_HOSTS=dashboard.lascade.com,api.maptiler.com,"
-                "server.arcgisonline.com,firebasestorage.googleapis.com",
+                "server.arcgisonline.com,firebasestorage.googleapis.com,"
+                "tiles.stadiamaps.com",
                 rendered,
             )
             self.assertIn("TARS_DISPATCHER_IMAGE=", rendered)
