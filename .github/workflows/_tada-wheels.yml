@@ -54,6 +54,8 @@ jobs:
     name: Wheel (${{ matrix.platform }})
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
+    env:
+      WHEEL_CACHE_KEY: ta-wheel-v1-${{ matrix.platform }}-${{ inputs.sha }}-${{ github.sha }}
     strategy:
       fail-fast: false
       matrix:
@@ -90,7 +92,21 @@ jobs:
           echo "owner=${FULL%%/*}" >> "$GITHUB_OUTPUT"
           echo "name=${FULL#*/}"   >> "$GITHUB_OUTPUT"
 
+      # A finished wheel is a pure function of the tada commit (which pins shared, Skiko and
+      # LWJGL) plus this repo's packaging scripts and ANGLE pins -- hence github.sha, since those
+      # scripts are fetched at run time and are otherwise invisible to the key. This is what lets
+      # the PyPI path reuse the wheels the push-to-main run already built for that commit.
+      # A hit skips the smoke with the build: it has already run on these exact bytes, and
+      # verify_tada_wheel.py still inspects every wheel in the publishing job regardless.
+      - name: Restore the finished wheel
+        id: wheel-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: platform
+          key: ${{ env.WHEEL_CACHE_KEY }}
+
       - name: Mint GitHub App token (tada + shared)
+        if: steps.wheel-cache.outputs.cache-hit != 'true'
         id: app-token
         uses: actions/create-github-app-token@v3
         with:
@@ -102,6 +118,7 @@ jobs:
             travel-animator-shared
 
       - name: Check out TADA @ requested commit
+        if: steps.wheel-cache.outputs.cache-hit != 'true'
         uses: actions/checkout@v6
         with:
           repository: ${{ inputs.repo }}
@@ -111,11 +128,13 @@ jobs:
           persist-credentials: false
 
       - name: Read pinned shared revision
+        if: steps.wheel-cache.outputs.cache-hit != 'true'
         id: shared
         shell: bash
         run: echo "revision=$(git rev-parse HEAD:shared)" >> "$GITHUB_OUTPUT"
 
       - name: Check out private shared protos
+        if: steps.wheel-cache.outputs.cache-hit != 'true'
         uses: actions/checkout@v6
         with:
           repository: Lascade-Co/travel-animator-shared
@@ -125,6 +144,7 @@ jobs:
           persist-credentials: false
 
       - name: Install pinned uv and Python
+        if: steps.wheel-cache.outputs.cache-hit != 'true'
         uses: astral-sh/setup-uv@v8.3.2
         with:
           version: "0.8.9"
@@ -133,23 +153,28 @@ jobs:
           cache-dependency-glob: uv.lock
 
       - name: Sync locked environment
+        if: steps.wheel-cache.outputs.cache-hit != 'true'
         run: uv sync --locked --all-packages --all-extras
 
       - name: Generate protobuf modules
+        if: steps.wheel-cache.outputs.cache-hit != 'true'
         run: uv run --locked --all-packages --all-extras python tada_render/hatch_build.py
 
       # The PURE public wheel each leg folds its own payload into. Built per leg so `uv build`
       # runs on the same checkout that generated the protos; identical across legs by construction.
       - name: Build the pure wheels
+        if: steps.wheel-cache.outputs.cache-hit != 'true'
         run: uv build --wheel --all-packages --out-dir pure
 
       - name: Download ta-render.jar
+        if: steps.wheel-cache.outputs.cache-hit != 'true'
         uses: actions/download-artifact@v8
         with:
           name: ta-render-jar
           path: jar
 
       - name: Fetch the packaging scripts
+        if: steps.wheel-cache.outputs.cache-hit != 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -164,7 +189,7 @@ jobs:
       # glibc measurement need manylinux_2_28, and putting the whole job in AlmaLinux 8 would
       # drag checkout, setup-uv, setup-java and every upload through it for no benefit.
       - name: Build the platform wheel (Linux, in manylinux)
-        if: ${{ matrix.container != '' }}
+        if: ${{ steps.wheel-cache.outputs.cache-hit != 'true' && matrix.container != '' }}
         env:
           CONTAINER: ${{ matrix.container }}
           IO_PLATFORM: ${{ matrix.platform }}
@@ -180,7 +205,7 @@ jobs:
             "$CONTAINER" bash /io/ci-scripts/build_linux_wheel.sh
 
       - name: Set up JDK for jlink
-        if: ${{ matrix.container == '' }}
+        if: ${{ steps.wheel-cache.outputs.cache-hit != 'true' && matrix.container == '' }}
         uses: actions/setup-java@v5
         with:
           distribution: temurin
@@ -195,7 +220,7 @@ jobs:
       # REST asset endpoint with `Accept: application/octet-stream` (the browser-facing
       # releases/download URL 404s unauthenticated). fetch_pinned_angle.py does both.
       - name: Fetch and verify the pinned ANGLE
-        if: ${{ matrix.angle_platform != '' }}
+        if: ${{ steps.wheel-cache.outputs.cache-hit != 'true' && matrix.angle_platform != '' }}
         shell: bash
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
@@ -259,7 +284,7 @@ jobs:
             --out angle
 
       - name: Build the platform wheel (native runner)
-        if: ${{ matrix.container == '' }}
+        if: ${{ steps.wheel-cache.outputs.cache-hit != 'true' && matrix.container == '' }}
         shell: bash
         env:
           PLATFORM: ${{ matrix.platform }}
@@ -296,13 +321,14 @@ jobs:
       # stack can be apt-installed, and a manylinux_2_28 wheel installs happily on glibc 2.39.
       # ---------------------------------------------------------------------------------
       - name: Install the GL runtime for the smoke (Linux)
-        if: ${{ matrix.container != '' }}
+        if: ${{ steps.wheel-cache.outputs.cache-hit != 'true' && matrix.container != '' }}
         run: |
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends \
             libegl1 libegl-mesa0 libgles2 libgl1 libgl1-mesa-dri libfontconfig1
 
       - name: Smoke the packaged renderer
+        if: steps.wheel-cache.outputs.cache-hit != 'true'
         shell: bash
         env:
           EGL_PLATFORM: surfaceless
@@ -335,6 +361,7 @@ jobs:
               sys.exit(f"self-test exited {result.returncode}")
           PY
 
+      # Unconditional: if-no-files-found catches a wheel neither the cache nor the build produced.
       - name: Upload the platform wheel
         uses: actions/upload-artifact@v7
         with:
@@ -343,3 +370,10 @@ jobs:
           if-no-files-found: error
           retention-days: 1
           compression-level: 0
+
+      - name: Cache the finished wheel
+        if: steps.wheel-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: platform
+          key: ${{ env.WHEEL_CACHE_KEY }}
