@@ -61,6 +61,8 @@ jobs:
     env:
       EGL_PLATFORM: surfaceless
       LIBGL_ALWAYS_SOFTWARE: "1"
+      # Must match publish-tada-wheel.yml: the jar cache key is shared between the two paths.
+      JAVA_VERSION: "21"
     outputs:
       dist: ${{ steps.publishable.outputs.dist }}
       version: ${{ steps.publishable.outputs.version }}
@@ -115,6 +117,25 @@ jobs:
           python3 "$RUNNER_TEMP/verify_tacli_publishable.py" \
             --pyproject tada_render/pyproject.toml
 
+      # Same key as publish-tada-wheel.yml's jvm-build, so the jars this release ships are the
+      # ones the push-to-main run already built for this commit rather than a second build of
+      # the same sources. Cache scope is the default branch, which both paths run on.
+      - name: Compute the JAR cache key
+        id: keys
+        env:
+          SOURCES: ${{ hashFiles('host/**', 'build.gradle.kts', 'settings.gradle.kts', 'gradle.properties', 'gradle/**') }}
+          SHARED: ${{ steps.shared.outputs.revision }}
+        run: echo "jars=ta-jars-v1-${{ runner.os }}-jdk${JAVA_VERSION}-${SHARED}-${SOURCES}" >> "$GITHUB_OUTPUT"
+
+      - name: Restore the built JARs
+        id: jars-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            host/build/libs
+            host/build/reports/ta-jars
+          key: ${{ steps.keys.outputs.jars }}
+
       # Kept byte-identical to publish-tada-wheel.yml's list on purpose -- the wheels uploaded
       # here are built by the same script, on the same runner image, and a GL stack that differs
       # between the two paths is a difference nobody would notice until a release. Two client
@@ -142,13 +163,19 @@ jobs:
       # :shared:jvmTest runs. tada + shared -- both checked out above -- are the whole build,
       # because rentile resolves from Maven Central.
       - name: Set up JDK
+        if: steps.jars-cache.outputs.cache-hit != 'true'
         uses: actions/setup-java@v5
         with:
           distribution: temurin
-          java-version: 21
+          java-version: ${{ env.JAVA_VERSION }}
 
+      # cache-encryption-key is what lets gradle/actions persist the configuration cache across
+      # runs; without it the entry is stored every run and reused never.
       - name: Setup Gradle
+        if: steps.jars-cache.outputs.cache-hit != 'true'
         uses: gradle/actions/setup-gradle@v6
+        with:
+          cache-encryption-key: ${{ secrets.GRADLE_ENCRYPTION_KEY }}
 
       - name: Install pinned uv and Python
         uses: astral-sh/setup-uv@v8.3.2
@@ -172,12 +199,14 @@ jobs:
         run: uv run --locked --all-packages --all-extras pytest
 
       - name: Make gradlew executable
+        if: steps.jars-cache.outputs.cache-hit != 'true'
         run: chmod +x gradlew
 
       # verifyTaRenderJarSeal is the ADR 0006/0007 gate: no com/lascade/ta/shared/builder/**
       # class in the jar the public wheels ship. Re-checked by verify_tada_wheel.py on the jar
-      # inside each finished wheel, since an artifact round-trip sits between here and there.
+      # inside each finished wheel, which is also what keeps the gate honest on a cache hit.
       - name: Build the two JARs and verify the builder seal
+        if: steps.jars-cache.outputs.cache-hit != 'true'
         run: ./gradlew :host:taJars
 
       # The matrix downloads this. A jar is a zip, so upload-artifact stripping modes is moot.
@@ -200,6 +229,15 @@ jobs:
           if-no-files-found: error
           retention-days: 1
           compression-level: 0
+
+      - name: Cache the built JARs
+        if: steps.jars-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            host/build/libs
+            host/build/reports/ta-jars
+          key: ${{ steps.keys.outputs.jars }}
 
   wheels:
     name: Wheels

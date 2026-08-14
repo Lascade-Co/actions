@@ -131,6 +131,8 @@ jobs:
       EGL_PLATFORM: surfaceless
       LIBGL_ALWAYS_SOFTWARE: "1"
       GALLIUM_DRIVER: llvmpipe
+      # Interpolated into both setup-java and the jar cache key, so the two cannot drift.
+      JAVA_VERSION: "21"
     steps:
       - name: Extract owner/repo
         id: repo
@@ -175,7 +177,41 @@ jobs:
 
       # No rentile checkout: it resolves from Maven Central, so the dependency cache has it.
 
+      # The jars are a pure function of tada's JVM sources plus the pinned shared revision;
+      # :shared:jvmTest is a function of the shared revision alone, so a `host/**` edit rebuilds
+      # the jars without re-running it. Computed before the restores, so the hash covers the
+      # checkout and not the restored build output.
+      - name: Compute the JVM cache keys
+        id: keys
+        env:
+          SOURCES: ${{ hashFiles('host/**', 'build.gradle.kts', 'settings.gradle.kts', 'gradle.properties', 'gradle/**') }}
+          BUILD_CONFIG: ${{ hashFiles('build.gradle.kts', 'settings.gradle.kts', 'gradle.properties', 'gradle/**') }}
+          SHARED: ${{ steps.shared.outputs.revision }}
+        run: |
+          echo "jars=ta-jars-v1-${{ runner.os }}-jdk${JAVA_VERSION}-${SHARED}-${SOURCES}" >> "$GITHUB_OUTPUT"
+          echo "jvmtest=ta-jvmtest-v1-${{ runner.os }}-${SHARED}-${BUILD_CONFIG}" >> "$GITHUB_OUTPUT"
+
+      # restore/save, not the combined action: that one saves from a post step that runs even on
+      # failure, which would cache jars from a red build and mark a failing revision as tested.
+      - name: Restore the built JARs
+        id: jars-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            host/build/libs
+            host/build/reports/ta-jars
+          key: ${{ steps.keys.outputs.jars }}
+
+      - name: Restore the :shared:jvmTest result
+        id: jvmtest-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: .ci-cache
+          key: ${{ steps.keys.outputs.jvmtest }}
+
+      # Only :shared:jvmTest needs a GL stack; building the jars does not.
       - name: Install headless OpenGL/GLES runtime
+        if: steps.jvmtest-cache.outputs.cache-hit != 'true'
         run: |
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends \
@@ -186,22 +222,31 @@ jobs:
             libgl1-mesa-dri
 
       - name: Set up JDK
+        if: steps.jars-cache.outputs.cache-hit != 'true' || steps.jvmtest-cache.outputs.cache-hit != 'true'
         uses: actions/setup-java@v5
         with:
           distribution: temurin
-          java-version: 21
+          java-version: ${{ env.JAVA_VERSION }}
 
+      # cache-encryption-key is what lets gradle/actions persist the CONFIGURATION cache; without
+      # it the entry is stored every run and reused never. An unset secret degrades to that.
       - name: Setup Gradle
+        if: steps.jars-cache.outputs.cache-hit != 'true' || steps.jvmtest-cache.outputs.cache-hit != 'true'
         uses: gradle/actions/setup-gradle@v6
+        with:
+          cache-encryption-key: ${{ secrets.GRADLE_ENCRYPTION_KEY }}
 
       - name: Make gradlew executable
+        if: steps.jars-cache.outputs.cache-hit != 'true' || steps.jvmtest-cache.outputs.cache-hit != 'true'
         run: chmod +x gradlew
 
       # verifyTaRenderJarSeal is the ADR 0006/0007 gate: no com/lascade/ta/shared/builder/**
       # class in the jar the public wheel ships, because JVM bytecode decompiles trivially.
       # Not the last word -- verify_tada_wheel.py re-runs it on the jar inside each finished
-      # wheel, since an artifact round-trip and a jar rewrite sit between here and there.
+      # wheel, since an artifact round-trip and a jar rewrite sit between here and there -- which
+      # is also what keeps the seal enforced on a cache hit, where this step does not run.
       - name: Build the two JARs and verify the builder seal
+        if: steps.jars-cache.outputs.cache-hit != 'true'
         run: ./gradlew :host:taJars
 
       # The report is written before the task throws, so a RED run is when it is worth having.
@@ -219,6 +264,7 @@ jobs:
       # produces, since these tests skip by design where there is no GLES -- into a failure.
       # No taSharedAngleDir: Linux tests the system-GLES path; ANGLE is the macOS/Windows answer.
       - name: Run the shared renderer JVM tests
+        if: steps.jvmtest-cache.outputs.cache-hit != 'true'
         run: ./gradlew :shared:jvmTest -PtaSharedRequireGl=true
 
       # A jar is a zip: no file modes travel with it, so upload-artifact stripping them is moot.
@@ -243,6 +289,30 @@ jobs:
           if-no-files-found: error
           retention-days: 1
           compression-level: 0
+
+      # Saved last and without always(): a step `if` implies success(), so a red build caches
+      # neither its jars nor a passing verdict for its shared revision.
+      - name: Cache the built JARs
+        if: steps.jars-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            host/build/libs
+            host/build/reports/ta-jars
+          key: ${{ steps.keys.outputs.jars }}
+
+      - name: Record the passing :shared:jvmTest revision
+        if: steps.jvmtest-cache.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p .ci-cache
+          echo "${{ steps.shared.outputs.revision }}" > .ci-cache/jvmtest-passed
+
+      - name: Save the :shared:jvmTest result
+        if: steps.jvmtest-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: .ci-cache
+          key: ${{ steps.keys.outputs.jvmtest }}
 
   # The four platform wheels. Defined in `_tada-wheels.yml` because PyPI publishes the same
   # four, and one copy is what keeps the ANGLE digests from drifting between the two paths.
