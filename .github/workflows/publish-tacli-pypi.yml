@@ -347,3 +347,117 @@ jobs:
         with:
           password: ${{ secrets.PIPY_TOKEN }}
           attestations: false
+
+  # --------------------------------------------------------------------------------------------
+  # The listing half of a release. `travel-animator` is also an MCP server, listed in the official
+  # MCP registry from `server.json` in Lascade-Co/travelanimator-mcp -- and that file names the
+  # PyPI version it describes. Left alone it goes stale on the first release nobody hand-edits it
+  # for, and a stale listing points installers at an old wheel while claiming to be current.
+  #
+  # So the bump is made here, where the version that actually reached PyPI is known, and the
+  # commit is the trigger: travelanimator-mcp's own publish-mcp-registry.yml runs on a change to
+  # server.json and does the registry publish. This job deliberately does NOT publish to the
+  # registry itself -- the DNS signing key lives in that repo's environment, and one credential in
+  # one place is the point.
+  #
+  # It runs after `publish`, never beside it: the registry validates that the package version
+  # exists on PyPI, so announcing before the upload lands is simply rejected.
+  sync-mcp-server-json:
+    name: Bump server.json in travelanimator-mcp
+    needs: [validate, publish]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Mint GitHub App token (travelanimator-mcp)
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ secrets.CI_APP_CLIENT_ID }}
+          private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
+          owner: Lascade-Co
+          repositories: travelanimator-mcp
+
+      # persist-credentials is TRUE here, unlike every other checkout in this file: those are
+      # read-only, and this one pushes.
+      - name: Check out travelanimator-mcp
+        uses: actions/checkout@v6
+        with:
+          repository: Lascade-Co/travelanimator-mcp
+          ref: main
+          token: ${{ steps.app-token.outputs.token }}
+          persist-credentials: true
+
+      # PyPI's JSON API trails the upload by a few seconds. The downstream workflow refuses to
+      # publish a version the index cannot serve yet, so pushing the bump too early turns a good
+      # release into a spurious red X on another repo's main.
+      - name: Wait for PyPI to serve the new version
+        env:
+          VERSION: ${{ needs.validate.outputs.version }}
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 30); do
+            if curl -sSfL "https://pypi.org/pypi/travel-animator/$VERSION/json" -o /dev/null; then
+              echo "PyPI is serving travel-animator $VERSION"
+              exit 0
+            fi
+            echo "attempt $attempt: not visible yet; sleeping 10s"
+            sleep 10
+          done
+          echo "::error::travel-animator $VERSION never became visible on PyPI" >&2
+          exit 1
+
+      - name: Bump server.json
+        id: bump
+        env:
+          VERSION: ${{ needs.validate.outputs.version }}
+        run: |
+          set -euo pipefail
+          current="$(jq -r '.version' server.json)"
+          if [[ "$current" == "$VERSION" ]]; then
+            echo "server.json is already at $VERSION"
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Both version fields move together: `.version` is the listing's own, and
+          # `.packages[].version` is the PyPI release it points at. The registry rejects a
+          # listing whose package version does not exist, so they are never independent.
+          jq --arg v "$VERSION" '.version = $v | (.packages[]?.version) = $v' \
+            server.json > server.json.tmp
+          mv server.json.tmp server.json
+
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+          echo "bumped $current -> $VERSION"
+          git diff --stat server.json
+
+      - name: Commit and push
+        if: steps.bump.outputs.changed == 'true'
+        env:
+          VERSION: ${{ needs.validate.outputs.version }}
+          TADA_SHA: ${{ inputs.sha }}
+        run: |
+          set -euo pipefail
+          git config user.name  "lascade-ci[bot]"
+          git config user.email "lascade-ci[bot]@users.noreply.github.com"
+          git add server.json
+          git commit -m "Point the MCP listing at travel-animator $VERSION" \
+                     -m "Released from tada@${TADA_SHA}. This commit triggers publish-mcp-registry.yml."
+          git push origin HEAD:main
+
+      - name: Summary
+        if: always()
+        env:
+          VERSION: ${{ needs.validate.outputs.version }}
+        run: |
+          {
+            echo "### MCP listing"
+            echo
+            if [[ "${{ steps.bump.outputs.changed }}" == "true" ]]; then
+              echo "Bumped \`server.json\` to \`$VERSION\` in Lascade-Co/travelanimator-mcp."
+              echo "Its publish-mcp-registry workflow takes it from there."
+            else
+              echo "\`server.json\` was already at \`$VERSION\`; nothing pushed."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
