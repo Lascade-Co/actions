@@ -498,6 +498,11 @@ jobs:
     permissions:
       contents: read
       packages: write
+    # Consumed by `repin-tars` below. The digest is the only thing TARS's lock can point at,
+    # and the version is what makes the PR title legible to whoever reviews it.
+    outputs:
+      digest: ${{ steps.push.outputs.digest }}
+      version: ${{ steps.metadata.outputs.version }}
     steps:
       - name: Extract owner/repo
         id: repo
@@ -546,6 +551,27 @@ jobs:
             sha256sum --check SHA256SUMS
           )
 
+      # Read from the bundle rather than from tada's pyproject.toml: this is the version that
+      # was actually built and verified, and `verify_tada_wheel.py` has already checked the
+      # filename against the metadata by the time the bundle reaches this job.
+      - name: Read the published wheel version
+        id: metadata
+        run: |
+          version="$(python3 - <<'PY'
+          import json
+          import re
+          import sys
+
+          metadata = json.load(open("bundle/build-metadata.json", encoding="utf-8"))
+          name = metadata["render_wheel"]
+          match = re.match(r"^travel_animator-([^-]+)-", name)
+          if match is None:
+              sys.exit(f"cannot read a version out of render_wheel {name!r}")
+          print(match.group(1))
+          PY
+          )"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
       - name: Install ORAS
         uses: oras-project/setup-oras@v2
         with:
@@ -586,3 +612,247 @@ jobs:
       - name: Log out of GHCR
         if: always()
         run: oras logout ghcr.io || true
+
+  # ---------------------------------------------------------------------------------------
+  # The TARS re-pin PR.
+  #
+  # A published bundle reaches production only once `TARS/release/lock.json` names it: TARS
+  # installs the wheel by digest at image BUILD time and never resolves `latest` at startup
+  # (ADR 0006). Remembering that bump by hand is the whole reason a tada merge felt like it
+  # required a TARS release. Opening the PR here removes the remembering; MERGING stays a
+  # human decision, because adopting a renderer is one -- and because the paid GPU
+  # qualification in release/README.md is the only thing that proves a bundle renders at all.
+  #
+  # ONE ROLLING BRANCH, not one per revision. `prune_ghcr_versions.sh` above leaves exactly
+  # one version of the package, so every digest but the newest has already been deleted and
+  # can never be built again. A per-revision branch would pile up PRs that go unbuildable the
+  # moment the next tada merge lands. At most one re-pin can be valid at a time, so there is
+  # at most one branch and it is force-updated.
+  #
+  # `release/lock.json` is the ONLY file this edits. It is the single source for the
+  # digest/revision pair -- the five docs that used to restate the values now point at it --
+  # which is what keeps this diff two lines and reviewable.
+  # ---------------------------------------------------------------------------------------
+  repin-tars:
+    name: Open the TARS re-pin PR
+    needs: publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    concurrency:
+      group: repin-tars
+      cancel-in-progress: false
+    permissions:
+      contents: read
+    env:
+      TARS_REPOSITORY: Lascade-Co/TARS
+      PIN_BRANCH: tada-pin
+      # push_ghcr_bundle.sh prints a BARE `sha256:...` (that is what prune_ghcr_versions.sh
+      # needs to match the GHCR versions API), so the repository has to be prefixed back on
+      # here to get the immutable reference the lock records. The regex below is what proves
+      # the composition produced a well-formed one rather than a string with a hole in it.
+      NEW_OCI: ghcr.io/lascade-co/tada-wheel@${{ needs.publish.outputs.digest }}
+      NEW_REVISION: ${{ github.event.client_payload.sha }}
+      NEW_VERSION: ${{ needs.publish.outputs.version }}
+      TADA_REPOSITORY: ${{ github.event.client_payload.repo }}
+    steps:
+      # Two tokens, deliberately: an App installation token carries the SAME permissions to
+      # every repository it names, so folding tada in here would hand contents:write over the
+      # renderer's source to a job that only ever needs to read its commit log.
+      - name: Mint a writable TARS GitHub App token
+        id: tars-token
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ secrets.CI_APP_CLIENT_ID }}
+          private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
+          owner: Lascade-Co
+          repositories: TARS
+          permission-contents: write
+          permission-pull-requests: write
+
+      - name: Mint a read-only tada GitHub App token
+        id: tada-token
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ secrets.CI_APP_CLIENT_ID }}
+          private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
+          owner: Lascade-Co
+          repositories: tada
+          permission-contents: read
+
+      # persist-credentials: true, unlike every other checkout in this file, because this is
+      # the one job that pushes. The credential lands in this ephemeral runner's git config
+      # and nowhere else.
+      - name: Check out TARS main
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ env.TARS_REPOSITORY }}
+          ref: main
+          token: ${{ steps.tars-token.outputs.token }}
+          path: tars
+          fetch-depth: 1
+          persist-credentials: true
+
+      # Surgical string replacement rather than a json.dump round-trip: the lock is a
+      # hand-maintained, heavily-commented release input whose formatting is reviewed, and a
+      # re-serialization would rewrite all 120 lines of it to change two. The asserts are what
+      # make that safe -- each old value must appear exactly once, and the reparsed document
+      # must differ from the original in exactly these two fields.
+      - name: Rewrite the tada pin
+        id: pin
+        working-directory: tars
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import re
+          import sys
+          from pathlib import Path
+
+          new_oci = os.environ["NEW_OCI"]
+          new_revision = os.environ["NEW_REVISION"]
+
+          if not re.fullmatch(r"ghcr\.io/lascade-co/tada-wheel@sha256:[0-9a-f]{64}", new_oci):
+              sys.exit(f"published digest is not an immutable tada-wheel reference: {new_oci!r}")
+          if not re.fullmatch(r"[0-9a-f]{40}", new_revision):
+              sys.exit(f"revision is not a full lowercase git sha: {new_revision!r}")
+
+          path = Path("release/lock.json")
+          text = path.read_text(encoding="utf-8")
+          document = json.loads(text)
+          old_oci = document["tada"]["oci"]
+          old_revision = document["tada"]["revision"]
+
+          output = Path(os.environ["GITHUB_OUTPUT"])
+
+          def emit(**pairs):
+              with output.open("a", encoding="utf-8") as handle:
+                  for key, value in pairs.items():
+                      handle.write(f"{key}={value}\n")
+
+          if (old_oci, old_revision) == (new_oci, new_revision):
+              print(f"lock.json already pins {new_revision}; nothing to open")
+              emit(changed="false")
+              raise SystemExit(0)
+
+          for label, value in (("oci", old_oci), ("revision", old_revision)):
+              quoted = json.dumps(value)
+              found = text.count(quoted)
+              if found != 1:
+                  sys.exit(f"expected tada.{label} {quoted} exactly once in lock.json, found {found}")
+              text = text.replace(quoted, json.dumps({"oci": new_oci, "revision": new_revision}[label]))
+
+          reparsed = json.loads(text)
+          document["tada"]["oci"] = new_oci
+          document["tada"]["revision"] = new_revision
+          if reparsed != document:
+              sys.exit("rewriting the pin changed something other than tada.oci and tada.revision")
+
+          path.write_text(text, encoding="utf-8")
+          emit(
+              changed="true",
+              old_oci=old_oci,
+              old_revision=old_revision,
+              old_revision_short=old_revision[:12],
+          )
+          print(f"repinned {old_revision} -> {new_revision}")
+          PY
+
+      # TARS's own gate, run here so the PR cannot carry a lock that the first job of
+      # tars-deploy.yml would reject -- which would block API, Garage and collector releases
+      # too, not just this one. Both commands are the ones release/README.md documents.
+      - name: Validate the rewritten lock
+        if: steps.pin.outputs.changed == 'true'
+        working-directory: tars
+        run: |
+          python3 release/validate_lock.py release/lock.json
+          python3 -m unittest discover -s release -p 'test_*.py'
+
+      # Best effort: the PR is worth opening without a changelog, so a compare that fails for
+      # any reason must not be what stops the pin from being offered.
+      - name: Summarise what moved in tada
+        id: changelog
+        if: steps.pin.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ steps.tada-token.outputs.token }}
+          OLD_REVISION: ${{ steps.pin.outputs.old_revision }}
+        run: |
+          set -uo pipefail
+          body="$RUNNER_TEMP/changelog.md"
+          if gh api "repos/$TADA_REPOSITORY/compare/$OLD_REVISION...$NEW_REVISION" \
+               --jq '.commits[] | "- \(.sha[0:12]) \(.commit.message | split("\n")[0])"' \
+               > "$body" 2>/dev/null && [ -s "$body" ]; then
+            echo "path=$body" >> "$GITHUB_OUTPUT"
+          else
+            echo "could not compare $OLD_REVISION...$NEW_REVISION; opening without a changelog" >&2
+          fi
+
+      - name: Push the rolling pin branch
+        if: steps.pin.outputs.changed == 'true'
+        working-directory: tars
+        run: |
+          set -euo pipefail
+          message="$RUNNER_TEMP/commit-message.txt"
+          {
+            printf 'release: pin tada %s\n\n' "$NEW_VERSION"
+            printf 'Moves the pinned bundle to the one published from tada main at\n'
+            printf '%s, which carries tada %s:\n\n' "$NEW_REVISION" "$NEW_VERSION"
+            printf '  %s\n\n' "$NEW_OCI"
+            printf 'Revision and digest travel together because deploy/verify_tada_bundle.py\n'
+            printf "checks the bundle's own build metadata against the recorded revision at\n"
+            printf 'build time: a pair that disagrees fails the deployment gate rather than\n'
+            printf 'shipping a wheel nobody asked for.\n\n'
+            printf 'Opened automatically by Lascade-Co/actions publish-tada-wheel.yml.\n'
+          } > "$message"
+
+          git config user.name  "lascade-ci[bot]"
+          git config user.email "lascade-ci[bot]@users.noreply.github.com"
+          git checkout -b "$PIN_BRANCH"
+          git add release/lock.json
+          git commit --file "$message"
+          git push --force origin "$PIN_BRANCH"
+
+      # Create-or-update against the rolling branch. A force-push to an open PR's head updates
+      # it in place, so the second publish in a row edits the existing PR instead of failing on
+      # a duplicate head.
+      - name: Open or update the re-pin PR
+        if: steps.pin.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ steps.tars-token.outputs.token }}
+          CHANGELOG: ${{ steps.changelog.outputs.path }}
+          OLD_REVISION_SHORT: ${{ steps.pin.outputs.old_revision_short }}
+        run: |
+          set -euo pipefail
+          body="$RUNNER_TEMP/pr-body.md"
+          {
+            printf 'Pins the tada bundle published from `%s` main at `%s` (tada %s):\n\n' \
+              "$TADA_REPOSITORY" "$NEW_REVISION" "$NEW_VERSION"
+            printf '```text\n%s\n```\n\n' "$NEW_OCI"
+            printf 'Previously `%s`. `release/lock.json` is the only file that changes; the docs\n' \
+              "$OLD_REVISION_SHORT"
+            printf 'reference it rather than restating the pair.\n\n'
+            if [ -n "${CHANGELOG:-}" ] && [ -s "${CHANGELOG:-/dev/null}" ]; then
+              printf '## tada commits in this pin\n\n'
+              cat "$CHANGELOG"
+              printf '\n'
+            fi
+            printf '## Before merging\n\n'
+            printf -- '- `release/lock.json` is the deployment gate: `validate_lock.py` runs in the\n'
+            printf -- '  first job of central delivery, so a lock it rejects blocks API, Garage and\n'
+            printf -- '  collector releases too. It passed here.\n'
+            printf -- '- A green deploy does not prove rendering works: the paid GPU render smoke is\n'
+            printf -- '  disabled (`SMOKE_RENDER_GATE_ENABLED`, release/README.md). Run\n'
+            printf -- '  `deployctl smoke` by hand if this pin matters for rendering.\n'
+            printf -- '- Re-pin only when you want this renderer. GHCR keeps one bundle, so this\n'
+            printf -- '  digest is the only one that can currently be built.\n'
+          } > "$body"
+
+          existing="$(gh pr list --repo "$TARS_REPOSITORY" --head "$PIN_BRANCH" \
+            --state open --json number --jq '.[0].number // empty')"
+          title="release: pin tada $NEW_VERSION"
+          if [ -n "$existing" ]; then
+            gh pr edit "$existing" --repo "$TARS_REPOSITORY" --title "$title" --body-file "$body"
+            echo "updated PR #$existing"
+          else
+            gh pr create --repo "$TARS_REPOSITORY" --base main --head "$PIN_BRANCH" \
+              --title "$title" --body-file "$body"
+          fi
