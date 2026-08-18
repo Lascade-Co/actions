@@ -162,8 +162,10 @@ jobs:
       # Gradle is here for the two jars and nothing else; publish-tada-wheel.yml is where
       # :shared:jvmTest runs. tada + shared -- both checked out above -- are the whole build,
       # because rentile resolves from Maven Central.
+      # Unconditional: the tests below also run the RESTORED jar, so a cache hit still
+      # needs a JVM. Skipping it left them on the runner's Java 17 against Java 21
+      # bytecode. Only Gradle is cache-conditional.
       - name: Set up JDK
-        if: steps.jars-cache.outputs.cache-hit != 'true'
         uses: actions/setup-java@v5
         with:
           distribution: temurin
@@ -195,8 +197,12 @@ jobs:
       - name: Generate protobuf modules
         run: uv run --locked --all-packages --all-extras python tada_render/hatch_build.py
 
+      # TADA_PREPARE_JAVA is the first rung of prepare_bridge's java ladder, so this
+      # decides which JVM runs the jar rather than leaving it to PATH.
       - name: Run tests from the lockfile
-        run: uv run --locked --all-packages --all-extras pytest
+        run: |
+          export TADA_PREPARE_JAVA="$JAVA_HOME/bin/java"
+          uv run --locked --all-packages --all-extras pytest
 
       - name: Make gradlew executable
         if: steps.jars-cache.outputs.cache-hit != 'true'
