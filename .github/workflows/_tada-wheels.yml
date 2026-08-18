@@ -55,7 +55,11 @@ jobs:
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
     env:
-      WHEEL_CACHE_KEY: ta-wheel-v1-${{ matrix.platform }}-${{ inputs.sha }}-${{ github.sha }}
+      # Keyed on the tada commit only. `github.sha` was in here, so any commit to THIS repo
+      # invalidated every wheel and the PyPI release rebuilt what the push-to-main run had
+      # already built for the same tada SHA. Bump the version when the wheel build changes:
+      # the build scripts are curled from main, so hashFiles cannot see them from here.
+      WHEEL_CACHE_KEY: ta-wheel-v2-${{ matrix.platform }}-${{ inputs.sha }}
     strategy:
       fail-fast: false
       matrix:
