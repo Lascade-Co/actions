@@ -91,10 +91,12 @@ def main() -> int:
 
     if vendored:
         # Everything this payload needs beyond the manylinux whitelist must come from
-        # the HOST: libEGL/libGLESv2/libGL (the driver), libX11 and libfontconfig
-        # (Skiko links both directly), and the java.desktop set -- libXtst, libXi,
-        # libXrender, libXext, libasound, libpng16, libuuid, libz, libfreetype -- which
-        # is never loaded headless. A `.libs/` means auditwheel vendored one anyway.
+        # the HOST: libEGL/libGLESv2/libGL (the driver), plus libX11 and libfontconfig,
+        # which Skiko links directly. The java.desktop set that used to be listed here
+        # too -- libXtst, libXi, libXrender, libXext, libasound, libpng16, libfreetype --
+        # is gone with the module: `build_jvm_payload.py` no longer links it, so the JRE
+        # carries no AWT/X11 closure at all (measured: 5 such libraries before, 0 after).
+        # A `.libs/` means auditwheel vendored something anyway.
         print(f"REFUSING: {len(vendored)} vendored libraries found, e.g. "
               f"{vendored[:3]}. Nothing in this payload may be vendored.",
               file=sys.stderr)

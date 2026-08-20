@@ -77,9 +77,28 @@ PLATFORMS = {
 }
 
 # jdeps' set, plus jdk.crypto.ec, which nothing references statically.
+#
+# `java.desktop` is deliberately NOT here, and its absence is worth 14.5 MB of every
+# platform wheel -- measured A/B on macos-arm64, same jar and same base wheel, 82.0 MiB
+# to 67.6 MiB, against a 100 MB PyPI per-file limit the published wheels were within
+# 16 MB of. The linked JRE goes from 53.8 MB to 34.1 MB on disk (62.7 to 42.9 on
+# linux-arm64). It used to be listed for "Skiko's AWT overlay rasteriser", but the
+# renderer never enters AWT: there is not one reference to
+# `java.awt`, `javax.imageio`, `BufferedImage` or `ImageIO` in `shared/commonMain`,
+# `shared/jvmMain` or `host/src/main`, and every image is decoded through Skia's own
+# `Codec` / `Image.makeFromEncoded`. The module was pulled in because the ARTIFACT is
+# `skiko-awt`, not because anything calls it -- jdeps sees the AWT-integration classes
+# in that jar whether or not a code path reaches them.
+#
+# Skiko's raster surface, its PNG codec and its text measurement are all native Skia
+# below the JNI boundary, so none of them needs the module. `_PROBE_SOURCE` now proves
+# that ON the linked image for every platform, which is what makes this exclusion safe
+# to hold: jdeps cannot tell "referenced by a jar" from "reached at run time", so the
+# probe is the only thing that can. If a future `:shared` change genuinely reaches AWT,
+# the probe fails at build time here rather than as a NoClassDefFoundError in a
+# customer's render.
 JLINK_MODULES = ",".join((
     "java.base",
-    "java.desktop",     # Skiko's AWT overlay rasteriser
     "java.instrument",
     "java.logging",     # OkHttp's TaskRunner.<clinit>
     "java.management",
@@ -87,12 +106,38 @@ JLINK_MODULES = ",".join((
     "jdk.unsupported",  # sun.misc.Unsafe, for okio and LWJGL
 ))
 
+# Modules jdeps reports against ta-render.jar that the renderer never reaches, and which
+# are therefore deliberately NOT in `JLINK_MODULES`. Subtracted from the jdeps gate below.
+#
+# jdeps is a static reference scan over every class in the jar, so it reports
+# `java.desktop` on account of the AWT-integration classes skiko-awt carries -- SkiaWindow
+# and friends -- which no render path loads. There is no jdeps flag for "reachable from
+# TadaHostMain", so the reference cannot be cleared statically; it is cleared by running
+# the drawing stack on the linked image, which is what `_PROBE_SOURCE` now does.
+#
+# Never add a module here without also adding a probe assertion that exercises whatever it
+# was referenced for. An entry with no probe behind it converts a build-time failure into
+# a NoClassDefFoundError in somebody's render.
+REFERENCED_NOT_REACHED = frozenset({"java.desktop"})
+
 # Runs ON the linked image, offline. `java -version` cannot fail on a missing module.
+#
+# The Skia half of this exists because `java.desktop` is NOT in `JLINK_MODULES` (see the
+# note there). jdeps cannot distinguish "the skiko-awt jar references AWT" from "the
+# renderer reaches AWT", so it always demands the module and can never clear it; only
+# running the drawing stack on the linked image can. Every call below is one the real
+# render performs -- a raster surface (the overlay rasteriser), a paint fill, a PNG
+# encode and a PNG decode through `Image.makeFromEncoded`, which is the exact entry
+# point `AnnotationRasterizer` uses for raster annotation frames.
 _PROBE_CLASS = "PayloadProbe"
 _PROBE_SOURCE = """\
 import java.security.Security;
 import java.util.Arrays;
 import javax.net.ssl.SSLContext;
+import org.jetbrains.skia.EncodedImageFormat;
+import org.jetbrains.skia.Image;
+import org.jetbrains.skia.Paint;
+import org.jetbrains.skia.Surface;
 
 public class PayloadProbe {
   public static void main(String[] args) throws Exception {
@@ -109,7 +154,33 @@ public class PayloadProbe {
       System.err.println("no ECDHE cipher suites -- this image cannot reach the basemap host");
       System.exit(1);
     }
-    System.out.println("okhttp + " + ecdhe + " ECDHE suites");
+
+    // Not a minimality nicety: java.desktop is 14.5 MB of a wheel that has to stay under
+    // PyPI's 100 MB, and re-adding it costs that silently. If something genuinely needs
+    // AWT now, put it back in JLINK_MODULES and delete this check in the same commit.
+    if (ModuleLayer.boot().findModule("java.desktop").isPresent()) {
+      System.err.println("java.desktop is in this image -- it costs 14.5 MB and the "
+          + "renderer never enters AWT. Remove it from JLINK_MODULES.");
+      System.exit(1);
+    }
+
+    // Skia raster + codec, the two things java.desktop was blamed for.
+    Surface surface = Surface.Companion.makeRasterN32Premul(64, 48);
+    Paint paint = new Paint();
+    paint.setColor(0xFF3366CC);
+    surface.getCanvas().drawRect(
+        org.jetbrains.skia.Rect.Companion.makeXYWH(4f, 4f, 40f, 24f), paint);
+    byte[] png = surface.makeImageSnapshot()
+        .encodeToData(EncodedImageFormat.PNG, 100)
+        .getBytes();
+    Image decoded = Image.Companion.makeFromEncoded(png);
+    if (decoded.getWidth() != 64 || decoded.getHeight() != 48) {
+      System.err.println("Skia round-trip gave " + decoded.getWidth() + "x"
+          + decoded.getHeight() + ", expected 64x48");
+      System.exit(1);
+    }
+    System.out.println("okhttp + " + ecdhe + " ECDHE suites + skia raster/codec ("
+        + png.length + "B png, no java.desktop)");
   }
 }
 """
@@ -171,8 +242,23 @@ def module_names(command: list[str]) -> set[str]:
     return {line.split("@", 1)[0].strip() for line in raw if line.strip()}
 
 
-def probe_image(java_home: Path, java: Path, jar: Path) -> str:
-    """Compile the probe with the JDK we linked FROM, run it on the linked image."""
+def probe_image(java_home: Path, java: Path, jar: Path, natives: Path) -> str:
+    """Compile the probe with the JDK we linked FROM, run it on the linked image.
+
+    `natives` is the staged `natives/` directory, passed as `skiko.library.path`: the jar
+    reaching this point has had its Skiko libraries stripped out, so without it Skiko has
+    nothing to load and the Skia half of the probe fails for a packaging reason rather
+    than a real one. It is the same property `render_bridge` sets at run time, so the
+    probe loads the library exactly the way a render will.
+
+    Because it loads libskiko for real, this probe needs whatever that library links
+    against to be present in the BUILD environment -- on Linux that is `libGL.so.1`,
+    `libX11.so.6` and `libfontconfig.so.1` (see `build_linux_wheel.sh`, which explains why
+    they come from the host and are never vendored). `quay.io/pypa/manylinux_2_28_*`, the
+    only container this runs in, carries all three, and a bare JDK image does not: moving
+    the Linux build to a slimmer image means installing them, or this probe fails with an
+    `UnsatisfiedLinkError` naming the missing library rather than anything about modules.
+    """
     javac = java_home / "bin" / ("javac.exe" if os.name == "nt" else "javac")
     with tempfile.TemporaryDirectory() as raw:
         workdir = Path(raw)
@@ -182,20 +268,25 @@ def probe_image(java_home: Path, java: Path, jar: Path) -> str:
             [str(javac), "-cp", str(jar), "-d", str(workdir), str(source)], check=True
         )
         result = subprocess.run(
-            [str(java), "-cp", f"{jar}{os.pathsep}{workdir}", _PROBE_CLASS],
+            [
+                str(java),
+                f"-Dskiko.library.path={natives}",
+                "-cp", f"{jar}{os.pathsep}{workdir}",
+                _PROBE_CLASS,
+            ],
             capture_output=True,
             text=True,
         )
     if result.returncode != 0:
         raise SystemExit(
-            f"ERROR: the linked JRE cannot run the renderer's HTTP/TLS stack "
+            f"ERROR: the linked JRE cannot run the renderer's HTTP/TLS or drawing stack "
             f"(exit {result.returncode}). Add the module it names to JLINK_MODULES.\n"
             f"{result.stdout}{result.stderr}".rstrip()
         )
     return result.stdout.strip()
 
 
-def build_jre(java_home: Path, out: Path, jar: Path) -> dict[str, str]:
+def build_jre(java_home: Path, out: Path, jar: Path, natives: Path) -> dict[str, str]:
     """jlink, then prove the image can run `jar`: jdeps check, then the probe."""
     jlink = java_home / "bin" / ("jlink.exe" if os.name == "nt" else "jlink")
     subprocess.run(
@@ -228,13 +319,15 @@ def build_jre(java_home: Path, out: Path, jar: Path) -> dict[str, str]:
         [str(jdeps), "--multi-release", feature, "--ignore-missing-deps",
          "--print-module-deps", str(jar)]
     )
-    absent = sorted(referenced - module_names([str(java), "--list-modules"]))
+    absent = sorted(
+        referenced - module_names([str(java), "--list-modules"]) - REFERENCED_NOT_REACHED
+    )
     if absent:
         raise SystemExit(
             f"ERROR: {jar.name} references modules the linked JRE does not carry: "
             f"{absent}. Add them to JLINK_MODULES."
         )
-    print(f"jre: probe passed -- {probe_image(java_home, java, jar)}")
+    print(f"jre: probe passed -- {probe_image(java_home, java, jar, natives)}")
     return {
         "version": version.splitlines()[0] if version else "",
         "java_version": release.get("JAVA_VERSION", ""),
@@ -353,7 +446,7 @@ def main() -> int:
         return 1
 
     # 5. The JRE, checked against the jar.
-    jre = build_jre(args.java_home, out / "jre", jar_out)
+    jre = build_jre(args.java_home, out / "jre", jar_out, natives)
 
     manifest = {
         "schema_version": 1,
