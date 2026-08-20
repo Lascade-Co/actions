@@ -28,10 +28,16 @@
 # `auditwheel repair` does NOT run, and must not. The natives need libGL, libX11,
 # libfontconfig and (arm64) libEGL from the HOST: the GPU worker's driver is
 # `libEGL_nvidia.so` and a vendored Mesa loader would win the lookup, and a
-# vendored fontconfig pins the wheel to this container's font cache. It cannot
-# finish on a wheel carrying a JRE anyway -- it dies resolving java.desktop's X11
-# closure. check_glibc_floor.py's docstring carries the argument and what
-# replaces it.
+# vendored fontconfig pins the wheel to this container's font cache.
+# check_glibc_floor.py's docstring carries the argument and what replaces it.
+# (It used to also die outright resolving java.desktop's X11 closure; that module
+# is no longer linked, so the JRE brings no X11 dependencies of its own. The
+# reasons above are the load-bearing ones and are unchanged.)
+#
+# Those three host libraries are now also a BUILD-time requirement, not just a
+# run-time one: build_jvm_payload.py's probe loads libskiko to prove the drawing
+# stack works without java.desktop, so a slimmer build image than
+# quay.io/pypa/manylinux_2_28_* must install them first.
 set -euo pipefail
 
 : "${IO_WHEEL:?}" "${IO_JAR:?}" "${IO_OUT:?}" "${IO_PLATFORM:?}"
