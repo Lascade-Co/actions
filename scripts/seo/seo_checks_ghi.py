@@ -85,7 +85,9 @@ def check_g4(page, site, urls, ctx):
     for anchor in page.anchors:
         if not is_internal(site, anchor.url):
             continue
-        text = " ".join(anchor.text.split()).lower()
+        aria_label = " ".join((anchor.aria_label or "").split())
+        accessible_text = aria_label or " ".join(anchor.text.split())
+        text = accessible_text.lower()
         if not text:
             if any(alt.strip() for alt in anchor.image_alts):
                 continue
@@ -93,7 +95,7 @@ def check_g4(page, site, urls, ctx):
                 finding(
                     G4,
                     SEVERITY_WARN,
-                    "internal link has no anchor text and no image alt",
+                    "internal link has no anchor text, aria-label, or image alt",
                     blog_url=page.url,
                     evidence=anchor.url,
                 )
@@ -103,7 +105,7 @@ def check_g4(page, site, urls, ctx):
                 finding(
                     G4,
                     SEVERITY_WARN,
-                    f"generic anchor text {anchor.text.strip()!r}",
+                    f"generic anchor text {accessible_text!r}",
                     blog_url=page.url,
                     evidence=anchor.url,
                 )

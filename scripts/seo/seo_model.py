@@ -157,6 +157,7 @@ class Anchor:
     href: str
     url: str
     text: str
+    aria_label: str | None = None
     image_alts: tuple[str, ...] = ()
 
 

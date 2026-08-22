@@ -11,7 +11,9 @@ from seo_model import (
     CmsSnapshot,
     ImageRef,
     JsonLdBlock,
+    Response,
 )
+from seo_parse import parse_blog
 from seo_testkit import BLOG_URL, make_context, make_page, make_response, make_site, make_status
 
 RULES = {rule.id: rule for rule in BLOG_RULES_GHI + RUN_RULES_GHI}
@@ -92,6 +94,11 @@ class GroupGTest(unittest.TestCase):
                 ),
             )
         )
+        self.assertEqual(run_rule("G4", page), [])
+
+    def test_g4_silent_when_aria_label_names_svg_only_anchor(self):
+        body = '<a href="/signin" aria-label="Sign in"><svg aria-hidden="true"></svg></a>'
+        page = parse_blog(BLOG_URL, "sign-in", Response(url=BLOG_URL, status=200, body=body))
         self.assertEqual(run_rule("G4", page), [])
 
     def test_g4_silent_on_descriptive_text(self):

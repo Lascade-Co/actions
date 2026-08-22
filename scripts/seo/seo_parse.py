@@ -139,6 +139,7 @@ def _collect_anchors(soup, base: str) -> tuple[Anchor, ...]:
                 href=href,
                 url=absolutize(base, href),
                 text=tag.get_text(" ", strip=True),
+                aria_label=tag.get("aria-label"),
                 image_alts=tuple(img.get("alt") or "" for img in tag.find_all("img")),
             )
         )
