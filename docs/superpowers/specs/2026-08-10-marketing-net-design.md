@@ -1,7 +1,7 @@
 # Marketing Net — daily figure to Telegram
 
 A daily cron that posts three images to a Telegram group: the month-to-date marketing-net card,
-a cumulative revenue graph, and a per-day revenue graph. The live result is not persisted or booked;
+a cumulative marketing-net graph, and a per-day marketing-net graph. The live result is not persisted or booked;
 a closed March 2026 daily benchmark is stored as an Infisical secret for both the comparison line
 and the graph reference series.
 
@@ -44,24 +44,24 @@ Play revenue (March earnings/sales factor applied to each sales day), daily Goog
 spend, and March 31 FX rates. The archived March P&L carried no influencer line, so zero was asserted
 explicitly with `--influencer-zero`; the builder never silently supplies that zero.
 
-## Revenue charts
+## Marketing-net charts
 
-Both charts compare app revenue only: App Store proceeds plus calibrated Play Store net revenue.
-The current series uses complete calendar days through yesterday, because today's App Store report
-does not exist yet. The marketing-net card remains fresher and includes today's Play Store value;
-the chart subtitle states its earlier boundary rather than presenting today's partial two-store bar
-as a complete day.
+Both charts use the same five-source formula as the card on each calendar day: App Store plus Play
+Store, minus Influencer, Google Ads and Meta Ads. The current series uses complete calendar days
+through yesterday, because today's App Store report does not exist yet. The card remains fresher and
+includes today's Play Store and spend values; the chart subtitle states its earlier boundary rather
+than presenting today's partial net as a complete day.
 
 The cumulative line chart contains three series:
 
-- current-month cumulative revenue through the latest complete day;
-- full-month March 2026 cumulative revenue, aligned by day of month;
+- current-month cumulative marketing net through the latest complete day;
+- full-month March 2026 cumulative marketing net, aligned by day of month;
 - a dashed current-month estimate from the latest actual point to month end. The estimate is the
-  average revenue per complete current-month day multiplied by each projected day number. It is a
-  simple run-rate projection, not a confidence interval or seasonal model.
+  average marketing net per complete current-month day multiplied by each projected day number. It
+  is a simple run-rate projection, not a confidence interval or seasonal model.
 
-The grouped bar chart contains current-month revenue and March 2026 revenue for each calendar day.
-Future current-month bars are absent, not zero. If either current revenue source is unavailable,
+The grouped bar chart contains current-month marketing net and March 2026 marketing net for each
+calendar day. Future current-month bars are absent, not zero. If any current source is unavailable,
 both current graph series are withheld and the images show the reason; a partial current series
 would be plausible and misleading.
 
@@ -74,7 +74,7 @@ workflow artifacts.
 
 | Source | Origin | Window |
 | --- | --- | --- |
-| Influencer | `GET pnl.lascade.com/api/head-spend/?head=INFLUENCER%20MARKETING` | calendar month, server-side |
+| Influencer | `GET pnl.lascade.com/api/head-spend/?head=INFLUENCER%20MARKETING[&day=N]` | calendar month, server-side |
 | App Store | App Store Connect `/v1/salesReports`, one request per day | 1st → **yesterday** |
 | Play Store | GCS `sales/` × net factor from `earnings/` | 1st → today |
 | Google Ads | Google Ads API **v25**, MCC children minus skip list | 1st → today |
@@ -91,6 +91,13 @@ and is signed (a refund-positive row reduces the line). Do not re-derive or adju
 
 `404` means the configured head key is wrong, **not** that the month is quiet. Surface it; never
 treat it as `0`.
+
+Without `day`, the endpoint retains its month-to-date contract. `day=N` returns the exact calendar
+day in the current month and is consumed once per day through today for the chart series. Daily
+attribution comes from the statement transactions linked to the editable spend row; if those
+transactions no longer reconcile with the row total, or the spend is manual and has no honest daily
+split, PNL returns `409`. The whole current chart series is then withheld rather than inventing a
+date or spreading the amount across the month.
 
 The key contains a **space**: PNL derives keys from card statement descriptors, so the shape is
 `AWS BILL`, `INFLUENCER MARKETING`. The underscored spelling `INFLUENCER_MARKETING` 404s — which is
@@ -164,7 +171,7 @@ produces nothing, and there is no message left to carry the warning.
 ## Message
 
 **The report is delivered as a three-photo Telegram album** (`sendMediaGroup`): summary card first,
-cumulative revenue second, per-day revenue third.
+cumulative marketing net second, per-day marketing net third.
 
 Telegram renders text proportionally, so a column of figures only lines up inside a code block —
 and a code block makes the whole message read as source. An image escapes that choice entirely:

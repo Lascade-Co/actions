@@ -19,16 +19,16 @@ from decimal import Decimal
 from pnl_appstore import DayCache, fetch_appstore_daily, window_days
 from pnl_benchmark import BenchmarkError, comparison, decode_benchmark
 from pnl_charts import (
-    build_revenue_chart_data,
-    render_cumulative_revenue_png,
-    render_daily_revenue_png,
+    build_marketing_net_chart_data,
+    render_cumulative_marketing_net_png,
+    render_daily_marketing_net_png,
 )
 from pnl_fx import build_rate_table, rate_date
-from pnl_googleads import fetch_google_ads
-from pnl_metaads import fetch_meta_ads
+from pnl_googleads import fetch_google_ads_daily
+from pnl_metaads import fetch_meta_ads_daily
 from pnl_money import Amount, SourceValue, Unavailable
 from pnl_playstore import fetch_playstore_daily
-from pnl_spend import fetch_head_spend
+from pnl_spend import fetch_head_spend, fetch_head_spend_daily
 from pnl_image import render_png
 from pnl_telegram import DeliveryError, render, send, send_media_group, send_photo
 
@@ -162,12 +162,26 @@ def main(argv=None) -> int:
     playstore_daily = _call(
         lambda: fetch_playstore_daily(config["playstore"], today, table)
     )
+    influencer_total = _call(
+        lambda: fetch_head_spend(PNL_BASE_URL, config["pnl_api_key"], HEAD)
+    )
+    influencer_daily = _call(
+        lambda: fetch_head_spend_daily(
+            PNL_BASE_URL, config["pnl_api_key"], HEAD, today
+        )
+    )
+    google_daily = _call(
+        lambda: fetch_google_ads_daily(config["ads"]["google"], today, table)
+    )
+    meta_daily = _call(
+        lambda: fetch_meta_ads_daily(config["ads"]["meta"], today, table)
+    )
     sources = {
         "appstore": lambda: _daily_total(appstore_daily),
         "playstore": lambda: _daily_total(playstore_daily),
-        "influencer": lambda: fetch_head_spend(PNL_BASE_URL, config["pnl_api_key"], HEAD),
-        "google": lambda: fetch_google_ads(config["ads"]["google"], today, table),
-        "meta": lambda: fetch_meta_ads(config["ads"]["meta"], today, table),
+        "influencer": lambda: influencer_total,
+        "google": lambda: _daily_total(google_daily),
+        "meta": lambda: _daily_total(meta_daily),
     }
 
     report = build_report(config, today, sources, table)
@@ -185,13 +199,19 @@ def main(argv=None) -> int:
     except Exception as exc:
         print(f"image rendering failed, falling back to text: {exc}", file=sys.stderr)
 
-    chart_data = build_revenue_chart_data(
-        today, appstore_daily, playstore_daily, config["benchmark"]
+    chart_data = build_marketing_net_chart_data(
+        today,
+        appstore_daily,
+        playstore_daily,
+        influencer_daily,
+        google_daily,
+        meta_daily,
+        config["benchmark"],
     )
     chart_images = []
     for filename, renderer in (
-        ("cumulative-revenue.png", render_cumulative_revenue_png),
-        ("daily-revenue.png", render_daily_revenue_png),
+        ("cumulative-marketing-net.png", render_cumulative_marketing_net_png),
+        ("daily-marketing-net.png", render_daily_marketing_net_png),
     ):
         try:
             rendered = renderer(chart_data)

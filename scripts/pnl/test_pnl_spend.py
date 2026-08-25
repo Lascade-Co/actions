@@ -1,8 +1,9 @@
 import unittest
+from datetime import date
 from decimal import Decimal
 
 from pnl_money import Amount, Unavailable
-from pnl_spend import fetch_head_spend
+from pnl_spend import fetch_head_spend, fetch_head_spend_daily
 
 
 class FakeResponse:
@@ -43,6 +44,35 @@ class FetchHeadSpendTest(unittest.TestCase):
         self.assertEqual(get.seen["headers"], {"X-Api-Key": "secret"})
         self.assertEqual(get.seen["params"], {"head": "INFLUENCER MARKETING"})
 
+    def test_sends_day_of_month_when_requested(self):
+        get = responder(FakeResponse(200, {"day": 3, "spend_usd": "12.5000"}))
+        result = fetch_head_spend(
+            "https://pnl.example", "secret", "H", day=3, get=get
+        )
+        self.assertEqual(result, Amount(Decimal("12.5000")))
+        self.assertEqual(get.seen["params"], {"head": "H", "day": 3})
+
+    def test_daily_attribution_conflict_is_unavailable(self):
+        result = fetch_head_spend(
+            "https://pnl.example",
+            "secret",
+            "H",
+            day=3,
+            get=responder(FakeResponse(409)),
+        )
+        self.assertIsInstance(result, Unavailable)
+        self.assertIn("daily spend attribution", result.reason)
+
+    def test_day_response_must_echo_the_requested_day(self):
+        result = fetch_head_spend(
+            "https://pnl.example",
+            "secret",
+            "H",
+            day=3,
+            get=responder(FakeResponse(200, {"spend_usd": "12.5000"})),
+        )
+        self.assertIsInstance(result, Unavailable)
+
     def test_404_is_unavailable_not_zero(self):
         # A 404 means the configured head key is wrong, not that the month is quiet.
         get = responder(FakeResponse(404))
@@ -70,4 +100,41 @@ class NonNumericPayloadTest(unittest.TestCase):
         # ArithmeticError, so a ValueError-only guard would break that.
         get = responder(FakeResponse(200, {"spend_usd": "n/a"}))
         result = fetch_head_spend("https://pnl.example", "k", "H", get=get)
+        self.assertIsInstance(result, Unavailable)
+
+
+class FetchHeadSpendDailyTest(unittest.TestCase):
+    def test_consumes_one_exact_day_response_for_each_day_through_today(self):
+        seen = []
+
+        def get(url, params=None, headers=None, timeout=None):
+            seen.append(params["day"])
+            return FakeResponse(
+                200,
+                {"day": params["day"], "spend_usd": str(params["day"] * 10)},
+            )
+
+        result = fetch_head_spend_daily(
+            "https://pnl.example", "secret", "H", date(2026, 8, 3), get=get
+        )
+        self.assertEqual(seen, [1, 2, 3])
+        self.assertEqual(
+            result,
+            {
+                date(2026, 8, 1): Decimal("10"),
+                date(2026, 8, 2): Decimal("20"),
+                date(2026, 8, 3): Decimal("30"),
+            },
+        )
+
+    def test_one_unavailable_day_refuses_the_whole_series(self):
+        def get(url, params=None, headers=None, timeout=None):
+            return FakeResponse(
+                409 if params["day"] == 2 else 200,
+                {"day": params["day"], "spend_usd": "1"},
+            )
+
+        result = fetch_head_spend_daily(
+            "https://pnl.example", "secret", "H", date(2026, 8, 3), get=get
+        )
         self.assertIsInstance(result, Unavailable)

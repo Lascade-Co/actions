@@ -10,7 +10,7 @@ API version, and all this needs is two queries.
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 from typing import Callable, Optional
 
@@ -33,6 +33,12 @@ CHILDREN_QUERY = """
 
 COST_QUERY = """
     SELECT metrics.cost_micros, customer.currency_code
+    FROM customer
+    WHERE segments.date BETWEEN '{start}' AND '{end}'
+"""
+
+DAILY_COST_QUERY = """
+    SELECT segments.date, metrics.cost_micros, customer.currency_code
     FROM customer
     WHERE segments.date BETWEEN '{start}' AND '{end}'
 """
@@ -115,5 +121,70 @@ def fetch_google_ads(
             # understated revenue deflates it.
             return Unavailable(f"Google Ads: no USD rate for {', '.join(blocked)}")
         return Amount(total)
+    except Exception as exc:
+        return Unavailable(f"Google Ads request failed: {type(exc).__name__}")
+
+
+def fetch_google_ads_daily(
+    creds: dict,
+    today: date,
+    table: RateTable,
+    search: Optional[Callable[[str, str, str], list]] = None,
+):
+    """Return current-month spend grouped by ``segments.date``."""
+    manager = str(creds["login_customer_id"])
+    skip = {str(value) for value in creds.get("skip_customer_ids", [])}
+    try:
+        if search is None:
+            _search.dev_token = creds["dev_token"]
+            _search.login_customer_id = manager
+            token = access_token(creds)
+            search = _search
+        else:
+            token = "injected"
+
+        children = search(token, manager, CHILDREN_QUERY)
+        accounts = []
+        for row in children:
+            client = row.get("customerClient", {})
+            customer_id = str(client.get("id", ""))
+            if customer_id and customer_id not in skip:
+                accounts.append((customer_id, client.get("currencyCode", "USD")))
+        if not accounts:
+            return Unavailable("Google Ads: the MCC returned no eligible child accounts")
+
+        start = today.replace(day=1)
+        query = DAILY_COST_QUERY.format(start=start.isoformat(), end=today.isoformat())
+        by_day = {}
+        for customer_id, fallback_currency in accounts:
+            for row in search(token, customer_id, query):
+                day_text = row.get("segments", {}).get("date")
+                if not day_text:
+                    return Unavailable(
+                        f"Google Ads: account {customer_id} returned no segments.date"
+                    )
+                current = date.fromisoformat(day_text)
+                micros = to_decimal(row.get("metrics", {}).get("costMicros", 0))
+                code = row.get("customer", {}).get("currencyCode") or fallback_currency
+                bucket = by_day.setdefault(current, {})
+                bucket[code] = bucket.get(code, Decimal("0")) + micros / _MICROS
+
+        dates = [
+            start + timedelta(days=index)
+            for index in range((today - start).days + 1)
+        ]
+        result = {}
+        blocked_codes = set()
+        for current in dates:
+            total, blocked = convert_all(by_day.get(current, {}), table)
+            if total is None:
+                blocked_codes.update(blocked)
+            else:
+                result[current] = total
+        if blocked_codes:
+            return Unavailable(
+                f"Google Ads: no USD rate for {', '.join(sorted(blocked_codes))}"
+            )
+        return result
     except Exception as exc:
         return Unavailable(f"Google Ads request failed: {type(exc).__name__}")

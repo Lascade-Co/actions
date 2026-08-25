@@ -1,4 +1,4 @@
-"""Render daily and cumulative app-revenue comparison charts as PNGs.
+"""Render daily and cumulative marketing-net comparison charts as PNGs.
 
 Charts use complete calendar days only: App Store reports stop at yesterday,
 so today's Play Store value is deliberately excluded. The summary card keeps
@@ -42,40 +42,63 @@ def _dates_through_yesterday(today: date) -> list[date]:
     return [start + timedelta(days=index) for index in range((end - start).days + 1)]
 
 
-def build_revenue_chart_data(today: date, appstore, playstore, benchmark: dict) -> dict:
-    """Build graph-ready revenue series without ever plotting a partial source."""
+def build_marketing_net_chart_data(
+    today: date,
+    appstore,
+    playstore,
+    influencer,
+    google,
+    meta,
+    benchmark: dict,
+) -> dict:
+    """Build graph-ready net series without ever plotting a partial source."""
     benchmark_daily = {}
     for day_text, item in benchmark["days"].items():
         day = date.fromisoformat(day_text).day
-        benchmark_daily[day] = sum(item["revenue"].values(), Decimal("0"))
+        benchmark_daily[day] = (
+            sum(item["revenue"].values(), Decimal("0"))
+            - sum(item["spend"].values(), Decimal("0"))
+        )
 
     unavailable = []
-    if isinstance(appstore, Unavailable):
-        unavailable.append(
-            appstore.reason
-            if appstore.reason.lower().startswith("app store")
-            else f"App Store: {appstore.reason}"
-        )
-    if isinstance(playstore, Unavailable):
-        unavailable.append(
-            playstore.reason
-            if playstore.reason.lower().startswith("play store")
-            else f"Play Store: {playstore.reason}"
-        )
+    for label, value in (
+        ("App Store", appstore),
+        ("Play Store", playstore),
+        ("Influencer", influencer),
+        ("Google Ads", google),
+        ("Meta Ads", meta),
+    ):
+        if isinstance(value, Unavailable):
+            unavailable.append(
+                value.reason
+                if value.reason.lower().startswith(label.lower())
+                else f"{label}: {value.reason}"
+            )
 
     current_daily = {}
     complete_dates = _dates_through_yesterday(today)
     if not unavailable and not complete_dates:
         unavailable.append("No complete current-month calendar day yet")
     if not unavailable:
-        missing = [day for day in complete_dates if day not in appstore or day not in playstore]
+        sources = (appstore, playstore, influencer, google, meta)
+        missing = [
+            day for day in complete_dates
+            if any(day not in source for source in sources)
+        ]
         if missing:
             unavailable.append(
-                "Revenue series is missing " + ", ".join(day.isoformat() for day in missing)
+                "Marketing-net series is missing "
+                + ", ".join(day.isoformat() for day in missing)
             )
         else:
             current_daily = {
-                day.day: appstore[day] + playstore[day]
+                day.day: (
+                    appstore[day]
+                    + playstore[day]
+                    - influencer[day]
+                    - google[day]
+                    - meta[day]
+                )
                 for day in complete_dates
             }
 
@@ -87,8 +110,8 @@ def build_revenue_chart_data(today: date, appstore, playstore, benchmark: dict) 
 
     benchmark_cumulative = {}
     running = Decimal("0")
-    for day, value in benchmark_daily.items():
-        running += value
+    for day in sorted(benchmark_daily):
+        running += benchmark_daily[day]
         benchmark_cumulative[day] = running
 
     estimate = {}
@@ -252,14 +275,14 @@ def _png(image) -> bytes:
     return buffer.getvalue()
 
 
-def render_cumulative_revenue_png(data: dict) -> bytes:
+def render_cumulative_marketing_net_png(data: dict) -> bytes:
     through = data["through_label"]
     subtitle = (
         f"{data['current_label']} vs {data['benchmark_label']} • complete days through {through} • USD"
         if through
         else f"{data['current_label']} vs {data['benchmark_label']} • USD"
     )
-    image, draw = _canvas("Cumulative revenue", subtitle, data["warning"])
+    image, draw = _canvas("Cumulative marketing net", subtitle, data["warning"])
     legend = [(data["benchmark_label"], BENCHMARK, False)]
     if data["current_cumulative"]:
         legend = [
@@ -281,14 +304,14 @@ def render_cumulative_revenue_png(data: dict) -> bytes:
     return _png(image)
 
 
-def render_daily_revenue_png(data: dict) -> bytes:
+def render_daily_marketing_net_png(data: dict) -> bytes:
     through = data["through_label"]
     subtitle = (
         f"{data['current_label']} vs {data['benchmark_label']} • complete days through {through} • USD"
         if through
         else f"{data['current_label']} vs {data['benchmark_label']} • USD"
     )
-    image, draw = _canvas("Revenue per day", subtitle, data["warning"])
+    image, draw = _canvas("Marketing net per day", subtitle, data["warning"])
     legend = [(data["benchmark_label"], BENCHMARK, False)]
     if data["current_daily"]:
         legend.insert(0, (data["current_label"], CURRENT, False))

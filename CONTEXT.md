@@ -142,7 +142,7 @@ never share a report.
 ## Language — Marketing Net
 
 The daily cron (`.github/workflows/daily-marketing-net.yml`) that posts a three-image Telegram report:
-month-to-date marketing net, cumulative app revenue, and per-day app revenue. Live results are not
+month-to-date marketing net, cumulative marketing net, and per-day marketing net. Live results are not
 persisted or booked; the closed March 2026 benchmark is retained only as an Infisical secret.
 
 **Marketing net**:
@@ -191,14 +191,14 @@ The closed March 2026 daily **source** data stored as base64 JSON. The compariso
 day-of-month and the same per-source **windows** as the live report, then shows current **marketing
 net** minus March **marketing net**. It is unavailable when any live **source** is unavailable.
 
-**Complete revenue day**:
-A calendar day for which both App Store and Play Store revenue are available. Because App Store
-publishes the following day, revenue charts stop at yesterday even though the marketing-net card
-includes today's Play Store value.
+**Complete marketing-net day**:
+A calendar day for which all five daily **sources** are available. Because App Store publishes the
+following day, marketing-net charts stop at yesterday even though the card includes today's Play
+Store and spend values.
 
-**Revenue estimate**:
-The current month's average revenue per **complete revenue day**, extended to the last calendar day
-of the month. It is a run-rate projection, not a confidence forecast.
+**Marketing-net estimate**:
+The current month's average marketing net per **complete marketing-net day**, extended to the last
+calendar day of the month. It is a run-rate projection, not a confidence forecast.
 
 **Skip list**:
 The Google Ads customer ids excluded from the MCC's children. Google Ads is include-by-default with
@@ -218,10 +218,10 @@ exclusions; Meta Ads is the opposite, an explicit list of accounts to read.
   so the ratio stays immune to FX drift.
 - The **benchmark** comparison is like-for-like by day and **window**; it never compares a partial
   live result with the complete March result.
-- Revenue charts never plot one store without the other. Their current series stops at the latest
-  **complete revenue day**, while the March series covers the full benchmark month.
-- The **revenue estimate** starts at the latest current cumulative value and continues as a dashed
-  line to the projected month-end cumulative value.
+- Marketing-net charts never plot a partial set of sources. Their current series stops at the latest
+  **complete marketing-net day**, while the March series covers the full benchmark month.
+- The **marketing-net estimate** starts at the latest current cumulative value and continues as a
+  dashed line to the projected month-end cumulative value.
 - **Google Ads** reads the MCC's children minus the **skip list**; **Meta Ads** reads only its listed
   accounts.
 - A run is green when it delivers a message and red when the delivery itself fails — the same rule

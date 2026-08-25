@@ -3,7 +3,7 @@ from datetime import date
 from decimal import Decimal
 
 from pnl_fx import RateTable
-from pnl_googleads import fetch_google_ads
+from pnl_googleads import fetch_google_ads, fetch_google_ads_daily
 from pnl_money import Amount, Unavailable
 
 CREDS = {
@@ -73,3 +73,53 @@ class FetchGoogleAdsTest(unittest.TestCase):
         result = fetch_google_ads(CREDS, date(2026, 8, 10), self.table,
                                   search=searcher(children, {"111": []}))
         self.assertEqual(result, Amount(Decimal("0")))
+
+
+class FetchGoogleAdsDailyTest(unittest.TestCase):
+    def setUp(self):
+        self.table = RateTable({"INR": Decimal("0.01")}, date(2026, 8, 3))
+        self.children = [
+            {"customerClient": {"id": "111", "currencyCode": "USD"}},
+            {"customerClient": {"id": "222", "currencyCode": "INR"}},
+        ]
+
+    def test_groups_accounts_by_segments_date_and_converts(self):
+        costs = {
+            "111": [
+                {
+                    "segments": {"date": "2026-08-01"},
+                    "metrics": {"costMicros": "5000000"},
+                },
+                {
+                    "segments": {"date": "2026-08-02"},
+                    "metrics": {"costMicros": "2000000"},
+                },
+            ],
+            "222": [
+                {
+                    "segments": {"date": "2026-08-01"},
+                    "metrics": {"costMicros": "100000000"},
+                }
+            ],
+        }
+        result = fetch_google_ads_daily(
+            CREDS,
+            date(2026, 8, 3),
+            self.table,
+            search=searcher(self.children, costs),
+        )
+        self.assertEqual(result[date(2026, 8, 1)], Decimal("6"))
+        self.assertEqual(result[date(2026, 8, 2)], Decimal("2"))
+        self.assertEqual(result[date(2026, 8, 3)], Decimal("0"))
+
+    def test_missing_segments_date_refuses_the_series(self):
+        result = fetch_google_ads_daily(
+            CREDS,
+            date(2026, 8, 3),
+            self.table,
+            search=searcher(
+                self.children,
+                {"111": [{"metrics": {}}], "222": []},
+            ),
+        )
+        self.assertIsInstance(result, Unavailable)

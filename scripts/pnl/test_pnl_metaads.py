@@ -3,7 +3,7 @@ from datetime import date
 from decimal import Decimal
 
 from pnl_fx import RateTable
-from pnl_metaads import fetch_meta_ads
+from pnl_metaads import fetch_meta_ads, fetch_meta_ads_daily
 from pnl_money import Amount, Unavailable
 
 
@@ -65,3 +65,49 @@ class FetchMetaAdsTest(unittest.TestCase):
         result = fetch_meta_ads(creds, date(2026, 8, 10), self.table, insights=insights)
         self.assertIsInstance(result, Unavailable)
         self.assertIn("222", result.reason)
+
+
+class FetchMetaAdsDailyTest(unittest.TestCase):
+    def setUp(self):
+        self.table = RateTable({"INR": Decimal("0.01")}, date(2026, 8, 3))
+        self.creds = {"token": "t", "account_ids": ["111", "222"]}
+
+    def test_groups_accounts_by_date_start_and_converts(self):
+        def insights(token, account_id, start, end):
+            return {
+                "111": [
+                    {
+                        "date_start": "2026-08-01",
+                        "spend": "5",
+                        "account_currency": "USD",
+                    },
+                    {
+                        "date_start": "2026-08-02",
+                        "spend": "2",
+                        "account_currency": "USD",
+                    },
+                ],
+                "222": [
+                    {
+                        "date_start": "2026-08-01",
+                        "spend": "100",
+                        "account_currency": "INR",
+                    }
+                ],
+            }[account_id]
+
+        result = fetch_meta_ads_daily(
+            self.creds, date(2026, 8, 3), self.table, insights=insights
+        )
+        self.assertEqual(result[date(2026, 8, 1)], Decimal("6"))
+        self.assertEqual(result[date(2026, 8, 2)], Decimal("2"))
+        self.assertEqual(result[date(2026, 8, 3)], Decimal("0"))
+
+    def test_missing_date_start_refuses_the_series(self):
+        result = fetch_meta_ads_daily(
+            {"token": "t", "account_ids": ["111"]},
+            date(2026, 8, 3),
+            self.table,
+            insights=lambda *args: [{"spend": "5", "account_currency": "USD"}],
+        )
+        self.assertIsInstance(result, Unavailable)
