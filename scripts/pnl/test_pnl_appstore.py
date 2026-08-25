@@ -2,7 +2,7 @@ import unittest
 from datetime import date
 from decimal import Decimal
 
-from pnl_appstore import fetch_appstore, parse_sales_tsv, window_days
+from pnl_appstore import fetch_appstore, fetch_appstore_daily, parse_sales_tsv, window_days
 from pnl_fx import RateTable
 from pnl_money import Amount, Unavailable
 
@@ -56,6 +56,19 @@ class FetchAppStoreTest(unittest.TestCase):
         result = fetch_appstore(self.config, date(2026, 8, 3), self.table, fetch_day=fetch_day)
         # Two days (1st, 2nd) x (1 USD + 100 INR@0.01 = 2.00)
         self.assertEqual(result, Amount(Decimal("4.00")))
+
+    def test_daily_values_preserve_each_complete_calendar_day(self):
+        def fetch_day(config, day):
+            return tsv(f"APPLE\t{day.day}.00\t1\tUSD")
+
+        result = fetch_appstore_daily(
+            self.config, date(2026, 8, 4), self.table, fetch_day=fetch_day
+        )
+        self.assertEqual(result, {
+            date(2026, 8, 1): Decimal("1.00"),
+            date(2026, 8, 2): Decimal("2.00"),
+            date(2026, 8, 3): Decimal("3.00"),
+        })
 
     def test_404_day_counts_as_zero_and_does_not_abort(self):
         def fetch_day(config, day):

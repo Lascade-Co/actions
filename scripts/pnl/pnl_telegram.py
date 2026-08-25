@@ -8,6 +8,7 @@ mid-entity; and a leaked bot token in a log.
 
 from __future__ import annotations
 
+import json
 import time
 from decimal import Decimal
 from typing import Callable, Optional
@@ -195,6 +196,39 @@ def send_photo(
             url,
             data={"chat_id": chat_id},
             files={"photo": ("marketing-net.png", png, "image/png")},
+            timeout=_TIMEOUT,
+        ),
+        sleep,
+    )
+
+
+def send_media_group(
+    token: str,
+    chat_id: str,
+    images: list[tuple[str, bytes]],
+    post: Optional[Callable] = None,
+    sleep: Optional[Callable] = None,
+) -> None:
+    """Send 2–10 PNGs as one Telegram album."""
+    if not 2 <= len(images) <= 10:
+        raise DeliveryError("Telegram sendMediaGroup requires 2–10 images")
+    post = post or requests.post
+    url = f"https://api.telegram.org/bot{token}/sendMediaGroup"
+    media = [
+        {"type": "photo", "media": f"attach://photo{index}"}
+        for index in range(len(images))
+    ]
+    files = {
+        f"photo{index}": (filename, png, "image/png")
+        for index, (filename, png) in enumerate(images)
+    }
+    _deliver(
+        token,
+        "sendMediaGroup",
+        lambda: post(
+            url,
+            data={"chat_id": chat_id, "media": json.dumps(media)},
+            files=files,
             timeout=_TIMEOUT,
         ),
         sleep,

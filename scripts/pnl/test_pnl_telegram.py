@@ -1,8 +1,17 @@
 import unittest
+import json
 from decimal import Decimal
 
 from pnl_money import Amount, Unavailable
-from pnl_telegram import DeliveryError, escape, redact, render, send, truncate
+from pnl_telegram import (
+    DeliveryError,
+    escape,
+    redact,
+    render,
+    send,
+    send_media_group,
+    truncate,
+)
 
 
 class EscapeTest(unittest.TestCase):
@@ -127,6 +136,33 @@ class SendTest(unittest.TestCase):
 
         send("123:ABC", "-1", "<pre>x</pre>", post=post)
         self.assertEqual(len(calls), 1)
+
+    def test_sends_three_photos_as_one_media_group(self):
+        class Ok:
+            status_code = 200
+
+        captured = {}
+
+        def post(url, data=None, files=None, timeout=None):
+            captured.update(url=url, data=data, files=files, timeout=timeout)
+            return Ok()
+
+        send_media_group(
+            "123:ABC",
+            "-1",
+            [("summary.png", b"one"), ("line.png", b"two"), ("bar.png", b"three")],
+            post=post,
+        )
+        self.assertTrue(captured["url"].endswith("/sendMediaGroup"))
+        media = json.loads(captured["data"]["media"])
+        self.assertEqual([item["media"] for item in media], [
+            "attach://photo0", "attach://photo1", "attach://photo2"
+        ])
+        self.assertEqual(set(captured["files"]), {"photo0", "photo1", "photo2"})
+
+    def test_media_group_rejects_telegram_invalid_item_count(self):
+        with self.assertRaises(DeliveryError):
+            send_media_group("123:ABC", "-1", [("only.png", b"one")])
 
 
 class ReviewRegressionTest(unittest.TestCase):

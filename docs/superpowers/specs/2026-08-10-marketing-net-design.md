@@ -1,8 +1,9 @@
 # Marketing Net — daily figure to Telegram
 
-A daily cron that posts one number to a Telegram group: month-to-date app revenue minus
-month-to-date marketing spend. The live result is not persisted or booked; a closed March 2026
-daily benchmark is stored as an Infisical secret solely for the comparison line.
+A daily cron that posts three images to a Telegram group: the month-to-date marketing-net card,
+a cumulative revenue graph, and a per-day revenue graph. The live result is not persisted or booked;
+a closed March 2026 daily benchmark is stored as an Infisical secret for both the comparison line
+and the graph reference series.
 
 Vocabulary for this pipeline lives in [`CONTEXT.md`](../../../CONTEXT.md) under **Marketing Net**.
 Three decisions carry their own ADRs: [0005](../../adr/0005-marketing-net-recomputes-revenue.md)
@@ -42,6 +43,32 @@ unsupported schema rejects the whole secret at startup.
 Play revenue (March earnings/sales factor applied to each sales day), daily Google Ads and Meta Ads
 spend, and March 31 FX rates. The archived March P&L carried no influencer line, so zero was asserted
 explicitly with `--influencer-zero`; the builder never silently supplies that zero.
+
+## Revenue charts
+
+Both charts compare app revenue only: App Store proceeds plus calibrated Play Store net revenue.
+The current series uses complete calendar days through yesterday, because today's App Store report
+does not exist yet. The marketing-net card remains fresher and includes today's Play Store value;
+the chart subtitle states its earlier boundary rather than presenting today's partial two-store bar
+as a complete day.
+
+The cumulative line chart contains three series:
+
+- current-month cumulative revenue through the latest complete day;
+- full-month March 2026 cumulative revenue, aligned by day of month;
+- a dashed current-month estimate from the latest actual point to month end. The estimate is the
+  average revenue per complete current-month day multiplied by each projected day number. It is a
+  simple run-rate projection, not a confidence interval or seasonal model.
+
+The grouped bar chart contains current-month revenue and March 2026 revenue for each calendar day.
+Future current-month bars are absent, not zero. If either current revenue source is unavailable,
+both current graph series are withheld and the images show the reason; a partial current series
+would be plausible and misleading.
+
+Both graphs are 1600×1100 PNGs with the same dark palette as the summary card, large type, sparse
+day ticks, explicit USD axes, and direct month legends. They remain readable when Telegram scales
+the three-photo album preview, while the full-resolution images remain available on tap and as
+workflow artifacts.
 
 ## Sources
 
@@ -136,7 +163,8 @@ produces nothing, and there is no message left to carry the warning.
 
 ## Message
 
-**The report is delivered as a rendered PNG card** (`sendPhoto`), not as text.
+**The report is delivered as a three-photo Telegram album** (`sendMediaGroup`): summary card first,
+cumulative revenue second, per-day revenue third.
 
 Telegram renders text proportionally, so a column of figures only lines up inside a code block —
 and a code block makes the whole message read as source. An image escapes that choice entirely:
@@ -153,10 +181,11 @@ figure reads as "healthy" to anyone skimming, and the net is the largest element
 warnings underneath lose that argument every time. This is the plausible-figure problem the whole
 design guards against, reintroduced through colour.
 
-**No caption.** The card already carries the heading, the date, the window footnote and every
-warning, so a caption only repeated it in a second typeface directly underneath.
+**No caption.** Each image carries its own heading, boundary and warnings, so an album caption only
+repeats content in a second typeface underneath.
 
-**A text rendering survives as a fallback.** If font discovery fails, `render()` produces a plain
+**Fallbacks survive.** If one graph cannot render, the successfully rendered images are still sent;
+if only the card renders it uses `sendPhoto`. If the card cannot render, `render()` produces a plain
 HTML message — bold headings, `label · figure` lines, no code block — and the run delivers that
 instead. A missing font must not cost the delivery.
 
@@ -192,7 +221,8 @@ Following the `scripts/seo/` precedent: focused modules, fetched by raw URL, off
 | `pnl_metaads.py` | Graph v26.0 |
 | `pnl_benchmark.py` | strict secret loading and like-for-like comparison |
 | `pnl_image.py` | the PNG card |
-| `pnl_telegram.py` | caption, escape, truncate, redact, sendPhoto |
+| `pnl_charts.py` | revenue-series policy and high-resolution PNG graphs |
+| `pnl_telegram.py` | escape, truncate, redact, sendPhoto, sendMediaGroup |
 | `marketing_net.py` | orchestrator |
 | `build_marketing_benchmark.py` | one-time closed-month daily benchmark fetcher |
 

@@ -169,14 +169,31 @@ def fetch_appstore(
     fetch_day: Optional[Callable[[dict, date], Optional[str]]] = None,
     cache: Optional[DayCache] = None,
 ) -> SourceValue:
+    daily = fetch_appstore_daily(config, today, table, fetch_day=fetch_day, cache=cache)
+    if isinstance(daily, Unavailable):
+        return daily
+    return Amount(sum(daily.values(), Decimal("0")))
+
+
+def fetch_appstore_daily(
+    config: dict,
+    today: date,
+    table: RateTable,
+    fetch_day: Optional[Callable[[dict, date], Optional[str]]] = None,
+    cache: Optional[DayCache] = None,
+):
+    """Return complete calendar-day proceeds through yesterday, in USD.
+
+    The daily chart and the month-to-date card share this one read so their
+    totals cannot drift. A source-level failure remains ``Unavailable``; a 404
+    for one date is the existing, explicit zero-day exception.
+    """
     fetch_day = fetch_day or _fetch_day
     days = window_days(today)
     if not days:
         return Unavailable("App Store: no published days in the window yet")
 
-    # Accumulate in the reported currencies and convert once at the end, so a
-    # code with no rate can be named rather than quietly left out of the sum.
-    by_currency: dict = {}
+    by_day: dict = {}
     parsed_any = False
     try:
         for day in days:
@@ -184,14 +201,14 @@ def fetch_appstore(
             if totals is None:
                 text = fetch_day(config, day)
                 if text is None:
+                    by_day[day] = {}
                     continue  # 404: sale-less or not yet published. Never cached.
                 totals = parse_sales_tsv(text)
                 if cache:
                     cache.put(day, totals)
             if totals:
                 parsed_any = True
-            for code, amount in totals.items():
-                by_currency[code] = by_currency.get(code, Decimal("0")) + amount
+            by_day[day] = totals
     except Exception as exc:
         return Unavailable(f"App Store request failed: {type(exc).__name__}")
 
@@ -201,7 +218,14 @@ def fetch_appstore(
             f"App Store: no rows parsed across {len(days)} days — check the report layout"
         )
 
-    total, blocked = convert_all(by_currency, table)
-    if total is None:
-        return Unavailable(f"App Store: no USD rate for {', '.join(blocked)}")
-    return Amount(total)
+    result = {}
+    blocked_codes = set()
+    for day in days:
+        total, blocked = convert_all(by_day.get(day, {}), table)
+        if total is None:
+            blocked_codes.update(blocked)
+        else:
+            result[day] = total
+    if blocked_codes:
+        return Unavailable(f"App Store: no USD rate for {', '.join(sorted(blocked_codes))}")
+    return result

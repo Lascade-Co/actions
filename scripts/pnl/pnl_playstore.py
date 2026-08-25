@@ -17,7 +17,7 @@ import csv
 import io
 import re
 import zipfile
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Optional
 
@@ -62,6 +62,28 @@ def sum_sales_csv(text: str) -> dict:
 
 def sum_earnings_csv(text: str) -> dict:
     return _sum_csv(text, _EARNINGS_AMOUNT, _EARNINGS_CURRENCY)
+
+
+def _sum_sales_daily_csv(text: str):
+    """Group sales by charged date, preserving the total parser's symmetry.
+
+    ``None`` means the layout changed. An empty dict means the report is valid
+    but has no rows yet, which is a real zero for an in-progress month.
+    """
+    result: dict = {}
+    required = ("Order Charged Date", _SALES_AMOUNT, _SALES_CURRENCY)
+    for row in csv.DictReader(io.StringIO(text)):
+        if any(column not in row for column in required):
+            return None
+        try:
+            day = date.fromisoformat((row["Order Charged Date"] or "")[:10])
+            amount = to_decimal((row[_SALES_AMOUNT] or "0").replace(",", ""))
+        except (InvalidOperation, ValueError, TypeError):
+            continue
+        code = (row[_SALES_CURRENCY] or "").strip().upper()
+        bucket = result.setdefault(day, {})
+        bucket[code] = bucket.get(code, Decimal("0")) + amount
+    return result
 
 
 def _to_usd_total(totals: dict, table: RateTable) -> Optional[Decimal]:
@@ -158,7 +180,27 @@ def _read_totals(storage, names: list, summer) -> dict:
     return totals
 
 
+def _merge_daily(target: dict, incoming: dict) -> None:
+    for day, totals in incoming.items():
+        bucket = target.setdefault(day, {})
+        for code, amount in totals.items():
+            bucket[code] = bucket.get(code, Decimal("0")) + amount
+
+
+def _window_days(today: date) -> list[date]:
+    first = today.replace(day=1)
+    return [first + timedelta(days=index) for index in range((today - first).days + 1)]
+
+
 def fetch_playstore(config: dict, today: date, table: RateTable, storage=None) -> SourceValue:
+    daily = fetch_playstore_daily(config, today, table, storage=storage)
+    if isinstance(daily, Unavailable):
+        return daily
+    return Amount(sum(daily.values(), Decimal("0")))
+
+
+def fetch_playstore_daily(config: dict, today: date, table: RateTable, storage=None):
+    """Return estimated net revenue per current-month calendar day, in USD."""
     storage = storage or GcsStorage(config["bucket"], config["credentials"])
     try:
         sales_names = _index_by_month(storage.list("sales/"))
@@ -184,11 +226,23 @@ def fetch_playstore(config: dict, today: date, table: RateTable, storage=None) -
         if factor is None:
             return Unavailable("Play Store: no net factor derivable — excluded")
 
-        gross, blocked = convert_all(
-            _read_totals(storage, sales_names[current], sum_sales_csv), table
-        )
-        if gross is None:
-            return Unavailable(f"Play Store: no USD rate for {', '.join(blocked)}")
-        return Amount(gross * factor)
+        by_day = {}
+        for name in sales_names[current]:
+            parsed = _sum_sales_daily_csv(storage.read_zip_csv(name))
+            if parsed is None:
+                return Unavailable(f"Play Store: no daily rows parsed from {name}")
+            _merge_daily(by_day, parsed)
+
+        result = {}
+        blocked_codes = set()
+        for day in _window_days(today):
+            gross, blocked = convert_all(by_day.get(day, {}), table)
+            if gross is None:
+                blocked_codes.update(blocked)
+            else:
+                result[day] = gross * factor
+        if blocked_codes:
+            return Unavailable(f"Play Store: no USD rate for {', '.join(sorted(blocked_codes))}")
+        return result
     except Exception as exc:
         return Unavailable(f"Play Store access failed: {type(exc).__name__}")

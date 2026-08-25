@@ -62,7 +62,8 @@ jobs:
       - name: Download scripts
         run: |
           for module in pnl_money pnl_fx pnl_spend pnl_appstore pnl_playstore \
-                        pnl_googleads pnl_metaads pnl_benchmark pnl_image pnl_telegram marketing_net; do
+                        pnl_googleads pnl_metaads pnl_benchmark pnl_image pnl_charts \
+                        pnl_telegram marketing_net; do
             curl -fsSL --retry 3 --retry-delay 2 -o "$module.py" "$RAW/scripts/pnl/$module.py"
           done
 
@@ -90,5 +91,7 @@ jobs:
           path: |
             message.png
             message.html
+            cumulative-revenue.png
+            daily-revenue.png
           if-no-files-found: warn
           retention-days: 30

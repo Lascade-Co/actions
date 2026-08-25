@@ -7,6 +7,7 @@ from pnl_money import Amount, Unavailable
 from pnl_playstore import (
     derive_net_factor,
     fetch_playstore,
+    fetch_playstore_daily,
     month_from_earnings_name,
     sum_earnings_csv,
     sum_sales_csv,
@@ -108,6 +109,22 @@ class FetchPlayStoreTest(unittest.TestCase):
         result = fetch_playstore(self.config, date(2026, 8, 10), self.table, storage=storage)
         # 300 gross x (140/200 = 0.7) = 210
         self.assertEqual(result, Amount(Decimal("210.0")))
+
+    def test_daily_values_apply_the_same_factor_per_calendar_day(self):
+        files = self._files()
+        files["sales/salesreport_202608.zip"] = "\n".join([
+            SALES_HEADER,
+            "2026-08-01,100,USD,Charged",
+            "2026-08-02,200,USD,Charged",
+        ])
+        result = fetch_playstore_daily(
+            self.config, date(2026, 8, 3), self.table, storage=FakeStorage(files)
+        )
+        self.assertEqual(result, {
+            date(2026, 8, 1): Decimal("70.0"),
+            date(2026, 8, 2): Decimal("140.0"),
+            date(2026, 8, 3): Decimal("0.0"),
+        })
 
     def test_no_factor_excludes_play_and_says_so(self):
         files = self._files()

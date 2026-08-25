@@ -14,17 +14,23 @@ import json
 import os
 import sys
 from datetime import date, timezone, datetime
+from decimal import Decimal
 
-from pnl_appstore import DayCache, fetch_appstore, window_days
+from pnl_appstore import DayCache, fetch_appstore_daily, window_days
 from pnl_benchmark import BenchmarkError, comparison, decode_benchmark
+from pnl_charts import (
+    build_revenue_chart_data,
+    render_cumulative_revenue_png,
+    render_daily_revenue_png,
+)
 from pnl_fx import build_rate_table, rate_date
 from pnl_googleads import fetch_google_ads
 from pnl_metaads import fetch_meta_ads
 from pnl_money import Amount, SourceValue, Unavailable
-from pnl_playstore import fetch_playstore
+from pnl_playstore import fetch_playstore_daily
 from pnl_spend import fetch_head_spend
 from pnl_image import render_png
-from pnl_telegram import DeliveryError, render, send, send_photo
+from pnl_telegram import DeliveryError, render, send, send_media_group, send_photo
 
 PNL_BASE_URL = "https://pnl.lascade.com"
 # The normalized key, which contains a SPACE — PNL derives keys from card
@@ -99,6 +105,12 @@ def _call(source) -> SourceValue:
         return Unavailable(f"{type(exc).__name__}: {exc}")
 
 
+def _daily_total(value) -> SourceValue:
+    if isinstance(value, Unavailable):
+        return value
+    return Amount(sum(value.values(), Decimal("0")))
+
+
 def build_report(config: dict, today: date, sources: dict, table=None) -> dict:
     revenue = {
         "App Store": _call(sources["appstore"]),
@@ -142,11 +154,17 @@ def main(argv=None) -> int:
     # Seeded with nothing: every code is fetched the first time a report shows it.
     table = build_rate_table([], rate_date(today))
 
-    sources = {
-        "appstore": lambda: fetch_appstore(
+    appstore_daily = _call(
+        lambda: fetch_appstore_daily(
             config["appstore"], today, table, cache=DayCache(APPSTORE_CACHE_DIR)
-        ),
-        "playstore": lambda: fetch_playstore(config["playstore"], today, table),
+        )
+    )
+    playstore_daily = _call(
+        lambda: fetch_playstore_daily(config["playstore"], today, table)
+    )
+    sources = {
+        "appstore": lambda: _daily_total(appstore_daily),
+        "playstore": lambda: _daily_total(playstore_daily),
         "influencer": lambda: fetch_head_spend(PNL_BASE_URL, config["pnl_api_key"], HEAD),
         "google": lambda: fetch_google_ads(config["ads"]["google"], today, table),
         "meta": lambda: fetch_meta_ads(config["ads"]["meta"], today, table),
@@ -167,13 +185,34 @@ def main(argv=None) -> int:
     except Exception as exc:
         print(f"image rendering failed, falling back to text: {exc}", file=sys.stderr)
 
+    chart_data = build_revenue_chart_data(
+        today, appstore_daily, playstore_daily, config["benchmark"]
+    )
+    chart_images = []
+    for filename, renderer in (
+        ("cumulative-revenue.png", render_cumulative_revenue_png),
+        ("daily-revenue.png", render_daily_revenue_png),
+    ):
+        try:
+            rendered = renderer(chart_data)
+            with open(filename, "wb") as handle:
+                handle.write(rendered)
+            chart_images.append((filename, rendered))
+        except Exception as exc:
+            print(f"{filename} rendering failed: {exc}", file=sys.stderr)
+
     if args.dry_run:
         print(html)
         print(f"[dry run] image: {'message.png' if png else 'unavailable'}")
+        for filename, _ in chart_images:
+            print(f"[dry run] chart: {filename}")
         return 0
 
     try:
-        if png:
+        album = [("marketing-net.png", png), *chart_images] if png else []
+        if len(album) >= 2:
+            send_media_group(config["telegram_token"], config["chat_id"], album)
+        elif png:
             send_photo(config["telegram_token"], config["chat_id"], png)
         else:
             send(config["telegram_token"], config["chat_id"], html)
