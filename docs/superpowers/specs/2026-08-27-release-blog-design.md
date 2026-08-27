@@ -328,8 +328,12 @@ accident.
 
 ## Failure model
 
-Following ADR-0003, extended to this pipeline in ADR-0011: **the CLI always exits 0** and the
-caller's `blog` job is `continue-on-error: true`. Nothing about a blog can redden a release.
+Following ADR-0003, extended to this pipeline in ADR-0011: **the CLI always exits 0**, and every
+step inside the reusable workflow that touches the network or a third-party tool carries
+`continue-on-error: true`. Deliberately *not* `continue-on-error` on the calling job: GitHub
+restricts which keys a job using `uses:` may set, and a rejected key there would fail to parse the
+whole release workflow — exactly the coupling this design exists to avoid. Safety lives inside the
+reusable workflow, where it is certain to be legal.
 
 | Condition | Behaviour |
 |---|---|
@@ -356,9 +360,15 @@ directory (scripts-refactor spec, constraint 1).
 | Module | Responsibility |
 |---|---|
 | `release_blog.py` | CLI entry, orchestration, artifact writing, exit-0 guarantee |
+| `release_blog_digest.py` | git reading, patch filtering, the 200 KB cap, `marketing_version_from_tag()` |
 | `release_blog_cms.py` | `fetch_link_candidates()`, sitemap fallback, `find_by_marker()`, `write_draft()` |
 | `release_blog_draft.py` | prompt assembly, `codex exec` invocation, output parsing |
 | `release_blog_check.py` | synthetic page wrap, rule allowlist, local checks, scoring |
+
+Five modules rather than four: the digest is git-facing and the draft is model-facing, and they fail
+for entirely different reasons. `release_blog_cms.py` does its own HTTP rather than reusing
+`seo_fetch.Fetcher` — that transport takes no request body, so it cannot POST — but it does reuse
+`seo_parse.parse_sitemap()` for the fallback.
 
 Reused unchanged: `seo_model` (thresholds, `GENERIC_ANCHOR_TEXT`, `SiteConfig`, `Response`,
 `SiteContext`), `seo_parse` (`parse_blog`), `seo_rulekit`, `seo_checks_abc/def/ghi`, `seo_fetch`
