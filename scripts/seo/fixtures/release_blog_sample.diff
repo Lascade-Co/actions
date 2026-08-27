@@ -1,0 +1,37 @@
+diff --git a/app/src/main/res/values/strings.xml b/app/src/main/res/values/strings.xml
+--- a/app/src/main/res/values/strings.xml
++++ b/app/src/main/res/values/strings.xml
+@@ -12,3 +12,5 @@
+   <string name="route_editor_title">Route editor</string>
++  <string name="waypoint_drag_hint">Drag a waypoint to reshape your route</string>
++  <string name="waypoint_undo">Undo move</string>
+diff --git a/app/src/main/res/values-de/strings.xml b/app/src/main/res/values-de/strings.xml
+--- a/app/src/main/res/values-de/strings.xml
++++ b/app/src/main/res/values-de/strings.xml
+@@ -12,3 +12,4 @@
+   <string name="route_editor_title">Routeneditor</string>
++  <string name="waypoint_drag_hint">Ziehen Sie einen Wegpunkt</string>
+diff --git a/gradle.lockfile b/gradle.lockfile
+--- a/gradle.lockfile
++++ b/gradle.lockfile
+@@ -1,2 +1,2 @@
+-androidx.core:core:1.13.0
++androidx.core:core:1.14.0
+diff --git a/app/src/main/java/com/lascade/ta/editor/WaypointDragHandler.kt b/app/src/main/java/com/lascade/ta/editor/WaypointDragHandler.kt
+--- a/app/src/main/java/com/lascade/ta/editor/WaypointDragHandler.kt
++++ b/app/src/main/java/com/lascade/ta/editor/WaypointDragHandler.kt
+@@ -1,3 +1,9 @@
+ class WaypointDragHandler {
++    fun onDragEnd(waypoint: Waypoint, target: LatLng) {
++        route.move(waypoint, target)
++        elevation.recompute()
++    }
+ }
+diff --git a/app/src/main/assets/logo.png b/app/src/main/assets/logo.png
+Binary files a/app/src/main/assets/logo.png and b/app/src/main/assets/logo.png differ
+diff --git a/lib/generated/l10n.g.dart b/lib/generated/l10n.g.dart
+--- a/lib/generated/l10n.g.dart
++++ b/lib/generated/l10n.g.dart
+@@ -1,2 +1,3 @@
+ // GENERATED — do not edit
++String get waypointDragHint => 'Drag a waypoint';
