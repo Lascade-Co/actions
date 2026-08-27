@@ -96,7 +96,13 @@ def build_prompt(
 
 def run_codex(prompt_text: str, out_dir: str, *, run=subprocess.run) -> tuple[bool, str]:
     """Run Codex once in an isolated output directory without raising."""
-    Path(out_dir).mkdir(parents=True, exist_ok=True)
+    output = Path(out_dir)
+    output.mkdir(parents=True, exist_ok=True)
+    try:
+        for name in ("blog.json", "blog.html"):
+            output.joinpath(name).unlink(missing_ok=True)
+    except OSError as exc:
+        return False, f"could not clear stale codex output: {exc}"
     try:
         result = run(
             ["codex", "exec", "--ephemeral", "--sandbox", "workspace-write", "-"],

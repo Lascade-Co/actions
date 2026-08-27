@@ -8,6 +8,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import release_blog
 from release_blog_digest import (
     PATCH_BYTE_CAP,
     build_digest,
@@ -661,6 +662,285 @@ class RunCodexTest(unittest.TestCase):
         ok, detail = run_codex("PROMPT", "/tmp/out", run=fake_run)
         self.assertFalse(ok)
         self.assertIn("codex", detail)
+
+
+class CliTest(unittest.TestCase):
+    def setUp(self):
+        self.out = tempfile.mkdtemp()
+        self.config = write_config(CONFIG)
+
+    def args(self, *extra):
+        return [
+            "--repo", "Lascade-Co/travel-animator-android",
+            "--config", self.config,
+            "--tag", "3.9.3",
+            "--out", self.out,
+            "--prompt", "../../data/RELEASE_BLOG.md",
+            "--diff-file", str(Path("fixtures/release_blog_sample.diff")),
+            "--notes-text", "- Drag waypoints to reshape routes",
+            *extra,
+        ]
+
+    def fake_codex(self, meta=None, html=None):
+        payload = json.dumps(meta or GOOD_META)
+        body = html if html is not None else fixture("release_blog_good.html")
+
+        class Result:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+
+        def runner(cmd, **kwargs):
+            Path(self.out, "blog.json").write_text(payload, encoding="utf-8")
+            Path(self.out, "blog.html").write_text(body, encoding="utf-8")
+            return Result()
+
+        return runner
+
+    def test_dry_run_writes_artifacts_and_performs_no_write(self):
+        http = FakeHttp((200, fixture("release_blog_candidates.json")))
+        code = release_blog.main(self.args("--dry-run"), http=http, run=self.fake_codex())
+        self.assertEqual(code, 0)
+        self.assertTrue(Path(self.out, "blog.html").exists())
+        self.assertTrue(Path(self.out, "wp-payload.json").exists())
+        self.assertTrue(Path(self.out, "validation.txt").exists())
+        self.assertTrue(Path(self.out, "prompt.md").exists())
+        self.assertEqual([call for call in http.calls if call["method"] == "POST"], [])
+
+    def test_dry_run_payload_is_a_draft_with_the_generated_content(self):
+        http = FakeHttp((200, fixture("release_blog_candidates.json")))
+        release_blog.main(self.args("--dry-run"), http=http, run=self.fake_codex())
+        payload = json.loads(Path(self.out, "wp-payload.json").read_text())
+        self.assertEqual(payload["body"]["status"], "draft")
+        self.assertIn("waypoint", payload["body"]["content"].lower())
+        self.assertIn("hub.travelanimator.com", payload["url"])
+
+    def test_publish_creates_a_new_draft(self):
+        http = FakeHttp(
+            (200, "[]"),
+            (200, fixture("release_blog_candidates.json")),
+            (201, json.dumps({"id": 77})),
+        )
+        code = release_blog.main(
+            self.args("--publish", "--cms-user", "u", "--cms-password", "p"),
+            http=http,
+            run=self.fake_codex(),
+        )
+        self.assertEqual(code, 0)
+        writes = [call for call in http.calls if call["method"] == "POST"]
+        self.assertEqual(len(writes), 1)
+        self.assertTrue(writes[0]["url"].endswith("/wp-json/wp/v2/posts"))
+
+    def test_publish_overwrites_an_existing_draft(self):
+        existing = json.dumps(
+            [{"id": 41, "status": "draft", "slug": "old", "content": {"rendered": f"<!-- {MARKER} -->"}}]
+        )
+        http = FakeHttp(
+            (200, existing),
+            (200, fixture("release_blog_candidates.json")),
+            (200, json.dumps({"id": 41})),
+        )
+        release_blog.main(
+            self.args("--publish", "--cms-user", "u", "--cms-password", "p"),
+            http=http,
+            run=self.fake_codex(),
+        )
+        writes = [call for call in http.calls if call["method"] == "POST"]
+        self.assertTrue(writes[0]["url"].endswith("/posts/41"))
+
+    def test_a_published_marker_stops_before_generating(self):
+        existing = json.dumps(
+            [{"id": 41, "status": "publish", "slug": "live", "content": {"rendered": f"<!-- {MARKER} -->"}}]
+        )
+        http = FakeHttp((200, existing))
+        calls = []
+
+        def runner(cmd, **kwargs):
+            calls.append(cmd)
+            raise AssertionError("codex must not run when the release is already published")
+
+        code = release_blog.main(
+            self.args("--publish", "--cms-user", "u", "--cms-password", "p"),
+            http=http,
+            run=runner,
+        )
+        self.assertEqual(code, 0)
+        self.assertEqual(calls, [])
+        self.assertEqual([call for call in http.calls if call["method"] == "POST"], [])
+
+    def test_missing_credentials_generate_but_do_not_write(self):
+        http = FakeHttp((200, fixture("release_blog_candidates.json")))
+        code = release_blog.main(self.args("--publish"), http=http, run=self.fake_codex())
+        self.assertEqual(code, 0)
+        self.assertTrue(Path(self.out, "blog.html").exists())
+        self.assertEqual([call for call in http.calls if call["method"] == "POST"], [])
+        self.assertIn("credential", Path(self.out, "validation.txt").read_text().lower())
+
+    def test_an_unmapped_repo_exits_zero_with_no_artifacts(self):
+        code = release_blog.main(
+            [
+                "--repo", "Lascade-Co/some-other-app",
+                "--config", self.config,
+                "--tag", "1.0.0",
+                "--out", self.out,
+                "--dry-run",
+            ],
+            http=FakeHttp(),
+            run=self.fake_codex(),
+        )
+        self.assertEqual(code, 0)
+        self.assertFalse(Path(self.out, "blog.html").exists())
+
+    def test_an_ambiguous_repo_exits_zero_with_no_artifacts(self):
+        entries = json.loads(json.dumps(CONFIG))
+        entries[1]["repos"] = ["Lascade-Co/travel-animator-android"]
+        code = release_blog.main(
+            [
+                "--repo", "Lascade-Co/travel-animator-android",
+                "--config", write_config(entries),
+                "--tag", "3.9.3",
+                "--out", self.out,
+                "--dry-run",
+            ],
+            http=FakeHttp(),
+            run=self.fake_codex(),
+        )
+        self.assertEqual(code, 0)
+        self.assertFalse(Path(self.out, "blog.html").exists())
+
+    def test_codex_failure_exits_zero(self):
+        class Failed:
+            returncode = 1
+            stdout = ""
+            stderr = "not logged in"
+
+        http = FakeHttp((200, fixture("release_blog_candidates.json")))
+        code = release_blog.main(self.args("--dry-run"), http=http, run=lambda cmd, **kw: Failed())
+        self.assertEqual(code, 0)
+
+    def test_no_candidates_skips_generation(self):
+        http = FakeHttp((503, ""), (503, ""))
+        calls = []
+
+        def runner(cmd, **kwargs):
+            calls.append(cmd)
+            raise AssertionError("codex must not run without link candidates")
+
+        code = release_blog.main(self.args("--dry-run"), http=http, run=runner)
+        self.assertEqual(code, 0)
+        self.assertEqual(calls, [])
+
+    def test_a_failing_first_attempt_triggers_one_retry(self):
+        http = FakeHttp((200, fixture("release_blog_candidates.json")))
+        bodies = [fixture("release_blog_bad.html"), fixture("release_blog_good.html")]
+        attempts = []
+
+        class Result:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+
+        def runner(cmd, **kwargs):
+            attempts.append(kwargs.get("input", ""))
+            Path(self.out, "blog.json").write_text(json.dumps(GOOD_META), encoding="utf-8")
+            Path(self.out, "blog.html").write_text(bodies[len(attempts) - 1], encoding="utf-8")
+            return Result()
+
+        release_blog.main(self.args("--dry-run"), http=http, run=runner)
+        self.assertEqual(len(attempts), 2)
+        self.assertIn("PREVIOUS ATTEMPT", attempts[1])
+        self.assertTrue(Path(self.out, "prompt-retry.md").exists())
+        report = Path(self.out, "validation.txt").read_text()
+        self.assertIn("chose attempt 2", report)
+
+    def test_malformed_first_output_triggers_one_retry(self):
+        http = FakeHttp((200, fixture("release_blog_candidates.json")))
+        attempts = []
+
+        class Result:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+
+        def runner(cmd, **kwargs):
+            attempts.append(1)
+            if len(attempts) == 1:
+                Path(self.out, "blog.json").write_text("{bad", encoding="utf-8")
+                Path(self.out, "blog.html").write_text("<h2>bad</h2>", encoding="utf-8")
+            else:
+                Path(self.out, "blog.json").write_text(json.dumps(GOOD_META), encoding="utf-8")
+                Path(self.out, "blog.html").write_text(fixture("release_blog_good.html"), encoding="utf-8")
+            return Result()
+
+        code = release_blog.main(self.args("--dry-run"), http=http, run=runner)
+        self.assertEqual(code, 0)
+        self.assertEqual(len(attempts), 2)
+        self.assertTrue(Path(self.out, "wp-payload.json").exists())
+
+    def test_no_retry_flag_stops_after_one_attempt(self):
+        http = FakeHttp((200, fixture("release_blog_candidates.json")))
+        attempts = []
+
+        class Result:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+
+        def runner(cmd, **kwargs):
+            attempts.append(1)
+            Path(self.out, "blog.json").write_text(json.dumps(GOOD_META), encoding="utf-8")
+            Path(self.out, "blog.html").write_text(fixture("release_blog_bad.html"), encoding="utf-8")
+            return Result()
+
+        release_blog.main(self.args("--dry-run", "--no-retry"), http=http, run=runner)
+        self.assertEqual(len(attempts), 1)
+
+    def test_a_suppressed_finding_does_not_trigger_a_retry(self):
+        entries = json.loads(json.dumps(CONFIG))
+        entries[0]["suppress"] = ["G4"]
+        html = fixture("release_blog_good.html").replace(">route animation guide<", ">read more<")
+        attempts = []
+
+        class Result:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+
+        def runner(cmd, **kwargs):
+            attempts.append(1)
+            Path(self.out, "blog.json").write_text(json.dumps(GOOD_META), encoding="utf-8")
+            Path(self.out, "blog.html").write_text(html, encoding="utf-8")
+            return Result()
+
+        code = release_blog.main(
+            [*self.args("--dry-run")[:3], write_config(entries), *self.args("--dry-run")[4:]],
+            http=FakeHttp((200, fixture("release_blog_candidates.json"))),
+            run=runner,
+        )
+        self.assertEqual(code, 0)
+        self.assertEqual(len(attempts), 1)
+        self.assertIn("info", Path(self.out, "validation.txt").read_text())
+
+    def test_html_flag_skips_codex_entirely(self):
+        meta_path = Path(self.out, "hand.json")
+        html_path = Path(self.out, "hand.html")
+        meta_path.write_text(json.dumps(GOOD_META), encoding="utf-8")
+        html_path.write_text(fixture("release_blog_good.html"), encoding="utf-8")
+        http = FakeHttp((200, fixture("release_blog_candidates.json")))
+
+        def runner(cmd, **kwargs):
+            raise AssertionError("codex must not run with --html")
+
+        code = release_blog.main(
+            self.args("--dry-run", "--html", str(html_path), "--meta", str(meta_path)),
+            http=http,
+            run=runner,
+        )
+        self.assertEqual(code, 0)
+        self.assertTrue(Path(self.out, "wp-payload.json").exists())
+
+    def test_invalid_arguments_still_return_zero(self):
+        self.assertEqual(release_blog.main([], http=FakeHttp(), run=self.fake_codex()), 0)
 
 
 if __name__ == "__main__":
