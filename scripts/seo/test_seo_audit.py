@@ -76,15 +76,15 @@ def scripted(**over):
 
 
 class RegistryTest(unittest.TestCase):
-    def test_all_46_rules_registered(self):
-        self.assertEqual(len(ALL_RULES), 46)
+    def test_all_47_rules_registered(self):
+        self.assertEqual(len(ALL_RULES), 47)
 
     def test_every_documented_id_exists(self):
         expected = (
             [f"A{i}" for i in range(1, 6)]
             + [f"B{i}" for i in range(1, 8)]
             + [f"C{i}" for i in range(1, 5)]
-            + [f"D{i}" for i in range(1, 9)]
+            + [f"D{i}" for i in range(1, 10)]
             + [f"E{i}" for i in range(1, 7)]
             + [f"F{i}" for i in range(1, 5)]
             + [f"G{i}" for i in range(1, 6)]
@@ -687,7 +687,7 @@ class AuditTest(unittest.TestCase):
         summary = audit(site, Fetcher(scripted()))
         self.assertEqual(len(summary.pages), 3)
         self.assertIsNone(summary.error)
-        self.assertEqual(len(summary.rules), 46)
+        self.assertEqual(len(summary.rules), 47)
 
     def test_audit_reports_insufficient_contextual_internal_links(self):
         sparse_blog = fixture("good_blog.html").replace(

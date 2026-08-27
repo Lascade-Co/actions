@@ -14,6 +14,7 @@ OG_REQUIRED = ("og:title", "og:description", "og:url", "og:image", "og:type", "o
 FILENAME_ALT = re.compile(r"^[\w\-. ]+\.(png|jpe?g|webp|gif|svg|avif)$", re.IGNORECASE)
 FILENAME_ISH_ALT = re.compile(r"^(img|dsc|image|photo|banner|screenshot)[-_ ]?\d+", re.IGNORECASE)
 CONTENT_IMAGE_SOURCES = ("img", "srcset")
+PLACEHOLDER_MARKERS = ("data-placeholder", "data-strip-before-publish")
 
 
 def _parse_date(value):
@@ -195,6 +196,25 @@ def check_d8(page, site, urls, ctx):
     if not missing:
         return []
     return [finding(D8, SEVERITY_WARN, f"missing {' and '.join(missing)}", blog_url=page.url)]
+
+
+def check_d9(page, site, urls, ctx):
+    """Draft scaffolding that reached a published blog.
+
+    Placeholder media can answer successfully and therefore pass the resource
+    checks. The editor checklist is not media at all. Inspecting the served HTML
+    is the only reliable way to detect either after publication.
+    """
+    return [
+        finding(
+            D9,
+            SEVERITY_ERROR,
+            f"published blog still carries draft scaffolding ({marker})",
+            blog_url=page.url,
+        )
+        for marker in PLACEHOLDER_MARKERS
+        if marker in page.raw_html
+    ]
 
 
 # --- Group E -----------------------------------------------------------------
@@ -484,6 +504,7 @@ D5 = Rule("D5", "thin-content", "D", check_d5)
 D6 = Rule("D6", "image-alt-missing", "D", check_d6)
 D7 = Rule("D7", "duplicate-metadata", "D", check_d7, scope="run")
 D8 = Rule("D8", "document-meta-missing", "D", check_d8)
+D9 = Rule("D9", "placeholder-media-published", "D", check_d9)
 E1 = Rule("E1", "jsonld-unparseable", "E", check_e1)
 E2 = Rule("E2", "article-schema-incomplete", "E", check_e2)
 E3 = Rule("E3", "breadcrumb-invalid", "E", check_e3)
@@ -495,5 +516,5 @@ F2 = Rule("F2", "og-url-mismatch", "F", check_f2)
 F3 = Rule("F3", "twitter-incomplete", "F", check_f3)
 F4 = Rule("F4", "og-image-unsuitable", "F", check_f4)
 
-BLOG_RULES_DEF = [D1, D2, D3, D4, D5, D6, D8, E1, E2, E3, E4, E5, E6, F1, F2, F3, F4]
+BLOG_RULES_DEF = [D1, D2, D3, D4, D5, D6, D8, D9, E1, E2, E3, E4, E5, E6, F1, F2, F3, F4]
 RUN_RULES_DEF = [D7]

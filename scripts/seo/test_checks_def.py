@@ -227,6 +227,26 @@ class GroupDTest(unittest.TestCase):
     def test_d8_silent_when_both_present(self):
         self.assertEqual(run_rule("D8", make_page()), [])
 
+    def test_d9_fires_on_placeholder_media(self):
+        page = make_page(
+            raw_html='<article><img src="https://placehold.co/1600x900/png" '
+            'width="1600" height="900" data-placeholder="true" alt="The route editor"></article>'
+        )
+        findings = run_rule("D9", page)
+        self.assertEqual(findings[0].severity, SEVERITY_ERROR)
+        self.assertIn("data-placeholder", findings[0].message)
+
+    def test_d9_fires_on_an_unstripped_editor_checklist(self):
+        page = make_page(
+            raw_html='<article><div class="release-blog-checklist" '
+            'data-strip-before-publish="true">Replace these</div></article>'
+        )
+        self.assertEqual(run_rule("D9", page)[0].severity, SEVERITY_ERROR)
+
+    def test_d9_silent_on_clean_html(self):
+        page = make_page(raw_html='<article><img src="/real.png" alt="A real screenshot"></article>')
+        self.assertEqual(run_rule("D9", page), [])
+
 
 class GroupETest(unittest.TestCase):
     def test_e1_fires_on_unparseable_block(self):
@@ -410,7 +430,7 @@ class RegistryTest(unittest.TestCase):
     def test_ids_present_exactly_once(self):
         ids = sorted(rule.id for rule in BLOG_RULES_DEF + RUN_RULES_DEF)
         expected = sorted(
-            [f"D{i}" for i in range(1, 9)] + [f"E{i}" for i in range(1, 7)] + [f"F{i}" for i in range(1, 5)]
+            [f"D{i}" for i in range(1, 10)] + [f"E{i}" for i in range(1, 7)] + [f"F{i}" for i in range(1, 5)]
         )
         self.assertEqual(ids, expected)
 
