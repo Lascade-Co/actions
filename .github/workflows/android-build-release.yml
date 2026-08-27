@@ -266,7 +266,13 @@ jobs:
         id: notes
         shell: bash
         run: |
-          LAST_TAG=$(git tag --sort=-creatordate | head -1 || true)
+          LAST_TAG=""
+          while IFS= read -r CANDIDATE; do
+            if [[ "$CANDIDATE" =~ ^[vV]?[0-9]+(\.[0-9]+)*$ ]]; then
+              LAST_TAG="$CANDIDATE"
+              break
+            fi
+          done < <(git tag --merged HEAD --sort=-creatordate)
           if [ -z "$LAST_TAG" ]; then
             BASE=$(git rev-list --max-parents=0 HEAD)
             echo "No tags found; using initial commit ($BASE) as diff base."

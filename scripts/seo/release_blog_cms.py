@@ -54,6 +54,19 @@ def _cms_url(site, path: str, query: str) -> str:
     return f"https://{site.origin_host}/wp-json/wp/v2/{path}?{query}"
 
 
+def _canonical_candidate_url(site, item: dict) -> str:
+    """Map a CMS permalink onto the public blog URL for this site."""
+    link = str(item.get("link") or "")
+    slug = str(item.get("slug") or "").strip("/")
+    if not slug:
+        return ""
+    trailing_slash = "/" if urlparse(link).path.endswith("/") else ""
+    return (
+        f"https://{site.canonical_host}{site.listing_path.rstrip('/')}"
+        f"/{slug}{trailing_slash}"
+    )
+
+
 def fetch_link_candidates(site, *, http=requests_http) -> tuple[list[LinkCandidate], str]:
     """Return newest published blogs, falling back from the CMS to the sitemap."""
     query = (
@@ -66,13 +79,13 @@ def fetch_link_candidates(site, *, http=requests_http) -> tuple[list[LinkCandida
             payload = json.loads(body)
             candidates = [
                 LinkCandidate(
-                    url=item.get("link", ""),
+                    url=_canonical_candidate_url(site, item),
                     slug=item.get("slug", ""),
                     title=_plain((item.get("title") or {}).get("rendered", "")),
                     excerpt=_plain((item.get("excerpt") or {}).get("rendered", "")),
                 )
                 for item in payload
-                if item.get("link")
+                if _canonical_candidate_url(site, item)
             ]
             if candidates:
                 return candidates, ""

@@ -132,7 +132,15 @@ def run_codex(prompt_text: str, out_dir: str, *, run=subprocess.run) -> tuple[bo
         return False, f"could not clear stale codex output: {exc}"
     try:
         result = run(
-            ["codex", "exec", "--ephemeral", "--sandbox", "workspace-write", "-"],
+            [
+                "codex",
+                "exec",
+                "--ephemeral",
+                "--skip-git-repo-check",
+                "--sandbox",
+                "workspace-write",
+                "-",
+            ],
             input=prompt_text,
             capture_output=True,
             text=True,

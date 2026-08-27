@@ -80,9 +80,18 @@ def _git(run, repo_path: str, *args: str) -> str:
 
 
 def previous_tag(repo_path: str, head: str, *, run=subprocess.run) -> str | None:
-    """Return the tag immediately before ``head`` when one exists."""
-    out = _git(run, repo_path, "describe", "--tags", "--abbrev=0", f"{head}^")
-    return out.strip() or None
+    """Return the newest version-shaped tag reachable before ``head``.
+
+    Mobile repositories also carry debug and pull-request tags. A plain
+    ``git describe --tags`` can select one of those as the release base even
+    when a stable version tag is only minutes older.
+    """
+    out = _git(run, repo_path, "tag", "--merged", f"{head}^", "--sort=-creatordate")
+    for tag in out.splitlines():
+        candidate = tag[1:] if tag[:1].lower() == "v" else tag
+        if VERSION_SHAPE.fullmatch(candidate):
+            return tag
+    return None
 
 
 def build_digest(repo_path: str, base: str, head: str, notes: str, *, run=subprocess.run) -> str:

@@ -16,6 +16,7 @@ from release_blog_digest import (
     build_digest,
     filter_patch,
     marketing_version_from_tag,
+    previous_tag,
     truncate,
 )
 from release_blog_draft import build_prompt, parse_output, run_codex
@@ -167,6 +168,16 @@ class MarketingVersionTest(unittest.TestCase):
     def test_empty_tag_is_empty(self):
         self.assertEqual(marketing_version_from_tag(""), "")
 
+    def test_previous_tag_ignores_newer_debug_tags(self):
+        class FakeCompleted:
+            returncode = 0
+            stdout = "debug-pr-602\n4.0.141\ndebug-pr-601\n4.0.140\n"
+
+        self.assertEqual(
+            previous_tag("/tmp/repo", "4.0.142", run=lambda cmd, **kwargs: FakeCompleted()),
+            "4.0.141",
+        )
+
 
 class FilterPatchTest(unittest.TestCase):
     def setUp(self):
@@ -282,6 +293,21 @@ class LinkCandidateTest(unittest.TestCase):
         http = FakeHttp((200, fixture("release_blog_candidates.json")))
         candidates, _ = fetch_link_candidates(make_site(), http=http)
         self.assertNotIn("<p>", candidates[0].excerpt)
+
+    def test_origin_permalink_is_mapped_to_the_public_blog_url(self):
+        body = json.dumps(
+            [{
+                "slug": "route-animation-guide",
+                "link": "https://hub.travelanimator.com/route-animation-guide/",
+                "title": {"rendered": "Route animation guide"},
+                "excerpt": {"rendered": ""},
+            }]
+        )
+        candidates, _ = fetch_link_candidates(make_site(), http=FakeHttp((200, body)))
+        self.assertEqual(
+            candidates[0].url,
+            "https://www.travelanimator.com/hub/route-animation-guide/",
+        )
 
     def test_requests_only_published_blogs(self):
         http = FakeHttp((200, fixture("release_blog_candidates.json")))
@@ -646,6 +672,7 @@ class RunCodexTest(unittest.TestCase):
         self.assertIn("--sandbox", seen["cmd"])
         self.assertIn("workspace-write", seen["cmd"])
         self.assertIn("--ephemeral", seen["cmd"])
+        self.assertIn("--skip-git-repo-check", seen["cmd"])
         self.assertEqual(seen["input"], "PROMPT TEXT")
         self.assertEqual(seen["cwd"], "/tmp/out")
         self.assertNotIn("CMS_APP_PASSWORD", seen["env"])
