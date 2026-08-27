@@ -1,17 +1,22 @@
 # Release Blog — design
 
 **Date:** 2026-08-27
-**Status:** Approved (design), pending implementation plan
+**Status:** Approved (design), grilled against CONTEXT.md 2026-08-27, pending implementation plan
 **Scope:** New reusable workflow + `scripts/seo/release_blog*` module set + `data/RELEASE_BLOG.md`
-+ `repos` in `data/seo_sites.json`. Wired into `android-build-release.yml` only; Flutter and iOS
-adopt the same reusable workflow later.
++ `repos` in `data/seo_sites.json` + one new audit rule (`D9`). Wired into
+`android-build-release.yml` only; Flutter and iOS adopt the same reusable workflow later.
+
+**Vocabulary:** this pipeline creates a **draft**, which an **editor** publishes to make it a
+**blog**. There is no such noun as a "release blog" — see CONTEXT.md, Language — Release Blog. Links
+into existing blogs are **contextual internal links**, never "backlinks"; the pool is the **link
+candidates**.
 
 ## Problem
 
 Every Android release already turns its git diff into `releasenotes.txt` via Codex. The same diff
 carries everything a feature announcement needs — what changed, in which screens, for which users —
-and nothing is done with it. Marketing writes release blogs by hand, late or not at all, and the
-site's `/hub` gains no page for a shipped feature.
+and nothing is done with it. Marketing writes feature announcements by hand, late or not at all, and
+the site's `/hub` gains no page for a shipped feature.
 
 Meanwhile this repo already knows what a good blog looks like: `scripts/seo/` holds a 40-rule
 audit that grades published blogs on title length, meta description, heading order, word count,
@@ -21,15 +26,14 @@ publishes, never before.
 ## Goal
 
 On every Android release, turn the release diff into an SEO-validated, human-sounding HTML draft in
-the site's CMS, with real internal links to existing blogs and correctly-sized media stand-ins —
-and never let any part of that affect whether the release ships.
+the site's CMS, with real contextual internal links to existing blogs and correctly-sized
+placeholders — and never let any part of that affect whether the release ships.
 
 The pipeline must be runnable end-to-end on a laptop without dispatching a workflow.
 
 ## Decisions
 
-1. **A release blog lands as a CMS draft, never published.** An editor reviews and publishes. See
-   ADR-0011.
+1. **The pipeline creates a draft and never publishes it.** An **editor** publishes. See ADR-0011.
 2. **Every release produces a draft**, including internal-only ones. Predictable cadence; the editor
    bins what doesn't warrant a post. (Considered: abstain when the diff has no user-visible feature,
    the test `RELEASE_NOTES.md` already applies. Rejected — a silent skip is indistinguishable from a
@@ -37,17 +41,32 @@ The pipeline must be runnable end-to-end on a laptop without dispatching a workf
 3. **A reusable workflow, not a job in the Android runner.** Flutter needs this next; iOS after.
    Invoked with `workflow_call`.
 4. **Repo → site mapping lives in `data/seo_sites.json`** as a `repos` list per site. One central
-   file, self-documenting, and a repo with no match skips.
+   file, self-documenting. A repo matching no site skips; a repo matching two is a config error and
+   also skips — the pipeline never picks a site for you.
 5. **Codex CLI writes the draft** — the same `codex exec` path, auth secret and sandbox steps the
    release-notes generation already uses. No second model dependency, and it runs locally for anyone
    logged into codex.
-6. **Backlink candidates come from the CMS API**, sitemap as fallback.
-7. **Validation reuses the audit's own rules** against an explicit allowlist, retries once, and
-   publishes the better attempt regardless. Reporting, not gating.
-8. **CMS credentials come from the app's existing Infisical project**, `prod` / `/Build` — the
-   folder that already holds `KEYSTORE_BASE64`. Two new secrets: `CMS_USER`, `CMS_APP_PASSWORD`.
-9. **All logic lives in the Python CLI.** The workflow YAML holds no business rules, which is what
-   makes local testing and later reuse cheap.
+6. **The writer sees a release digest**, not a raw diff: release notes, commit subjects, diffstat, and
+   a filtered patch capped at 200 KB. The digest is the outer bound of what a draft may claim.
+7. **Link candidates come from the CMS API**, sitemap as fallback.
+8. **Validation reuses the audit's own rules** against an explicit allowlist, retries once, and
+   publishes the better attempt regardless. Reporting, not gating. See ADR-0012.
+9. **A site's `suppress` list applies here too** — a suppressed rule is evaluated and reported but
+   cannot trigger the retry or affect scoring. Suppression blocks its pipeline's consequence,
+   whatever that consequence is.
+10. **A re-run overwrites its own draft.** Every draft closes with a **release marker**; a marker
+    found on a draft means overwrite in place, a marker found on a published blog stops the run.
+    See ADR-0011.
+11. **A placeholder that reaches a live blog is caught by the audit**, not by this pipeline: new rule
+    `D9 placeholder-media-published` (`error`), added to the Blog SEO Audit as part of this change.
+12. **CMS credentials come from the app's existing Infisical project**, `prod` / `/Build` — the
+    folder that already holds `KEYSTORE_BASE64`. Two new secrets: `CMS_USER`, `CMS_APP_PASSWORD`.
+    `CMS_USER` must be a publishable editorial account, not a service identity: WordPress makes the
+    authenticating user the public byline and `E2`'s schema `author`. See ADR-0011.
+13. **The marketing version is derived from the tag**, not passed in — strip an optional leading `v`.
+    It reaches the writer as context only, and the body contract keeps it out of the title.
+14. **All logic lives in the Python CLI.** The workflow YAML holds no business rules, which is what
+    makes local testing and later reuse cheap.
 
 ## What is produced
 
@@ -77,7 +96,12 @@ Codex writes exactly two files into `out/`:
 }
 ```
 
-`blog.html` — the post body fragment only.
+`blog.html` — the post body fragment only, opening with the **editor checklist** block and closing
+with the **release marker**:
+
+```html
+<!-- release-blog: Lascade-Co/travel-animator-android@3.9.3 -->
+```
 
 ### Body contract
 
@@ -114,7 +138,7 @@ model output while named prohibitions do:
   adjectives are what make AI copy legible as AI copy.
 - No "Conclusion" heading; end on what the reader can now do.
 
-### Media stand-ins
+### Placeholders
 
 Placeholders point at `placehold.co` at exact dimensions, so layout and CLS are representative in
 the editor:
@@ -136,7 +160,7 @@ must not appear in the image. The split exists because a 300-character alt is wo
 readers and reads as keyword stuffing to a crawler, while a structured `prompt` field is directly
 consumable by an image-generation step later.
 
-1–6 placeholders per post. Video stand-ins use `<video>` with `width`/`height` and a `<p>` fallback
+1–6 placeholders per post. Video placeholders use `<video>` with `width`/`height` and a `<p>` fallback
 carrying the same description.
 
 The body opens with an **editor checklist** block listing every placeholder with its alt and prompt
@@ -144,13 +168,37 @@ in plain language, so whoever publishes has the remaining work enumerated rather
 block is wrapped in `<div class="release-blog-checklist" data-strip-before-publish="true">` and the
 checklist explicitly instructs its own deletion.
 
-## Backlink candidates
+## Release digest
+
+What the writer is shown, in this order, assembled by `release_blog_draft.py`:
+
+1. `releasenotes.txt` from the checked-out tag — what shipped, already in user-facing language.
+2. `git log --oneline <base>..<tag>` — commit subjects, often the clearest feature signal.
+3. `git diff --stat <base>..<tag>` — scale and which areas moved.
+4. The filtered patch.
+
+The patch drops what cannot inform a feature story and would crowd out what can:
+
+| Dropped | Why |
+|---|---|
+| `*.lock`, `*.lockb`, `gradle.lockfile`, `Podfile.lock`, `pubspec.lock` | dependency churn |
+| `build/`, `generated/`, `*.pb.*`, `*.g.dart`, `*.freezed.dart` | machine-written |
+| `Binary files ... differ` hunks | no information at all |
+| `values-*/strings.xml` | the same new strings repeated in 30 languages |
+
+`values/strings.xml` is **kept** deliberately — new default strings are the literal words on the new
+screen, and they are the single best source of concrete detail in an Android diff.
+
+Capped at 200 KB total, with `[diff truncated — N of M bytes shown]` appended when the cap is hit, so
+the writer knows it is working from a partial view rather than silently treating it as complete.
+
+## Link candidates
 
 `GET https://<origin_host>/wp-json/wp/v2/posts?per_page=100&status=publish&orderby=date&order=desc&_fields=title,excerpt,link,slug,date`
 
-A dedicated `fetch_candidates()` in `release_blog_cms.py` — deliberately **not** a change to
-`Fetcher.fetch_cms_posts`, whose `_fields` list the audit's group `I` depends on. Candidates are
-their own `BlogCandidate` dataclass; `seo_model.CmsPost` is untouched.
+A dedicated `fetch_link_candidates()` in `release_blog_cms.py` — deliberately **not** a change to
+`Fetcher.fetch_cms_posts`, whose `_fields` list the audit's group `I` depends on. Candidates are their
+own `LinkCandidate` dataclass; `seo_model.CmsPost` is untouched.
 
 Fallback when the CMS call fails: the site's `sitemap_url`, filtered to paths under `listing_path`,
 yielding URL + slug with no title. Relevance is then guessed from slug text, which is worse but not
@@ -187,9 +235,15 @@ Rules run with an empty URL-status map and a bare `SiteContext()`.
   omits.
 - `A3 B1 B2 B3 B4 B5 B6 G3 G5 D7 C3 H1 H2 H3 I1 I2 I3 I4` — need the network or the live site. That
   is the daily Blog SEO Audit's job, after publish.
+- `D9` — pure-HTML and therefore *eligible*, but a draft legitimately contains placeholders. Being
+  runnable offline is not the criterion; being answerable about a draft is. See ADR-0012.
 
 Verified 2026-08-27: every check has the uniform signature `check_x(page, site, urls, ctx)`, and the
 22 rules named above read neither `urls` nor `ctx`.
+
+**A suppressed rule** still evaluates and still appears in `validation.txt`, but cannot trigger the
+retry or affect scoring — the audit's suppression semantics, generalised from delivery to whatever a
+pipeline's consequence is.
 
 ### Local checks
 
@@ -229,8 +283,33 @@ served than an editor holding nothing.
 
 ## Publishing
 
-`POST https://<origin_host>/wp-json/wp/v2/posts` with HTTP Basic auth (`CMS_USER` /
-`CMS_APP_PASSWORD` — a WordPress application password), body:
+### The release marker, checked first
+
+Before anything is generated, an authenticated search looks for this release's marker:
+
+`GET /wp-json/wp/v2/posts?status=draft,publish&search=<marker>&_fields=id,slug,status,content`
+
+WordPress `search` is fuzzy, so the result is filtered in code for the exact marker string — a
+substring match on `content.rendered`, never trust of the search ranking. Three outcomes:
+
+| Found on | Action |
+|---|---|
+| nothing | generate, `POST` a new draft |
+| a **draft** | generate, then overwrite that post in place: `POST /wp/v2/posts/<id>`, `status` stays `draft` |
+| a published **blog** | stop before generating. Log it, upload nothing, exit 0 |
+
+Overwriting discards edits an editor had already made to that draft. That is the accepted trade: a
+re-run means the release itself was re-cut, and two near-identical drafts leave the editor guessing
+which is current. A published match is never touched — regenerating over a live, edited page is the
+one outcome worse than doing nothing.
+
+Because a published match short-circuits before generation, a re-run of an already-published release
+costs no Codex call.
+
+### The write
+
+`POST https://<origin_host>/wp-json/wp/v2/posts` (or `/<id>` to overwrite) with HTTP Basic auth
+(`CMS_USER` / `CMS_APP_PASSWORD` — a WordPress application password), body:
 
 ```json
 { "status": "draft", "title": "...", "slug": "...", "excerpt": "...", "content": "<the fragment>" }
@@ -238,6 +317,10 @@ served than an editor holding nothing.
 
 `date` is omitted so WordPress stamps it. A non-2xx response is logged to `validation.txt` with
 status and body; the run still exits 0.
+
+`CMS_USER` is the public byline: WordPress attributes the post to the authenticating account and the
+front end feeds that into the visible byline and `E2`'s schema `author`. It must be a properly-named
+editorial account with a display name, bio and avatar — see ADR-0011.
 
 `--dry-run` stops immediately before the POST and writes `out/wp-payload.json` with the exact body
 and target URL. `--publish` is its explicit opposite, so no local run reaches a live CMS by
@@ -251,6 +334,9 @@ caller's `blog` job is `continue-on-error: true`. Nothing about a blog can redde
 | Condition | Behaviour |
 |---|---|
 | `inputs.repo` matches no site's `repos` | log, no artifacts, exit 0 |
+| `inputs.repo` matches two sites' `repos` | log both names as a config error, no artifacts, exit 0 |
+| the release marker is found on a published blog | log, no artifacts, no Codex call, exit 0 |
+| the marker search fails (non-2xx, auth rejected) | treat as "not found" and proceed; worst case a duplicate draft, which is recoverable, where skipping would silently lose a blog |
 | CMS candidate fetch fails | fall back to sitemap; note it in `validation.txt` |
 | Both candidate sources fail | log, skip generation entirely (a blog with no internal links is worse than no blog), exit 0 |
 | Codex missing, unauthenticated, or non-zero | log stderr tail, exit 0 |
@@ -270,7 +356,7 @@ directory (scripts-refactor spec, constraint 1).
 | Module | Responsibility |
 |---|---|
 | `release_blog.py` | CLI entry, orchestration, artifact writing, exit-0 guarantee |
-| `release_blog_cms.py` | `fetch_candidates()`, sitemap fallback, `post_draft()` |
+| `release_blog_cms.py` | `fetch_link_candidates()`, sitemap fallback, `find_by_marker()`, `write_draft()` |
 | `release_blog_draft.py` | prompt assembly, `codex exec` invocation, output parsing |
 | `release_blog_check.py` | synthetic page wrap, rule allowlist, local checks, scoring |
 
@@ -286,6 +372,11 @@ Reused unchanged: `seo_model` (thresholds, `GENERIC_ANCHOR_TEXT`, `SiteConfig`, 
 constructed in exactly one place (`site_config_from_dict`) and every caller goes through the dict
 parser.
 
+`scripts/seo/seo_checks_def.py` — new rule `D9 placeholder-media-published` (`error`): fires when
+served blog HTML contains `data-placeholder` or `data-strip-before-publish`. Pure-HTML, registered in
+the audit's rule list and its report grouping, and **excluded from the pre-publish allowlist** by
+design. Its own tests live with the audit's, in `scripts/seo/test_checks_def.py`.
+
 `data/seo_sites.json` — each site gains `repos`:
 
 ```json
@@ -300,9 +391,10 @@ Matching is case-insensitive on the full `owner/name`.
 python3 scripts/seo/release_blog.py
   --site NAME | --repo OWNER/NAME     resolve the site config
   --config PATH                       data/seo_sites.json
-  --version STRING                    display version, copy only
+  --tag STRING                        the release tag; marketing version derived from it
   --repo-path PATH                    checkout to diff (default: cwd)
-  --base REF --head REF               diff range (default base: previous tag before head)
+  --base REF --head REF               diff range (default base: previous tag before head,
+                                      default head: --tag)
   --notes-file PATH                   releasenotes.txt (default: <repo-path>/releasenotes.txt)
   --out DIR                           artifact directory (default: ./out)
   --dry-run | --publish               required, mutually exclusive
@@ -310,6 +402,7 @@ python3 scripts/seo/release_blog.py
   --candidates-file PATH              skip the CMS call, use a saved candidate list
   --html PATH --meta PATH             skip Codex, validate and publish a hand-written draft
   --no-retry                          single attempt
+  --ignore-marker                     generate even if this release's marker already exists
 ```
 
 Outputs, identical in CI and locally: `blog.html`, `blog.json`, `wp-payload.json`,
@@ -321,7 +414,7 @@ Typical local run:
 python3 scripts/seo/release_blog.py \
   --site travelanimator --config data/seo_sites.json \
   --repo-path ~/src/travel-animator-android \
-  --base v3.9.2 --head HEAD --version 3.9.3 \
+  --base v3.9.2 --tag v3.9.3 \
   --out ./out --dry-run
 ```
 
@@ -331,17 +424,20 @@ python3 scripts/seo/release_blog.py \
 on:
   workflow_call:
     inputs:
-      repo:         { required: true,  type: string }
-      ref:          { required: true,  type: string }
-      version:      { required: true,  type: string }
+      repo:         { required: true,  type: string }   # Lascade-Co/travel-animator-android
+      tag:          { required: true,  type: string }   # 3.9.3 (Android) | v3.9.3 (Flutter)
       project_slug: { required: true,  type: string }
-      base:         { required: false, type: string }
+      base:         { required: false, type: string }   # blank = previous tag before `tag`
       dry_run:      { required: false, type: boolean, default: false }
     secrets: inherit
 ```
 
+`tag` serves as both the checkout ref and the source of the marketing version (leading `v`
+stripped). iOS cuts no tag, so it will need an explicit override when it adopts this — a
+`marketing_version` input defaulting to the derivation.
+
 Steps: mint App token (`actions/create-github-app-token@v3`) → checkout `inputs.repo` at
-`inputs.ref`, `fetch-depth: 0` → `actions/setup-python@v7` 3.13 → `pip install requests==2.34.2
+`inputs.tag`, `fetch-depth: 0` → `actions/setup-python@v7` 3.13 → `pip install requests==2.34.2
 beautifulsoup4==4.15.0 lxml==6.1.1` (pinned identically to the audit, and for the same reason) →
 Infisical `/Build` `prod` as env → restore Codex auth from `CODEX_AUTH_JSON_BASE_64` + install codex
 + enable user namespaces (lifted verbatim from `android-build-release.yml`) → `curl` the four
@@ -358,14 +454,13 @@ The `release` job gains three outputs from values it already computes:
 
 ```yaml
     outputs:
-      tag:     ${{ steps.increment_version.outputs.new_version }}
-      version: ${{ steps.increment_version.outputs.new_version }}
-      base:    ${{ steps.notes.outputs.base }}
+      tag:  ${{ steps.increment_version.outputs.new_version }}
+      base: ${{ steps.notes.outputs.base }}
 ```
 
-`tag` and `version` are the same string on Android (tags are bare `3.9.3`) and deliberately separate
-inputs, because Flutter tags `v3.9.3` while its display version is `3.9.3`. The `Check if release
-notes are outdated` step is unconditional, so `base` is always set.
+Android tags bare (`3.9.3`), so `tag` is the version string as-is; Flutter tags `v3.9.3` and the
+leading `v` is stripped when deriving the marketing version. The `Check if release notes are
+outdated` step is unconditional, so `base` is always set.
 
 New job:
 
@@ -376,8 +471,7 @@ New job:
     uses: ./.github/workflows/release-blog.yml
     with:
       repo:         ${{ github.event.client_payload.repo }}
-      ref:          ${{ needs.release.outputs.tag }}
-      version:      ${{ needs.release.outputs.version }}
+      tag:          ${{ needs.release.outputs.tag }}
       project_slug: ${{ github.event.client_payload.project_slug }}
       base:         ${{ needs.release.outputs.base }}
     secrets: inherit
@@ -398,22 +492,21 @@ identifiers and avoids "WordPress".
 
 ## Documentation
 
-Part of the change, not a follow-up.
+Written during design (2026-08-27), not deferred to implementation.
 
-**`docs/adr/0011-release-blogs-are-validated-drafts.md`** — three decisions that will read as
-arbitrary in six months otherwise: why a generated blog lands as a draft and never publishes itself;
-why pre-publish validation reports rather than blocks (and why it therefore publishes a draft
-carrying known warnings); and why a blog failure can never redden a release, extending ADR-0003's
-reasoning from a cron to a release-path job. It also records what was considered and rejected —
-abstaining on internal-only releases, and hard-gating the POST on error findings.
-
-**`CONTEXT.md`** gains a **Language — Release Blog** section plus its **Relationships** block, and
-one entry under **Flagged ambiguities**. The ambiguity is load-bearing: "blog" today means one
-published article at `www.<domain>/hub/<slug>`, and this pipeline introduces an unpublished
-generated draft. Resolution — **blog** keeps meaning the published article, so the audit's `B5`/`I3`
-reasoning stays unambiguous, and **release blog** means the generated draft. Terms to define:
-**release blog**, **draft**, **backlink candidate**, **placeholder**, **editor checklist**,
-**pre-publish allowlist**, **attempt**.
+- **`docs/adr/0011-release-blog-creates-drafts.md`** — the human-in-the-loop stance: draft only,
+  rejected alternatives (auto-publish, PR into a content repo, release artifact), placeholders
+  legitimate in a draft and caught post-publish by `D9`, overwrite-own-draft / stop-on-published, the
+  authenticating account as the public byline, and never reddening a release (extending ADR-0003 from
+  a cron onto the release path).
+- **`docs/adr/0012-pre-publish-validation-allowlist.md`** — why 22 rules and not the audit, why each
+  exclusion class is excluded, why `D9` is excluded despite being eligible, `info` inert, suppression
+  applying, one retry not a loop, and the trap that adding a network-dependent rule to the allowlist
+  breaks validation silently.
+- **`CONTEXT.md`** — a **Language — Release Blog** section (**draft**, **release digest**, **release
+  marker**, **placeholder**, **editor**, **editor checklist**, **link candidate**), its
+  **Relationships** block, two **Example dialogue** exchanges, a generalised **Suppressed rule**
+  definition, and a flagged ambiguity resolving "backlink" to **contextual internal link**.
 
 ## Testing
 
@@ -431,9 +524,21 @@ reasoning stays unambiguous, and **release blog** means the generated draft. Ter
 - attempt scoring: fewer errors wins; equal errors → fewer warns; full tie → first
 - `wp-payload.json` shape, including `status: draft`
 - `--dry-run` performs no POST (transport double asserts zero calls)
+- release digest: filters drop lockfiles / generated / binary / `values-de`, keep `values/strings.xml`;
+  the 200 KB cap appends the truncation notice
+- marketing version derived from `3.9.3`, `v3.9.3`, and a non-version tag (falls back to raw)
+- marker handling: absent → create; on a draft → overwrite that id, `status` still `draft`; on a
+  published post → no generation and no write; fuzzy search returning a non-matching post → treated
+  as absent
+- suppression: a suppressed rule appears in `validation.txt` but triggers no retry and does not
+  change which attempt wins
+- ambiguous mapping: a repo in two site configs produces no draft
 
 Fixtures in `scripts/seo/fixtures/`: `release_blog_good.html`, `release_blog_bad.html`,
-`release_blog_cms_posts.json`, `release_blog_sample.diff`.
+`release_blog_candidates.json`, `release_blog_sample.diff`.
+
+`D9`'s tests belong to the audit and live in `scripts/seo/test_checks_def.py`: fires on
+`data-placeholder`, fires on `data-strip-before-publish`, silent on clean HTML.
 
 ## Verification
 
@@ -451,14 +556,17 @@ Fixtures in `scripts/seo/fixtures/`: `release_blog_good.html`, `release_blog_bad
 
 - Generating real images or video. Placeholders and prompts only; `media[].prompt` is the seam.
 - Flutter and iOS wiring. The reusable workflow makes each a ~10-line addition when wanted.
-- Publishing, scheduling, or updating an existing post. Draft creation only; no `PUT`.
+- Publishing or scheduling. Drafts only — the sole update path is overwriting this pipeline's own
+  unpublished draft, identified by its release marker.
 - Social copy, newsletters, changelog pages.
 - Translations.
 
 ## Open items
 
-- `placehold.co` is an external dependency in a draft. If it ever goes away the editor sees broken
-  images in an unpublished draft — annoying, not harmful. Revisit if it becomes noise.
-- Nothing enforces that the checklist block is stripped before publish. The daily audit will not
-  flag it. If editors forget, a `data-strip-before-publish` check belongs in the audit's rule set,
-  not here.
+- `placehold.co` is an external dependency inside a draft. If it disappears, an editor sees broken
+  images in something unpublished — annoying, not harmful. `D9` covers the case that actually matters.
+- The pipeline never learns whether drafts get published. If editors stop reviewing them, the symptom
+  is silence: no red run, no message, just a `/hub` that stops gaining pages. Deliberate for now
+  (ADR-0011); a "drafts older than N days" nudge would belong in the daily audit, not here.
+- Categories and tags are not set on the draft, so it lands in WordPress's default category. If the
+  site's `/hub` filters by category this will need a per-site config value.

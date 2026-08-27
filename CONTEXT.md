@@ -1,7 +1,7 @@
 # Lascade Actions
 
-The shared vocabulary for this repo's pipelines. Four have enough domain language to need it:
-**Daily Catchup**, **Blog SEO Audit**, **Marketing Net**, and **iOS Builds**.
+The shared vocabulary for this repo's pipelines. Five have enough domain language to need it:
+**Daily Catchup**, **Blog SEO Audit**, **Release Blog**, **Marketing Net**, and **iOS Builds**.
 
 ## Language — Daily Catchup
 
@@ -118,8 +118,10 @@ A rule's weight — **error** (crawl or index correctness is actively broken), *
 and warns gate delivery; info never does.
 
 **Suppressed rule**:
-A rule named in a **site config**'s `suppress` list — still evaluated and still shown in the
-report, but unable to trigger delivery. For known, accepted conditions.
+A rule named in a **site config**'s `suppress` list — still evaluated and still reported, but unable
+to trigger its pipeline's consequence: delivery in an **audit run**, the retry and attempt scoring in
+the **Release Blog** pipeline. For known, accepted conditions; a suppress entry means "accepted on
+this site" wherever it is read.
 _Avoid_: disabled, ignored, muted.
 
 **Site config**:
@@ -138,6 +140,69 @@ never share a report.
   audit run delivers its report.
 - **Origin** URLs are legitimate only as **asset URLs**. Any other origin URL is a **finding** —
   `error` when in a **crawlable position**, `warn` when merely present in the markup.
+
+## Language — Release Blog
+
+The per-release pipeline (`.github/workflows/release-blog.yml`) that turns a release diff into an
+SEO-validated draft in the site's **CMS**, invoked by the central release runners.
+
+**Draft**:
+An unpublished post in the **CMS** — what this pipeline creates and the only thing it ever creates.
+An editor turns a draft into a **blog** by publishing it; nothing in this pipeline can.
+_Avoid_: release blog, generated blog, post, article.
+
+**Release digest**:
+What the writer is told about a release — the release notes, the commit subjects, the diffstat, and a
+filtered patch. It is the outer bound of what a **draft** may claim: anything not in the digest is a
+fabrication.
+_Avoid_: context, payload, diff (the digest is more than the diff).
+
+**Release marker**:
+The `<!-- release-blog: <owner>/<repo>@<tag> -->` comment closing every **draft** — the pipeline's
+identity for one release. A re-run finds its own marker and overwrites that **draft** in place rather
+than adding a second one; a marker found on a published **blog** stops the run instead.
+_Avoid_: fingerprint, sentinel, idempotency key.
+
+**Placeholder**:
+A sized `<img>`/`<video>` stand-in in a **draft**, carrying the real image's description as `alt` and
+a generation brief alongside it, marked `data-placeholder`. Expected in a draft; an `error` (`D9`) if
+it survives into a published **blog**.
+_Avoid_: stand-in, dummy image, mock.
+
+**Editor**:
+The person who reviews a **draft** and publishes it. The only actor that can turn a draft into a
+**blog**, and the reader the **editor checklist** is written for.
+
+**Editor checklist**:
+The block at the top of a **draft** listing every **placeholder** with its description and generation
+brief, marked `data-strip-before-publish` and instructing its own deletion.
+
+**Link candidate**:
+One existing **blog** offered to the writer as a possible **contextual internal link** target —
+title, canonical URL and excerpt, read from the **CMS** newest-first.
+_Avoid_: backlink, back link, inbound link.
+
+## Relationships — Release Blog
+
+- One release produces one **draft**, addressed to the one **site config** whose `repos` list names
+  the releasing repo. A repo named by no site config produces nothing; a repo named by two is a
+  config error and also produces nothing — the pipeline never picks a site for you.
+- The **marketing version** the writer is told about is derived from the tag, not passed in — the
+  only version-shaped value a release runner reliably has. iOS cuts no tag, so it will need an
+  explicit value when it adopts this.
+- A release is identified by its **release marker**, never by the draft's slug — the slug is the
+  writer's SEO choice and varies between runs of the same release.
+- A **draft** is invisible to the **Blog SEO Audit**: the audit reads the **CMS** unauthenticated,
+  which returns published posts only. Were credentials ever added there, every draft would read as
+  `I1` (in the CMS, absent from `www`) — the audit's blindness to drafts is load-bearing, not
+  incidental.
+- **Link candidates** are read from the **CMS** and become **contextual internal links** in the
+  draft. A link to anything not in the candidate list is a fabricated URL and is rejected.
+- A **draft** becomes a **blog** only when an **editor** publishes it, at which point the audit's
+  full rule set applies to it like any other blog.
+- **Placeholders** and the **editor checklist** are legitimate in a **draft** and forbidden in a
+  **blog** — the one condition this repo checks on both sides of publication, pre-publish by the
+  Release Blog pipeline (which permits them) and post-publish by `D9` (which does not).
 
 ## Language — Marketing Net
 
@@ -286,6 +351,18 @@ A workflow in this repo that does the work, invoked by `repository_dispatch` fro
 > position**. That's why it's `warn` and not `error`. If it ever shows up in an `a[href]`,
 > that's A1 and it's an `error`."
 
+> **Dev:** "The draft still has placehold.co images. Do I need to fix that before it goes to WP?"
+> **Maintainer:** "No — **placeholders** belong in a **draft**, that's what the **editor checklist**
+> is for. They only become a problem the moment it's a **blog**: `D9` fires `error` on any
+> `data-placeholder` in served HTML. So the pipeline puts them in and the audit takes them out, and
+> the only person who can move it between those two states is the **editor**."
+
+> **Dev:** "Codex linked to /hub/best-travel-routes and that page doesn't exist. Why didn't it just
+> pick a real one?"
+> **Maintainer:** "It invented a plausible URL, which is the failure this pipeline expects. Every
+> **contextual internal link** has to match a **link candidate** verbatim or validation rejects it and
+> burns the retry saying so. A **draft** can only link to blogs the **CMS** actually returned."
+
 > **Dev:** "Meta's token expired overnight. Do we post $0 for it?"
 > **Maintainer:** "No — it renders **unavailable** and drops out of the **marketing net**, with a
 > warning line. A zero would read as 'we spent nothing on Meta this month', which is a different
@@ -312,3 +389,7 @@ A workflow in this repo that does the work, invoked by `repository_dispatch` fro
   Resolved: **origin** is the host, **blog listing** is the index, **blog** is one article, and
   **CMS** is the authoring system. The word "hub" survives only as the literal URL path
   `/hub`, never as vocabulary.
+- "backlink" was used for the links a release blog places into existing blogs — resolved: those are
+  **contextual internal links**, the term the audit already uses, and the pool they are chosen from
+  is the **link candidates**. "Backlink" means an inbound link from another site and is reserved for
+  that, so it never names an internal one.
