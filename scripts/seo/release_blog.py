@@ -25,7 +25,7 @@ from release_blog_cms import (
 )
 from release_blog_digest import build_digest, marketing_version_from_tag, previous_tag
 from release_blog_draft import build_prompt, load_prompt, parse_output, run_codex
-from seo_model import load_site_config, resolve_site_for_repo
+from seo_model import SEVERITY_ERROR, SEVERITY_WARN, load_site_config, resolve_site_for_repo
 
 
 def log(message: str) -> None:
@@ -214,7 +214,12 @@ def _run(argv=None, *, http=None, run=None) -> int:
             )
             name = "prompt.md" if index == 0 else "prompt-retry.md"
             _write_text(out / name, prompt)
-            ok, detail = run_codex(prompt, str(out), run=run)
+            ok, detail = run_codex(
+                prompt,
+                str(out),
+                run=run,
+                status=lambda message, attempt=index + 1: log(f"attempt {attempt}: {message}"),
+            )
             log(f"attempt {index + 1}: {detail}")
             if not ok:
                 notes.append(detail)
@@ -229,6 +234,14 @@ def _run(argv=None, *, http=None, run=None) -> int:
             attempt = validate(site, meta, html, candidates)
             attempts.append(attempt)
             log(f"attempt {index + 1}: {attempt.errors} errors, {attempt.warns} warns")
+            for finding in attempt.findings:
+                if finding.severity not in (SEVERITY_ERROR, SEVERITY_WARN):
+                    continue
+                evidence = f" [{finding.evidence}]" if finding.evidence else ""
+                log(
+                    f"attempt {index + 1}: {finding.severity} {finding.rule}: "
+                    f"{finding.message}{evidence}"
+                )
             if not blocking(attempt):
                 break
             previous_html, previous_findings = html, attempt.findings

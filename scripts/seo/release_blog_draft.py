@@ -5,12 +5,16 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import threading
+import time
+from collections.abc import Callable
 from pathlib import Path
 
 from seo_model import SEVERITY_ERROR, SEVERITY_WARN
 
 PROMPT_URL = "https://raw.githubusercontent.com/Lascade-Co/actions/main/data/RELEASE_BLOG.md"
 CODEX_TIMEOUT = 900
+CODEX_STATUS_INTERVAL = 20
 
 CODEX_ENV_ALLOWLIST = (
     "PATH",
@@ -121,7 +125,24 @@ def build_prompt(
     return "\n".join(sections)
 
 
-def run_codex(prompt_text: str, out_dir: str, *, run=subprocess.run) -> tuple[bool, str]:
+def _emit_status(status: Callable[[str], None] | None, message: str) -> None:
+    """Report progress without allowing a display failure to stop generation."""
+    if status is None:
+        return
+    try:
+        status(message)
+    except Exception:
+        pass
+
+
+def run_codex(
+    prompt_text: str,
+    out_dir: str,
+    *,
+    run=subprocess.run,
+    status: Callable[[str], None] | None = None,
+    status_interval: float = CODEX_STATUS_INTERVAL,
+) -> tuple[bool, str]:
     """Run Codex once in an isolated output directory without raising."""
     output = Path(out_dir)
     output.mkdir(parents=True, exist_ok=True)
@@ -130,31 +151,50 @@ def run_codex(prompt_text: str, out_dir: str, *, run=subprocess.run) -> tuple[bo
             output.joinpath(name).unlink(missing_ok=True)
     except OSError as exc:
         return False, f"could not clear stale codex output: {exc}"
+
+    stopped = threading.Event()
+    heartbeat = None
+    _emit_status(status, "Codex generation started; this can take several minutes")
+    if status is not None and status_interval > 0:
+        started_at = time.monotonic()
+
+        def report_while_running():
+            while not stopped.wait(status_interval):
+                elapsed = int(time.monotonic() - started_at)
+                _emit_status(status, f"Codex is still generating ({elapsed}s elapsed)")
+
+        heartbeat = threading.Thread(target=report_while_running, daemon=True)
+        heartbeat.start()
     try:
-        result = run(
-            [
-                "codex",
-                "exec",
-                "--ephemeral",
-                "--skip-git-repo-check",
-                "--sandbox",
-                "workspace-write",
-                "-",
-            ],
-            input=prompt_text,
-            capture_output=True,
-            text=True,
-            timeout=CODEX_TIMEOUT,
-            check=False,
-            cwd=out_dir,
-            env=_codex_env(),
-        )
-    except FileNotFoundError:
-        return False, "codex is not installed or not on PATH"
-    except subprocess.TimeoutExpired:
-        return False, f"codex timed out after {CODEX_TIMEOUT}s"
-    except OSError as exc:
-        return False, f"codex could not be started: {exc}"
+        try:
+            result = run(
+                [
+                    "codex",
+                    "exec",
+                    "--ephemeral",
+                    "--skip-git-repo-check",
+                    "--sandbox",
+                    "workspace-write",
+                    "-",
+                ],
+                input=prompt_text,
+                capture_output=True,
+                text=True,
+                timeout=CODEX_TIMEOUT,
+                check=False,
+                cwd=out_dir,
+                env=_codex_env(),
+            )
+        except FileNotFoundError:
+            return False, "codex is not installed or not on PATH"
+        except subprocess.TimeoutExpired:
+            return False, f"codex timed out after {CODEX_TIMEOUT}s"
+        except OSError as exc:
+            return False, f"codex could not be started: {exc}"
+    finally:
+        stopped.set()
+        if heartbeat is not None:
+            heartbeat.join()
     if result.returncode != 0:
         tail = (result.stderr or result.stdout or "").strip()[-800:]
         return False, f"codex exited {result.returncode}: {tail}"

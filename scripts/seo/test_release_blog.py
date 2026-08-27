@@ -6,7 +6,10 @@ import json
 import os
 import re
 import tempfile
+import time
 import unittest
+from contextlib import redirect_stdout
+from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
 
@@ -695,6 +698,28 @@ class RunCodexTest(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("codex", detail)
 
+    def test_reports_start_and_periodic_status_while_codex_runs(self):
+        class Result:
+            returncode = 0
+            stdout = "done"
+            stderr = ""
+
+        def slow_run(cmd, **kwargs):
+            time.sleep(0.04)
+            return Result()
+
+        messages = []
+        ok, _detail = run_codex(
+            "PROMPT",
+            "/tmp/out",
+            run=slow_run,
+            status=messages.append,
+            status_interval=0.01,
+        )
+        self.assertTrue(ok)
+        self.assertIn("generation started", messages[0])
+        self.assertTrue(any("still generating" in message for message in messages))
+
 
 class CliTest(unittest.TestCase):
     def setUp(self):
@@ -926,6 +951,20 @@ class CliTest(unittest.TestCase):
 
         release_blog.main(self.args("--dry-run", "--no-retry"), http=http, run=runner)
         self.assertEqual(len(attempts), 1)
+
+    def test_validation_findings_are_printed_after_the_attempt_summary(self):
+        http = FakeHttp((200, fixture("release_blog_candidates.json")))
+        output = StringIO()
+        with redirect_stdout(output):
+            release_blog.main(
+                self.args("--dry-run", "--no-retry"),
+                http=http,
+                run=self.fake_codex(html=fixture("release_blog_bad.html")),
+            )
+        text = output.getvalue()
+        self.assertIn("attempt 1: 3 errors, 4 warns", text)
+        self.assertIn("attempt 1: error A1: origin URL", text)
+        self.assertIn("attempt 1: warn B7:", text)
 
     def test_a_suppressed_finding_does_not_trigger_a_retry(self):
         entries = json.loads(json.dumps(CONFIG))
