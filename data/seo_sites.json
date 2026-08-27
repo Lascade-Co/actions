@@ -16,6 +16,10 @@
     "sitemap_url": "https://www.travelanimator.com/sitemap.xml",
     "blog_count": 10,
     "cms_api": true,
+    "repos": [
+      "Lascade-Co/travel-animator-android",
+      "Lascade-Co/travel-animator-ios"
+    ],
     "suppress": [],
     "thresholds": {}
   },
@@ -34,6 +38,9 @@
     "sitemap_url": "https://www.marineradar.com/sitemap.xml",
     "blog_count": 10,
     "cms_api": true,
+    "repos": [
+      "Lascade-Co/marine-tracking-flutter"
+    ],
     "suppress": [],
     "thresholds": {}
   }

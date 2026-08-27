@@ -50,6 +50,7 @@ class SiteConfig:
     cms_api: bool
     suppress: frozenset[str]
     thresholds: dict
+    repos: tuple[str, ...] = ()
 
     @property
     def base_url(self) -> str:
@@ -86,6 +87,7 @@ def site_config_from_dict(raw: dict) -> SiteConfig:
         cms_api=bool(raw.get("cms_api", False)),
         suppress=frozenset(raw.get("suppress") or ()),
         thresholds=thresholds,
+        repos=tuple(str(repo).lower() for repo in (raw.get("repos") or ())),
     )
 
 
@@ -97,6 +99,27 @@ def load_site_config(path: str, name: str) -> SiteConfig:
             return site_config_from_dict(raw)
     known = ", ".join(sorted(e["name"] for e in entries))
     raise KeyError(f"no site named {name!r} in {path} (known: {known})")
+
+
+def resolve_site_for_repo(path: str, repo: str) -> tuple[SiteConfig | None, str]:
+    """Return the one site config whose ``repos`` list names ``repo``.
+
+    Missing and ambiguous matches are non-fatal outcomes for the draft pipeline.
+    An unreadable or invalid config still raises so its caller can report the
+    underlying configuration failure accurately.
+    """
+    wanted = repo.lower()
+    with open(path, encoding="utf-8") as fh:
+        entries = json.load(fh)
+    sites = [site_config_from_dict(raw) for raw in entries]
+    matches = [site for site in sites if wanted in site.repos]
+    if len(matches) == 1:
+        return matches[0], ""
+    if not matches:
+        known = ", ".join(sorted(site.name for site in sites))
+        return None, f"no site config names {repo!r} in its repos list (known sites: {known})"
+    names = ", ".join(sorted(site.name for site in matches))
+    return None, f"{repo!r} is named by two site configs ({names}) — config error, refusing to pick one"
 
 
 @dataclass
