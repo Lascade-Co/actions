@@ -563,6 +563,29 @@ Fixtures in `scripts/seo/fixtures/`: `release_blog_good.html`, `release_blog_bad
 5. Publish that draft by hand and confirm the next daily Blog SEO Audit reports it clean — the
    pre-publish allowlist's predictions checked against the full live rule set.
 
+## Corrections found by running it live (2026-08-27)
+
+- The CMS API returns origin permalinks such as `https://hub.travelanimator.com/<slug>/`, not the
+  public URL that editors and the audit must use. Candidate ingestion now builds the URL from
+  `canonical_host`, `listing_path`, and the CMS slug, while preserving the source permalink's
+  trailing-slash convention. A synthetic end-to-end run then produced a draft with zero errors and
+  zero warnings, and all four contextual internal links returned HTTP 200.
+- The Android repository's tag namespace also contains `debug-pr-*` tags. Sorting all tags by
+  creation time can therefore choose a debug tag as the release base, including a tag that is not
+  an ancestor of the released version. Both local base discovery and the Android release-notes step
+  now consider only version-shaped tags merged into the released ref.
+- Codex runs with the artifact directory as its working directory so generated files stay isolated.
+  That directory is intentionally not a Git checkout, so non-interactive invocation also needs
+  `--skip-git-repo-check`.
+- A caller job that invokes a reusable workflow cannot carry `continue-on-error`. Failure isolation
+  remains inside the reusable workflow's external steps and the CLI's exit-zero boundary.
+- A uniquely marked credentialed run created draft `13345`; the identical second run found the
+  marker and overwrote draft `13345`. It remained unpublished. This verified create and idempotent
+  overwrite without altering a real release draft.
+- Model input used the synthetic release fixture during this verification. Sending a real checkout's
+  source-derived digest to an external model still requires separate explicit authorization, so
+  prose quality against a real release digest and the hosted release run remain open gates.
+
 ## Out of scope
 
 - Generating real images or video. Placeholders and prompts only; `media[].prompt` is the seam.
