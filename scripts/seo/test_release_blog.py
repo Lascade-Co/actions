@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import tempfile
 import unittest
 
@@ -21,7 +22,22 @@ from release_blog_cms import (
     release_marker,
     write_draft,
 )
-from seo_model import resolve_site_for_repo, site_config_from_dict
+from release_blog_check import (
+    PRE_PUBLISH_RULE_IDS,
+    Attempt,
+    better,
+    local_checks,
+    render_report,
+    run_rules,
+    validate,
+)
+from seo_model import (
+    SEVERITY_ERROR,
+    SEVERITY_INFO,
+    SEVERITY_WARN,
+    resolve_site_for_repo,
+    site_config_from_dict,
+)
 from seo_testkit import fixture, make_site
 
 CONFIG = [
@@ -58,6 +74,35 @@ CONFIG = [
 ]
 
 MARKER = "release-blog: Lascade-Co/travel-animator-android@3.9.3"
+
+GOOD_META = {
+    "title": "Reshape any route by dragging a waypoint",
+    "slug": "drag-waypoints-to-reshape-routes",
+    "excerpt": (
+        "Waypoints are draggable now, so a route that took four taps to fix takes one. "
+        "Here is how the new editor behaves on long multi-stop trips."
+    ),
+    "media": [
+        {
+            "id": "m1",
+            "kind": "image",
+            "width": 1600,
+            "height": 900,
+            "alt": "The route editor with a waypoint handle dragged onto a coastal road, the elevation strip updating beneath the map",
+            "prompt": "Wide screenshot-style render of a mobile map editor. 16:9. No text overlays.",
+        }
+    ],
+}
+
+CANDIDATES = [
+    LinkCandidate(url="https://www.travelanimator.com/hub/route-animation-guide", slug="route-animation-guide", title="Route guide"),
+    LinkCandidate(url="https://www.travelanimator.com/hub/best-travel-maps", slug="best-travel-maps", title="Map styles"),
+    LinkCandidate(url="https://www.travelanimator.com/hub/export-for-instagram", slug="export-for-instagram", title="Export"),
+]
+
+
+def ids(findings):
+    return {finding.rule for finding in findings}
 
 
 def write_config(entries) -> str:
@@ -315,6 +360,173 @@ class WriteDraftTest(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("403", detail)
         self.assertIn("forbidden", detail)
+
+
+class AllowlistTest(unittest.TestCase):
+    def test_the_allowlist_is_exactly_the_documented_set(self):
+        self.assertEqual(
+            set(PRE_PUBLISH_RULE_IDS),
+            {
+                "A1", "A2", "A4", "A5",
+                "B7",
+                "C1", "C4",
+                "D1", "D2", "D3", "D4", "D5", "D6",
+                "E1", "E4",
+                "G1", "G2", "G4",
+            },
+        )
+        self.assertEqual(len(PRE_PUBLISH_RULE_IDS), 18)
+        self.assertEqual(len(set(PRE_PUBLISH_RULE_IDS)), 18, "duplicate id in the allowlist")
+
+    def test_d9_is_excluded_because_a_draft_may_hold_placeholders(self):
+        self.assertNotIn("D9", PRE_PUBLISH_RULE_IDS)
+
+    def test_no_allowlisted_rule_reads_the_network(self):
+        import inspect
+
+        from seo_checks import RULES_BY_ID
+
+        for rule_id in PRE_PUBLISH_RULE_IDS:
+            source = inspect.getsource(RULES_BY_ID[rule_id].fn)
+            body = source.split(":", 1)[1]
+            self.assertNotIn("urls.get", body, f"{rule_id} reads the network")
+            self.assertNotIn("urls[", body, f"{rule_id} reads the network")
+
+
+class RunRulesTest(unittest.TestCase):
+    def test_a_clean_fragment_produces_no_error_or_warn(self):
+        findings = run_rules(make_site(), GOOD_META, fixture("release_blog_good.html"))
+        bad = [finding for finding in findings if finding.severity in (SEVERITY_ERROR, SEVERITY_WARN)]
+        self.assertEqual(bad, [], f"unexpected findings: {[(f.rule, f.message) for f in bad]}")
+
+    def test_a_bad_fragment_trips_the_expected_rules(self):
+        findings = run_rules(make_site(), dict(GOOD_META), fixture("release_blog_bad.html"))
+        found = ids(findings)
+        self.assertIn("D4", found)
+        self.assertIn("D5", found)
+        self.assertIn("D6", found)
+        self.assertIn("B7", found)
+        self.assertIn("G4", found)
+        self.assertIn("A1", found)
+
+    def test_a_short_title_trips_d1(self):
+        findings = run_rules(make_site(), dict(GOOD_META, title="Waypoints"), fixture("release_blog_good.html"))
+        self.assertIn("D1", ids(findings))
+
+    def test_an_over_long_excerpt_trips_d2(self):
+        findings = run_rules(make_site(), dict(GOOD_META, excerpt="x" * 200), fixture("release_blog_good.html"))
+        self.assertIn("D2", ids(findings))
+
+    def test_suppressed_rules_are_reported_at_info(self):
+        site = make_site(suppress=["G4"])
+        findings = run_rules(site, dict(GOOD_META), fixture("release_blog_bad.html"))
+        g4 = [finding for finding in findings if finding.rule == "G4"]
+        self.assertTrue(g4)
+        self.assertTrue(all(finding.severity == SEVERITY_INFO for finding in g4))
+
+
+class LocalChecksTest(unittest.TestCase):
+    def test_clean_draft_passes(self):
+        findings = local_checks(make_site(), GOOD_META, fixture("release_blog_good.html"), CANDIDATES)
+        self.assertEqual([finding for finding in findings if finding.severity != SEVERITY_INFO], [])
+
+    def test_a_fabricated_internal_link_is_an_error(self):
+        html = fixture("release_blog_good.html").replace(
+            "https://www.travelanimator.com/hub/best-travel-maps",
+            "https://www.travelanimator.com/hub/best-travel-routes",
+        )
+        findings = local_checks(make_site(), GOOD_META, html, CANDIDATES)
+        self.assertTrue(any(f.severity == SEVERITY_ERROR and "not a link candidate" in f.message for f in findings))
+
+    def test_a_modified_candidate_url_is_an_error(self):
+        html = fixture("release_blog_good.html").replace(
+            "https://www.travelanimator.com/hub/best-travel-maps",
+            "https://www.travelanimator.com/hub/best-travel-maps?ref=draft",
+        )
+        findings = local_checks(make_site(), GOOD_META, html, CANDIDATES)
+        self.assertTrue(any(f.severity == SEVERITY_ERROR and "not a link candidate" in f.message for f in findings))
+
+    def test_a_slug_colliding_with_a_candidate_is_an_error(self):
+        meta = dict(GOOD_META, slug="route-animation-guide")
+        findings = local_checks(make_site(), meta, fixture("release_blog_good.html"), CANDIDATES)
+        self.assertTrue(any(f.severity == SEVERITY_ERROR and "slug" in f.message for f in findings))
+
+    def test_script_in_the_fragment_is_an_error(self):
+        html = fixture("release_blog_good.html") + "<script>alert(1)</script>"
+        findings = local_checks(make_site(), GOOD_META, html, CANDIDATES)
+        self.assertTrue(any(f.severity == SEVERITY_ERROR and "script" in f.message for f in findings))
+
+    def test_an_unresolved_media_id_is_an_error(self):
+        html = fixture("release_blog_good.html").replace('data-media-id="m1"', 'data-media-id="m7"')
+        findings = local_checks(make_site(), GOOD_META, html, CANDIDATES)
+        self.assertTrue(any(f.severity == SEVERITY_ERROR and "m7" in f.message for f in findings))
+
+    def test_zero_placeholders_is_an_error(self):
+        html = re.sub(r"<figure>.*?</figure>", "", fixture("release_blog_good.html"), flags=re.DOTALL)
+        findings = local_checks(make_site(), dict(GOOD_META, media=[]), html, CANDIDATES)
+        self.assertTrue(any(f.severity == SEVERITY_ERROR and "placeholder" in f.message for f in findings))
+
+    def test_more_than_six_placeholders_is_an_error(self):
+        meta = dict(GOOD_META, media=[dict(GOOD_META["media"][0], id=f"m{n}") for n in range(7)])
+        findings = local_checks(make_site(), meta, fixture("release_blog_good.html"), CANDIDATES)
+        self.assertTrue(any(f.severity == SEVERITY_ERROR and "placeholder" in f.message for f in findings))
+
+    def test_a_missing_release_marker_is_an_error(self):
+        html = fixture("release_blog_good.html").replace(
+            "<!-- release-blog: Lascade-Co/travel-animator-android@3.9.3 -->", ""
+        )
+        findings = local_checks(make_site(), GOOD_META, html, CANDIDATES)
+        self.assertTrue(any(f.severity == SEVERITY_ERROR and "marker" in f.message for f in findings))
+
+    def test_a_four_word_alt_is_a_warning(self):
+        meta = dict(GOOD_META, media=[dict(GOOD_META["media"][0], alt="The route editor screen")])
+        findings = local_checks(make_site(), meta, fixture("release_blog_good.html"), CANDIDATES)
+        self.assertTrue(any(f.severity == SEVERITY_WARN and "alt" in f.message for f in findings))
+
+    def test_a_generic_alt_opener_is_a_warning(self):
+        meta = dict(
+            GOOD_META,
+            media=[dict(GOOD_META["media"][0], alt="Screenshot of the app showing the editor screen")],
+        )
+        findings = local_checks(make_site(), meta, fixture("release_blog_good.html"), CANDIDATES)
+        self.assertTrue(any(f.severity == SEVERITY_WARN and "alt" in f.message for f in findings))
+
+
+class ScoringTest(unittest.TestCase):
+    def attempt(self, errors, warns):
+        return Attempt(meta={}, html="", findings=[], errors=errors, warns=warns)
+
+    def test_fewer_errors_wins(self):
+        first, second = self.attempt(2, 0), self.attempt(1, 9)
+        self.assertIs(better(first, second), second)
+
+    def test_equal_errors_fewer_warns_wins(self):
+        first, second = self.attempt(1, 3), self.attempt(1, 1)
+        self.assertIs(better(first, second), second)
+
+    def test_a_full_tie_keeps_the_first(self):
+        first, second = self.attempt(1, 1), self.attempt(1, 1)
+        self.assertIs(better(first, second), first)
+
+
+class ValidateTest(unittest.TestCase):
+    def test_validate_counts_errors_and_warns(self):
+        attempt = validate(make_site(), dict(GOOD_META), fixture("release_blog_bad.html"), CANDIDATES)
+        self.assertGreater(attempt.errors, 0)
+        self.assertEqual(attempt.score, (attempt.errors, attempt.warns))
+
+    def test_a_clean_draft_scores_zero(self):
+        attempt = validate(make_site(), GOOD_META, fixture("release_blog_good.html"), CANDIDATES)
+        self.assertEqual(attempt.score, (0, 0), f"{[(f.rule, f.message) for f in attempt.findings]}")
+
+    def test_report_names_every_attempt_and_the_choice(self):
+        first = validate(make_site(), dict(GOOD_META), fixture("release_blog_bad.html"), CANDIDATES)
+        second = validate(make_site(), GOOD_META, fixture("release_blog_good.html"), CANDIDATES)
+        report = render_report([first, second], second, ["CMS read clean"])
+        self.assertIn("attempt 1", report)
+        self.assertIn("attempt 2", report)
+        self.assertIn("chose attempt 2", report)
+        self.assertIn("CMS read clean", report)
 
 
 if __name__ == "__main__":
