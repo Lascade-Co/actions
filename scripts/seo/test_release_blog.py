@@ -6,6 +6,7 @@ import json
 import re
 import tempfile
 import unittest
+from pathlib import Path
 
 from release_blog_digest import (
     PATCH_BYTE_CAP,
@@ -14,6 +15,7 @@ from release_blog_digest import (
     marketing_version_from_tag,
     truncate,
 )
+from release_blog_draft import build_prompt, parse_output, run_codex
 from release_blog_cms import (
     LinkCandidate,
     build_payload,
@@ -99,6 +101,8 @@ CANDIDATES = [
     LinkCandidate(url="https://www.travelanimator.com/hub/best-travel-maps", slug="best-travel-maps", title="Map styles"),
     LinkCandidate(url="https://www.travelanimator.com/hub/export-for-instagram", slug="export-for-instagram", title="Export"),
 ]
+
+BASE_PROMPT = "# Codex Draft Prompt\n\nWrite two files.\n"
 
 
 def ids(findings):
@@ -527,6 +531,136 @@ class ValidateTest(unittest.TestCase):
         self.assertIn("attempt 2", report)
         self.assertIn("chose attempt 2", report)
         self.assertIn("CMS read clean", report)
+
+
+class BuildPromptTest(unittest.TestCase):
+    def prompt(self, **over):
+        kwargs = {
+            "base_prompt": BASE_PROMPT,
+            "site": make_site(),
+            "marketing_version": "3.9.3",
+            "marker": MARKER,
+            "digest": "## Release notes\n\n- Drag waypoints\n",
+            "candidates": CANDIDATES,
+            "out_dir": "/tmp/out",
+        }
+        kwargs.update(over)
+        return build_prompt(**kwargs)
+
+    def test_base_prompt_comes_first_and_verbatim(self):
+        self.assertTrue(self.prompt().startswith(BASE_PROMPT))
+
+    def test_run_context_names_the_output_dir_marker_and_host(self):
+        text = self.prompt()
+        self.assertIn("/tmp/out", text)
+        self.assertIn(MARKER, text)
+        self.assertIn("www.travelanimator.com", text)
+        self.assertIn("3.9.3", text)
+
+    def test_candidates_are_listed_with_titles_and_urls(self):
+        text = self.prompt()
+        self.assertIn("https://www.travelanimator.com/hub/route-animation-guide", text)
+        self.assertIn("Route guide", text)
+
+    def test_digest_is_included(self):
+        self.assertIn("Drag waypoints", self.prompt())
+
+    def test_retry_prompt_carries_the_previous_html_and_each_finding(self):
+        previous = validate(make_site(), dict(GOOD_META), fixture("release_blog_bad.html"), CANDIDATES)
+        text = self.prompt(previous=previous.html, findings=previous.findings)
+        self.assertIn("previous attempt", text.lower())
+        self.assertIn("New stuff", text)
+        for item in previous.findings:
+            if item.severity in (SEVERITY_ERROR, SEVERITY_WARN):
+                self.assertIn(item.message[:40], text)
+
+    def test_retry_prompt_omits_info_findings(self):
+        site = make_site(suppress=["G4"])
+        previous = validate(site, dict(GOOD_META), fixture("release_blog_bad.html"), CANDIDATES)
+        text = self.prompt(previous=previous.html, findings=previous.findings)
+        self.assertNotIn("suppressed for travelanimator", text)
+
+
+class ParseOutputTest(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+
+    def write(self, name, content):
+        Path(self.dir, name).write_text(content, encoding="utf-8")
+
+    def test_reads_both_files(self):
+        self.write("blog.json", json.dumps(GOOD_META))
+        self.write("blog.html", "<h2>Body</h2>")
+        meta, html, error = parse_output(self.dir)
+        self.assertEqual(error, "")
+        self.assertEqual(meta["slug"], GOOD_META["slug"])
+        self.assertEqual(html, "<h2>Body</h2>")
+
+    def test_missing_html_is_an_error(self):
+        self.write("blog.json", json.dumps(GOOD_META))
+        meta, html, error = parse_output(self.dir)
+        self.assertIsNone(meta)
+        self.assertIn("blog.html", error)
+
+    def test_missing_json_is_an_error(self):
+        self.write("blog.html", "<h2>Body</h2>")
+        _meta, _html, error = parse_output(self.dir)
+        self.assertIn("blog.json", error)
+
+    def test_unparseable_json_is_an_error(self):
+        self.write("blog.json", "{not json")
+        self.write("blog.html", "<h2>Body</h2>")
+        _meta, _html, error = parse_output(self.dir)
+        self.assertIn("blog.json", error)
+
+    def test_empty_html_is_an_error(self):
+        self.write("blog.json", json.dumps(GOOD_META))
+        self.write("blog.html", "   \n")
+        _meta, _html, error = parse_output(self.dir)
+        self.assertIn("empty", error)
+
+
+class RunCodexTest(unittest.TestCase):
+    def test_invokes_codex_with_workspace_write_and_the_prompt_on_stdin(self):
+        seen = {}
+
+        class Result:
+            returncode = 0
+            stdout = "done"
+            stderr = ""
+
+        def fake_run(cmd, **kwargs):
+            seen["cmd"] = cmd
+            seen["input"] = kwargs.get("input")
+            seen["cwd"] = kwargs.get("cwd")
+            return Result()
+
+        ok, detail = run_codex("PROMPT TEXT", "/tmp/out", run=fake_run)
+        self.assertTrue(ok)
+        self.assertIn("codex", seen["cmd"][0])
+        self.assertIn("--sandbox", seen["cmd"])
+        self.assertIn("workspace-write", seen["cmd"])
+        self.assertIn("--ephemeral", seen["cmd"])
+        self.assertEqual(seen["input"], "PROMPT TEXT")
+        self.assertEqual(seen["cwd"], "/tmp/out")
+
+    def test_a_non_zero_exit_reports_the_stderr_tail(self):
+        class Result:
+            returncode = 1
+            stdout = ""
+            stderr = "not logged in"
+
+        ok, detail = run_codex("PROMPT", "/tmp/out", run=lambda cmd, **kw: Result())
+        self.assertFalse(ok)
+        self.assertIn("not logged in", detail)
+
+    def test_a_missing_codex_binary_is_not_an_exception(self):
+        def fake_run(cmd, **kwargs):
+            raise FileNotFoundError("codex")
+
+        ok, detail = run_codex("PROMPT", "/tmp/out", run=fake_run)
+        self.assertFalse(ok)
+        self.assertIn("codex", detail)
 
 
 if __name__ == "__main__":
