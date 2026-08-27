@@ -13,8 +13,16 @@ from release_blog_digest import (
     marketing_version_from_tag,
     truncate,
 )
+from release_blog_cms import (
+    LinkCandidate,
+    build_payload,
+    fetch_link_candidates,
+    find_by_marker,
+    release_marker,
+    write_draft,
+)
 from seo_model import resolve_site_for_repo, site_config_from_dict
-from seo_testkit import fixture
+from seo_testkit import fixture, make_site
 
 CONFIG = [
     {
@@ -48,6 +56,8 @@ CONFIG = [
         "thresholds": {},
     },
 ]
+
+MARKER = "release-blog: Lascade-Co/travel-animator-android@3.9.3"
 
 
 def write_config(entries) -> str:
@@ -183,6 +193,128 @@ class BuildDigestTest(unittest.TestCase):
         digest = build_digest("/tmp/repo", "v3.9.2", "v3.9.3", "notes\n", run=lambda cmd, **kw: FakeCompleted())
         self.assertIn("notes", digest)
         self.assertIn("unavailable", digest)
+
+
+class FakeHttp:
+    """Record calls and replay queued ``(status, body)`` pairs."""
+
+    def __init__(self, *responses):
+        self.responses = list(responses)
+        self.calls = []
+
+    def __call__(self, method, url, *, headers=None, json_body=None, auth=None, timeout=20):
+        self.calls.append({"method": method, "url": url, "json_body": json_body, "auth": auth})
+        return self.responses.pop(0) if self.responses else (500, "no response queued")
+
+
+class ReleaseMarkerTest(unittest.TestCase):
+    def test_marker_names_the_repo_and_tag(self):
+        self.assertEqual(
+            release_marker("Lascade-Co/travel-animator-android", "3.9.3"),
+            MARKER,
+        )
+
+
+class LinkCandidateTest(unittest.TestCase):
+    def test_reads_title_url_and_excerpt_from_the_cms(self):
+        http = FakeHttp((200, fixture("release_blog_candidates.json")))
+        candidates, note = fetch_link_candidates(make_site(), http=http)
+        self.assertEqual(note, "")
+        self.assertEqual(len(candidates), 3)
+        self.assertEqual(candidates[0].title, "How to animate a road trip route")
+        self.assertEqual(candidates[0].url, "https://www.travelanimator.com/hub/route-animation-guide")
+        self.assertEqual(candidates[0].slug, "route-animation-guide")
+        self.assertIn("GPX", candidates[0].excerpt)
+
+    def test_excerpt_html_is_stripped(self):
+        http = FakeHttp((200, fixture("release_blog_candidates.json")))
+        candidates, _ = fetch_link_candidates(make_site(), http=http)
+        self.assertNotIn("<p>", candidates[0].excerpt)
+
+    def test_requests_only_published_blogs(self):
+        http = FakeHttp((200, fixture("release_blog_candidates.json")))
+        fetch_link_candidates(make_site(), http=http)
+        self.assertIn("status=publish", http.calls[0]["url"])
+        self.assertIn("per_page=100", http.calls[0]["url"])
+        self.assertIn("hub.travelanimator.com", http.calls[0]["url"])
+
+    def test_falls_back_to_the_sitemap_when_the_cms_fails(self):
+        sitemap = (
+            '<?xml version="1.0"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
+            "<url><loc>https://www.travelanimator.com/hub/route-animation-guide</loc></url>"
+            "<url><loc>https://www.travelanimator.com/pricing</loc></url>"
+            "</urlset>"
+        )
+        http = FakeHttp((503, "service unavailable"), (200, sitemap))
+        candidates, note = fetch_link_candidates(make_site(), http=http)
+        self.assertIn("sitemap", note)
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0].slug, "route-animation-guide")
+        self.assertEqual(candidates[0].title, "")
+
+    def test_returns_empty_when_both_sources_fail(self):
+        http = FakeHttp((503, ""), (503, ""))
+        candidates, note = fetch_link_candidates(make_site(), http=http)
+        self.assertEqual(candidates, [])
+        self.assertIn("no link candidates", note)
+
+
+class MarkerSearchTest(unittest.TestCase):
+    def test_finds_a_draft_carrying_the_marker(self):
+        body = json.dumps(
+            [{"id": 41, "status": "draft", "slug": "drag-waypoints", "content": {"rendered": f"<p>x</p><!-- {MARKER} -->"}}]
+        )
+        http = FakeHttp((200, body))
+        found = find_by_marker(make_site(), MARKER, http=http, auth=("u", "p"))
+        self.assertEqual(found["id"], 41)
+        self.assertEqual(found["status"], "draft")
+
+    def test_ignores_a_fuzzy_search_hit_without_the_exact_marker(self):
+        body = json.dumps(
+            [{"id": 9, "status": "draft", "slug": "other", "content": {"rendered": "<!-- release-blog: other/repo@1.0.0 -->"}}]
+        )
+        http = FakeHttp((200, body))
+        self.assertIsNone(find_by_marker(make_site(), MARKER, http=http, auth=("u", "p")))
+
+    def test_search_is_authenticated_and_covers_drafts(self):
+        http = FakeHttp((200, "[]"))
+        find_by_marker(make_site(), MARKER, http=http, auth=("u", "p"))
+        self.assertIn("status=draft%2Cpublish", http.calls[0]["url"])
+        self.assertEqual(http.calls[0]["auth"], ("u", "p"))
+
+    def test_a_failed_search_reads_as_not_found(self):
+        http = FakeHttp((401, "unauthorised"))
+        self.assertIsNone(find_by_marker(make_site(), MARKER, http=http, auth=("u", "p")))
+
+
+class WriteDraftTest(unittest.TestCase):
+    def test_payload_is_a_draft(self):
+        payload = build_payload(
+            {"title": "T", "slug": "s", "excerpt": "E"}, "<h2>Body</h2>"
+        )
+        self.assertEqual(payload["status"], "draft")
+        self.assertEqual(payload["content"], "<h2>Body</h2>")
+        self.assertNotIn("date", payload)
+
+    def test_creates_a_new_draft_when_no_id_is_given(self):
+        http = FakeHttp((201, json.dumps({"id": 77})))
+        ok, detail = write_draft(make_site(), {"status": "draft"}, http=http, auth=("u", "p"))
+        self.assertTrue(ok)
+        self.assertIn("77", detail)
+        self.assertTrue(http.calls[0]["url"].endswith("/wp-json/wp/v2/posts"))
+
+    def test_overwrites_the_given_draft_id(self):
+        http = FakeHttp((200, json.dumps({"id": 41})))
+        ok, _ = write_draft(make_site(), {"status": "draft"}, http=http, auth=("u", "p"), draft_id=41)
+        self.assertTrue(ok)
+        self.assertTrue(http.calls[0]["url"].endswith("/wp-json/wp/v2/posts/41"))
+
+    def test_a_failed_write_reports_status_and_body(self):
+        http = FakeHttp((403, "forbidden"))
+        ok, detail = write_draft(make_site(), {"status": "draft"}, http=http, auth=("u", "p"))
+        self.assertFalse(ok)
+        self.assertIn("403", detail)
+        self.assertIn("forbidden", detail)
 
 
 if __name__ == "__main__":

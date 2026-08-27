@@ -1,0 +1,23 @@
+[
+  {
+    "slug": "route-animation-guide",
+    "link": "https://www.travelanimator.com/hub/route-animation-guide",
+    "title": { "rendered": "How to animate a road trip route" },
+    "excerpt": { "rendered": "<p>Build a route animation from a GPX file in five steps.</p>\n" },
+    "date": "2026-08-20T10:00:00"
+  },
+  {
+    "slug": "best-travel-maps",
+    "link": "https://www.travelanimator.com/hub/best-travel-maps",
+    "title": { "rendered": "The best map styles for travel videos" },
+    "excerpt": { "rendered": "<p>Six map styles that read well on a phone screen.</p>\n" },
+    "date": "2026-08-14T10:00:00"
+  },
+  {
+    "slug": "export-for-instagram",
+    "link": "https://www.travelanimator.com/hub/export-for-instagram",
+    "title": { "rendered": "Exporting for Instagram Reels" },
+    "excerpt": { "rendered": "<p>Aspect ratios, bitrates and the safe area.</p>\n" },
+    "date": "2026-08-02T10:00:00"
+  }
+]
