@@ -120,7 +120,22 @@ Derived from the thresholds and rules already in `scripts/seo/seo_model.py`:
 - **No JSON-LD in the fragment.** The front end emits Article schema; a second copy invites `E5`
   schema-url-mismatch. **No FAQPage schema** in particular — `E4` in this repo already treats FAQ
   schema as unsupported, so Q&A goes in as plain headings and paragraphs.
-- **Never a feature absent from the diff**, the same constraint `RELEASE_NOTES.md` imposes.
+- **Never a Travel Animator capability absent from the release digest or link-candidate title and
+  excerpt.** General analysis about usability, travel storytelling, and creative work is allowed;
+  unsupported product facts are not.
+
+### Editorial angle
+
+The release is a relevance signal and factual source, not the article's structure. The writer picks
+one reader problem or creative possibility, supports it with one feature or tightly related cluster,
+and omits unrelated shipped changes. The title, slug, focus keyword, and headings stay independent
+of the version number. This makes each draft part of a varied, durable editorial library instead of
+an expanded changelog.
+
+Link candidates double as editorial memory: they show which existing capabilities can responsibly
+support the new angle and which subjects the site has already covered. Named competitor claims still
+need supplied evidence; comparison without that evidence stays at the level of approaches and common
+workflow patterns.
 
 ### Humanised voice
 
@@ -134,8 +149,10 @@ model output while named prohibitions do:
 - Em dashes capped at two in the whole post.
 - Varied sentence length; at least a few sentences under eight words.
 - Second person, present tense.
-- Every claim tied to something concrete from the diff — a screen name, a gesture, a number. Vague
-  adjectives are what make AI copy legible as AI copy.
+- Every factual product claim tied to something concrete in the release digest or link-candidate
+  title and excerpt. Human consequences come first; implementation details appear only when useful.
+- No commit-by-commit march and no paragraph for every shipped change. One memorable idea is the
+  target.
 - No "Conclusion" heading; end on what the reader can now do.
 
 ### Placeholders
