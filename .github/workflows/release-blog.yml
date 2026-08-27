@@ -1,0 +1,168 @@
+name: Release Blog
+
+# Turns a released tag into an SEO-validated draft in the site's CMS. It never
+# publishes. Every fallible external step is tolerated, and the CLI itself
+# always exits zero, so this follow-up cannot change the release outcome.
+#
+# See docs/adr/0011-release-blog-creates-drafts.md and
+# docs/superpowers/specs/2026-08-27-release-blog-design.md.
+
+on:
+  workflow_call:
+    inputs:
+      repo:
+        description: owner/name of the repository that was released
+        required: true
+        type: string
+      tag:
+        description: Tag just created and source of the marketing version
+        required: true
+        type: string
+      project_slug:
+        description: Infisical project containing CMS credentials in prod /Build
+        required: true
+        type: string
+      base:
+        description: Release-digest base; blank means the tag before tag
+        required: false
+        type: string
+      dry_run:
+        description: Validate and upload artifacts without writing to the CMS
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+env:
+  RAW: https://raw.githubusercontent.com/Lascade-Co/actions/main
+
+jobs:
+  draft:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Mint GitHub App token
+        id: app-token
+        continue-on-error: true
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ secrets.CI_APP_CLIENT_ID }}
+          private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ inputs.repo }}
+          permission-contents: read
+
+      - name: Checkout the released tag
+        id: checkout
+        continue-on-error: true
+        uses: actions/checkout@v7
+        with:
+          repository: ${{ inputs.repo }}
+          ref: ${{ inputs.tag }}
+          token: ${{ steps.app-token.outputs.token }}
+          fetch-depth: 0
+          path: app
+
+      - name: Set up Python
+        id: python
+        continue-on-error: true
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+
+      - name: Install dependencies
+        id: dependencies
+        continue-on-error: true
+        run: pip install --quiet requests==2.34.2 beautifulsoup4==4.15.0 lxml==6.1.1
+
+      - name: Fetch CMS credentials (prod)
+        id: credentials
+        continue-on-error: true
+        uses: Infisical/secrets-action@v1.0.17
+        with:
+          method: universal
+          client-id: ${{ secrets.INFISICAL_CLIENT_ID }}
+          client-secret: ${{ secrets.INFISICAL_CLIENT_SECRET }}
+          project-slug: ${{ inputs.project_slug }}
+          env-slug: "prod"
+          domain: ${{ secrets.INFISICAL_DOMAIN }}
+          secret-path: /Build
+          export-type: env
+
+      - name: Restore Codex auth
+        continue-on-error: true
+        shell: bash
+        env:
+          CODEX_AUTH_JSON_BASE_64: ${{ secrets.CODEX_AUTH_JSON_BASE_64 }}
+        run: |
+          mkdir -p "$HOME/.codex"
+          printf '%s' "$CODEX_AUTH_JSON_BASE_64" | tr -d '\n\r ' | base64 -d > "$HOME/.codex/auth.json"
+
+      - name: Install Codex and enable user namespaces for its sandbox
+        continue-on-error: true
+        shell: bash
+        run: |
+          npm install -g @openai/codex
+
+          current_userns="$(sysctl -n kernel.unprivileged_userns_clone 2>/dev/null || true)"
+          if [ -n "$current_userns" ] && [ "$current_userns" != "1" ]; then
+            sudo sysctl -w kernel.unprivileged_userns_clone=1
+          fi
+          current_apparmor="$(sysctl -n kernel.apparmor_restrict_unprivileged_userns 2>/dev/null || true)"
+          if [ -n "$current_apparmor" ] && [ "$current_apparmor" != "0" ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+
+      - name: Download the draft pipeline
+        id: scripts
+        continue-on-error: true
+        shell: bash
+        run: |
+          for name in seo_model seo_parse seo_rulekit seo_checks_abc seo_checks_def seo_checks_ghi \
+                      seo_checks seo_fetch release_blog_digest release_blog_cms release_blog_check \
+                      release_blog_draft release_blog; do
+            curl -fsSL --retry 3 --retry-delay 2 -o "$name.py" "$RAW/scripts/seo/$name.py"
+          done
+          curl -fsSL --retry 3 --retry-delay 2 -o seo_sites.json "$RAW/data/seo_sites.json"
+          curl -fsSL --retry 3 --retry-delay 2 -o RELEASE_BLOG.md "$RAW/data/RELEASE_BLOG.md"
+
+      - name: Write the draft
+        id: draft
+        if: >-
+          ${{ always() && steps.checkout.outcome == 'success' &&
+              steps.python.outcome == 'success' &&
+              steps.dependencies.outcome == 'success' &&
+              steps.scripts.outcome == 'success' }}
+        continue-on-error: true
+        shell: bash
+        env:
+          BASE: ${{ inputs.base }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          REPO: ${{ inputs.repo }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          MODE=--publish
+          [ "$DRY_RUN" = "true" ] && MODE=--dry-run
+          BASE_ARGS=()
+          [ -n "$BASE" ] && BASE_ARGS=(--base "$BASE")
+          python3 release_blog.py --repo "$REPO" --config seo_sites.json \
+            --prompt RELEASE_BLOG.md --tag "$TAG" --repo-path app --out out \
+            "${BASE_ARGS[@]}" "$MODE"
+
+      - name: Upload artifacts
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-blog-${{ inputs.tag }}
+          path: |
+            out/blog.html
+            out/blog.json
+            out/wp-payload.json
+            out/validation.txt
+            out/prompt.md
+            out/prompt-retry.md
+          if-no-files-found: warn
+          retention-days: 30

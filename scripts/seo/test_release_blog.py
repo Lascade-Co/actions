@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import release_blog
 from release_blog_digest import (
@@ -634,9 +636,11 @@ class RunCodexTest(unittest.TestCase):
             seen["cmd"] = cmd
             seen["input"] = kwargs.get("input")
             seen["cwd"] = kwargs.get("cwd")
+            seen["env"] = kwargs.get("env")
             return Result()
 
-        ok, detail = run_codex("PROMPT TEXT", "/tmp/out", run=fake_run)
+        with patch.dict(os.environ, {"CMS_APP_PASSWORD": "must-not-reach-codex"}):
+            ok, detail = run_codex("PROMPT TEXT", "/tmp/out", run=fake_run)
         self.assertTrue(ok)
         self.assertIn("codex", seen["cmd"][0])
         self.assertIn("--sandbox", seen["cmd"])
@@ -644,6 +648,7 @@ class RunCodexTest(unittest.TestCase):
         self.assertIn("--ephemeral", seen["cmd"])
         self.assertEqual(seen["input"], "PROMPT TEXT")
         self.assertEqual(seen["cwd"], "/tmp/out")
+        self.assertNotIn("CMS_APP_PASSWORD", seen["env"])
 
     def test_a_non_zero_exit_reports_the_stderr_tail(self):
         class Result:

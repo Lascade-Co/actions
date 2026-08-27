@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from pathlib import Path
 
@@ -10,6 +11,27 @@ from seo_model import SEVERITY_ERROR, SEVERITY_WARN
 
 PROMPT_URL = "https://raw.githubusercontent.com/Lascade-Co/actions/main/data/RELEASE_BLOG.md"
 CODEX_TIMEOUT = 900
+
+CODEX_ENV_ALLOWLIST = (
+    "PATH",
+    "HOME",
+    "USER",
+    "LOGNAME",
+    "SHELL",
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    "TMPDIR",
+    "TEMP",
+    "TMP",
+    "XDG_CONFIG_HOME",
+    "CODEX_HOME",
+    "SSL_CERT_FILE",
+    "SSL_CERT_DIR",
+    "HTTPS_PROXY",
+    "HTTP_PROXY",
+    "NO_PROXY",
+)
 
 
 def load_prompt(source: str | None = None, *, http=None) -> str:
@@ -33,6 +55,11 @@ def _candidate_lines(candidates) -> str:
         excerpt = f" — {candidate.excerpt}" if candidate.excerpt else ""
         lines.append(f"{index}. {title} | {candidate.url}{excerpt}")
     return "\n".join(lines) if lines else "(none available)"
+
+
+def _codex_env() -> dict[str, str]:
+    """Keep Infisical and CMS credentials out of the model subprocess."""
+    return {name: os.environ[name] for name in CODEX_ENV_ALLOWLIST if name in os.environ}
 
 
 def build_prompt(
@@ -112,6 +139,7 @@ def run_codex(prompt_text: str, out_dir: str, *, run=subprocess.run) -> tuple[bo
             timeout=CODEX_TIMEOUT,
             check=False,
             cwd=out_dir,
+            env=_codex_env(),
         )
     except FileNotFoundError:
         return False, "codex is not installed or not on PATH"

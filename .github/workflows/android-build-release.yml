@@ -221,6 +221,9 @@ jobs:
   release:
     needs: [prepare, build-aab, build-apk]
     runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.increment_version.outputs.new_version }}
+      base: ${{ steps.notes.outputs.base }}
     steps:
       - name: Mint GitHub App token
         id: app-token
@@ -348,3 +351,15 @@ jobs:
           git add gradle.properties
           git commit -m "[skip ci] Increment version number to ${{ steps.increment_version.outputs.new_version }}" || echo "No changes"
           git push origin HEAD:${{ github.event.client_payload.branch }}
+
+  # Creates an unpublished CMS draft from the released tag after the release
+  # succeeds. See docs/adr/0011-release-blog-creates-drafts.md.
+  blog:
+    needs: [prepare, release]
+    uses: ./.github/workflows/release-blog.yml
+    with:
+      repo: ${{ github.event.client_payload.repo }}
+      tag: ${{ needs.release.outputs.tag }}
+      project_slug: ${{ github.event.client_payload.project_slug }}
+      base: ${{ needs.release.outputs.base }}
+    secrets: inherit
