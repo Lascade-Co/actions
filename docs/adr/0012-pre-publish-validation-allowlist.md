@@ -1,7 +1,7 @@
 # Pre-publish validation runs an allowlist of the audit's rules, not the audit
 
 Before a draft is written to the CMS, its HTML is wrapped in a synthetic host page, parsed by
-`seo_parse.parse_blog()` and run through **22 named rules from the Blog SEO Audit** — not the audit,
+`seo_parse.parse_blog()` and run through **18 named rules from the Blog SEO Audit** — not the audit,
 and not a second checker written for the purpose. The set is an explicit allowlist in
 `release_blog_check.py`:
 
@@ -12,7 +12,7 @@ and not a second checker written for the purpose. The set is an explicit allowli
 list that took real findings to tune. A parallel checker would drift from it, and the drift would
 show up as blogs that pass pre-publish validation and then fail the daily audit — the two systems
 disagreeing about the same page. Reuse costs nothing: every check has the signature
-`check_x(page, site, urls, ctx)`, and these 22 read neither `urls` nor `ctx`, so they run offline
+`check_x(page, site, urls, ctx)`, and these 18 read neither `urls` nor `ctx`, so they run offline
 against an empty URL map and a bare `SiteContext`.
 
 **Why an allowlist rather than the whole set.** Two thirds of the catalogue cannot answer at this

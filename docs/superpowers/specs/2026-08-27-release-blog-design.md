@@ -239,7 +239,8 @@ Rules run with an empty URL-status map and a bare `SiteContext()`.
   runnable offline is not the criterion; being answerable about a draft is. See ADR-0012.
 
 Verified 2026-08-27: every check has the uniform signature `check_x(page, site, urls, ctx)`, and the
-22 rules named above read neither `urls` nor `ctx`.
+18 rules named above read neither `urls` nor `ctx`. Verified again by importing the allowlist
+against `seo_checks.RULES_BY_ID`: every id exists, and a bare fragment reports only `B7`.
 
 **A suppressed rule** still evaluates and still appears in `validation.txt`, but cannot trigger the
 retry or affect scoring — the audit's suppression semantics, generalised from delivery to whatever a
@@ -509,7 +510,7 @@ Written during design (2026-08-27), not deferred to implementation.
   legitimate in a draft and caught post-publish by `D9`, overwrite-own-draft / stop-on-published, the
   authenticating account as the public byline, and never reddening a release (extending ADR-0003 from
   a cron onto the release path).
-- **`docs/adr/0012-pre-publish-validation-allowlist.md`** — why 22 rules and not the audit, why each
+- **`docs/adr/0012-pre-publish-validation-allowlist.md`** — why 18 rules and not the audit, why each
   exclusion class is excluded, why `D9` is excluded despite being eligible, `info` inert, suppression
   applying, one retry not a loop, and the trap that adding a network-dependent rule to the allowlist
   breaks validation silently.
