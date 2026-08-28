@@ -139,6 +139,9 @@ jobs:
           if [ -n "${{ env.SHARE_EXT_PROFILE_UUID }}" ]; then
             /usr/libexec/PlistBuddy -c "Add :provisioningProfiles:${{ env.IOS_BUNDLE_ID }}.MapLinkShareExtension string ${{ env.SHARE_EXT_PROFILE_UUID }}" ExportOptions.plist
           fi
+          if [ -n "${{ env.WIDGET_PROFILE_BUNDLE_ID }}" ] && [ -n "${{ env.WIDGET_PROFILE_UUID }}" ]; then
+            /usr/libexec/PlistBuddy -c "Add :provisioningProfiles:${{ env.WIDGET_PROFILE_BUNDLE_ID }} string ${{ env.WIDGET_PROFILE_UUID }}" ExportOptions.plist
+          fi
 
       - name: Cache SPM packages
         uses: actions/cache@v5

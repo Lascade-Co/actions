@@ -252,6 +252,9 @@ jobs:
           if [ -n "${{ env.SHARE_PROFILE_BUNDLE_ID }}" ] && [ -n "${{ env.SHARE_PROFILE_UUID }}" ]; then
             /usr/libexec/PlistBuddy -c "Add :provisioningProfiles:${{ env.SHARE_PROFILE_BUNDLE_ID }} string ${{ env.SHARE_PROFILE_UUID }}" ExportOptions.plist
           fi
+          if [ -n "${{ env.WIDGET_PROFILE_BUNDLE_ID }}" ] && [ -n "${{ env.WIDGET_PROFILE_UUID }}" ]; then
+            /usr/libexec/PlistBuddy -c "Add :provisioningProfiles:${{ env.WIDGET_PROFILE_BUNDLE_ID }} string ${{ env.WIDGET_PROFILE_UUID }}" ExportOptions.plist
+          fi
 
       # A resolved SwiftPM cache is ~4 GB: too big for the Actions cache, whose
       # 10 GB repo quota is already fully consumed by the Android pipeline.
