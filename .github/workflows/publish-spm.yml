@@ -151,6 +151,15 @@ jobs:
           done
           echo "Published ANGLE from $angle_dir"
 
+      # ANGLE's generated framework plists carry CFBundleVersion but omit the
+      # short version App Store Connect requires (error 90057). Normalize the
+      # copied SPM payload, leaving the pinned upstream archive byte-for-byte
+      # intact so its provenance checksum still describes the downloaded input.
+      - name: Normalize ANGLE framework metadata
+        run: |
+          curl -sSL https://raw.githubusercontent.com/Lascade-Co/actions/main/scripts/ios/normalize_framework_metadata.py |
+            python3 - spm-repo/libEGL.xcframework spm-repo/libGLESv2.xcframework
+
       - name: Commit XCFramework
         uses: stefanzweifel/git-auto-commit-action@v7
         with:

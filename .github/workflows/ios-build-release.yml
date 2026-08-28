@@ -171,6 +171,11 @@ jobs:
             CURRENT_PROJECT_VERSION="${{ github.run_number }}" \
             CODE_SIGN_STYLE=Manual \
 
+      - name: Validate embedded framework metadata
+        run: |
+          curl -sSL https://raw.githubusercontent.com/Lascade-Co/actions/main/scripts/ios/normalize_framework_metadata.py |
+            python3 - --check build/App.xcarchive
+
       - name: Export IPA
         run: |
           xcodebuild -exportArchive \

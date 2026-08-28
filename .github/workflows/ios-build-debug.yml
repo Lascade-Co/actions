@@ -389,6 +389,11 @@ jobs:
             SWIFT_ACTIVE_COMPILATION_CONDITIONS='DEBUG $(inherited)' \
             GCC_PREPROCESSOR_DEFINITIONS='DEBUG=1 $(inherited)'
 
+      - name: Validate embedded framework metadata
+        run: |
+          curl -sSL https://raw.githubusercontent.com/Lascade-Co/actions/main/scripts/ios/normalize_framework_metadata.py |
+            python3 - --check build/App.xcarchive
+
       - name: Export IPA
         id: export
         run: |
