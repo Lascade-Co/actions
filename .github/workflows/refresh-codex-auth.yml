@@ -13,7 +13,8 @@ concurrency:
 jobs:
   refresh:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # Device codes expire after 15 minutes; leave time for setup and Infisical afterward.
+    timeout-minutes: 25
     steps:
       - name: Restore Codex auth.json from GH secret
         shell: bash
@@ -38,14 +39,15 @@ jobs:
             sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           fi
 
-      - name: Trigger Codex token refresh
-        shell: bash
+      - name: Refresh Codex token
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: '1575855120'
         run: |
-          codex exec --skip-git-repo-check --sandbox read-only \
-            "Reply with exactly one word: refreshed" > /tmp/codex_out 2>&1 || {
-              echo "Codex exec failed:"; cat /tmp/codex_out; exit 1;
-          }
-          cat /tmp/codex_out
+          curl -fsSL --retry 3 \
+            -o "$RUNNER_TEMP/refresh_codex_auth.py" \
+            https://raw.githubusercontent.com/Lascade-Co/actions/main/scripts/codex/refresh_codex_auth.py
+          python3 "$RUNNER_TEMP/refresh_codex_auth.py"
 
       - name: Verify auth.json was refreshed
         shell: bash
@@ -74,12 +76,13 @@ jobs:
           INFISICAL_DOMAIN: ${{ secrets.INFISICAL_DOMAIN }}
           PROJECT_ID: db94ba33-278d-4425-a6c9-a7cf7c9cae88
         run: |
-          export INFISICAL_TOKEN=$(infisical login \
+          INFISICAL_TOKEN=$(infisical login \
             --method=universal-auth \
             --client-id="$INFISICAL_CLIENT_ID" \
             --client-secret="$INFISICAL_CLIENT_SECRET" \
             --domain="$INFISICAL_DOMAIN" \
             --silent --plain)
+          export INFISICAL_TOKEN
           NEW_B64=$(base64 -w0 < "$HOME/.codex/auth.json")
           infisical secrets set "CODEX_AUTH_JSON_BASE_64=$NEW_B64" \
             --projectId="$PROJECT_ID" \
