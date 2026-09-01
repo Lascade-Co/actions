@@ -45,6 +45,11 @@ class RefreshCodexAuthTest(unittest.TestCase):
                   echo "ERROR: unrelated authentication failure"
                   exit 7
                 fi
+                if [ "$FAKE_MODE" = "refresh_revoked" ]; then
+                  echo 'ERROR: {"code":"refresh_token_invalidated"}'
+                  echo "ERROR: Your access token could not be refreshed because your refresh token was revoked. Please log out and sign in again."
+                  exit 1
+                fi
                 echo "ERROR: Your access token could not be refreshed because your refresh token was already used. Please log out and sign in again."
                 exit 1
                 ;;
@@ -151,6 +156,16 @@ class RefreshCodexAuthTest(unittest.TestCase):
         self.assertFalse(self.login_started.exists())
         self.assertFalse(self.curl_args.exists())
 
+    def test_revoked_refresh_token_starts_device_login(self) -> None:
+        self.env["FAKE_MODE"] = "refresh_revoked"
+
+        result = self._run()
+
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+        self.assertEqual("2", self.exec_count.read_text().strip())
+        self.assertTrue(self.login_started.exists())
+        self.assertTrue(self.curl_args.exists())
+
     def test_successful_refresh_does_not_start_login_or_notify(self) -> None:
         self.env["FAKE_MODE"] = "success"
 
@@ -198,6 +213,7 @@ class RefreshCodexAuthTest(unittest.TestCase):
             "TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}", workflow
         )
         self.assertIn("TELEGRAM_CHAT_ID: '1575855120'", workflow)
+        self.assertIn("--path=/Actions", workflow)
 
 
 if __name__ == "__main__":

@@ -11,7 +11,12 @@ import sys
 from collections.abc import Mapping
 
 
-REFRESH_TOKEN_REUSED = "refresh token was already used"
+DEVICE_LOGIN_REQUIRED_MARKERS = (
+    "refresh token was already used",
+    "refresh token was revoked",
+    "refresh_token_invalidated",
+    "token_revoked",
+)
 ANSI_ESCAPE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 VERIFICATION_URL = re.compile(r"https://[^\s]+")
 DEVICE_CODE = re.compile(r"^[A-Z0-9]+(?:-[A-Z0-9]+)+$")
@@ -34,6 +39,11 @@ def codex_environment(source: Mapping[str, str] | None = None) -> dict[str, str]
     environment = dict(source or os.environ)
     environment.pop("TELEGRAM_BOT_TOKEN", None)
     return environment
+
+
+def requires_device_login(output: str) -> bool:
+    normalized = output.lower()
+    return any(marker in normalized for marker in DEVICE_LOGIN_REQUIRED_MARKERS)
 
 
 def run_codex_exec() -> subprocess.CompletedProcess[str]:
@@ -66,7 +76,7 @@ def send_device_code(token: str, chat_id: str, url: str, code: str) -> None:
     lines = [
         "Codex sign-in required",
         "",
-        "The stored refresh token was already used, so this Actions run started a device login.",
+        "The stored Codex session could not be refreshed, so this Actions run started a device login.",
         f"Open: {url}",
         f"Code: {code}",
         "Expires in 15 minutes.",
@@ -192,7 +202,7 @@ def main() -> int:
     initial = run_codex_exec()
     if initial.returncode == 0:
         return 0
-    if REFRESH_TOKEN_REUSED not in initial.stdout.lower():
+    if not requires_device_login(initial.stdout):
         return initial.returncode or 1
 
     token = os.environ.get("TELEGRAM_BOT_TOKEN")
@@ -202,7 +212,7 @@ def main() -> int:
             "TELEGRAM_BOT_TOKEN is required when Codex needs device login"
         )
 
-    print("Stored Codex refresh token was already used; starting device login.")
+    print("Stored Codex session requires a new login; starting device login.")
     run_device_login(token, chat_id)
     print("Device login completed; verifying the new Codex session.")
 
