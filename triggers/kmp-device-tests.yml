@@ -1,0 +1,40 @@
+# Copy this workflow into the Kotlin Multiplatform app repo to get a button that runs the
+# device-required test suites on an emulator, and set secrets.CENTRAL_DISPATCH_TOKEN.
+# Runner: .github/workflows/kmp-device-tests.yml, event type kmp-device-tests.
+#
+# These suites are deliberately off the pull-request path: a hosted emulator's GL and codec
+# behaviour is not a real phone's, so a green run asserts little and a red one is often flake. The
+# button exists so they stay compilable and occasionally runnable rather than rotting unused.
+
+name: Device tests (on demand)
+
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: Branch to run the device suites against
+        required: true
+        # Default to the trunk. The equivalent workflow in travel-animator-ios defaults to a
+        # long-dead personal feature branch, and nobody notices until a build comes out wrong.
+        default: dev
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  dispatch:
+    name: Dispatch to central runner
+    runs-on: ubuntu-latest
+    steps:
+      - uses: peter-evans/repository-dispatch@v3
+        with:
+          token: ${{ secrets.CENTRAL_DISPATCH_TOKEN }}
+          repository: Lascade-Co/actions
+          event-type: kmp-device-tests
+          client-payload: >-
+            {
+              "repo": ${{ toJSON(github.repository) }},
+              "branch": ${{ toJSON(inputs.branch) }},
+              "project_slug": "geoanimator"
+            }
