@@ -27,5 +27,20 @@ class WidgetSigningWorkflowContractTest(unittest.TestCase):
                 self.assertIn(mapping, source)
 
 
+class TestFlightVersionWorkflowContractTest(unittest.TestCase):
+    def test_marketing_version_is_shared_and_build_number_is_unique(self) -> None:
+        source = WORKFLOWS[0].read_text()
+
+        self.assertIn('BUILD=$(( 1000 + ${{ github.run_number }} ))', source)
+        self.assertIn(
+            'CURRENT_PROJECT_VERSION="${{ steps.build_number.outputs.build }}"',
+            source,
+        )
+        self.assertIn(
+            'MARKETING_VERSION="${{ steps.marketing.outputs.version }}"',
+            source,
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -79,7 +79,7 @@ jobs:
 
       - name: Purge previous comments from this workflow
         if: ${{ github.event.client_payload.pr && github.event.client_payload.pr != '' && github.event.client_payload.pr != 'null' }}
-        uses: actions/github-script@v8
+        uses: actions/github-script@v9
         env:
           PAYLOAD_REPO: ${{ github.event.client_payload.repo }}
           PAYLOAD_PR: ${{ github.event.client_payload.pr }}
@@ -134,7 +134,7 @@ jobs:
           fi
 
       - name: Checkout target repo at PR HEAD/branch
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           repository: ${{ github.event.client_payload.repo }}
           ref: ${{ steps.ref.outputs.ref }}
@@ -174,7 +174,7 @@ jobs:
           echo "cache-key=$key"   >> "$GITHUB_OUTPUT"
 
       - name: Fetch build secrets from Infisical
-        uses: Infisical/secrets-action@v1.0.15
+        uses: Infisical/secrets-action@v1.0.17
         with:
           method: universal
           client-id: ${{ secrets.INFISICAL_CLIENT_ID }}
@@ -342,14 +342,12 @@ jobs:
           echo "Published $BUNDLE and moved $FALLBACK"
           rm -rf "$WORK"
 
-      # App Store Connect closes a version train once that version ships, and
-      # then refuses every further build for it, TestFlight included. The repo
-      # sat at 3.9.3 long after 3.9.3 was released, so uploads failed with
-      # "Invalid Pre-Release Train ... is closed for new build submissions".
-      # Ask ASC what exists and build a version that is open. Nothing is
-      # committed: pushing to a contributor's PR branch would be wrong, and on a
-      # pull_request trigger it risks a re-trigger loop.
-      - name: Determine marketing version
+      # Reuse the latest iOS TestFlight train so every PR for one release
+      # candidate shares a marketing version and is distinguished by its build
+      # number. If the project is newer, its version opens the next train after
+      # the release workflow's post-release bump. This workflow never bumps the
+      # marketing version or commits to a contributor's branch.
+      - name: Determine TestFlight marketing version
         id: marketing
         shell: bash
         env:
@@ -430,7 +428,7 @@ jobs:
 
       - name: Comment on PR if the build failed
         if: ${{ failure() && github.event.client_payload.pr && github.event.client_payload.pr != '' && github.event.client_payload.pr != 'null' && steps.app-token.outcome == 'success' }}
-        uses: actions/github-script@v8
+        uses: actions/github-script@v9
         env:
           PAYLOAD_REPO: ${{ github.event.client_payload.repo }}
           PAYLOAD_PR: ${{ github.event.client_payload.pr }}
@@ -473,7 +471,7 @@ jobs:
           repositories: ${{ needs.build.outputs.name }}
 
       - name: Fetch build secrets from Infisical
-        uses: Infisical/secrets-action@v1.0.15
+        uses: Infisical/secrets-action@v1.0.17
         with:
           method: universal
           client-id: ${{ secrets.INFISICAL_CLIENT_ID }}

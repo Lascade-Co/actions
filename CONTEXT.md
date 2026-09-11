@@ -336,6 +336,10 @@ A workflow in this repo that does the work, invoked by `repository_dispatch` fro
 - A **build number** must clear its **train**'s floor. `travel-animator-ios` sits at
   marketing version `3.9.3` with builds around `213`, which is why a bare run counter cannot
   be used (see ADR-0008).
+- TestFlight builds reuse the highest iOS **train** already in TestFlight. The project
+  **marketing version** is used only when it is higher, which opens the next train after the
+  release runner's post-release bump. TestFlight builds never bump the marketing version;
+  their **build numbers** distinguish them.
 - **Team ID** and **bundle ID** are derived from the App Store provisioning profile rather
   than stored, so they cannot drift from the profile actually doing the signing.
 

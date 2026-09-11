@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """
-Print the marketing version this build should use.
+Print the marketing version a TestFlight build should use.
 
-App Store Connect closes a version train once that version is approved, and
-refuses any further build for it — including TestFlight builds. A repo whose
-MARKETING_VERSION has already shipped therefore cannot upload anything until
-somebody bumps it by hand. This asks App Store Connect what exists and returns
-a version that is guaranteed to be open.
+All TestFlight builds for one release candidate belong in the same marketing
+version train. This asks App Store Connect for the latest iOS TestFlight train
+and reuses it; CURRENT_PROJECT_VERSION, set by the workflow, distinguishes the
+individual builds.
 
 The answer is meant to be passed to xcodebuild as MARKETING_VERSION=... . The
 repository is never modified: a PR pipeline must not push commits to
@@ -21,9 +20,10 @@ Required environment:
     CURRENT_VERSION            – MARKETING_VERSION as it stands in the project
 
 Behaviour:
-    Returns CURRENT_VERSION when it is already higher than everything App Store
-    Connect knows about. Otherwise returns the highest known version with its
-    patch component incremented.
+    Returns the highest iOS TestFlight marketing version without incrementing
+    it. When CURRENT_VERSION is higher, returns CURRENT_VERSION so the release
+    workflow's post-release bump can open the next train. The TestFlight
+    workflow never advances the marketing version itself.
 
     On any failure — no credentials, app not found, API error — it warns on
     stderr and falls back to CURRENT_VERSION rather than failing. A version
@@ -143,38 +143,35 @@ def main():
             return
         app_id = apps["data"][0]["id"]
 
-        known = []
-        # Released and in-review versions. Their trains are the ones that close.
-        store = get(
-            f"/v1/apps/{app_id}/appStoreVersions"
-            f"?limit=200&fields[appStoreVersions]=versionString",
-            token,
-        )
-        known += [v["attributes"]["versionString"] for v in store.get("data", [])]
-        # TestFlight trains. A version already used here is not free either.
+        # Prerelease versions are TestFlight trains. Restrict this lookup to iOS
+        # so another platform attached to the app cannot select our version.
         pre = get(
-            f"/v1/apps/{app_id}/preReleaseVersions"
-            f"?limit=200&fields[preReleaseVersions]=version",
+            f"/v1/preReleaseVersions?filter[app]={app_id}"
+            f"&filter[platform]=IOS&sort=-version&limit=200"
+            f"&fields[preReleaseVersions]=version",
             token,
         )
-        known += [v["attributes"]["version"] for v in pre.get("data", [])]
-
-        known = [v for v in known if v]
-        if not known:
-            warn("App Store Connect returned no versions; using CURRENT_VERSION")
+        testflight_versions = [
+            v["attributes"]["version"]
+            for v in pre.get("data", [])
+            if v.get("attributes", {}).get("version")
+        ]
+        if not testflight_versions:
+            warn("no TestFlight marketing versions; using CURRENT_VERSION")
             print(current)
             return
 
-        highest = max(known, key=parse)
-        if parse(current) > parse(highest):
-            warn(f"current {current} is already above the highest known {highest}")
+        latest_testflight = max(testflight_versions, key=parse)
+        if parse(current) > parse(latest_testflight):
+            warn(
+                f"project marketing version {current} is newer than TestFlight "
+                f"{latest_testflight}; using project version"
+            )
             print(current)
             return
 
-        major, minor, patch = parse(highest)
-        nxt = f"{major}.{minor}.{patch + 1}"
-        warn(f"highest known version is {highest}; using {nxt}")
-        print(nxt)
+        warn(f"latest TestFlight marketing version is {latest_testflight}; reusing it")
+        print(latest_testflight)
 
     except (urllib.error.URLError, subprocess.CalledProcessError, ValueError, KeyError) as e:
         warn(f"lookup failed ({type(e).__name__}: {e}); using CURRENT_VERSION")
