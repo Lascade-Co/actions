@@ -17,3 +17,6 @@ deploys production. The caller supplies required `project_slug`; do not store it
 Infisical project selection centrally. Keep both targets serialized by account/Worker. Infisical
 exports only allowlisted build/runtime values; never use secret bulk for previews.
 See `docs/vinext-deployment.md` before changing the shared runner.
+
+Pin control downloads to the runner SHA; retry transport errors with bounded curl
+retries and promote only successful, nonempty temporary downloads.

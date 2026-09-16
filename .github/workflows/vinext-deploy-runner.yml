@@ -33,10 +33,12 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p control/scripts/vinext control/data
-          for file in cli config build deploy secrets; do
-            curl --fail --silent --show-error --retry 3 "https://raw.githubusercontent.com/Lascade-Co/actions/$CONTROL_SHA/scripts/vinext/$file.mjs" -o "control/scripts/vinext/$file.mjs"
+          for file in scripts/vinext/{cli,config,build,deploy,secrets}.mjs data/vinext-projects.json; do
+            rm -f "control/$file.tmp"
+            curl --fail --silent --show-error --retry 5 --retry-all-errors --retry-delay 2 --retry-max-time 60 --connect-timeout 10 --max-time 20 "https://raw.githubusercontent.com/Lascade-Co/actions/$CONTROL_SHA/$file" -o "control/$file.tmp"
+            test -s "control/$file.tmp"
+            mv "control/$file.tmp" "control/$file"
           done
-          curl --fail --silent --show-error --retry 3 "https://raw.githubusercontent.com/Lascade-Co/actions/$CONTROL_SHA/data/vinext-projects.json" -o control/data/vinext-projects.json
 
       - name: Validate dispatch and resolve registered project
         id: prepare
@@ -87,10 +89,12 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p control/scripts/vinext control/data
-          for file in cli config build deploy secrets; do
-            curl --fail --silent --show-error --retry 3 "https://raw.githubusercontent.com/Lascade-Co/actions/$CONTROL_SHA/scripts/vinext/$file.mjs" -o "control/scripts/vinext/$file.mjs"
+          for file in scripts/vinext/{cli,config,build,deploy,secrets}.mjs data/vinext-projects.json; do
+            rm -f "control/$file.tmp"
+            curl --fail --silent --show-error --retry 5 --retry-all-errors --retry-delay 2 --retry-max-time 60 --connect-timeout 10 --max-time 20 "https://raw.githubusercontent.com/Lascade-Co/actions/$CONTROL_SHA/$file" -o "control/$file.tmp"
+            test -s "control/$file.tmp"
+            mv "control/$file.tmp" "control/$file"
           done
-          curl --fail --silent --show-error --retry 3 "https://raw.githubusercontent.com/Lascade-Co/actions/$CONTROL_SHA/data/vinext-projects.json" -o control/data/vinext-projects.json
 
       - name: Resolve the project locally without cross-job secret masking
         id: prepare
@@ -200,10 +204,12 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p control/scripts/vinext control/data
-          for file in cli config build deploy secrets; do
-            curl --fail --silent --show-error --retry 3 "https://raw.githubusercontent.com/Lascade-Co/actions/$CONTROL_SHA/scripts/vinext/$file.mjs" -o "control/scripts/vinext/$file.mjs"
+          for file in scripts/vinext/{cli,config,build,deploy,secrets}.mjs data/vinext-projects.json; do
+            rm -f "control/$file.tmp"
+            curl --fail --silent --show-error --retry 5 --retry-all-errors --retry-delay 2 --retry-max-time 60 --connect-timeout 10 --max-time 20 "https://raw.githubusercontent.com/Lascade-Co/actions/$CONTROL_SHA/$file" -o "control/$file.tmp"
+            test -s "control/$file.tmp"
+            mv "control/$file.tmp" "control/$file"
           done
-          curl --fail --silent --show-error --retry 3 "https://raw.githubusercontent.com/Lascade-Co/actions/$CONTROL_SHA/data/vinext-projects.json" -o control/data/vinext-projects.json
 
       - name: Resolve the project locally without cross-job secret masking
         id: prepare
