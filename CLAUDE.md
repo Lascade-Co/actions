@@ -9,3 +9,11 @@ This repo contains GitHub actions that are invokend by `repository_dispatch` / `
 - For more complex scripts, place the script in a domain subfolder under scripts/ (e.g. scripts/ios/, scripts/catchup/) and invoke it using the GitHub raw url, including the subfolder (https://raw.githubusercontent.com/Lascade-Co/actions/main/scripts/<domain>/<name>)
 - When writing an action that is using `repository_dispatch` write the corrosponding trigger action and place it in the triggers folder.
 
+
+## Vinext deployment
+
+Register projects in `data/vinext-projects.json`; `dev` uploads alias `dev`, `main`
+deploys production. The caller supplies required `project_slug`; do not store its
+Infisical project selection centrally. Keep both targets serialized by account/Worker. Infisical
+exports only allowlisted build/runtime values; never use secret bulk for previews.
+See `docs/vinext-deployment.md` before changing the shared runner.

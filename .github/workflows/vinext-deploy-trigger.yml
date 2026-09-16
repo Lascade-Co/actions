@@ -1,0 +1,38 @@
+name: Vinext Deploy Trigger
+
+on:
+  workflow_call:
+    inputs:
+      project_slug:
+        description: Infisical project slug supplied by the application repository
+        required: true
+        type: string
+    secrets:
+      central_dispatch_token:
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  dispatch:
+    if: >-
+      github.event_name == 'push' && !github.event.deleted &&
+      (github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/main')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Request deployment of this exact commit
+        uses: peter-evans/repository-dispatch@v4
+        with:
+          token: ${{ secrets.central_dispatch_token }}
+          repository: Lascade-Co/actions
+          event-type: vinext-deploy
+          client-payload: >-
+            {
+              "repo": ${{ toJSON(github.repository) }},
+              "project_slug": ${{ toJSON(inputs.project_slug) }},
+              "branch": ${{ toJSON(github.ref_name) }},
+              "sha": ${{ toJSON(github.sha) }},
+              "source_run_url": ${{ toJSON(format('{0}/{1}/actions/runs/{2}', github.server_url, github.repository, github.run_id)) }}
+            }
