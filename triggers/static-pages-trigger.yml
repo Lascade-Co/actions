@@ -1,0 +1,23 @@
+# Copy into the application's .github/workflows/deploy-pages.yml.
+name: Deploy Dashboard to Pages
+
+on:
+  push:
+    branches: [main]
+    paths: ['dashboard/**', '.github/workflows/deploy-pages.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    uses: Lascade-Co/actions/.github/workflows/static-pages-deploy-trigger.yml@main
+    with:
+      base_path: dashboard
+      # Optional browser-safe build environment:
+      # project_slug: your-infisical-project
+      # infisical_path: /frontend
+    secrets:
+      CI_APP_CLIENT_ID: ${{ secrets.CI_APP_CLIENT_ID }}
+      CI_APP_PRIVATE_KEY: ${{ secrets.CI_APP_PRIVATE_KEY }}

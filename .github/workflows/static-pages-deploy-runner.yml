@@ -1,0 +1,232 @@
+name: Static Pages Deploy
+run-name: "${{ github.event.client_payload.repo }} · ${{ github.event.client_payload.sha }} · Pages"
+
+on:
+  repository_dispatch:
+    types: [static-pages-deploy]
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      repo: ${{ steps.source.outputs.repo }}
+      owner: ${{ steps.source.outputs.owner }}
+      repo_name: ${{ steps.source.outputs.repo_name }}
+      base_path: ${{ steps.source.outputs.base_path }}
+      project_slug: ${{ steps.source.outputs.project_slug }}
+      infisical_path: ${{ steps.source.outputs.infisical_path }}
+      project_name: ${{ steps.source.outputs.project_name }}
+      target_key: ${{ steps.source.outputs.target_key }}
+      sha: ${{ steps.source.outputs.sha }}
+      current: ${{ steps.source.outputs.current }}
+    steps:
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - name: Download pinned central controls
+        env:
+          CONTROL_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          mkdir -p control/scripts/pages
+          curl --fail --silent --show-error --retry 5 --retry-all-errors --retry-delay 2 --retry-max-time 60 --connect-timeout 10 --max-time 20 "https://raw.githubusercontent.com/Lascade-Co/actions/$CONTROL_SHA/scripts/pages/control.mjs" -o control/scripts/pages/control.mjs.tmp
+          test -s control/scripts/pages/control.mjs.tmp
+          mv control/scripts/pages/control.mjs.tmp control/scripts/pages/control.mjs
+      - name: Validate source request
+        id: request
+        env:
+          PAYLOAD_JSON: ${{ toJSON(github.event.client_payload) }}
+        run: node control/scripts/pages/control.mjs validate
+      - name: Mint source read and status token
+        id: status-token
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ secrets.CI_APP_CLIENT_ID }}
+          private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
+          owner: ${{ steps.request.outputs.owner }}
+          repositories: ${{ steps.request.outputs.repo_name }}
+          permission-contents: read
+          permission-statuses: write
+      - name: Read source target and verify main HEAD
+        id: source
+        env:
+          PAYLOAD_JSON: ${{ toJSON(github.event.client_payload) }}
+          GH_TOKEN: ${{ steps.status-token.outputs.token }}
+        run: node control/scripts/pages/control.mjs head
+      - name: Mark deployment pending on source commit
+        if: steps.source.outputs.current == 'true'
+        env:
+          GH_TOKEN: ${{ steps.status-token.outputs.token }}
+          SOURCE_SHA: ${{ steps.source.outputs.sha }}
+          SOURCE_REPO: ${{ steps.source.outputs.repo }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: gh api --method POST "repos/$SOURCE_REPO/statuses/$SOURCE_SHA" -f state=pending -f context=cloudflare-pages -f description='Static site deployment in progress' -f target_url="$RUN_URL"
+
+  build:
+    needs: prepare
+    if: needs.prepare.outputs.current == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      artifact_id: ${{ steps.upload.outputs.artifact-id }}
+    steps:
+      - name: Mint read-only source checkout token
+        id: checkout-token
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ secrets.CI_APP_CLIENT_ID }}
+          private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
+          owner: ${{ needs.prepare.outputs.owner }}
+          repositories: ${{ needs.prepare.outputs.repo_name }}
+          permission-contents: read
+      - uses: actions/checkout@v7
+        with:
+          repository: ${{ needs.prepare.outputs.repo }}
+          token: ${{ steps.checkout-token.outputs.token }}
+          ref: ${{ needs.prepare.outputs.sha }}
+          path: app
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - name: Download pinned central controls
+        env:
+          CONTROL_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          mkdir -p control/scripts/pages
+          curl --fail --silent --show-error --retry 5 --retry-all-errors --retry-delay 2 --retry-max-time 60 --connect-timeout 10 --max-time 20 "https://raw.githubusercontent.com/Lascade-Co/actions/$CONTROL_SHA/scripts/pages/control.mjs" -o control/scripts/pages/control.mjs.tmp
+          test -s control/scripts/pages/control.mjs.tmp
+          mv control/scripts/pages/control.mjs.tmp control/scripts/pages/control.mjs
+      - name: Validate build directory
+        env:
+          BASE_PATH: ${{ needs.prepare.outputs.base_path }}
+        run: node control/scripts/pages/control.mjs base app "$BASE_PATH"
+      - name: Install dependencies
+        working-directory: app/${{ needs.prepare.outputs.base_path }}
+        run: npm ci
+      - name: Import optional build environment from Infisical
+        if: needs.prepare.outputs.project_slug != ''
+        uses: Infisical/secrets-action@v1.0.18
+        with:
+          method: universal
+          client-id: ${{ secrets.INFISICAL_CLIENT_ID }}
+          client-secret: ${{ secrets.INFISICAL_CLIENT_SECRET }}
+          project-slug: ${{ needs.prepare.outputs.project_slug }}
+          env-slug: prod
+          domain: ${{ secrets.INFISICAL_DOMAIN }}
+          secret-path: ${{ needs.prepare.outputs.infisical_path }}
+          export-type: env
+      - name: Lint and build static app
+        working-directory: app/${{ needs.prepare.outputs.base_path }}
+        run: |
+          npm run lint --if-present
+          npm run build
+      - name: Validate static output before artifact upload
+        env:
+          BASE_PATH: ${{ needs.prepare.outputs.base_path }}
+        run: |
+          node control/scripts/pages/control.mjs base app "$BASE_PATH"
+          node control/scripts/pages/control.mjs static "app/$BASE_PATH/dist"
+      - name: Upload static output
+        id: upload
+        uses: actions/upload-artifact@v7
+        with:
+          name: pages-${{ github.run_id }}-${{ github.run_attempt }}
+          path: app/${{ needs.prepare.outputs.base_path }}/dist/
+          if-no-files-found: error
+          include-hidden-files: true
+          retention-days: 1
+
+  deploy:
+    needs: [prepare, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    concurrency:
+      group: ${{ needs.prepare.outputs.target_key }}
+      cancel-in-progress: false
+    outputs:
+      current: ${{ steps.source.outputs.current }}
+    steps:
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - uses: actions/download-artifact@v8
+        with:
+          artifact-ids: ${{ needs.build.outputs.artifact_id }}
+          merge-multiple: true
+          path: public
+      - name: Download pinned central controls
+        env:
+          CONTROL_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          mkdir -p control/scripts/pages
+          curl --fail --silent --show-error --retry 5 --retry-all-errors --retry-delay 2 --retry-max-time 60 --connect-timeout 10 --max-time 20 "https://raw.githubusercontent.com/Lascade-Co/actions/$CONTROL_SHA/scripts/pages/control.mjs" -o control/scripts/pages/control.mjs.tmp
+          test -s control/scripts/pages/control.mjs.tmp
+          mv control/scripts/pages/control.mjs.tmp control/scripts/pages/control.mjs
+      - name: Reject runtime code and unsafe artifacts
+        run: node control/scripts/pages/control.mjs static public
+      - name: Mint read-only source verification token
+        id: source-token
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ secrets.CI_APP_CLIENT_ID }}
+          private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
+          owner: ${{ needs.prepare.outputs.owner }}
+          repositories: ${{ needs.prepare.outputs.repo_name }}
+          permission-contents: read
+      - name: Recheck main HEAD immediately before deployment
+        id: source
+        env:
+          PAYLOAD_JSON: ${{ toJSON(github.event.client_payload) }}
+          GH_TOKEN: ${{ steps.source-token.outputs.token }}
+        run: node control/scripts/pages/control.mjs head
+      - name: Deploy production static assets
+        if: steps.source.outputs.current == 'true'
+        uses: cloudflare/wrangler-action@v4
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ steps.source.outputs.account_id }}
+          wranglerVersion: '4.131.1'
+          command: pages deploy public --project-name ${{ steps.source.outputs.project_name }} --branch main --commit-hash ${{ needs.prepare.outputs.sha }}
+
+  status:
+    needs: [prepare, build, deploy]
+    if: always() && needs.prepare.result == 'success' && needs.prepare.outputs.current == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Mint source status token
+        id: status-token
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ secrets.CI_APP_CLIENT_ID }}
+          private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
+          owner: ${{ needs.prepare.outputs.owner }}
+          repositories: ${{ needs.prepare.outputs.repo_name }}
+          permission-statuses: write
+      - name: Report central deployment result
+        env:
+          GH_TOKEN: ${{ steps.status-token.outputs.token }}
+          SOURCE_SHA: ${{ needs.prepare.outputs.sha }}
+          SOURCE_REPO: ${{ needs.prepare.outputs.repo }}
+          DEPLOY_RESULT: ${{ needs.deploy.result }}
+          CURRENT: ${{ needs.deploy.outputs.current }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          state=failure; description='Static site deployment failed; see central run'
+          if [[ "$DEPLOY_RESULT" == success && "$CURRENT" == true ]]; then state=success; description='Static site deployed to Cloudflare Pages'; fi
+          if [[ "$DEPLOY_RESULT" == success && "$CURRENT" == false ]]; then state=success; description='Skipped: a newer main commit superseded this deployment'; fi
+          gh api --method POST "repos/$SOURCE_REPO/statuses/$SOURCE_SHA" -f state="$state" -f context=cloudflare-pages -f description="$description" -f target_url="$RUN_URL"

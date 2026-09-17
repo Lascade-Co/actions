@@ -20,3 +20,10 @@ See `docs/vinext-deployment.md` before changing the shared runner.
 
 Pin control downloads to the runner SHA; retry transport errors with bounded curl
 retries and promote only successful, nonempty temporary downloads.
+
+## Static Pages deployment
+
+Static Pages callers supply `base_path` and keep their target in that directory's
+`wrangler.json`; there is no central project registry. See `docs/static-pages-deployment.md`.
+Keep npm builds isolated from deployment credentials, validate static artifacts,
+and recheck main HEAD inside the serialized Pages deployment job.

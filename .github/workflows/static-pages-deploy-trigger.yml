@@ -1,0 +1,60 @@
+name: Static Pages Deploy Trigger
+
+on:
+  workflow_call:
+    inputs:
+      base_path:
+        description: Relative directory containing package.json and the npm build (dist output)
+        type: string
+        default: '.'
+      project_slug:
+        description: Optional Infisical project slug for browser-safe build environment variables
+        type: string
+        default: ''
+      infisical_path:
+        description: Infisical prod secret folder to import when project_slug is set
+        type: string
+        default: '/'
+    secrets:
+      CI_APP_CLIENT_ID:
+        required: true
+      CI_APP_PRIVATE_KEY:
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  dispatch:
+    if: >-
+      github.ref == 'refs/heads/main' &&
+      ((github.event_name == 'push' && !github.event.deleted) || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Mint central dispatch token
+        id: dispatch-token
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ secrets.CI_APP_CLIENT_ID }}
+          private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
+          owner: Lascade-Co
+          repositories: actions
+          permission-contents: write
+
+      - name: Request deployment of this exact commit
+        uses: peter-evans/repository-dispatch@v4
+        with:
+          token: ${{ steps.dispatch-token.outputs.token }}
+          repository: Lascade-Co/actions
+          event-type: static-pages-deploy
+          client-payload: >-
+            {
+              "repo": ${{ toJSON(github.repository) }},
+              "branch": ${{ toJSON(github.ref_name) }},
+              "sha": ${{ toJSON(github.sha) }},
+              "base_path": ${{ toJSON(inputs.base_path) }},
+              "project_slug": ${{ toJSON(inputs.project_slug) }},
+              "infisical_path": ${{ toJSON(inputs.infisical_path) }},
+              "source_run_url": ${{ toJSON(format('{0}/{1}/actions/runs/{2}', github.server_url, github.repository, github.run_id)) }}
+            }
