@@ -67,6 +67,25 @@ jobs:
           token: ${{ steps.app-token.outputs.token }}
           fetch-depth: 1
 
+      # Which source commit this artifact actually came from.
+      #
+      # The checkout above takes `ref: <branch>`, not a SHA, so the commit this job BUILDS is
+      # whatever the branch head is when the job starts -- not necessarily the commit whose push
+      # dispatched it. Recording only the dispatcher's SHA would therefore sometimes name a commit
+      # that was never built, which is the exact error this exists to remove. Record both, and say
+      # so when they differ rather than quietly picking one.
+      - name: Resolve built source SHA
+        id: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          BUILT="$(git rev-parse HEAD)"
+          echo "sha=$BUILT" >> "$GITHUB_OUTPUT"
+          REQUESTED="${{ github.event.client_payload.source_sha }}"
+          if [ -n "$REQUESTED" ] && [ "$REQUESTED" != "$BUILT" ]; then
+            echo "::warning::publish raced a push: requested $REQUESTED, building $BUILT"
+          fi
+
       - name: Fetch local.properties from Infisical
         uses: Infisical/secrets-action@v1.0.15
         with:
@@ -160,12 +179,61 @@ jobs:
           curl -sSL https://raw.githubusercontent.com/Lascade-Co/actions/main/scripts/ios/normalize_framework_metadata.py |
             python3 - spm-repo/libEGL.xcframework spm-repo/libGLESv2.xcframework
 
+      # A consumer pinned at a revision on the SPM branch reads the source commit out of the
+      # checkout itself, instead of pairing workflow run timestamps against publish times and then
+      # checking whether some symbol is present in the published header.
+      #
+      # Its own file rather than a header comment in Package.swift on purpose: that file carries
+      # the load-bearing ANGLE binaryTarget declarations, and a workflow that rewrites it is a way
+      # to lose the two frameworks that stop a consuming app dying in dyld.
+      #
+      # Intentional side effect: this file changes every run, so the commit below always has
+      # something to commit. Previously a publish whose framework bytes happened to be identical
+      # produced no commit and therefore no tag, while `increment_version.sh` had already burned
+      # the version -- the same stuck state the concurrency comment above describes, reached from
+      # the other side. This removes it.
+      - name: Record provenance in SPM repo
+        shell: bash
+        env:
+          PROV_VERSION: ${{ steps.version.outputs.new_version }}
+          PROV_SOURCE_REPO: ${{ github.event.client_payload.repo }}
+          PROV_SOURCE_BRANCH: ${{ github.event.client_payload.branch }}
+          PROV_SOURCE_COMMIT: ${{ steps.source.outputs.sha }}
+          PROV_REQUESTED_COMMIT: ${{ github.event.client_payload.source_sha }}
+          PROV_RUN: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          # Values go through the environment, not string interpolation, so a branch name
+          # containing a quote cannot break the JSON or the surrounding shell.
+          python3 - > spm-repo/PROVENANCE.json <<'PY'
+          import datetime, json, os
+          print(json.dumps({
+              "version": os.environ["PROV_VERSION"],
+              "source_repo": os.environ["PROV_SOURCE_REPO"],
+              "source_branch": os.environ["PROV_SOURCE_BRANCH"],
+              "source_commit": os.environ["PROV_SOURCE_COMMIT"],
+              "requested_commit": os.environ.get("PROV_REQUESTED_COMMIT", ""),
+              "published_at": datetime.datetime.now(datetime.timezone.utc)
+                  .strftime("%Y-%m-%dT%H:%M:%SZ"),
+              "publish_run": os.environ["PROV_RUN"],
+          }, indent=2))
+          PY
+
       - name: Commit XCFramework
         uses: stefanzweifel/git-auto-commit-action@v7
         with:
           repository: spm-repo
           tag_name: v${{ steps.version.outputs.new_version }}
-          commit_message: Update to v${{ steps.version.outputs.new_version }}
+          # Subject line deliberately unchanged, so anything matching `Update to v<version>`
+          # keeps working; the provenance rides in the body as trailers.
+          commit_message: |
+            Update to v${{ steps.version.outputs.new_version }}
+
+            Source-Repo: ${{ github.event.client_payload.repo }}
+            Source-Branch: ${{ github.event.client_payload.branch }}
+            Source-Commit: ${{ steps.source.outputs.sha }}
+            Requested-Commit: ${{ github.event.client_payload.source_sha }}
+            Publish-Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           branch: ${{ github.event.client_payload.spm_branch || 'main' }}
 
       # `increment_version.sh` bumps gradle.properties in the SOURCE checkout, but
