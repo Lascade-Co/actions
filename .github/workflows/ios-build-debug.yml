@@ -25,6 +25,7 @@ jobs:
     timeout-minutes: 120
     outputs:
       version: ${{ steps.marketing.outputs.version }}
+      version_verified: ${{ steps.marketing.outputs.verified }}
       app_name: ${{ steps.app_meta.outputs.app_name }}
       build_number: ${{ steps.build_number.outputs.build }}
       owner: ${{ steps.repo.outputs.owner }}
@@ -357,9 +358,14 @@ jobs:
           IOS_BUNDLE_ID: ${{ steps.ids.outputs.bundle }}
           CURRENT_VERSION: ${{ steps.version.outputs.version }}
         run: |
-          V=$(curl -sSL https://raw.githubusercontent.com/Lascade-Co/actions/main/scripts/ios/next_version.py | python3 -)
-          echo "Building marketing version $V (project says ${CURRENT_VERSION})"
-          echo "version=$V" >> "$GITHUB_OUTPUT"
+          # The script writes its answer as GITHUB_OUTPUT key=value lines
+          # (version= and verified=), so a single tee both records them in the
+          # job log and sets the step outputs. The step runs under pipefail, so
+          # a failing script still fails the step even though tee succeeds.
+          echo "Project says marketing version ${CURRENT_VERSION}"
+          curl -sSL https://raw.githubusercontent.com/Lascade-Co/actions/main/scripts/ios/next_version.py \
+            | python3 - \
+            | tee -a "$GITHUB_OUTPUT"
 
       - name: Compute build number
         id: build_number
@@ -520,6 +526,7 @@ jobs:
             <!-- central-ios-testflight -->
             ✅ Uploaded to TestFlight — **${{ needs.build.outputs.app_name }}**,
             version `${{ needs.build.outputs.version }}`, build `${{ needs.build.outputs.build_number }}`.
+            ${{ needs.build.outputs.version_verified != 'true' && '⚠️ Marketing version was **not verified** against App Store Connect — the lookup failed and the project version was used as-is.' || '' }}
 
             Find it in TestFlight under version ${{ needs.build.outputs.version }} → build ${{ needs.build.outputs.build_number }}.
             Processing takes a few minutes after this comment appears.
@@ -538,6 +545,7 @@ jobs:
           BRANCH: ${{ github.event.client_payload.branch }}
           APP_NAME: ${{ needs.build.outputs.app_name }}
           APP_VERSION: ${{ needs.build.outputs.version }}
+          VERSION_VERIFIED: ${{ needs.build.outputs.version_verified }}
           BUILD_NUMBER: ${{ needs.build.outputs.build_number }}
         run: |
           # & first: escaping < and > introduces ampersands we must not re-escape.
@@ -551,6 +559,15 @@ jobs:
           ESCAPED_APP="$(html_escape "$APP_NAME")"
           ESCAPED_VERSION="$(html_escape "$APP_VERSION")"
           ESCAPED_BUILD="$(html_escape "$BUILD_NUMBER")"
+          ESCAPED_VERIFIED="$(html_escape "$VERSION_VERIFIED")"
+          # Anything other than true means the version was never confirmed
+          # against App Store Connect and the train may already be closed. The
+          # warning itself is a fixed literal — the flag only decides whether the
+          # line appears, so no untrusted text reaches the heredoc.
+          VERIFIED_NOTE=""
+          if [ "$ESCAPED_VERIFIED" != "true" ]; then
+            VERIFIED_NOTE=$'\n<b>⚠️ Version NOT verified against App Store Connect</b>'
+          fi
           curl -sf -X POST "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage" \
             -d chat_id="${TELEGRAM_CHAT_ID}" \
             -d parse_mode=html \
@@ -559,7 +576,7 @@ jobs:
           <b>iOS build uploaded to TestFlight</b>
 
           <b>App:</b> ${ESCAPED_APP}
-          <b>Version:</b> ${ESCAPED_VERSION}
+          <b>Version:</b> ${ESCAPED_VERSION}${VERIFIED_NOTE}
           <b>Build:</b> ${ESCAPED_BUILD}
           <b>Branch:</b> ${ESCAPED_BRANCH}
           <b>PR:</b> ${ESCAPED_TITLE:-n/a}
@@ -616,4 +633,5 @@ jobs:
           body: |
             <!-- central-ios-testflight -->
             ❌ **TestFlight upload** failed for build `${{ needs.build.outputs.build_number }}`.
+            ${{ needs.build.outputs.version_verified != 'true' && '⚠️ The marketing version was **not verified** against App Store Connect — it may target a closed TestFlight train, which is the likely cause of this rejection (`ITMS-90186`).' || '' }}
             [Check logs](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})

@@ -322,6 +322,13 @@ _Avoid_: version, build version.
 Every build sharing one **marketing version**. Monotonicity is enforced per train, so a train
 carries a floor: the highest build number already uploaded to it.
 
+**Closed train**:
+A **train** App Store Connect will accept no further uploads to, rejecting them as
+`ITMS-90186 Invalid Pre-Release Train`. A train closes when an App Store version record exists
+for its **marketing version**, and every train below that one is closed with it.
+_Avoid_: released version, closed version — it is the train that closes, and it closes before
+the version is public.
+
 **Central runner**:
 A workflow in this repo that does the work, invoked by `repository_dispatch` from an app repo.
 **Trigger**: the thin workflow in the app repo that dispatches to it.
@@ -333,13 +340,17 @@ A workflow in this repo that does the work, invoked by `repository_dispatch` fro
 - The **central runner** reads Infisical `staging` for **TestFlight builds** and `prod` for
   App Store releases — the signing material is identical in both, because TestFlight and the
   App Store take the same distribution certificate and profiles.
-- A **build number** must clear its **train**'s floor. `travel-animator-ios` sits at
-  marketing version `3.9.3` with builds around `213`, which is why a bare run counter cannot
-  be used (see ADR-0008).
-- TestFlight builds reuse the highest iOS **train** already in TestFlight. The project
-  **marketing version** is used only when it is higher, which opens the next train after the
-  release runner's post-release bump. TestFlight builds never bump the marketing version;
-  their **build numbers** distinguish them.
+- A **build number** must clear its **train**'s floor. `travel-animator-ios` is at marketing
+  version `4.0.1` with builds around `235` (it was `3.9.3` / `213` when ADR-0008 was written),
+  which is why a bare run counter cannot be used (see ADR-0008).
+- A **TestFlight build** reuses the highest iOS **train** already in TestFlight, so every build for
+  one release candidate shares a **marketing version** and is told apart by its **build number**.
+- The project **marketing version** is used instead when it is higher. That is now the only
+  deliberate way to open a new **train**: the release runner's post-release bump does not exist —
+  `increment_version.sh` is absent from the app repo (`docs/handoff/ios-testflight-missing-secrets.md`).
+- Neither is used if it names a **closed train**. The runner then takes one patch step above the
+  highest closed train, which is guaranteed to clear all of them at once. No pipeline commits a
+  **marketing version** back to the app repo; the choice lives only in the `xcodebuild` invocation.
 - **Team ID** and **bundle ID** are derived from the App Store provisioning profile rather
   than stored, so they cannot drift from the profile actually doing the signing.
 
@@ -389,6 +400,11 @@ A workflow in this repo that does the work, invoked by `repository_dispatch` fro
 - "version" meant both `MARKETING_VERSION` and `CURRENT_PROJECT_VERSION` — resolved:
   **marketing version** and **build number**. The distinction is load-bearing; only the build
   number has a monotonicity rule.
+- "floor" was nearly overloaded onto marketing versions when **closed train** was introduced —
+  resolved: a floor is always a **build number** floor. The version-side concept is expressed as
+  *the highest closed train*, so the glossary keeps one floor, not two.
+- "closed" could name the **marketing version** or the **train** — resolved: the **train** closes.
+  A marketing version is a string and has no state; the train is what App Store Connect refuses.
 - "hub" meant three things — the CMS host, the blog index page, and the articles themselves.
   Resolved: **origin** is the host, **blog listing** is the index, **blog** is one article, and
   **CMS** is the authoring system. The word "hub" survives only as the literal URL path

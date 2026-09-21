@@ -3,9 +3,10 @@
 Print the marketing version a TestFlight build should use.
 
 All TestFlight builds for one release candidate belong in the same marketing
-version train. This asks App Store Connect for the latest iOS TestFlight train
-and reuses it; CURRENT_PROJECT_VERSION, set by the workflow, distinguishes the
-individual builds.
+version train, so this reuses the latest iOS train rather than minting a new
+version per build; CURRENT_PROJECT_VERSION, set by the workflow, distinguishes
+the individual builds. A train that App Store Connect has closed is stepped
+over, because it would reject the upload as ITMS-90186.
 
 The answer is meant to be passed to xcodebuild as MARKETING_VERSION=... . The
 repository is never modified: a PR pipeline must not push commits to
@@ -19,17 +20,30 @@ Required environment:
     IOS_BUNDLE_ID              – bundle id of the app to look up
     CURRENT_VERSION            – MARKETING_VERSION as it stands in the project
 
+Output, on stdout, in GITHUB_OUTPUT key=value form so the step can tee it
+straight into $GITHUB_OUTPUT:
+
+    version=4.0.2
+    verified=true
+
 Behaviour:
-    Returns the highest iOS TestFlight marketing version without incrementing
-    it. When CURRENT_VERSION is higher, returns CURRENT_VERSION so the release
-    workflow's post-release bump can open the next train. The TestFlight
-    workflow never advances the marketing version itself.
+    The candidate is the higher of CURRENT_VERSION and the latest iOS TestFlight
+    train — the project version is what opens a new train, since nothing in
+    these pipelines bumps it. If that candidate is at or below the highest
+    closed train, the answer becomes one patch above the highest closed train
+    instead, which clears every closed train in one step.
+
+    A train is closed when an App Store version record exists for its marketing
+    version, whatever state that record is in. appVersionState is fetched and
+    logged so a human can see why a train was judged closed, and is deliberately
+    never branched on — see docs/adr/0013.
 
     On any failure — no credentials, app not found, API error — it warns on
-    stderr and falls back to CURRENT_VERSION rather than failing. A version
-    lookup should not be able to break a build; a genuinely unusable version is
-    reported by the upload step with a far clearer message than this script
-    could produce.
+    stderr, falls back to CURRENT_VERSION and reports verified=false. A version
+    lookup should not be able to break a build during an Apple outage, but the
+    fallback is a gamble on a train still being open, so the workflow surfaces
+    verified=false on the PR comment and the Telegram message rather than
+    letting the upload step discover it two hours later.
 """
 
 import json
@@ -117,6 +131,17 @@ def parse(version: str):
     return tuple(out)
 
 
+def bump_patch(version: str) -> str:
+    """'4.0.9' -> '4.0.10'. The smallest step App Store Connect will accept."""
+    major, minor, patch = parse(version)
+    return f"{major}.{minor}.{patch + 1}"
+
+
+def emit(version: str, verified: bool):
+    print(f"version={version}")
+    print(f"verified={'true' if verified else 'false'}")
+
+
 def main():
     current = os.environ.get("CURRENT_VERSION", "").strip()
     if not current:
@@ -130,7 +155,7 @@ def main():
 
     if not all([key_id, issuer, key.strip(), bundle]):
         warn("App Store Connect credentials or bundle id missing; using CURRENT_VERSION")
-        print(current)
+        emit(current, verified=False)
         return
 
     try:
@@ -139,7 +164,7 @@ def main():
         apps = get(f"/v1/apps?filter[bundleId]={bundle}&limit=1", token)
         if not apps.get("data"):
             warn(f"no app found for bundle id {bundle}; using CURRENT_VERSION")
-            print(current)
+            emit(current, verified=False)
             return
         app_id = apps["data"][0]["id"]
 
@@ -156,26 +181,56 @@ def main():
             for v in pre.get("data", [])
             if v.get("attributes", {}).get("version")
         ]
+
+        # An App Store version record is what closes a train, whatever state it
+        # is in (ADR-0013). appVersionState is read for the warning below and
+        # nothing else; branching on it reopens the failure this replaced, and
+        # the appStoreState it replaces is deprecated.
+        store = get(
+            f"/v1/apps/{app_id}/appStoreVersions"
+            f"?filter[platform]=IOS&limit=200"
+            f"&fields[appStoreVersions]=versionString,appVersionState",
+            token,
+        )
+        closed_trains = {
+            v["attributes"]["versionString"]: v["attributes"].get("appVersionState", "unknown state")
+            for v in store.get("data", [])
+            if v.get("attributes", {}).get("versionString")
+        }
+
+        candidate = current
         if not testflight_versions:
             warn("no TestFlight marketing versions; using CURRENT_VERSION")
-            print(current)
-            return
+        else:
+            latest_testflight = max(testflight_versions, key=parse)
+            if parse(latest_testflight) > parse(candidate):
+                candidate = latest_testflight
+                warn(f"latest TestFlight train is {latest_testflight}; reusing it")
+            else:
+                warn(
+                    f"project marketing version {current} is at or above every "
+                    f"TestFlight train (highest {latest_testflight}); using it"
+                )
 
-        latest_testflight = max(testflight_versions, key=parse)
-        if parse(current) > parse(latest_testflight):
-            warn(
-                f"project marketing version {current} is newer than TestFlight "
-                f"{latest_testflight}; using project version"
-            )
-            print(current)
-            return
+        if closed_trains:
+            highest_closed = max(closed_trains, key=parse)
+            if parse(candidate) <= parse(highest_closed):
+                # One step above the *highest closed* train, not above the
+                # candidate: bumping 4.0.0 when 4.0.1 is closed lands on 4.0.1,
+                # which is closed too. This clears all of them at once.
+                stepped = bump_patch(highest_closed)
+                warn(
+                    f"train {candidate} is at or below the closed train "
+                    f"{highest_closed} (App Store version is "
+                    f"{closed_trains[highest_closed]}); using {stepped}"
+                )
+                candidate = stepped
 
-        warn(f"latest TestFlight marketing version is {latest_testflight}; reusing it")
-        print(latest_testflight)
+        emit(candidate, verified=True)
 
     except (urllib.error.URLError, subprocess.CalledProcessError, ValueError, KeyError) as e:
         warn(f"lookup failed ({type(e).__name__}: {e}); using CURRENT_VERSION")
-        print(current)
+        emit(current, verified=False)
 
 
 if __name__ == "__main__":
