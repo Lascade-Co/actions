@@ -3,20 +3,62 @@ name: Daily Org Catchup
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 11 * * *'   # 14:00 UTC daily = 06:00 PST — summarise the previous 24h
+    # GitHub delays scheduled runs by hours, so fire three times the evening before;
+    # the gate jobs hold each run until 05:45 America/Los_Angeles (DST-aware) and the
+    # later runs exit at dedupe once the email is out. Off-the-hour minutes on purpose.
+    - cron: '17 3 * * *'
+    - cron: '17 6 * * *'
+    - cron: '17 9 * * *'
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
-  group: daily-catchup
+  group: daily-catchup-${{ github.event_name }}
   cancel-in-progress: false
 
 env:
   RAW: https://raw.githubusercontent.com/Lascade-Co/actions/main
 
 jobs:
+  # Hold until 05:45 Pacific. Two chained jobs because one job is capped at 6h.
+  gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    outputs:
+      proceed: ${{ steps.gate.outputs.proceed }}
+      report_date: ${{ steps.gate.outputs.report_date }}
+      remaining: ${{ steps.gate.outputs.remaining }}
+    steps:
+      - id: gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          curl -fsSL -o catchup_gate.py "$RAW/scripts/catchup/catchup_gate.py"
+          python3 catchup_gate.py --phase 1 --event "${{ github.event_name }}"
+
+  gate2:
+    needs: gate
+    if: needs.gate.outputs.proceed == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    outputs:
+      proceed: ${{ steps.gate.outputs.proceed }}
+      report_date: ${{ steps.gate.outputs.report_date }}
+    steps:
+      - id: gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          curl -fsSL -o catchup_gate.py "$RAW/scripts/catchup/catchup_gate.py"
+          python3 catchup_gate.py --phase 2 --event "${{ github.event_name }}" \
+            --report-date "${{ needs.gate.outputs.report_date }}" \
+            --remaining "${{ needs.gate.outputs.remaining }}"
+
   discover:
+    needs: gate2
+    if: needs.gate2.outputs.proceed == 'true'
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.disc.outputs.matrix }}
@@ -201,7 +243,7 @@ jobs:
   # active repos except those in data/catchup_exclude.txt, and email it via
   # Resend. Runs in parallel with `commit`; an email failure can't block the commit.
   email:
-    needs: collect
+    needs: [gate2, collect]
     if: needs.collect.outputs.wrote == 'true'
     runs-on: ubuntu-latest
     steps:
@@ -255,6 +297,7 @@ jobs:
         env:
           RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
           TODAY: ${{ needs.collect.outputs.today }}
+          REPORT_DATE: ${{ needs.gate2.outputs.report_date }}
         run: |
           jq -n --rawfile html email.html --arg d "$TODAY" \
             '{from:"noreply@metrics.lascade.com",
@@ -262,4 +305,5 @@ jobs:
               subject:"Lascade Daily Report — \($d)", html:$html}' \
           | curl -fsS -X POST https://api.resend.com/emails \
               -H "Authorization: Bearer $RESEND_API_KEY" \
+              -H "Idempotency-Key: daily-report-$REPORT_DATE" \
               -H "Content-Type: application/json" --data @-
