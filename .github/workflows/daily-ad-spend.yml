@@ -13,6 +13,10 @@ on:
       to:
         description: Recipient override (default cherian@lascade.com)
         default: cherian@lascade.com
+      reconcile:
+        description: Compare channel totals with marketing-net (prints match or MISMATCH only)
+        type: boolean
+        default: false
       break_commentary:
         description: Test only, corrupt the Codex auth so commentary must be skipped
         type: boolean
@@ -103,7 +107,7 @@ jobs:
 
       - name: Download scripts
         run: |
-          for m in pnl_money pnl_fx; do curl -fsSL --retry 3 --retry-delay 2 -o "$m.py" "$RAW/scripts/pnl/$m.py"; done
+          for m in pnl_money pnl_fx pnl_metaads pnl_googleads; do curl -fsSL --retry 3 --retry-delay 2 -o "$m.py" "$RAW/scripts/pnl/$m.py"; done
           for m in adspend_fetch adspend_model adspend_commentary adspend_render_email adspend_main; do
             curl -fsSL --retry 3 --retry-delay 2 -o "$m.py" "$RAW/scripts/adspend/$m.py"
           done
@@ -131,7 +135,7 @@ jobs:
         run: npm install -g @openai/codex
 
       - name: Build the emails
-        run: python3 adspend_main.py --ad-date "${{ steps.dates.outputs.ad_date }}" --variants "$VARIANTS" --out out --scratch scratch
+        run: python3 adspend_main.py --ad-date "${{ steps.dates.outputs.ad_date }}" --variants "$VARIANTS" --out out --scratch scratch ${{ inputs.reconcile && '--reconcile' || '' }}
 
       - name: Save the commentary cache
         if: always()

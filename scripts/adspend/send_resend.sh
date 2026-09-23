@@ -9,9 +9,11 @@ jq -n --rawfile html "out/email-$V.html" --rawfile text "out/email-$V.txt" \
       --arg to "${MAIL_TO:-cherian@lascade.com}" \
   '{from:"noreply@metrics.lascade.com", to:[$to],
     subject:$subject, html:$html, text:$text}' > "payload-$V.json"
+# Key includes the recipient: a resend to a different address must not read as "already sent".
+KEY="ad-spend-$V-$AD-$(printf %s "${MAIL_TO:-cherian@lascade.com}" | shasum | cut -c1-8)"
 STATUS=$(curl -sS -o /dev/null -w '%{http_code}' -X POST https://api.resend.com/emails \
   -H "Authorization: Bearer $RESEND_API_KEY" \
-  -H "Idempotency-Key: ad-spend-$V-$AD" \
+  -H "Idempotency-Key: $KEY" \
   -H "Content-Type: application/json" --data @"payload-$V.json")
 echo "variant $V: HTTP $STATUS"
 case "$STATUS" in

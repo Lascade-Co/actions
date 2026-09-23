@@ -352,7 +352,7 @@ def test_main_masks_and_never_logs_figures(capsys=None):
     with contextlib.redirect_stdout(buf):
         rc = mm.main(["--ad-date", "2026-09-22", "--out", out, "--scratch", scratch,
                       "--apps", os.path.join(HERE, "..", "..", "data", "adspend_apps.json"),
-                      "--break-commentary"])
+                      "--variants", "A,B", "--break-commentary"])
     log = buf.getvalue()
     assert rc == 0 and os.path.exists(os.path.join(out, "email-A.html")) and os.path.exists(os.path.join(out, "email-B.subject"))
     assert "::add-mask::" + SENTINEL + "M" in log
@@ -363,6 +363,17 @@ def test_main_masks_and_never_logs_figures(capsys=None):
     with contextlib.redirect_stdout(io.StringIO()):
         assert mm.main(["--ad-date", "2026-09-22", "--out", out, "--scratch", scratch,
                         "--apps", os.path.join(HERE, "..", "..", "data", "adspend_apps.json")]) == 1
+
+
+def test_reconcile_prints_no_figures():
+    import adspend_main as mm
+    rows = {"Meta": [row("TA - IOS", AD, 100)], "Google": Unavailable("x")}
+    ads = {"meta": {}, "google": {}}
+    ok = mm.reconcile(rows, TABLE, AD, ads, lambda *a: {AD: D(100)}, lambda *a: {})
+    bad = mm.reconcile(rows, TABLE, AD, ads, lambda *a: {AD: D(99)}, lambda *a: {})
+    assert ok[0] == "reconcile Meta: match" and ok[1].endswith("skipped (a side is unavailable)")
+    assert bad[0] == "reconcile Meta: MISMATCH (>=1%)" or bad[0].startswith("reconcile Meta: MISMATCH")
+    assert not any("$" in l or "100" in l for l in ok + bad)
 
 
 if __name__ == "__main__":

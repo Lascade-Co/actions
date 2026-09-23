@@ -15,6 +15,7 @@ import json
 import os
 import sys
 from datetime import date, datetime, timedelta, timezone
+from decimal import Decimal
 
 from adspend_commentary import commentary
 from adspend_fetch import fetch_google, fetch_meta
@@ -34,6 +35,23 @@ def load_creds(env=os.environ) -> dict:
     return ads
 
 
+def reconcile(rows, table, ad_date, ads, meta_fn, google_fn) -> list:
+    """Compare per-channel USD totals for ad_date with marketing-net's fetchers (same
+    accounts, same FX table). Public log: prints match/MISMATCH only, never a figure."""
+    out = []
+    for name, fn, cfg in (("Meta", meta_fn, ads["meta"]), ("Google", google_fn, ads["google"])):
+        data = rows[name]
+        theirs = fn(cfg, ad_date, table)
+        if isinstance(data, Unavailable) or isinstance(theirs, Unavailable):
+            out.append(f"reconcile {name}: skipped (a side is unavailable)")
+            continue
+        mine = sum((table.to_usd(r.spend, r.currency) for r in data if r.day == ad_date), Decimal("0"))
+        diff = abs(mine - theirs.get(ad_date, Decimal("0")))
+        out.append(f"reconcile {name}: " + ("match" if diff < Decimal("0.01") else
+                   f"MISMATCH ({'<1%' if theirs.get(ad_date) and diff / theirs[ad_date] < Decimal('0.01') else '>=1%'})"))
+    return out
+
+
 def status_line(name, data) -> str:
     if isinstance(data, Unavailable):
         return f"{name}: unavailable ({data.reason})"
@@ -51,6 +69,7 @@ def main(argv=None):
     ap.add_argument("--variants", default="A")
     ap.add_argument("--apps", default="data/adspend_apps.json")
     ap.add_argument("--break-commentary", action="store_true")
+    ap.add_argument("--reconcile", action="store_true")
     a = ap.parse_args(argv)
 
     ad_date = date.fromisoformat(a.ad_date)
@@ -70,6 +89,11 @@ def main(argv=None):
         return 1
 
     table = build_rate_table([], ad_date)
+    if a.reconcile:
+        from pnl_googleads import fetch_google_ads_daily
+        from pnl_metaads import fetch_meta_ads_daily
+        for line in reconcile(rows, table, ad_date, ads, fetch_meta_ads_daily, fetch_google_ads_daily):
+            print(line)
     model = build_model(rows, table, ad_date, datetime.now(timezone.utc), apps)
 
     def broken(*_a, **_k):
