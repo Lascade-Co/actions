@@ -32,14 +32,23 @@ def now_utc():
     return datetime.fromisoformat(v).astimezone(timezone.utc) if v else datetime.now(timezone.utc)
 
 
+def target_for(report_date):
+    return datetime(report_date.year, report_date.month, report_date.day,
+                    *TARGET_HHMM, tzinfo=PT)
+
+
 def plan(now):
     """Return (report_date, wait_seconds, proceed)."""
     local = now.astimezone(PT)
     report_date = (local + timedelta(hours=8)).date()
-    target = datetime(report_date.year, report_date.month, report_date.day,
-                      *TARGET_HHMM, tzinfo=PT)
-    wait = max(0.0, (target - now).total_seconds())
+    wait = max(0.0, (target_for(report_date) - now).total_seconds())
     return report_date, wait, wait <= MAX_WAIT
+
+
+def phase2_wait(report_date, now):
+    """Seconds phase 2 should sleep, from the absolute target rather than the
+    `remaining` phase 1 computed: gate2 can queue behind gate for an hour."""
+    return min(MAX_SLEEP, max(0.0, (target_for(report_date) - now).total_seconds()))
 
 
 def sent_cutoff(report_date):
@@ -52,14 +61,14 @@ def gh_json(path):
     return json.loads(out)
 
 
-def already_sent(report_date, now, fetch=gh_json):
+def already_sent(report_date, now, fetch=gh_json, workflow="daily-catchup.yml"):
     """True if a scheduled run's `email` job succeeded for this report_date. Fails open."""
     repo = os.environ.get("GITHUB_REPOSITORY", "Lascade-Co/actions")
     current = os.environ.get("GITHUB_RUN_ID", "")
     cutoff = sent_cutoff(report_date).astimezone(timezone.utc)
     since = (now - timedelta(hours=30)).strftime("%Y-%m-%dT%H:%M:%SZ")
     try:
-        runs = fetch(f"repos/{repo}/actions/workflows/daily-catchup.yml/runs"
+        runs = fetch(f"repos/{repo}/actions/workflows/{workflow}/runs"
                      f"?event=schedule&per_page=50&created=>={since}")["workflow_runs"]
         for r in runs:
             if str(r["id"]) == current:
@@ -89,7 +98,8 @@ def main():
     ap.add_argument("--phase", type=int, choices=[1, 2], required=True)
     ap.add_argument("--event", default="schedule")
     ap.add_argument("--report-date")
-    ap.add_argument("--remaining", type=float, default=0)
+    ap.add_argument("--remaining", type=float, default=0)  # unused; kept so callers keep working
+    ap.add_argument("--workflow", default="daily-catchup.yml")
     a = ap.parse_args()
     manual = a.event == "workflow_dispatch"
     now = now_utc()
@@ -101,7 +111,7 @@ def main():
         if not ok:
             print(f"wait {wait/60:.0f}m exceeds cap; a later cron handles it")
             return emit(proceed="false", report_date=report_date, remaining=0)
-        if not manual and already_sent(report_date, now):
+        if not manual and already_sent(report_date, now, workflow=a.workflow):
             print("already sent for", report_date)
             return emit(proceed="false", report_date=report_date, remaining=0)
         nap = min(wait, MAX_SLEEP)
@@ -111,8 +121,9 @@ def main():
 
     from datetime import date
     report_date = date.fromisoformat(a.report_date)
-    time.sleep(a.remaining)
-    if not manual and already_sent(report_date, now_utc()):
+    if not manual:
+        time.sleep(phase2_wait(report_date, now_utc()))
+    if not manual and already_sent(report_date, now_utc(), workflow=a.workflow):
         print("already sent for", report_date)
         return emit(proceed="false", report_date=report_date)
     emit(proceed="true", report_date=report_date)

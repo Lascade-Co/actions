@@ -1,0 +1,160 @@
+name: Daily Ad Spend
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Build the emails without sending
+        type: boolean
+        default: false
+      variants:
+        description: Variants to build and send
+        default: 'A,B'
+      break_commentary:
+        description: Test only, corrupt the Codex auth so commentary must be skipped
+        type: boolean
+        default: false
+  schedule:
+    # GitHub delays scheduled runs by hours, so fire three times the evening before;
+    # the gates hold each run until 05:45 America/Los_Angeles and later runs exit at dedupe.
+    - cron: '29 3 * * *'
+    - cron: '29 6 * * *'
+    - cron: '29 9 * * *'
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: daily-ad-spend-${{ github.event_name }}
+  cancel-in-progress: false
+
+env:
+  RAW: https://raw.githubusercontent.com/Lascade-Co/actions/main
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    outputs:
+      proceed: ${{ steps.gate.outputs.proceed }}
+      report_date: ${{ steps.gate.outputs.report_date }}
+    steps:
+      - id: gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          curl -fsSL -o catchup_gate.py "$RAW/scripts/catchup/catchup_gate.py"
+          python3 catchup_gate.py --phase 1 --event "${{ github.event_name }}" --workflow daily-ad-spend.yml
+
+  gate2:
+    needs: gate
+    if: needs.gate.outputs.proceed == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    outputs:
+      proceed: ${{ steps.gate.outputs.proceed }}
+      report_date: ${{ steps.gate.outputs.report_date }}
+    steps:
+      - id: gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          curl -fsSL -o catchup_gate.py "$RAW/scripts/catchup/catchup_gate.py"
+          python3 catchup_gate.py --phase 2 --event "${{ github.event_name }}" --workflow daily-ad-spend.yml \
+            --report-date "${{ needs.gate.outputs.report_date }}"
+
+  # The job must be named `email`: the dedupe check looks for a successful job of that name.
+  email:
+    needs: gate2
+    if: needs.gate2.outputs.proceed == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      VARIANTS: ${{ inputs.variants || 'A,B' }}
+    steps:
+      - name: Work out the ad date
+        id: dates
+        run: echo "ad_date=$(date -d '${{ needs.gate2.outputs.report_date }} - 1 day' +%F)" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+
+      - name: Install dependencies
+        run: pip install --quiet requests==2.34.2
+
+      - name: Import secrets from Infisical
+        uses: Infisical/secrets-action@v1.0.16
+        with:
+          method: universal
+          client-id: ${{ secrets.INFISICAL_CLIENT_ID }}
+          client-secret: ${{ secrets.INFISICAL_CLIENT_SECRET }}
+          project-slug: pnl
+          env-slug: prod
+          domain: ${{ secrets.INFISICAL_DOMAIN }}
+          secret-path: /
+          export-type: env
+
+      - name: Download scripts
+        run: |
+          for m in pnl_money pnl_fx; do curl -fsSL --retry 3 --retry-delay 2 -o "$m.py" "$RAW/scripts/pnl/$m.py"; done
+          for m in adspend_fetch adspend_model adspend_commentary adspend_render_email adspend_main; do
+            curl -fsSL --retry 3 --retry-delay 2 -o "$m.py" "$RAW/scripts/adspend/$m.py"
+          done
+          curl -fsSL --retry 3 --retry-delay 2 -o send_resend.sh "$RAW/scripts/adspend/send_resend.sh"
+          mkdir -p data && curl -fsSL --retry 3 --retry-delay 2 -o data/adspend_apps.json "$RAW/data/adspend_apps.json"
+          chmod +x send_resend.sh
+
+      - name: Restore the commentary cache
+        # Commentary is generated once per ad date so a retry re-sends identical bytes.
+        uses: actions/cache/restore@v6
+        with:
+          path: scratch
+          key: adspend-commentary-${{ steps.dates.outputs.ad_date }}
+
+      - name: Restore Codex auth.json
+        continue-on-error: true
+        env:
+          CODEX_AUTH: ${{ inputs.break_commentary && 'garbage' || secrets.CODEX_AUTH_JSON_BASE_64 }}
+        run: |
+          mkdir -p "$HOME/.codex"
+          printf '%s' "$CODEX_AUTH" | tr -d '\n\r ' | base64 -d > "$HOME/.codex/auth.json"
+
+      - name: Install codex
+        continue-on-error: true
+        run: npm install -g @openai/codex
+
+      - name: Build the emails
+        run: python3 adspend_main.py --ad-date "${{ steps.dates.outputs.ad_date }}" --variants "$VARIANTS" --out out --scratch scratch
+
+      - name: Save the commentary cache
+        if: always()
+        continue-on-error: true
+        uses: actions/cache/save@v6
+        with:
+          path: scratch
+          key: adspend-commentary-${{ steps.dates.outputs.ad_date }}
+
+      - name: Send variant A
+        id: sendA
+        if: ${{ !inputs.dry_run && contains(env.VARIANTS, 'A') }}
+        continue-on-error: true
+        env:
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+        run: ./send_resend.sh A "${{ steps.dates.outputs.ad_date }}"
+
+      - name: Send variant B
+        id: sendB
+        if: ${{ !inputs.dry_run && contains(env.VARIANTS, 'B') }}
+        continue-on-error: true
+        env:
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+        run: ./send_resend.sh B "${{ steps.dates.outputs.ad_date }}"
+
+      - name: Fail if a variant failed
+        if: ${{ always() && (steps.sendA.outcome == 'failure' || steps.sendB.outcome == 'failure') }}
+        run: |
+          echo "a variant failed to send"
+          exit 1

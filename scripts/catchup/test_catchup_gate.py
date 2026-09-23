@@ -1,6 +1,6 @@
 import os
 import sys
-from datetime import datetime, timezone, date
+from datetime import datetime, timezone, date, timedelta
 sys.path.insert(0, os.path.dirname(__file__))
 import catchup_gate as g
 
@@ -72,5 +72,29 @@ def test_dedupe():
     assert g.already_sent(rd, now, boom) is False  # fail open
 
 
+def test_phase2_wait_is_absolute():
+    # gate2 queued 60 min after gate finished: it must not sleep the stale `remaining`
+    rd = date(2026, 9, 24)
+    target = datetime(2026, 9, 24, 5, 45, tzinfo=g.PT).astimezone(timezone.utc)
+    assert g.phase2_wait(rd, target - timedelta(minutes=30)) == 30 * 60
+    assert g.phase2_wait(rd, target + timedelta(minutes=60)) == 0
+    far = target - timedelta(hours=10)
+    assert g.phase2_wait(rd, far) == g.MAX_SLEEP
+
+
+def test_workflow_routes_dedupe():
+    seen = []
+
+    def f(path):
+        seen.append(path)
+        return {"workflow_runs": []}
+    now = U("2026-09-24T09:17:00+00:00")
+    g.already_sent(date(2026, 9, 24), now, f, workflow="daily-ad-spend.yml")
+    assert "workflows/daily-ad-spend.yml/runs" in seen[0]
+    seen.clear()
+    g.already_sent(date(2026, 9, 24), now, f)
+    assert "workflows/daily-catchup.yml/runs" in seen[0]
+
+
 if __name__ == "__main__":
-    test_plan(); test_dedupe(); print("ok")
+    test_plan(); test_dedupe(); test_phase2_wait_is_absolute(); test_workflow_routes_dedupe(); print("ok")
