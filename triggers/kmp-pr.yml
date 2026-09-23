@@ -1,0 +1,52 @@
+# Copy this workflow into the Kotlin Multiplatform app repo you want gated on every PR, and set
+# secrets.CENTRAL_DISPATCH_TOKEN (a token that can dispatch to Lascade-Co/actions).
+# Fill in project_slug (Infisical) if it is not `geoanimator`.
+# Runner: .github/workflows/kmp-build-debug.yml, event type kmp-debug.
+#
+# `sha` is required, not decorative. The runner posts the verdict back as a commit status named
+# `ci/kmp-gate` on that SHA, and that status — not this dispatcher — is what to require in branch
+# protection. This dispatcher goes green as soon as the event is accepted and would gate nothing.
+#
+# The app repo also needs, for the build to work at all:
+#   * Infisical /Build (staging) with ANDROID_DEBUG_KEYSTORE_BASE64,
+#     ANDROID_DEBUG_KEYSTORE_PASSWORD, ANDROID_DEBUG_KEY_ALIAS, ANDROID_DEBUG_KEY_PASSWORD
+#     and optionally TELEGRAM_CHAT_ID;
+#   * a `VERSION` property in gradle.properties, and a build that accepts -PversionCode;
+#   * the CI GitHub App granted `statuses: write` on the repo, or the status post-back 403s.
+
+name: Request central KMP build
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+concurrency:
+  group: kmp-pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  dispatch:
+    name: Dispatch to central runner
+    # A fork's PR cannot read CENTRAL_DISPATCH_TOKEN, so the dispatch could not authenticate.
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - uses: peter-evans/repository-dispatch@v3
+        with:
+          token: ${{ secrets.CENTRAL_DISPATCH_TOKEN }}
+          repository: Lascade-Co/actions
+          event-type: kmp-debug
+          # toJSON, not bare interpolation: a title containing a quote breaks the JSON, and one
+          # containing shell metacharacters would reach a runner holding signing material.
+          client-payload: >-
+            {
+              "repo": ${{ toJSON(github.repository) }},
+              "pr": ${{ toJSON(github.event.pull_request.number) }},
+              "branch": ${{ toJSON(github.head_ref) }},
+              "title": ${{ toJSON(github.event.pull_request.title) }},
+              "sha": ${{ toJSON(github.event.pull_request.head.sha) }},
+              "project_slug": "geoanimator"
+            }

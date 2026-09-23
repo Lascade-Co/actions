@@ -1,0 +1,41 @@
+# Copy this workflow into the Kotlin Multiplatform app repo to get an installable build of the
+# trunk after every merge, and set secrets.CENTRAL_DISPATCH_TOKEN.
+# Fill in project_slug (Infisical) and the branch filter if the trunk is not `dev`.
+# Runner: .github/workflows/kmp-build-debug.yml, event type kmp-debug — the same runner as
+# triggers/kmp-pr.yml, which distinguishes the two shapes by whether `pr` is present.
+#
+# There is no [skip ci] guard here and none is needed: the runner pushes no commits to the source
+# repo, because versionCode comes from the commit count rather than from a property it has to bump.
+# Adding a version-bumping step later would reintroduce the loop this avoids.
+
+name: Request central KMP build (dev)
+
+on:
+  push:
+    branches: [dev]
+
+concurrency:
+  group: kmp-dev-${{ github.ref_name }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  dispatch:
+    name: Dispatch to central runner
+    runs-on: ubuntu-latest
+    steps:
+      - uses: peter-evans/repository-dispatch@v3
+        with:
+          token: ${{ secrets.CENTRAL_DISPATCH_TOKEN }}
+          repository: Lascade-Co/actions
+          event-type: kmp-debug
+          client-payload: >-
+            {
+              "repo": ${{ toJSON(github.repository) }},
+              "branch": ${{ toJSON(github.ref_name) }},
+              "title": ${{ toJSON(github.event.head_commit.message) }},
+              "sha": ${{ toJSON(github.sha) }},
+              "project_slug": "geoanimator"
+            }

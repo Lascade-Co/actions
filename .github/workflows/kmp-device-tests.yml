@@ -1,0 +1,155 @@
+# The device-required suites for Kotlin Multiplatform repositories, on demand only.
+# Designed in Lascade-Co/geoanimator's ADR 0028.
+#
+# Deliberately not part of the gate. `:render:androidDeviceTest` holds a GL context and reads pixels
+# back, and drives MediaCodec through `Mp4EncoderTest`; a hosted emulator's GL and codec behaviour is
+# not the floor device's from that repository's ADR 0012, so a green run here says little about the
+# phone that matters and a red one is mostly flake. It exists so the suites stay compilable and
+# occasionally runnable — a suite nothing ever invokes stops compiling, which is how
+# tools/reng-harness rotted.
+#
+# Expect this to be less reliable than the gate. That is the nature of the thing being tested, not a
+# defect in the workflow.
+
+name: Central Device Tests KMP
+
+run-name: >-
+  ${{ github.event.client_payload.repo || inputs.repo }} ·
+  ${{ github.event.client_payload.branch || inputs.branch }}
+
+on:
+  repository_dispatch:
+    types: [kmp-device-tests]
+  workflow_dispatch:
+    inputs:
+      repo:
+        description: Source repository (owner/name)
+        required: true
+        default: Lascade-Co/geoanimator
+        type: string
+      branch:
+        description: Branch to test
+        required: true
+        default: dev
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  # Not cancel-in-progress: an emulator run that is halfway through is worth finishing, and nobody
+  # presses this button by accident twice.
+  group: >-
+    kmp-device-tests-${{ github.event.client_payload.repo || inputs.repo }}-${{
+      github.event.client_payload.branch || inputs.branch }}
+  cancel-in-progress: false
+
+jobs:
+  device-tests:
+    name: Device tests (emulator)
+    runs-on: ubuntu-latest
+    # Emulator boot alone can take several minutes before a single test runs.
+    timeout-minutes: 90
+    steps:
+      - name: Normalise trigger
+        id: norm
+        env:
+          IN_REPO: ${{ github.event.client_payload.repo || inputs.repo }}
+          IN_BRANCH: ${{ github.event.client_payload.branch || inputs.branch }}
+        run: |
+          set -euo pipefail
+          : "${IN_REPO:?no repo in payload or inputs}"
+          : "${IN_BRANCH:?no branch in payload or inputs}"
+          echo "repo=$IN_REPO"        >> "$GITHUB_OUTPUT"
+          echo "owner=${IN_REPO%%/*}" >> "$GITHUB_OUTPUT"
+          echo "name=${IN_REPO#*/}"   >> "$GITHUB_OUTPUT"
+          echo "branch=$IN_BRANCH"    >> "$GITHUB_OUTPUT"
+
+      - name: Mint GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ secrets.CI_APP_CLIENT_ID }}
+          private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
+          owner: ${{ steps.norm.outputs.owner }}
+          repositories: ${{ steps.norm.outputs.name }}
+
+      - name: Checkout source repository
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ steps.norm.outputs.repo }}
+          ref: refs/heads/${{ steps.norm.outputs.branch }}
+          token: ${{ steps.app-token.outputs.token }}
+          fetch-depth: 1
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v6
+        with:
+          validate-wrappers: true
+
+      # Without this the emulator falls back to software rendering, where the GL tests are both
+      # far slower and no longer testing a GPU driver in any meaningful sense.
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      # API 33 rather than the module's minSdk of 30: closer to the three-year-old mid-range Android
+      # that ADR 0012 names as the floor, while still being an image with a working GL stack.
+      - name: Render tests on the emulator
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 33
+          target: google_apis
+          arch: x86_64
+          profile: pixel_6
+          emulator-options: >-
+            -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
+          disable-animations: true
+          script: ./gradlew :render:connectedAndroidDeviceTest
+
+      # `:core:androidDeviceTest` is separated because it needs an asset staged by hand.
+      # GeoscadeBakeDeviceBenchmark reads countries.geoscade from the test package's external files
+      # directory, and `connectedAndroidDeviceTest` uninstalls the test package — and everything
+      # under that directory — when it finishes. So the push has to happen after the install and
+      # before the run, which is what the two-step script below attempts.
+      #
+      # This ordering is UNVERIFIED on a hosted emulator. If it fails, the fallback is to run it
+      # locally with the ritual in the test's own KDoc; do not paper over it here.
+      - name: Geoscade bake benchmark on the emulator
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 33
+          target: google_apis
+          arch: x86_64
+          profile: pixel_6
+          emulator-options: >-
+            -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
+          disable-animations: true
+          script: |
+            set -euo pipefail
+            ./gradlew :core:installAndroidDeviceTest
+            FILES=/storage/emulated/0/Android/data/com.lascade.geoanimator.core.test/files
+            adb shell mkdir -p "$FILES"
+            adb push androidApp/src/main/assets/countries.geoscade "$FILES/countries.geoscade"
+            ./gradlew :core:connectedAndroidDeviceTest
+            # The benchmark logs rather than asserts, so the numbers only exist in logcat.
+            adb logcat -d -s GeoscadeBakeBenchmark:I
+
+      - name: Upload test reports
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: device-test-reports
+          path: '**/build/reports/androidTests/**'
+          if-no-files-found: ignore
+          retention-days: 14

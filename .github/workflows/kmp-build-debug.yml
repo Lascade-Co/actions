@@ -1,0 +1,558 @@
+# The gate and the internal build for Kotlin Multiplatform repositories (currently
+# Lascade-Co/geoanimator). Designed in that repository's ADR 0028.
+#
+# Three things here differ from the sibling Android and iOS runners on purpose.
+#
+#   1. **It posts a commit status back to the source repository.** The other runners do not, and the
+#      consequence is documented in travel-animator-android/CLAUDE.md: the dispatcher in the app
+#      repository goes green in under fifteen seconds while the real build is still running, so a
+#      broken change can be merged past a red pipeline. `ci/kmp-gate` is a real status on a real
+#      commit, so branch protection can require it. This is why the dispatch payload carries `sha`.
+#   2. **It runs tests, and they block.** The iOS runner runs none at all; geoanimator has 184 test
+#      files and they are the reason the pipeline exists.
+#   3. **It reads no `local.properties` from Infisical.** GitHub runners preset `ANDROID_HOME`, and
+#      the only other machine-local key that file carried was the Android SDK path. RenG resolves
+#      anonymously from maven.rohittp.com, so the build needs no repository credentials at all.
+#
+# `workflow_dispatch` exists because `repository_dispatch` only fires on a repository's default
+# branch: a change to this file cannot be exercised by the pull request that makes it, so the only
+# rehearsal available is running it by hand on `main` after merge. Treat edits here accordingly.
+
+name: Central Build & Check KMP
+
+run-name: >-
+  ${{ github.event.client_payload.repo || inputs.repo }} ·
+  ${{ github.event.client_payload.branch || inputs.branch
+      || format('PR #{0}', github.event.client_payload.pr) }}
+
+on:
+  repository_dispatch:
+    types: [kmp-debug]
+  workflow_dispatch:
+    inputs:
+      repo:
+        description: Source repository (owner/name)
+        required: true
+        default: Lascade-Co/geoanimator
+        type: string
+      branch:
+        description: Branch to build
+        required: true
+        default: dev
+        type: string
+      sha:
+        description: Commit to attach the status to (blank to skip the status)
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: >-
+    kmp-debug-${{ github.event.client_payload.repo || inputs.repo }}-${{
+      github.event.client_payload.pr || github.event.client_payload.branch || inputs.branch }}
+  cancel-in-progress: true
+
+jobs:
+  # ── Normalise the two trigger shapes, then say publicly that a run has started ──────────────
+  prepare:
+    name: Prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      repo: ${{ steps.norm.outputs.repo }}
+      owner: ${{ steps.norm.outputs.owner }}
+      name: ${{ steps.norm.outputs.name }}
+      pr: ${{ steps.norm.outputs.pr }}
+      branch: ${{ steps.norm.outputs.branch }}
+      sha: ${{ steps.norm.outputs.sha }}
+      ref: ${{ steps.norm.outputs.ref }}
+      title: ${{ steps.norm.outputs.title }}
+      is_pr: ${{ steps.norm.outputs.is_pr }}
+      comment_id: ${{ steps.comment.outputs.comment-id }}
+    steps:
+      # Everything downstream reads these outputs rather than the event, so the two trigger shapes
+      # diverge in exactly one place. Payload values are quoted into env: and read from there —
+      # never interpolated into a shell line — because `title` and `branch` are attacker-controlled
+      # on a pull request and this workflow later holds signing material.
+      - name: Normalise trigger
+        id: norm
+        env:
+          IN_REPO: ${{ github.event.client_payload.repo || inputs.repo }}
+          IN_PR: ${{ github.event.client_payload.pr }}
+          IN_BRANCH: ${{ github.event.client_payload.branch || inputs.branch }}
+          IN_SHA: ${{ github.event.client_payload.sha || inputs.sha }}
+          IN_TITLE: ${{ github.event.client_payload.title }}
+        run: |
+          set -euo pipefail
+          : "${IN_REPO:?no repo in payload or inputs}"
+          echo "repo=$IN_REPO"        >> "$GITHUB_OUTPUT"
+          echo "owner=${IN_REPO%%/*}" >> "$GITHUB_OUTPUT"
+          echo "name=${IN_REPO#*/}"   >> "$GITHUB_OUTPUT"
+
+          # A dispatch payload omitting a field yields the empty string; `toJSON(null)` yields the
+          # four characters "null". Both mean absent.
+          PR="${IN_PR:-}"
+          if [ "$PR" = "null" ]; then PR=""; fi
+          SHA="${IN_SHA:-}"
+          if [ "$SHA" = "null" ]; then SHA=""; fi
+
+          echo "pr=$PR"   >> "$GITHUB_OUTPUT"
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+          echo "branch=${IN_BRANCH:-}" >> "$GITHUB_OUTPUT"
+
+          if [ -n "$PR" ]; then
+            echo "is_pr=true"                 >> "$GITHUB_OUTPUT"
+            echo "ref=refs/pull/${PR}/head"   >> "$GITHUB_OUTPUT"
+          elif [ -n "${IN_BRANCH:-}" ]; then
+            echo "is_pr=false"                      >> "$GITHUB_OUTPUT"
+            echo "ref=refs/heads/${IN_BRANCH}"      >> "$GITHUB_OUTPUT"
+          else
+            echo "No pr and no branch in payload or inputs" >&2
+            exit 1
+          fi
+
+          # Only the first line, and never more than 120 characters: this ends up in a release name
+          # and a Telegram message, and a dev push sends the whole commit body.
+          TITLE=$(printf '%s' "${IN_TITLE:-}" | head -1 | cut -c1-120)
+          if [ -z "$TITLE" ] || [ "$TITLE" = "null" ]; then TITLE="Debug build"; fi
+          printf 'title=%s\n' "$TITLE" >> "$GITHUB_OUTPUT"
+
+      - name: Mint GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ secrets.CI_APP_CLIENT_ID }}
+          private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
+          owner: ${{ steps.norm.outputs.owner }}
+          repositories: ${{ steps.norm.outputs.name }}
+
+      # The whole point of the design. If this step 403s, the CI GitHub App is missing
+      # `statuses: write` on the source repository — grant it there, not here.
+      - name: Report gate pending
+        if: steps.norm.outputs.sha != ''
+        uses: actions/github-script@v8
+        with:
+          github-token: ${{ steps.app-token.outputs.token }}
+          script: |
+            await github.rest.repos.createCommitStatus({
+              owner: '${{ steps.norm.outputs.owner }}',
+              repo: '${{ steps.norm.outputs.name }}',
+              sha: '${{ steps.norm.outputs.sha }}',
+              state: 'pending',
+              context: 'ci/kmp-gate',
+              description: 'Building and testing…',
+              target_url:
+                '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}',
+            });
+
+      # Marker + purge + replace, as the Android runner does: a pull request pushed six times
+      # should carry one comment, not six.
+      - name: Purge previous comments from this workflow
+        if: steps.norm.outputs.is_pr == 'true'
+        uses: actions/github-script@v8
+        with:
+          github-token: ${{ steps.app-token.outputs.token }}
+          script: |
+            const owner = '${{ steps.norm.outputs.owner }}';
+            const repo = '${{ steps.norm.outputs.name }}';
+            const issue_number = Number('${{ steps.norm.outputs.pr }}');
+            const marker = '<!-- central-kmp-debug -->';
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              owner, repo, issue_number, per_page: 100,
+            });
+            for (const c of comments) {
+              if ((c.body || '').includes(marker)) {
+                await github.rest.issues.deleteComment({ owner, repo, comment_id: c.id });
+              }
+            }
+
+      - name: Comment that the build started
+        id: comment
+        if: steps.norm.outputs.is_pr == 'true'
+        continue-on-error: true
+        uses: peter-evans/create-or-update-comment@v5
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+          repository: ${{ steps.norm.outputs.repo }}
+          issue-number: ${{ steps.norm.outputs.pr }}
+          body: |
+            <!-- central-kmp-debug -->
+            🏗️ Building and testing.
+            [Watch the run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
+
+  # ── The Linux half of the gate, plus the APK ────────────────────────────────────────────────
+  gate-linux:
+    name: Gate (JVM, Android, quality)
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    outputs:
+      version_code: ${{ steps.version.outputs.code }}
+      version_name: ${{ steps.version.outputs.name }}
+    steps:
+      - name: Mint GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ secrets.CI_APP_CLIENT_ID }}
+          private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
+          owner: ${{ needs.prepare.outputs.owner }}
+          repositories: ${{ needs.prepare.outputs.name }}
+
+      # fetch-depth: 0 because versionCode is the commit count (ADR 0028). It is the one thing here
+      # that needs history, and it is the reason this checkout is not shallow like the macOS one.
+      - name: Checkout source repository
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ needs.prepare.outputs.repo }}
+          ref: ${{ needs.prepare.outputs.ref }}
+          token: ${{ steps.app-token.outputs.token }}
+          fetch-depth: 0
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v6
+        with:
+          # Supply-chain gate, not a nicety: a tampered gradle-wrapper.jar executes arbitrary code
+          # on every runner and every developer machine, so it is checked before anything runs.
+          validate-wrappers: true
+
+      - name: Derive the version
+        id: version
+        run: |
+          set -euo pipefail
+          CODE=$(git rev-list --count HEAD)
+          NAME=$(sed -n 's/^VERSION=//p' gradle.properties | head -1)
+          : "${NAME:?VERSION missing from gradle.properties}"
+          echo "code=$CODE" >> "$GITHUB_OUTPUT"
+          echo "name=$NAME" >> "$GITHUB_OUTPUT"
+          echo "Building $NAME ($CODE)"
+
+      # Spotless and detekt. Both self-register into `check`, but `qualityCheck` is the gates
+      # without the tests, which is what this step wants.
+      - name: Quality gates
+        run: ./gradlew qualityCheck
+
+      # `qualityCheck` is registered by the geoanimator.quality convention plugin on the five
+      # product modules and cannot reach into the build-logic included build — which is where that
+      # convention plugin itself lives. One invocation would silently skip it.
+      - name: Quality gates (build-logic)
+        run: ./gradlew -p build-logic spotlessCheck
+
+      # The desktop JVM slice covers commonMain and commonTest for :core and :ui — the same shared
+      # code Android and iOS run — in about ten seconds. :render is absent on purpose: it publishes
+      # no JVM target because RenG does not, so its suites run on the macOS job instead.
+      - name: Shared-code tests (desktop JVM)
+        run: ./gradlew :core:desktopTest :ui:desktopTest
+
+      # `testAndroidHostTest`, not `androidHostTest` — that is the task AGP's KMP library plugin
+      # registers for the host-side Android variant, and the shorter name does not exist. `:ui` has
+      # no such task at all: it deliberately omits `withHostTest {}` because its Compose UI tests
+      # die on the stubbed android.jar with an NPE from a null Build.FINGERPRINT.
+      - name: Android host tests
+        run: ./gradlew :core:testAndroidHostTest :render:testAndroidHostTest
+
+      - name: Fetch signing material from Infisical
+        uses: Infisical/secrets-action@v1.0.15
+        with:
+          method: universal
+          client-id: ${{ secrets.INFISICAL_CLIENT_ID }}
+          client-secret: ${{ secrets.INFISICAL_CLIENT_SECRET }}
+          project-slug: ${{ github.event.client_payload.project_slug || 'geoanimator' }}
+          env-slug: staging
+          domain: ${{ secrets.INFISICAL_DOMAIN }}
+          secret-path: /Build
+          export-type: env
+
+      # The Infisical secret names match the environment variables androidApp/build.gradle.kts
+      # reads, so there is no remapping step here. The Android runner next door needs one because
+      # its names disagree with its build's; copying that was avoidable.
+      - name: Decode the debug keystore
+        run: |
+          set -euo pipefail
+          printf '%s' "${ANDROID_DEBUG_KEYSTORE_BASE64:?not in Infisical /Build}" \
+            | base64 --decode > "$RUNNER_TEMP/debug.jks"
+
+      # A stable key so an internal tester can install this over the previous build. Without it AGP
+      # signs with a keystore it generates on the runner, which is different every time.
+      - name: Assemble the debug APK
+        env:
+          ANDROID_DEBUG_KEYSTORE: ${{ runner.temp }}/debug.jks
+        run: ./gradlew :androidApp:assembleDebug -PversionCode=${{ steps.version.outputs.code }}
+
+      - name: Upload the APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: apk-debug
+          path: androidApp/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+          retention-days: 7
+
+      # detekt findings used to reach the source repository's security tab as SARIF. They cannot
+      # from here — upload-sarif reports to the repository running the workflow, which is this one
+      # (ADR 0028). The HTML report is the replacement. Uploaded on failure too: that is the run
+      # where you most want to read it.
+      - name: Upload quality reports
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: quality-reports
+          path: |
+            **/build/reports/detekt/**
+            **/build/reports/tests/**
+          if-no-files-found: ignore
+          retention-days: 7
+
+  # ── The Apple half of the gate ──────────────────────────────────────────────────────────────
+  # Not optional, and not rationed. RenG publishes no jvm target, so :render has none either, and
+  # its commonTest suites — including FramePlanAdapterTest, which pins the region bake keys — are
+  # unreachable from the desktop JVM tests above. An Apple test target is the only place they run.
+  # The disabled workflow this replaces gated its iOS job behind a label because macOS runners bill
+  # at ten times the Linux rate; this repository is public, so its runner minutes are free.
+  gate-macos:
+    name: Gate (iOS link, Apple-native tests)
+    needs: prepare
+    runs-on: macos-latest
+    timeout-minutes: 60
+    steps:
+      - name: Mint GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ secrets.CI_APP_CLIENT_ID }}
+          private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
+          owner: ${{ needs.prepare.outputs.owner }}
+          repositories: ${{ needs.prepare.outputs.name }}
+
+      # Shallow, unlike the Linux job: nothing here reads git history. The source repository carries
+      # roughly 22 MB of non-LFS binaries, so the distinction is worth making.
+      - name: Checkout source repository
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ needs.prepare.outputs.repo }}
+          ref: ${{ needs.prepare.outputs.ref }}
+          token: ${{ steps.app-token.outputs.token }}
+          fetch-depth: 1
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      # The Kotlin/Native toolchain and its prebuilt platform libraries, keyed on the version
+      # catalogue because that is what pins the Kotlin version that selects them. A cold ~/.konan
+      # costs several minutes of download before any compilation starts.
+      - name: Cache the Kotlin/Native toolchain
+        uses: actions/cache@v4
+        with:
+          path: ~/.konan
+          key: konan-${{ runner.os }}-${{ hashFiles('gradle/libs.versions.toml') }}
+          restore-keys: konan-${{ runner.os }}-
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v6
+        with:
+          validate-wrappers: true
+
+      - name: Link the iOS framework
+        run: ./gradlew :ui:linkDebugFrameworkIosSimulatorArm64
+
+      # :render's suites are the reason this job exists.
+      #
+      # :ui:iosSimulatorArm64Test is absent because ui/src/commonTest does not currently COMPILE for
+      # an Apple target: PictureRateTest uses String.format, which is JVM-only. Measured, not
+      # assumed — the task was run and it fails in :ui:compileTestKotlinIosSimulatorArm64, not in
+      # any test. So this is not evidence that Compose UI tests are unviable on the simulator; that
+      # question is still open, and 59 tests' worth of Apple coverage is waiting behind a two-line
+      # fix. Add the task here once commonTest compiles for the target.
+      - name: Apple-native tests
+        run: ./gradlew :core:iosSimulatorArm64Test :render:iosSimulatorArm64Test
+
+      # Proves the Xcode project itself still builds — the Gradle framework link alone does not.
+      # Mirrors scripts/run-ios.sh, including CODE_SIGNING_ALLOWED=NO: the project has an empty
+      # DEVELOPMENT_TEAM and there is no distribution provisioning for this bundle id yet.
+      #
+      # TestFlight attaches here (ADR 0028): install the certificate and profile, rewrite signing to
+      # Manual, generate ExportOptions.plist, then archive / -exportArchive / `xcrun altool
+      # --upload-app`. The distribution certificate and App Store Connect API key are already
+      # provisioned org-wide; what is missing is an App Store Connect app record and a provisioning
+      # profile for com.lascade.geoanimator.kmp.
+      - name: Build the iOS app
+        run: |
+          set -euo pipefail
+          xcodebuild \
+            -project iosApp/iosApp.xcodeproj \
+            -scheme iosApp \
+            -configuration Debug \
+            -destination 'generic/platform=iOS Simulator' \
+            -derivedDataPath build/ios \
+            CODE_SIGNING_ALLOWED=NO \
+            build
+
+      - name: Upload test reports
+        if: failure()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: quality-reports-macos
+          path: '**/build/reports/tests/**'
+          if-no-files-found: ignore
+          retention-days: 7
+
+  # ── Hand the build to whoever is meant to install it ────────────────────────────────────────
+  # Gated on the gate: an APK that fails its own tests should not reach a tester.
+  publish:
+    name: Publish internal build
+    needs: [prepare, gate-linux, gate-macos]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Mint GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ secrets.CI_APP_CLIENT_ID }}
+          private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
+          owner: ${{ needs.prepare.outputs.owner }}
+          repositories: ${{ needs.prepare.outputs.name }}
+
+      - name: Download the APK
+        uses: actions/download-artifact@v4
+        with:
+          name: apk-debug
+          path: apk
+
+      # `debug-pr-<n>` is reused for the life of a pull request, so the release is replaced rather
+      # than accumulated; `dev-<code>` is unique per commit. cleanup-debug-releases.yml in the
+      # source repository prunes both, on different rules.
+      - name: Decide the tag
+        id: tag
+        run: |
+          set -euo pipefail
+          if [ '${{ needs.prepare.outputs.is_pr }}' = 'true' ]; then
+            echo 'tag=debug-pr-${{ needs.prepare.outputs.pr }}' >> "$GITHUB_OUTPUT"
+          else
+            echo 'tag=dev-${{ needs.gate-linux.outputs.version_code }}' >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create the prerelease
+        id: release
+        uses: softprops/action-gh-release@v2
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+          repository: ${{ needs.prepare.outputs.repo }}
+          tag_name: ${{ steps.tag.outputs.tag }}
+          target_commitish: ${{ needs.prepare.outputs.sha }}
+          name: >-
+            ${{ needs.prepare.outputs.title }}
+            (${{ needs.gate-linux.outputs.version_name }} ·
+            ${{ needs.gate-linux.outputs.version_code }})
+          # prerelease is load-bearing beyond presentation: it is what a future Play Store trigger
+          # would filter on, exactly as travel-animator-android's trigger-playstore.yml does.
+          prerelease: true
+          files: apk/*.apk
+          fail_on_unmatched_files: true
+
+      - name: Announce on Telegram
+        if: ${{ env.TELEGRAM_CHAT_ID != '' }}
+        continue-on-error: true
+        uses: appleboy/telegram-action@v1.0.1
+        with:
+          token: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          to: ${{ env.TELEGRAM_CHAT_ID }}
+          format: html
+          # No payload-derived text: `title` is attacker-controlled on a pull request and this
+          # message is assembled by an action, not escaped by us.
+          message: |
+            <b>Geoanimator</b> debug build ${{ needs.gate-linux.outputs.version_name }} (${{ needs.gate-linux.outputs.version_code }})
+            <a href="${{ steps.release.outputs.url }}">Install</a>
+
+  # ── Say what happened, once, wherever it can be read ────────────────────────────────────────
+  report:
+    name: Report gate
+    needs: [prepare, gate-linux, gate-macos, publish]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Mint GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ secrets.CI_APP_CLIENT_ID }}
+          private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
+          owner: ${{ needs.prepare.outputs.owner }}
+          repositories: ${{ needs.prepare.outputs.name }}
+
+      # The gate is the two gate jobs, not the whole run. A Telegram outage or a release-API hiccup
+      # in `publish` is not a statement about the code, and must not block a merge.
+      - name: Decide the verdict
+        id: verdict
+        env:
+          LINUX: ${{ needs.gate-linux.result }}
+          MACOS: ${{ needs.gate-macos.result }}
+          PUBLISHED: ${{ needs.publish.result }}
+        run: |
+          set -euo pipefail
+          if [ "$LINUX" = 'success' ] && [ "$MACOS" = 'success' ]; then
+            echo 'state=success' >> "$GITHUB_OUTPUT"
+            if [ "$PUBLISHED" = 'success' ]; then
+              echo 'description=Gate passed; build published' >> "$GITHUB_OUTPUT"
+              echo 'summary=✅ Gate passed. The debug APK is attached to its prerelease.' >> "$GITHUB_OUTPUT"
+            else
+              echo 'description=Gate passed; publishing failed' >> "$GITHUB_OUTPUT"
+              echo 'summary=✅ Gate passed, but publishing the build failed — see the run.' >> "$GITHUB_OUTPUT"
+            fi
+          else
+            echo 'state=failure' >> "$GITHUB_OUTPUT"
+            FAILED=''
+            [ "$LINUX" != 'success' ] && FAILED='JVM/Android/quality'
+            if [ "$MACOS" != 'success' ]; then
+              [ -n "$FAILED" ] && FAILED="$FAILED and Apple" || FAILED='Apple'
+            fi
+            echo "description=Gate failed: $FAILED" >> "$GITHUB_OUTPUT"
+            echo "summary=❌ Gate failed in the $FAILED job(s) — see the run." >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Report the gate
+        if: needs.prepare.outputs.sha != ''
+        uses: actions/github-script@v8
+        with:
+          github-token: ${{ steps.app-token.outputs.token }}
+          script: |
+            await github.rest.repos.createCommitStatus({
+              owner: '${{ needs.prepare.outputs.owner }}',
+              repo: '${{ needs.prepare.outputs.name }}',
+              sha: '${{ needs.prepare.outputs.sha }}',
+              state: '${{ steps.verdict.outputs.state }}',
+              context: 'ci/kmp-gate',
+              description: '${{ steps.verdict.outputs.description }}',
+              target_url:
+                '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}',
+            });
+
+      - name: Update the pull-request comment
+        if: needs.prepare.outputs.is_pr == 'true'
+        continue-on-error: true
+        uses: peter-evans/create-or-update-comment@v5
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+          repository: ${{ needs.prepare.outputs.repo }}
+          issue-number: ${{ needs.prepare.outputs.pr }}
+          comment-id: ${{ needs.prepare.outputs.comment_id }}
+          edit-mode: replace
+          body: |
+            <!-- central-kmp-debug -->
+            ${{ steps.verdict.outputs.summary }}
+
+            `${{ needs.gate-linux.outputs.version_name }}` build `${{ needs.gate-linux.outputs.version_code }}` ·
+            [run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
