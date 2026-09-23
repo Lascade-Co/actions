@@ -8,8 +8,8 @@ on:
         type: boolean
         default: false
       variants:
-        description: Variants to build and send
-        default: 'A,B'
+        description: Variants to build and send (B, with installs and CPI, is retired)
+        default: 'A'
       to:
         description: Recipient override (default cherian@lascade.com)
         default: cherian@lascade.com
@@ -74,7 +74,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
-      VARIANTS: ${{ inputs.variants || 'A,B' }}
+      VARIANTS: ${{ inputs.variants || 'A' }}
       MAIL_TO: ${{ inputs.to || 'cherian@lascade.com' }}
     steps:
       - name: Work out the ad date
