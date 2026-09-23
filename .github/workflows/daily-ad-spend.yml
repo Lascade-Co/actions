@@ -10,6 +10,9 @@ on:
       variants:
         description: Variants to build and send
         default: 'A,B'
+      to:
+        description: Recipient override (default cherian@lascade.com)
+        default: cherian@lascade.com
       break_commentary:
         description: Test only, corrupt the Codex auth so commentary must be skipped
         type: boolean
@@ -72,6 +75,7 @@ jobs:
     timeout-minutes: 30
     env:
       VARIANTS: ${{ inputs.variants || 'A,B' }}
+      MAIL_TO: ${{ inputs.to || 'cherian@lascade.com' }}
     steps:
       - name: Work out the ad date
         id: dates

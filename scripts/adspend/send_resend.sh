@@ -6,7 +6,8 @@ set -euo pipefail
 V="$1"; AD="$2"
 jq -n --rawfile html "out/email-$V.html" --rawfile text "out/email-$V.txt" \
       --rawfile subject "out/email-$V.subject" \
-  '{from:"noreply@metrics.lascade.com", to:["cherian@lascade.com"],
+      --arg to "${MAIL_TO:-cherian@lascade.com}" \
+  '{from:"noreply@metrics.lascade.com", to:[$to],
     subject:$subject, html:$html, text:$text}' > "payload-$V.json"
 STATUS=$(curl -sS -o /dev/null -w '%{http_code}' -X POST https://api.resend.com/emails \
   -H "Authorization: Bearer $RESEND_API_KEY" \
