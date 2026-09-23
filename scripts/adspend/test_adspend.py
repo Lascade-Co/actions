@@ -376,6 +376,13 @@ def test_reconcile_prints_no_figures():
     assert not any("$" in l or "100" in l for l in ok + bad)
 
 
+def test_small_dollar_move_is_not_shown_as_big_percent():
+    rows = [row("TA - IOS", d(1), 8), row("TA - IOS", d(0), 17)]      # +112% but only $9
+    model = m.build_model({"Meta": rows, "Google": []}, TABLE, AD, NOW, APPS)
+    h = r.render(model, "A", [], APPS)[2]
+    assert "small change vs Mon (+$9)" in h and "steady vs Mon (+1" not in h
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):

@@ -195,7 +195,12 @@ def _detail(ln, d1_name, variant) -> str:
     elif lab == "dark":
         bits = [f"no spend {d1_name} or yesterday"]
     elif lab == "steady":
-        bits = [f"steady vs {d1_name} ({_pct(ln['pct'])})" if ln["pct"] is not None else "steady"]
+        delta = ln["d"] - ln["d1"]
+        if ln["pct"] is not None and abs(ln["pct"]) >= DEADBAND_PCT:
+            # big in percent but under the dollar floor: say so in dollars, not a scary percent
+            bits = [f"small change vs {d1_name} ({'+' if delta >= 0 else '-'}{_usd(abs(delta))})"]
+        else:
+            bits = [f"steady vs {d1_name} ({_pct(ln['pct'])})" if ln["pct"] is not None else "steady"]
     else:
         bits = [f"spend {lab} {abs(round_pct(ln['pct']))}% vs {d1_name}"]
     if lab != "started":
