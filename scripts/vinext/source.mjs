@@ -76,14 +76,6 @@ export async function fetchSourceFiles(payload, github) {
   catch { throw new Error('Source package.json or wrangler.jsonc is not valid JSON'); }
 }
 
-const variable = /^[A-Z][A-Z0-9_]*$/;
-const names = value => {
-  assert(typeof value === 'string', 'Missing Infisical Vinext secret-name metadata');
-  const result = value ? value.split(',').map(x => x.trim()) : [];
-  assert(result.every(x => variable.test(x)) && new Set(result).size === result.length, 'Invalid Infisical Vinext secret-name metadata');
-  return result;
-};
-
 export function projectFromSource(payload, { pkg, wrangler, submodule_repos }, values) {
   validateDispatch(payload);
   assert(pkg && typeof pkg === 'object' && wrangler && typeof wrangler === 'object', 'Missing source package or Wrangler configuration');
@@ -93,11 +85,10 @@ export function projectFromSource(payload, { pkg, wrangler, submodule_repos }, v
   assert(typeof wranglerVersion === 'string' && /^[0-9]+\.[0-9]+\.[0-9]+$/.test(wranglerVersion), 'Pin an exact Wrangler version in package.json');
   assert(typeof pkg.scripts?.['check:deploy'] === 'string' && typeof pkg.scripts?.['build:vinext'] === 'string', 'Provide check:deploy and build:vinext scripts');
   assert(Array.isArray(submodule_repos) && submodule_repos.every(x => /^[A-Za-z0-9_.-]+$/.test(x)), 'Invalid source submodule repositories');
-  const runtime = names(values.VINEXT_RUNTIME_SECRETS);
-  const required = names(values.VINEXT_REQUIRED_BUILD_VARIABLES);
-  assert(runtime.every(k => !k.startsWith('NEXT_PUBLIC_') && Object.hasOwn(values, k)), 'Missing declared runtime secret in Infisical');
-  const build = Object.keys(values).filter(k => k.startsWith('NEXT_PUBLIC_') && variable.test(k));
-  assert(required.every(k => k.startsWith('NEXT_PUBLIC_') && build.includes(k) && values[k].trim()), 'Missing required public build value in Infisical');
+  const keys = Object.keys(values);
+  const build = keys.filter(k => k.startsWith('NEXT_PUBLIC_'));
+  const runtime = keys.filter(k => !k.startsWith('NEXT_PUBLIC_') && !k.startsWith('VINEXT_'));
+  assert(build.every(k => values[k].trim()), 'Empty NEXT_PUBLIC_ value in Infisical');
   const topName = wrangler.name, topAccount = wrangler.account_id;
   assert(typeof topName === 'string' && typeof topAccount === 'string', 'Source Wrangler must declare Worker and account');
   assert(values.VINEXT_WORKER_NAME === topName && values.VINEXT_ACCOUNT_ID === topAccount, 'Infisical project does not authorize this Worker destination');
@@ -116,7 +107,7 @@ export function projectFromSource(payload, { pkg, wrangler, submodule_repos }, v
     package_manager: manager, wrangler_version: wranglerVersion,
     working_directory: '.', bundle_directory: 'dist', generated_config: 'dist/server/wrangler.json',
     build_script: 'build:vinext', check_scripts: ['check:deploy'], submodule_repos,
-    build_variables: build, required_build_variables: required, runtime_secrets: runtime,
+    build_variables: build, runtime_secrets: runtime,
     environments,
   };
 }

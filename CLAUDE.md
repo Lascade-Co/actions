@@ -15,6 +15,8 @@ This repo contains GitHub actions that are invokend by `repository_dispatch` / `
 Vinext deployments are source-owned: fetch `package.json`, `wrangler.jsonc`,
 and any `.gitmodules` at the dispatched commit, then read build and runtime
 values from Infisical. Derive checkout scope from pinned submodules.
+Classify Infisical `NEXT_PUBLIC_*` keys as build values and other app keys as
+runtime secrets; reserve `VINEXT_*` for runner metadata.
 Keep this public runner free of project-specific registries and examples. `dev`
 uploads alias `dev`; `main` deploys production. Serialize both targets by
 account/Worker. Never use secret bulk for previews. See

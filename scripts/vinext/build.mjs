@@ -56,7 +56,7 @@ export function validateBundle(root, plan, ignoreEnvironmentFiles = false) {
 export function build(plan, { appRoot, envFile, bundleRoot, execute = run, env = process.env }) {
   const p = plan.project;
   const values = readSecrets(envFile);
-  const buildValues = selectValues(values, p.build_variables, p.required_build_variables);
+  const buildValues = selectValues(values, p.build_variables);
   const cwd = inside(appRoot, p.working_directory);
   const pkg = JSON.parse(readFileSync(join(cwd, 'package.json'), 'utf8'));
   assert(new RegExp(`^${p.package_manager}@[0-9]+\\.[0-9]+\\.[0-9]+(?:\\+sha[0-9]+\\.[a-f0-9]+)?$`).test(pkg.packageManager), 'Set packageManager to a pinned version matching central configuration');

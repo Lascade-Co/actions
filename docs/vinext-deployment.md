@@ -44,15 +44,13 @@ project slug in the caller workflow.
 ## Infisical contract
 
 The runner reads the caller's project, environment `staging` or `prod`, path
-`/`. Each environment must contain:
+`/`. It classifies the values as follows:
 
-- App build variables prefixed `NEXT_PUBLIC_`. Only these are passed to the
-  build. They are embedded into browser assets.
-- `VINEXT_REQUIRED_BUILD_VARIABLES`: comma-separated names of public build
-  variables that must exist and be nonempty. Use an empty string if none.
-- `VINEXT_RUNTIME_SECRETS`: comma-separated names of Worker runtime secrets
-  that must exist. Use an empty string if none. Only these values are uploaded
-  as Worker secrets.
+- App build variables prefixed `NEXT_PUBLIC_`. These are passed to the build
+  and embedded into browser assets. Discovered public values must be nonempty.
+- Other app values become Worker runtime secrets automatically. This includes
+  values imported into this Infisical environment. Runtime values must be
+  nonempty. Invalid or reserved variable names fail preparation.
 - `VINEXT_WORKER_NAME` and `VINEXT_ACCOUNT_ID`: the exact Worker target
   authorized for that project. The runner compares them to the pinned source
   Wrangler config before building.
@@ -62,10 +60,11 @@ use same-organization GitHub URLs and have pinned gitlinks. The checkout token
 is scoped to the source repo plus the listed submodule repositories. Nested
 private submodules need separate support before they can be checked out.
 
-These `VINEXT_*` values are deployment metadata and are never passed to the
-app. Other Infisical values are ignored. Local `.env*` and `.dev.vars*` files
-in the repository root are removed from the fresh CI checkout before building;
-environment files are excluded from the deployment artifact.
+`VINEXT_*` keys are reserved deployment metadata and are never passed to the
+app. No build-variable or runtime-secret name lists are required. Local
+`.env*` and `.dev.vars*` files in the repository root are removed from the
+fresh CI checkout before building. Environment files are excluded from the
+deployment artifact.
 
 The Worker must have an initial active deployment before the shared runner can
 update it. A missing Worker fails before upload, including for production.

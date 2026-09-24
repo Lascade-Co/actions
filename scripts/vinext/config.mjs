@@ -43,10 +43,9 @@ export function prepare(payload, project) {
   inside(resolve('/project', project.bundle_directory), relative(resolve('/project', project.bundle_directory), resolve('/project', project.generated_config)));
   assert(script.test(project.build_script) && Array.isArray(project.check_scripts) && project.check_scripts.every(v => script.test(v)), 'Expected package script names');
   assert(Array.isArray(project.submodule_repos) && project.submodule_repos.every(v => /^[A-Za-z0-9_.-]+$/.test(v)), 'Invalid submodule repository');
-  for (const key of ['build_variables', 'required_build_variables', 'runtime_secrets']) {
+  for (const key of ['build_variables', 'runtime_secrets']) {
     assert(Array.isArray(project[key]) && new Set(project[key]).size === project[key].length && project[key].every(v => variable.test(v) && !reserved.test(v)), `Invalid ${key}`);
   }
-  assert(project.required_build_variables.every(v => project.build_variables.includes(v)), 'Required build variables must be allowlisted');
   assert(project.runtime_secrets.every(v => !project.build_variables.includes(v) && !v.startsWith('NEXT_PUBLIC_')), 'Runtime secrets must not overlap public/build variables');
   const target = payload.branch === 'dev' ? 'staging' : 'production';
   assert(project.environments?.production, 'Missing production environment');

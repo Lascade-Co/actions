@@ -40,6 +40,6 @@ export async function exportSecrets(plan, { file, kind, env = process.env, fetch
   rmSync(file, { force: true });
   const values = await loadSecrets(plan, { env, fetcher });
   const p = plan.project;
-  const selected = kind === 'build' ? selectValues(values, p.build_variables, p.required_build_variables) : selectValues(values, p.runtime_secrets);
+  const selected = kind === 'build' ? selectValues(values, p.build_variables) : selectValues(values, p.runtime_secrets);
   writeFileSync(file, JSON.stringify(selected), { mode: 0o600, flag: 'wx' });
 }
