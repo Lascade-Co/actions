@@ -91,7 +91,6 @@ export function projectFromSource(payload, { pkg, wrangler, submodule_repos }, v
   assert(build.every(k => values[k].trim()), 'Empty NEXT_PUBLIC_ value in Infisical');
   const topName = wrangler.name, topAccount = wrangler.account_id;
   assert(typeof topName === 'string' && typeof topAccount === 'string', 'Source Wrangler must declare Worker and account');
-  assert(values.VINEXT_WORKER_NAME === topName && values.VINEXT_ACCOUNT_ID === topAccount, 'Infisical project does not authorize this Worker destination');
   const environments = {};
   for (const [target, infisical_env] of [['staging', 'staging'], ['production', 'prod']]) {
     const source = wrangler.env?.[target];

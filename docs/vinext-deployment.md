@@ -23,7 +23,8 @@ A main-only project omits `staging` in `wrangler.jsonc` and triggers only on
   `check:deploy` and `build:vinext` scripts. The build emits `dist/server/wrangler.json`
   and `dist/client`. The runner uses Node 24 and frozen dependency installs.
 - `wrangler.jsonc` declares the account, Worker, and each deployed environment.
-  Environments must target the same account and Worker. Declare resource
+  It is the sole source of the deployment destination. Environments must
+  target the same account and Worker. Declare resource
   bindings inside each environment because Cloudflare does not inherit them.
   The generated config is compared against this source configuration, then
   sanitized to a deployment-only bundle; executable hooks and routes are
@@ -36,10 +37,11 @@ A main-only project omits `staging` in `wrangler.jsonc` and triggers only on
 The CI GitHub App needs read access to the source repository and any private
 submodules. The build checkout token is read-only and scoped to the source repo plus
 the submodules declared at the dispatched commit. It remains during the job for recursive
-submodule cleanup. The central Cloudflare token and Infisical machine identity must be
-scoped to resources the source repositories are allowed to deploy; source
-maintainers control the Worker target in `wrangler.jsonc` and the Infisical
-project slug in the caller workflow.
+submodule cleanup. Source maintainers control the Worker target in
+`wrangler.jsonc` and the Infisical project slug in the caller workflow. The
+central Cloudflare token must be scoped to the Workers and accounts these
+maintainers may deploy; the runner does not authorize the destination through
+Infisical. Scope the Infisical machine identity to the intended projects.
 
 ## Infisical contract
 
@@ -51,16 +53,13 @@ The runner reads the caller's project, environment `staging` or `prod`, path
 - Other app values become Worker runtime secrets automatically. This includes
   values imported into this Infisical environment. Runtime values must be
   nonempty. Invalid or reserved variable names fail preparation.
-- `VINEXT_WORKER_NAME` and `VINEXT_ACCOUNT_ID`: the exact Worker target
-  authorized for that project. The runner compares them to the pinned source
-  Wrangler config before building.
 
 The runner reads `.gitmodules` from the exact source commit. Submodules must
 use same-organization GitHub URLs and have pinned gitlinks. The checkout token
 is scoped to the source repo plus the listed submodule repositories. Nested
 private submodules need separate support before they can be checked out.
 
-`VINEXT_*` keys are reserved deployment metadata and are never passed to the
+`VINEXT_*` keys are reserved and ignored by this runner; they are never passed to the
 app. No build-variable or runtime-secret name lists are required. Local
 `.env*` and `.dev.vars*` files in the repository root are removed from the
 fresh CI checkout before building. Environment files are excluded from the
