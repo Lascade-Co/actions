@@ -1,5 +1,7 @@
 import { assert, bindingKeys, validateDispatch } from './config.mjs';
 
+const noPlainVars = source => source.vars === undefined || (source.vars && typeof source.vars === 'object' && !Array.isArray(source.vars) && Object.keys(source.vars).length === 0);
+
 async function fileAtCommit(payload, github, name) {
   const file = await github(`/repos/${payload.repo}/contents/${name}?ref=${payload.sha}`);
   assert(file?.type === 'file' && file.encoding === 'base64' && typeof file.content === 'string' && file.size > 0 && file.size <= 100000, `Missing or oversized source ${name}`);
@@ -87,26 +89,49 @@ export function projectFromSource(payload, { pkg, wrangler, submodule_repos }, v
   assert(Array.isArray(submodule_repos) && submodule_repos.every(x => /^[A-Za-z0-9_.-]+$/.test(x)), 'Invalid source submodule repositories');
   const keys = Object.keys(values);
   const build = keys.filter(k => k.startsWith('NEXT_PUBLIC_'));
-  const runtime = keys.filter(k => !k.startsWith('NEXT_PUBLIC_') && !k.startsWith('VINEXT_'));
+  let runtime = keys.filter(k => !k.startsWith('NEXT_PUBLIC_') && !k.startsWith('VINEXT_'));
   assert(build.every(k => values[k].trim()), 'Empty NEXT_PUBLIC_ value in Infisical');
   const topName = wrangler.name, topAccount = wrangler.account_id;
   assert(typeof topName === 'string' && typeof topAccount === 'string', 'Source Wrangler must declare Worker and account');
+  const nativePreview = wrangler.previews !== undefined;
+  if (nativePreview) {
+    assert(wrangler.previews && typeof wrangler.previews === 'object' && !Array.isArray(wrangler.previews), 'Source previews must be an object');
+    assert(noPlainVars(wrangler) && noPlainVars(wrangler.previews), 'Native Preview source must not declare plaintext vars; use Infisical');
+    const [major, minor] = wranglerVersion.split('.').map(Number);
+    assert(major > 4 || (major === 4 && minor >= 135), 'Native Previews require Wrangler 4.135.0 or later');
+    const required = wrangler.secrets?.required;
+    assert(Array.isArray(required) && required.length > 0 && new Set(required).size === required.length && required.every(key => typeof key === 'string' && /^[A-Z][A-Z0-9_]*$/.test(key) && !key.startsWith('NEXT_PUBLIC_') && !key.startsWith('VINEXT_')), 'Native Previews require source-declared runtime secret names');
+    assert(JSON.stringify(wrangler.previews.secrets?.required) === JSON.stringify(required), 'Production and Preview must declare the same required runtime secret names');
+    for (const key of required) assert(typeof values[key] === 'string' && values[key].trim(), `Missing Infisical value: ${key}`);
+    runtime = required;
+  }
   const environments = {};
   for (const [target, infisical_env] of [['staging', 'staging'], ['production', 'prod']]) {
     const source = wrangler.env?.[target];
     if (!source) continue;
+    if (nativePreview) assert(noPlainVars(source), 'Native Preview source environments must not declare plaintext vars; use Infisical');
     assert(source.name === topName && (source.account_id ?? topAccount) === topAccount, 'All source environments must target the same Worker and account');
     const bindings = Object.fromEntries(bindingKeys.filter(key => source[key] !== undefined).map(key => [key, source[key]]));
     environments[target] = { infisical_env, infisical_path: '/', bindings };
   }
   const target = payload.branch === 'main' ? 'production' : 'staging';
   assert(environments[target], `Source Wrangler has no ${target} environment`);
+  if (nativePreview) {
+    assert(environments.staging && environments.production, 'Native Previews require staging and production source environments for Vinext builds');
+    const previewBindings = Object.fromEntries(bindingKeys.filter(key => wrangler.previews[key] !== undefined).map(key => [key, wrangler.previews[key]]));
+    const productionBindings = Object.fromEntries(bindingKeys.filter(key => wrangler[key] !== undefined).map(key => [key, wrangler[key]]));
+    assert(Object.keys(wrangler.previews).every(key => bindingKeys.includes(key) || ['vars', 'secrets', 'compatibility_date', 'compatibility_flags', 'observability', 'limits', 'placement'].includes(key)), 'Unsupported native Preview configuration');
+    environments.staging.bindings = previewBindings;
+    environments.production.bindings = productionBindings;
+  }
   return {
     account_id: topAccount, worker_name: topName, node_version: '24',
     package_manager: manager, wrangler_version: wranglerVersion,
     working_directory: '.', bundle_directory: 'dist', generated_config: 'dist/server/wrangler.json',
     build_script: 'build:vinext', check_scripts: ['check:deploy'], submodule_repos,
     build_variables: build, runtime_secrets: runtime,
+    preview_mode: nativePreview ? 'native' : 'alias', preview_name: nativePreview ? 'stg' : undefined,
+    preview_config: nativePreview ? wrangler.previews : undefined,
     environments,
   };
 }

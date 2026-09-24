@@ -56,7 +56,7 @@ try {
       const cloudflare = async path => (await request(`https://api.cloudflare.com/client/v4${path}`, env.CLOUDFLARE_API_TOKEN)).result;
       const result = await deploy(plan, { bundleRoot: env.BUNDLE_ROOT, envFile: env.INFISICAL_ENV_FILE, wranglerBin: env.WRANGLER_BIN, github, cloudflare });
       for (const [key, value] of Object.entries(result)) output(key, value);
-      if (env.GITHUB_STEP_SUMMARY) appendFileSync(env.GITHUB_STEP_SUMMARY, `### Vinext ${result.state}\n\n${plan.repo} · ${plan.target}\n\n${result.state === 'superseded' ? 'A newer source commit superseded this request.' : plan.target === 'staging' ? 'Cloudflare confirmed the preview version and dev alias.' : 'Cloudflare confirmed the active deployment.'}\n`);
+      if (env.GITHUB_STEP_SUMMARY) appendFileSync(env.GITHUB_STEP_SUMMARY, `### Vinext ${result.state}\n\n${plan.repo} · ${plan.target}\n\n${result.state === 'superseded' ? 'A newer source commit superseded this request.' : plan.target === 'staging' && plan.project.preview_mode === 'native' ? `Wrangler deployed the ${result.preview_name} Worker Preview and the production deployment stayed unchanged.` : plan.target === 'staging' ? 'Cloudflare confirmed the preview version and dev alias.' : 'Cloudflare confirmed the active deployment.'}\n`);
     } else if (command === 'status') {
       assert(['pending', 'success', 'failure', 'error'].includes(env.STATUS_STATE), 'Invalid commit status');
       const body = { state: env.STATUS_STATE, context: `vinext/${plan.target}`, target_url: env.STATUS_URL, description: env.DEPLOY_STATE === 'superseded' ? 'Superseded by a newer commit' : `Central Vinext deployment: ${env.STATUS_STATE}` };

@@ -38,6 +38,13 @@ export function prepare(payload, project) {
   assert(project && /^[a-f0-9]{32}$/.test(project.account_id) && /^[a-z0-9][a-z0-9-]{0,62}$/.test(project.worker_name), 'Project must register a valid account and Worker');
   assert(/^[0-9]+(?:\.[0-9]+){0,2}$/.test(project.node_version) && Number(project.node_version.split('.')[0]) >= 22, 'Vinext requires Node 22 or newer');
   assert(/^[0-9]+\.[0-9]+\.[0-9]+$/.test(project.wrangler_version), 'Pin an exact Wrangler version');
+  assert(['alias', 'native'].includes(project.preview_mode ?? 'alias'), 'Unsupported Preview mode');
+  if (project.preview_mode === 'native') {
+    const [major, minor] = project.wrangler_version.split('.').map(Number);
+    assert(major > 4 || (major === 4 && minor >= 135), 'Native Previews require Wrangler 4.135.0 or later');
+    assert(project.preview_name === 'stg', 'Dev Preview must use the stg name');
+    assert(project.preview_config && typeof project.preview_config === 'object' && !Array.isArray(project.preview_config), 'Missing source Preview configuration');
+  }
   assert(['pnpm', 'npm', 'yarn'].includes(project.package_manager), 'Unsupported package manager');
   for (const key of ['working_directory', 'generated_config', 'bundle_directory']) inside('/project', project[key]);
   inside(resolve('/project', project.bundle_directory), relative(resolve('/project', project.bundle_directory), resolve('/project', project.generated_config)));
@@ -88,6 +95,17 @@ export function sanitizeConfig(config, plan) {
     if (config[key] !== undefined) result[key] = config[key];
   }
   result.no_bundle = true;
+  if (p.preview_mode === 'native') {
+    assert(config.vars === undefined || (config.vars && typeof config.vars === 'object' && !Array.isArray(config.vars) && Object.keys(config.vars).length === 0), 'Generated native Preview config must not declare plaintext vars');
+    assert(isDeepStrictEqual(config.previews, p.preview_config), 'Generated Preview configuration differs from source');
+    for (const key of bindingKeys) {
+      if (p.environments.production.bindings[key] === undefined) delete result[key];
+      else result[key] = p.environments.production.bindings[key];
+    }
+    result.previews = p.preview_config;
+  } else {
+    assert(empty(config.previews), 'Legacy alias build must not configure native Previews');
+  }
   // Domains/routes are managed outside this runner; omit instead of clearing.
   result.secrets = { required: p.runtime_secrets };
   return result;

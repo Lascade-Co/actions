@@ -7,7 +7,8 @@ No project registry or deployment manifest is stored here.
 
 | Source branch | Wrangler environment | Infisical environment | Runner action |
 | --- | --- | --- | --- |
-| `dev` | `staging` | `staging` | Upload a version with preview alias `dev` |
+| `dev` with source `previews` block | `staging` build plus native Preview `stg` | `staging` | Deploy a Worker Preview with staging secrets |
+| `dev` without source `previews` block | `staging` | `staging` | Upload a version with preview alias `dev` |
 | `main` | `production` | `prod` | Deploy the active production version |
 
 A main-only project omits `staging` in `wrangler.jsonc` and triggers only on
@@ -29,6 +30,22 @@ A main-only project omits `staging` in `wrangler.jsonc` and triggers only on
   The generated config is compared against this source configuration, then
   sanitized to a deployment-only bundle; executable hooks and routes are
   discarded.
+- For native Worker Previews, add a top-level `previews` block and pin Wrangler
+  4.135.0 or later. The top level contains production bindings; `previews`
+  contains staging bindings. Retain `env.staging` and `env.production` for the
+  Vinext build, with matching bindings. The runner validates both source and
+  generated configuration and uses the stable Preview name `stg` for `dev`.
+  Without a `previews` block, the existing version-alias path is unchanged.
+- Native Preview projects declare runtime secret names in both
+  `secrets.required` and `previews.secrets.required`. The lists must match.
+  The runner takes their values from the branch-selected Infisical environment
+  and does not upload unrelated Infisical values. Production deploy and Preview
+  deployment both pass a temporary `--secrets-file` to the pinned Wrangler,
+  so the secrets are included with the deployment. Preview deployment uses
+  `--ignore-base-config` so dashboard Base settings cannot add bindings or secrets.
+  Native projects must not declare plaintext `vars` at the top level, in
+  `previews`, or in either Vinext environment. The runner rejects generated
+  plaintext `vars` and checks the deployed Preview secret names and types.
 - The source workflow calls
   `Lascade-Co/actions/.github/workflows/vinext-deploy-trigger.yml@main` with
   `project_slug`. It passes `CENTRAL_DISPATCH_TOKEN` as the reusable workflow
@@ -52,7 +69,8 @@ The runner reads the caller's project, environment `staging` or `prod`, path
   and embedded into browser assets. Discovered public values must be nonempty.
 - Other app values become Worker runtime secrets automatically. This includes
   values imported into this Infisical environment. Runtime values must be
-  nonempty. Invalid or reserved variable names fail preparation.
+  nonempty. Invalid or reserved variable names fail preparation. Native Preview
+  projects upload only the names declared in source `secrets.required`.
 
 The runner reads `.gitmodules` from the exact source commit. Submodules must
 use same-organization GitHub URLs and have pinned gitlinks. The checkout token
@@ -60,15 +78,16 @@ is scoped to the source repo plus the listed submodule repositories. Nested
 private submodules need separate support before they can be checked out.
 
 `VINEXT_*` keys are reserved and ignored by this runner; they are never passed to the
-app. No build-variable or runtime-secret name lists are required. Local
+app. Legacy projects need no build-variable or runtime-secret name lists;
+native Preview projects declare the runtime names in Wrangler. Local
 `.env*` and `.dev.vars*` files in the repository root are removed from the
 fresh CI checkout before building. Environment files are excluded from the
 deployment artifact.
 
-The Worker must have an initial active deployment before the shared runner can
-update it. A missing Worker fails before upload, including for production.
-This guard lets the runner verify existing secret bindings and protect the
-production version during staging uploads. The runner does not
+The legacy alias path requires an initial active Worker deployment before the
+shared runner can update it. Native Previews can be created before the first
+production deployment. The runner checks that a native Preview does not change
+an existing production deployment. The runner does not
 create KV or R2 resources; source `wrangler.jsonc` must refer to existing
 resources. Vinext's optional `VINEXT_KV_CACHE` binding is unnecessary when its
 default in-memory cache is acceptable. App-data KV or R2 bindings remain valid.
@@ -82,5 +101,7 @@ API errors exclude response bodies, and temporary secret JSON is deleted.
 The central run reports `vinext/staging` or `vinext/production` on the source
 commit. The caller job only confirms dispatch. A successful central run means
 Cloudflare accepted the upload and the runner verified the resulting version
-and deployment state. It does not report application health. Domain changes
+and deployment state. For native Previews it checks Wrangler's deployment ID,
+Preview URL, and an unchanged active production deployment. It does not report
+application health. Domain changes
 and authenticated UI checks are separate rollout steps.

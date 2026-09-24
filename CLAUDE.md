@@ -16,11 +16,17 @@ Vinext deployments are source-owned: fetch `package.json`, `wrangler.jsonc`,
 and any `.gitmodules` at the dispatched commit, then read build and runtime
 values from Infisical. Derive checkout scope from pinned submodules.
 The Worker destination comes solely from the source `wrangler.jsonc`.
-Classify Infisical `NEXT_PUBLIC_*` keys as build values and other app keys as
-runtime secrets; reserve `VINEXT_*` for runner metadata.
+Classify Infisical `NEXT_PUBLIC_*` keys as build values. Legacy sources use
+other app keys as runtime secrets; native Preview sources use only names in
+`secrets.required`. Reserve `VINEXT_*` for runner metadata.
 Keep this public runner free of project-specific registries and examples. `dev`
-uploads alias `dev`; `main` deploys production. Serialize both targets by
-account/Worker. Never use secret bulk for previews. See
+uses native Preview `stg` when source Wrangler declares `previews`, otherwise
+uploads legacy alias `dev`; `main` deploys production. Native Preview projects
+declare runtime secret names in both production and Preview `secrets.required`;
+values come only from Infisical. Reject plaintext Wrangler `vars` for native
+Preview projects and verify returned Preview secret bindings. Serialize both
+targets by account/Worker.
+Never use secret bulk for previews. See
 `docs/vinext-deployment.md` before changing the shared runner.
 The reusable trigger accepts source pushes and manual `workflow_dispatch`
 runs on `main` or `dev`.
