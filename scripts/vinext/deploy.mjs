@@ -96,24 +96,34 @@ async function deployNative(plan, { configPath, secrets, wranglerBin, env, execu
     const childEnv = { ...env, CLOUDFLARE_ACCOUNT_ID: plan.project.account_id, WRANGLER_SEND_METRICS: 'false', CI: 'true' };
     for (const key of Object.keys(childEnv)) if (key === 'CLOUDFLARE_ENV' || key === 'GH_TOKEN' || key === 'GITHUB_TOKEN' || key.startsWith('INFISICAL_') || plan.project.runtime_secrets.includes(key)) delete childEnv[key];
     if (!await isCurrent(plan, github)) return { state: 'superseded' };
-    const output = execute(process.execPath, [wranglerBin, ...deploymentArgs(plan, configPath, secretsPath, tag)], {
+    execute(process.execPath, [wranglerBin, ...deploymentArgs(plan, configPath, secretsPath, tag)], {
       cwd: dirname(configPath), env: childEnv,
-      ...(plan.target === 'staging' ? { encoding: 'utf8', stdio: ['ignore', 'pipe', 'inherit'] } : {}),
+      ...(plan.target === 'staging' ? { stdio: ['ignore', 'ignore', 'inherit'] } : {}),
     });
     const after = await activeOrUndefined(cloudflare, workerPath);
     if (plan.target === 'staging') {
-      let result;
-      try { result = JSON.parse(output); }
-      catch { throw new Error('Wrangler returned invalid Preview deployment JSON'); }
-      assert(result.preview?.name === plan.project.preview_name && typeof result.preview.id === 'string' && typeof result.deployment?.id === 'string', 'Wrangler returned a different Preview deployment');
-      assert(Array.isArray(result.preview.urls) && result.preview.urls.length > 0, 'Wrangler returned no Preview URL');
-      const bindings = result.deployment.env;
-      assert(bindings && typeof bindings === 'object' && !Array.isArray(bindings), 'Wrangler returned no Preview bindings');
+      const previewPath = `/accounts/${plan.project.account_id}/workers/workers/${plan.project.worker_name}/previews/${encodeURIComponent(plan.project.preview_name)}`;
+      let preview, deployment;
+      for (let attempt = 0; attempt < 6; attempt++) {
+        try {
+          preview = await cloudflare(previewPath);
+          deployment = await cloudflare(`${previewPath}/deployments/latest`);
+        } catch (error) {
+          if (!/^API request failed \(404\)/.test(error.message)) throw error;
+        }
+        if (deployment?.annotations?.['workers/tag'] === tag) break;
+        if (attempt < 5) await pause(2000);
+      }
+      assert(preview?.name === plan.project.preview_name && typeof preview.id === 'string' && typeof deployment?.id === 'string', 'Cloudflare returned a different Preview deployment');
+      assert(Array.isArray(preview.urls) && preview.urls.length > 0, 'Cloudflare returned no Preview URL');
+      assert(deployment.annotations?.['workers/tag'] === tag, 'Latest Preview deployment differs from the uploaded source');
+      const bindings = deployment.env ?? {};
+      assert(bindings && typeof bindings === 'object' && !Array.isArray(bindings), 'Cloudflare returned no Preview bindings');
       const secrets = Object.entries(bindings).filter(([, binding]) => binding?.type === 'secret_text' || binding?.type === 'secret_key');
       assert(secrets.every(([name, binding]) => binding.type === 'secret_text' && plan.project.runtime_secrets.includes(name)), 'Preview deployment contains an unexpected secret binding');
       assert(plan.project.runtime_secrets.every(name => bindings[name]?.type === 'secret_text'), 'Preview deployment is missing a required secret binding');
       assert(isDeepStrictEqual(after, before), 'Native Preview deployment unexpectedly changed active production');
-      return { state: 'deployed', preview_name: result.preview.name, preview_id: result.preview.id, deployment_id: result.deployment.id };
+      return { state: 'deployed', preview_name: preview.name, preview_id: preview.id, deployment_id: deployment.id };
     }
     assert(after?.versions?.length === 1 && after.versions[0].percentage === 100, 'Production version is not receiving 100% traffic');
     let uploaded;

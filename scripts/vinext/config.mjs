@@ -116,13 +116,12 @@ export function sanitizeConfig(config, plan) {
   result.no_bundle = true;
   if (p.preview_mode === 'native') {
     assert(config.vars === undefined || (config.vars && typeof config.vars === 'object' && !Array.isArray(config.vars) && Object.keys(config.vars).length === 0), 'Generated native Preview config must not declare plaintext vars');
-    const preview = { ...p.preview_config, secrets: { required: p.runtime_secrets } };
-    assert(isDeepStrictEqual(config.previews, p.preview_config) || isDeepStrictEqual(config.previews, preview), 'Generated Preview configuration differs from source');
+    assert(isDeepStrictEqual(config.previews, p.preview_config), 'Generated Preview configuration differs from source');
     for (const key of bindingKeys) {
       if (p.environments.production.bindings[key] === undefined) delete result[key];
       else result[key] = p.environments.production.bindings[key];
     }
-    result.previews = preview;
+    result.previews = p.preview_config;
   } else {
     assert(empty(config.previews), 'Legacy alias build must not configure native Previews');
   }

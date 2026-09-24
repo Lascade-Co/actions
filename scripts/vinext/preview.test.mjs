@@ -68,10 +68,11 @@ test('native Preview derives every private runtime secret from Infisical', () =>
     workers_dev: true, preview_urls: true, images: { binding: 'IMAGES' },
     previews: source.wrangler.previews,
   };
-  assert.deepEqual(sanitizeConfig(built, plan).previews, { ...source.wrangler.previews, secrets: { required: project.runtime_secrets } });
+  assert.deepEqual(sanitizeConfig(built, plan).previews, source.wrangler.previews);
   assert.deepEqual(sanitizeConfig(built, plan).secrets.required, project.runtime_secrets);
   assert.throws(() => sanitizeConfig({ ...built, previews: undefined }, plan), /Generated Preview configuration differs from source/);
   assert.throws(() => sanitizeConfig({ ...built, vars: { API_URL: 'plain' } }, plan), /must not declare plaintext vars/);
+  assert.throws(() => projectFromSource(payload, { ...source, wrangler: { ...source.wrangler, previews: { ...source.wrangler.previews, secrets: { required: ['APP_SECRET'] } } } }, { APP_SECRET: 'selected' }), /Unsupported native Preview configuration/);
 });
 
 test('sanitized native Preview bundle passes validation a second time', () => {
@@ -85,7 +86,7 @@ test('sanitized native Preview bundle passes validation a second time', () => {
     writeFileSync(configPath, JSON.stringify(first));
     const second = validateBundle(bundleRoot, plan).config;
     assert.deepEqual(second, first);
-    assert.deepEqual(second.previews.secrets.required, ['APP_SECRET', 'VINEXT_METADATA']);
+    assert.deepEqual(second.previews, source.wrangler.previews);
     assert.throws(() => sanitizeConfig({ ...first, previews: { ...first.previews, vars: { EXTRA: 'plain' } } }, plan), /Generated Preview configuration differs from source/);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
@@ -143,20 +144,25 @@ test('native Preview deploy passes Infisical secret file atomically and preserve
     const { bundleRoot, envFile } = nativeBundle(root, plan, source, runtimeValues);
     const production = { versions: [{ version_id: 'production-version', percentage: 100 }] };
     let executed = false;
+    let uploadedTag;
     const result = await deploy(plan, {
       bundleRoot, envFile, wranglerBin: '/wrangler.js', env: {},
       github: async () => ({ sha: payload.sha }),
       cloudflare: async path => {
-        assert.match(path, /\/deployments$/);
-        return { deployments: [production] };
+        if (path.endsWith('/previews/stg/deployments/latest')) return { id: 'deployment-id', annotations: { 'workers/tag': uploadedTag }, env: { APP_SECRET: { type: 'secret_text' }, VINEXT_METADATA: { type: 'secret_text' }, IMAGES: { type: 'images' } } };
+        if (path.endsWith('/previews/stg')) return { id: 'preview-id', name: 'stg', urls: ['https://stg.example.com'] };
+        if (path.endsWith('/deployments')) return { deployments: [production] };
+        throw new Error(`Unexpected Cloudflare API path: ${path}`);
       },
       execute: (_command, args, options) => {
         executed = true;
+        uploadedTag = args[args.indexOf('--tag') + 1];
         assert.deepEqual(args.slice(1, 4), ['preview', '--name', 'stg']);
         assert(args.includes('--secrets-file') && args.includes('--json') && args.includes('--ignore-base-config'));
         assert.deepEqual(JSON.parse(readFileSync(args[args.indexOf('--secrets-file') + 1], 'utf8')), runtimeValues);
         assert.equal(options.env.CLOUDFLARE_ENV, undefined);
-        return JSON.stringify({ preview: { id: 'preview-id', name: 'stg', urls: ['https://stg.example.com'] }, deployment: { id: 'deployment-id', env: { APP_SECRET: { type: 'secret_text' }, VINEXT_METADATA: { type: 'secret_text' }, IMAGES: { type: 'images' } } } });
+        assert.deepEqual(options.stdio, ['ignore', 'ignore', 'inherit']);
+        return '🌀 Building list of assets...\n🌀 Starting asset upload...\n{ "preview": "mixed with progress output" }';
       },
     });
     assert(executed);
@@ -170,15 +176,61 @@ test('native Preview rejects unexpected remote secret bindings', async () => {
   const root = mkdtempSync(join(tmpdir(), 'vinext-preview-secrets-test-'));
   try {
     const { bundleRoot, envFile } = nativeBundle(root, plan, source);
+    let uploadedTag;
     await assert.rejects(() => deploy(plan, {
       bundleRoot, envFile, wranglerBin: '/wrangler.js', env: {},
       github: async () => ({ sha: payload.sha }),
-      cloudflare: async () => ({ deployments: [] }),
-      execute: () => JSON.stringify({
-        preview: { id: 'preview-id', name: 'stg', urls: ['https://stg.example.com'] },
-        deployment: { id: 'deployment-id', env: { APP_SECRET: { type: 'secret_text' }, OLD_SECRET: { type: 'secret_text' } } },
-      }),
+      cloudflare: async path => {
+        if (path.endsWith('/previews/stg/deployments/latest')) return { id: 'deployment-id', annotations: { 'workers/tag': uploadedTag }, env: { APP_SECRET: { type: 'secret_text' }, OLD_SECRET: { type: 'secret_text' } } };
+        if (path.endsWith('/previews/stg')) return { id: 'preview-id', name: 'stg', urls: ['https://stg.example.com'] };
+        if (path.endsWith('/deployments')) return { deployments: [] };
+        throw new Error(`Unexpected Cloudflare API path: ${path}`);
+      },
+      execute: (_command, args) => { uploadedTag = args[args.indexOf('--tag') + 1]; },
     }), /unexpected secret binding/);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('native Preview does not credit an unrelated latest deployment', async () => {
+  const source = nativeSource();
+  const plan = prepare(payload, projectFromSource(payload, source, { APP_SECRET: 'selected' }));
+  const root = mkdtempSync(join(tmpdir(), 'vinext-preview-tag-test-'));
+  try {
+    const { bundleRoot, envFile } = nativeBundle(root, plan, source);
+    await assert.rejects(() => deploy(plan, {
+      bundleRoot, envFile, wranglerBin: '/wrangler.js', env: {},
+      github: async () => ({ sha: payload.sha }),
+      pause: async () => {},
+      cloudflare: async path => {
+        if (path.endsWith('/previews/stg/deployments/latest')) return { id: 'deployment-id', annotations: { 'workers/tag': 'another-upload' }, env: { APP_SECRET: { type: 'secret_text' } } };
+        if (path.endsWith('/previews/stg')) return { id: 'preview-id', name: 'stg', urls: ['https://stg.example.com'] };
+        if (path.endsWith('/deployments')) return { deployments: [] };
+        throw new Error(`Unexpected Cloudflare API path: ${path}`);
+      },
+      execute: () => {},
+    }), /Latest Preview deployment differs from the uploaded source/);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('native Preview accepts no runtime secrets when Cloudflare omits env', async () => {
+  const source = nativeSource();
+  const plan = prepare(payload, projectFromSource(payload, source, {}));
+  const root = mkdtempSync(join(tmpdir(), 'vinext-preview-no-secrets-test-'));
+  try {
+    const { bundleRoot, envFile } = nativeBundle(root, plan, source, {});
+    let uploadedTag;
+    const result = await deploy(plan, {
+      bundleRoot, envFile, wranglerBin: '/wrangler.js', env: {},
+      github: async () => ({ sha: payload.sha }),
+      cloudflare: async path => {
+        if (path.endsWith('/previews/stg/deployments/latest')) return { id: 'deployment-id', annotations: { 'workers/tag': uploadedTag } };
+        if (path.endsWith('/previews/stg')) return { id: 'preview-id', name: 'stg', urls: ['https://stg.example.com'] };
+        if (path.endsWith('/deployments')) return { deployments: [] };
+        throw new Error(`Unexpected Cloudflare API path: ${path}`);
+      },
+      execute: (_command, args) => { uploadedTag = args[args.indexOf('--tag') + 1]; },
+    });
+    assert.equal(result.state, 'deployed');
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
@@ -189,19 +241,28 @@ test('first native Preview works without an active production deployment', async
     const root = mkdtempSync(join(tmpdir(), 'vinext-first-preview-test-'));
     try {
       const { bundleRoot, envFile } = nativeBundle(root, plan, source);
+      let uploadedTag;
+      let latestCalls = 0;
       const result = await deploy(plan, {
         bundleRoot, envFile, wranglerBin: '/wrangler.js', env: {},
         github: async () => ({ sha: payload.sha }),
-        cloudflare: async () => {
-          if (missingResponse === '404') throw new Error('API request failed (404) at /deployments');
-          return { deployments: [] };
+        pause: async () => {},
+        cloudflare: async path => {
+          if (path.endsWith('/previews/stg/deployments/latest')) {
+            if (missingResponse === '404' && ++latestCalls === 1) throw new Error('API request failed (404) at /deployments/latest');
+            return { id: 'deployment-id', annotations: { 'workers/tag': uploadedTag }, env: { APP_SECRET: { type: 'secret_text' } } };
+          }
+          if (path.endsWith('/previews/stg')) return { id: 'preview-id', name: 'stg', urls: ['https://stg.example.com'] };
+          if (path.endsWith('/deployments')) {
+            if (missingResponse === '404') throw new Error('API request failed (404) at /deployments');
+            return { deployments: [] };
+          }
+          throw new Error(`Unexpected Cloudflare API path: ${path}`);
         },
-        execute: () => JSON.stringify({
-          preview: { id: 'preview-id', name: 'stg', urls: ['https://stg.example.com'] },
-          deployment: { id: 'deployment-id', env: { APP_SECRET: { type: 'secret_text' } } },
-        }),
+        execute: (_command, args) => { uploadedTag = args[args.indexOf('--tag') + 1]; },
       });
       assert.equal(result.state, 'deployed', missingResponse);
+      if (missingResponse === '404') assert.equal(latestCalls, 2);
     } finally { rmSync(root, { recursive: true, force: true }); }
   }
 });

@@ -22,10 +22,12 @@ guard for keys that could shadow runner process settings.
 Keep this public runner free of project-specific registries and examples. `dev`
 uses native Preview `stg` when source Wrangler declares `previews`, otherwise
 uploads legacy alias `dev`; `main` deploys production. Runtime secret names
-are derived from Infisical for production and Preview `secrets.required`;
-values come only from Infisical. Reject plaintext Wrangler `vars` for native
-Preview projects and verify returned Preview secret bindings. Serialize both
-targets by account/Worker.
+are derived from Infisical into top-level `secrets.required`; values come
+only from Infisical via `--secrets-file`. Do not add `previews.secrets`:
+Wrangler 4.135 warns on and ignores it. Reject plaintext Wrangler `vars` for native
+Preview projects. Wrangler writes asset progress to stdout even with
+`preview --json`, so verify the tagged deployment and secret bindings through
+the Cloudflare Preview API. Serialize both targets by account/Worker.
 Never use secret bulk for previews. See
 `docs/vinext-deployment.md` before changing the shared runner.
 The reusable trigger accepts source pushes and manual `workflow_dispatch`

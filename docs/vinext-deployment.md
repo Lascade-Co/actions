@@ -37,15 +37,16 @@ A main-only project omits `staging` in `wrangler.jsonc` and triggers only on
   generated configuration and uses the stable Preview name `stg` for `dev`.
   Without a `previews` block, the existing version-alias path is unchanged.
 - Native Preview projects derive runtime secret names from the selected
-  Infisical environment. The runner writes those names into both
-  `secrets.required` and `previews.secrets.required` in the sanitized bundle.
-  Production deploy and Preview
+  Infisical environment. The runner writes those names into top-level
+  `secrets.required` in the sanitized bundle. Production deploy and Preview
   deployment both pass a temporary `--secrets-file` to the pinned Wrangler,
   so the secrets are included with the deployment. Preview deployment uses
   `--ignore-base-config` so dashboard Base settings cannot add bindings or secrets.
   Native projects must not declare plaintext `vars` at the top level, in
   `previews`, or in either Vinext environment. The runner rejects generated
-  plaintext `vars` and checks the deployed Preview secret names and types.
+  plaintext `vars` and checks the deployed Preview's unique tag, secret names,
+  and types through Cloudflare's API. Wrangler's asset progress shares stdout
+  with `preview --json`, so stdout is not used for verification.
 - The source workflow calls
   `Lascade-Co/actions/.github/workflows/vinext-deploy-trigger.yml@main` with
   `project_slug`. It passes `CENTRAL_DISPATCH_TOKEN` as the reusable workflow

@@ -115,7 +115,7 @@ export function projectFromSource(payload, { pkg, wrangler, submodule_repos }, v
     assert(environments.staging && environments.production, 'Native Previews require staging and production source environments for Vinext builds');
     const previewBindings = Object.fromEntries(bindingKeys.filter(key => wrangler.previews[key] !== undefined).map(key => [key, wrangler.previews[key]]));
     const productionBindings = Object.fromEntries(bindingKeys.filter(key => wrangler[key] !== undefined).map(key => [key, wrangler[key]]));
-    assert(Object.keys(wrangler.previews).every(key => bindingKeys.includes(key) || ['vars', 'secrets', 'compatibility_date', 'compatibility_flags', 'observability', 'limits', 'placement'].includes(key)), 'Unsupported native Preview configuration');
+    assert(Object.keys(wrangler.previews).every(key => bindingKeys.includes(key) || ['vars', 'compatibility_date', 'compatibility_flags', 'observability', 'limits', 'placement'].includes(key)), 'Unsupported native Preview configuration');
     environments.staging.bindings = previewBindings;
     environments.production.bindings = productionBindings;
   }
