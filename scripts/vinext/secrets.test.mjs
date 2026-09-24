@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { exportSecrets } from './secrets.mjs';
+import { exportSecrets, loadSecrets } from './secrets.mjs';
 
 const plan = {
   infisical_project_slug: 'test-project', infisical_env: 'staging', infisical_path: '/web',
@@ -85,4 +85,37 @@ test('insecure origin, missing credentials and unknown export kind fail before n
     { kind: 'unknown', env },
   ]) await assert.rejects(exportSecrets(plan, { file, fetcher, ...options }));
   assert.equal(calls, 0);
+});
+
+test('public runner masks imported values while leaving only nonsecret plan metadata unmasked', async t => {
+  const file = destination(t);
+  const output = [];
+  const previous = console.log;
+  console.log = line => output.push(line);
+  t.after(() => { console.log = previous; });
+  const api = mock({ secrets: [
+    entry('NEXT_PUBLIC_API_URL', 'https://public.example.test'),
+    entry('SERVER_SECRET', 'private-value'),
+    entry('VINEXT_RUNTIME_SECRETS', 'SERVER_SECRET'),
+    entry('VINEXT_SOURCE_REPOSITORY', 'Lascade-Co/example'),
+  ] });
+  await exportSecrets(plan, { file, kind: 'build', env: { ...env, GITHUB_ACTIONS: 'true' }, fetcher: api.fetcher });
+  assert(output.includes('::add-mask::https://public.example.test'));
+  assert(output.includes('::add-mask::private-value'));
+  assert(!output.some(line => line.includes('Lascade-Co/example') || line === '::add-mask::SERVER_SECRET'));
+});
+
+test('plan resolution masks private values without masking public values that can collide with job outputs', async t => {
+  const output = [];
+  const previous = console.log;
+  console.log = line => output.push(line);
+  t.after(() => { console.log = previous; });
+  const api = mock({ secrets: [
+    entry('NEXT_PUBLIC_APP_CODE', 'example'),
+    entry('SERVER_SECRET', 'private-value'),
+    entry('VINEXT_SOURCE_REPOSITORY', 'Lascade-Co/example'),
+  ] });
+  await loadSecrets(plan, { env: { ...env, GITHUB_ACTIONS: 'true' }, fetcher: api.fetcher, maskPublic: false });
+  assert(output.includes('::add-mask::private-value'));
+  assert(!output.includes('::add-mask::example'));
 });

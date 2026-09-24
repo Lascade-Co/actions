@@ -2,10 +2,10 @@ name: Vinext Deployment Tests
 
 on:
   pull_request:
-    paths: ['scripts/vinext/**', 'data/vinext-projects.json', '.github/workflows/vinext-*.yml', 'triggers/vinext-trigger.yml']
+    paths: ['scripts/vinext/**', '.github/workflows/vinext-*.yml', 'triggers/vinext-trigger.yml']
   push:
     branches: [main]
-    paths: ['scripts/vinext/**', 'data/vinext-projects.json', '.github/workflows/vinext-*.yml', 'triggers/vinext-trigger.yml']
+    paths: ['scripts/vinext/**', '.github/workflows/vinext-*.yml', 'triggers/vinext-trigger.yml']
 
 permissions:
   contents: read

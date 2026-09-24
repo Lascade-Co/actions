@@ -59,17 +59,7 @@ export function deploymentArgs(plan, configPath, secretsPath, tag) {
   ];
 }
 
-export async function smoke(plan, fetcher = fetch) {
-  const response = await fetcher(plan.smoke_url, { redirect: 'follow', signal: AbortSignal.timeout(30000), headers: { 'Cache-Control': 'no-cache' } });
-  assert(response.ok, `Smoke check returned HTTP ${response.status}`);
-  if (plan.project.environments[plan.target].check_noindex) {
-    const noindex = /noindex/i.test(response.headers.get('x-robots-tag') ?? '');
-    assert(noindex === (plan.target === 'staging'), 'Smoke check found the wrong indexing policy');
-  }
-  await response.body?.cancel();
-}
-
-export async function deploy(plan, { bundleRoot, envFile, wranglerBin, env = process.env, execute = run, github, cloudflare, smokeCheck = smoke, pause = ms => new Promise(r => setTimeout(r, ms)) }) {
+export async function deploy(plan, { bundleRoot, envFile, wranglerBin, env = process.env, execute = run, github, cloudflare, pause = ms => new Promise(r => setTimeout(r, ms)) }) {
   const values = readSecrets(envFile);
   const secrets = selectValues(values, plan.project.runtime_secrets);
   const release = JSON.parse(readFileSync(join(bundleRoot, 'vinext-release.json'), 'utf8'));
@@ -120,11 +110,6 @@ export async function deploy(plan, { bundleRoot, envFile, wranglerBin, env = pro
       assert(after.versions.length === 1 && after.versions[0].version_id === uploaded.id && after.versions[0].percentage === 100, 'Production version is not receiving 100% traffic');
       assert(newest(afterVersions, 'dev')?.id === priorPreview?.id, 'Production deploy changed the dev preview alias');
     }
-    // Allow edge propagation; a failed smoke never automatically promotes or rolls back.
-    for (let attempt = 0; ; attempt++) {
-      try { await smokeCheck(plan); break; }
-      catch (error) { if (attempt === 4) throw error; await pause(3000); }
-    }
-    return { state: 'deployed', version_id: uploaded.id, deployment_url: plan.smoke_url };
+    return { state: 'deployed', version_id: uploaded.id };
   } finally { rmSync(directory, { recursive: true, force: true }); }
 }

@@ -4,7 +4,7 @@ on:
   workflow_call:
     inputs:
       project_slug:
-        description: Infisical project slug supplied by the application repository
+        description: Infisical project slug
         required: true
         type: string
     secrets:

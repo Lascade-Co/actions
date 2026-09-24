@@ -1,137 +1,94 @@
-# Shared Vinext deployments
+# Shared Vinext Workers deployment
 
-One existing Worker per project serves production and an independent `dev`
-version preview. Source pushes on `dev` and `main` call the reusable trigger,
-which sends `vinext-deploy` to this repository. Direct pushes deploy too; use
-branch protection if changes must arrive through merged PRs.
+The public runner contains deployment logic only. Each source repository owns its
+`wrangler.jsonc`, `package.json`, and caller workflow. The caller supplies only
+its Infisical project slug.
+No project registry or deployment manifest is stored here.
 
-| Source branch | Build target | Default Infisical environment | Operation |
+| Source branch | Wrangler environment | Infisical environment | Runner action |
 | --- | --- | --- | --- |
-| `dev` | `staging` | `staging` | `wrangler versions upload --preview-alias dev` |
-| `main` | `production` | `prod` | `wrangler deploy` |
+| `dev` | `staging` | `staging` | Upload a version with preview alias `dev` |
+| `main` | `production` | `prod` | Deploy the active production version |
 
-The generated configuration must name the same Worker in both targets, enable
-`workers_dev` and `preview_urls`, and emit a prebuilt `no_bundle` entry. Version
-uploads never promote staging to production. Domains and redirects remain
-managed separately. Roamjoy uses the `stg.roamjoy.com` redirect to its Workers
-preview and `www.roamjoy.com` for production.
+A main-only project omits `staging` in `wrangler.jsonc` and triggers only on
+`main`. The branch selects the environment; the dispatch cannot override it.
 
-## Onboard a project
+## Source repository contract
 
-1. Initialize the Worker and its resources once. This runner deliberately fails
-   if no active Worker deployment exists. Provision caches/databases separately;
-   it does not run stateful resource migrations or automatically create them.
-2. Add the source repository to `data/vinext-projects.json`. Register its account,
-   Worker, Node and exact Wrangler version, package manager, working directory,
-   output directory/config path, build/check script names, and same-owner private
-   submodule repository names. Pin `packageManager` in the source `package.json`
-   and commit its matching lockfile. pnpm, npm and Yarn are supported; the working
-   directory must contain its own package file and lockfile.
-3. Register `build_variables`, `required_build_variables`, and `runtime_secrets`.
-   Build values are intentionally visible to the build and potentially browsers;
-   never allowlist server credentials there. Runtime names cannot overlap build
-   names or begin with `NEXT_PUBLIC_`. Runner/tool environment names are rejected.
-4. Supply the required `project_slug` input in the source repository caller
-   (for example, `with: { project_slug: roam-joy-web }`). The trigger forwards it
-   to the runner; there is no central project-slug variable or registry fallback.
-   Configure environment slugs and folder paths under `environments.staging` and
-   `environments.production` in the central registry.
-5. Register **all** supported resource bindings for each target. The runner compares
-   generated bindings with those exact objects. Keep staging/production KV IDs
-   distinct. Other shared mutable resources need the same deliberate isolation
-   review. Basic KV/Images, R2, D1, services and the binding families listed in
-   `config.mjs` are supported. Configurations requiring custom builds, containers,
-   migrations, local certificate/module files or additional binding types need an
-   explicit extension and tests; they are not automatically provisioned.
-6. Set each target's HTTPS `smoke_url`. Set `check_noindex: true` for projects that
-   emit `X-Robots-Tag: noindex` on staging and omit it on production. Prefer a fast
-   non-personalized page. Supply the actual deployment host, not a redirect alias.
-7. Make `CENTRAL_DISPATCH_TOKEN` available to the source repo. It needs permission
-   to send repository dispatches to `Lascade-Co/actions`. Copy
-   `triggers/vinext-trigger.yml` into the source `.github/workflows/`.
+- The repository belongs to `Lascade-Co`, has root `package.json` and
+  `wrangler.jsonc`, and keeps `wrangler.jsonc` in the strict JSON subset of
+  JSONC. Both files are fetched through the GitHub API at the exact dispatched
+  commit. The runner checks that this commit remains the branch head.
+- `package.json` pins `packageManager` and an exact `wrangler` version. It has
+  `check:deploy` and `build:vinext` scripts. The build emits `dist/server/wrangler.json`
+  and `dist/client`. The runner uses Node 24 and frozen dependency installs.
+- `wrangler.jsonc` declares the account, Worker, and each deployed environment.
+  Environments must target the same account and Worker. Declare resource
+  bindings inside each environment because Cloudflare does not inherit them.
+  The generated config is compared against this source configuration, then
+  sanitized to a deployment-only bundle; executable hooks and routes are
+  discarded.
+- The source workflow calls
+  `Lascade-Co/actions/.github/workflows/vinext-deploy-trigger.yml@main` with
+  `project_slug`. It passes `CENTRAL_DISPATCH_TOKEN` as the reusable workflow
+  secret.
 
-Land the central runner and project registration on this repository's default
-branch **before** enabling the caller. `repository_dispatch` runs only workflows
-on the default branch. The backend `deploy-pr` and Pages `cloudflare-commit`
-workflows remain independent.
+The CI GitHub App needs read access to the source repository and any private
+submodules. The build checkout token is read-only and scoped to the source repo plus
+the Infisical-authorized submodules. It remains during the job for recursive
+submodule cleanup. The central Cloudflare token and Infisical machine identity must be
+scoped to resources the source repositories are allowed to deploy; source
+maintainers control the Worker target in `wrangler.jsonc` and the Infisical
+project slug in the caller workflow.
 
-### Central credentials
+## Infisical contract
 
-- `CI_APP_CLIENT_ID`, `CI_APP_PRIVATE_KEY`: GitHub App installed on the source and
-  declared private submodules; contents read and source commit statuses write.
-  Tokens are narrowed by job/repository. Checkout credentials are read-only and
-  retained until checkout post-cleanup for recursive submodule compatibility.
-- `INFISICAL_DOMAIN`, `INFISICAL_CLIENT_ID`, `INFISICAL_CLIENT_SECRET`: existing
-  Universal Auth machine identity, authorized for each registered project/env/path.
-- `CLOUDFLARE_API_TOKEN`: scoped to the registered accounts with Workers upload,
-  versions, deployments, and required resource permissions. `CLOUDFLARE_ACCOUNT_ID`
-  is taken from the reviewed registry, not a caller payload or exported secret.
+The runner reads the caller's project, environment `staging` or `prod`, path
+`/`. Each environment must contain:
 
-Roamjoy supplies `project_slug: roam-joy-web` from its caller workflow. Initial
-folder/environment mappings are `/`, `staging` and `prod`.
-Both targets need the five required public values listed in the registry,
-including `NEXT_PUBLIC_SITE_URL`, plus their own `LAABHAM_SECRET_KEY`. Local
-`.env` and `.env.prod` files are not used by CI. The central machine identity must
-have access to the caller-selected Infisical project before the first run.
+- App build variables prefixed `NEXT_PUBLIC_`. Only these are passed to the
+  build. They are embedded into browser assets.
+- `VINEXT_REQUIRED_BUILD_VARIABLES`: comma-separated names of public build
+  variables that must exist and be nonempty. Use an empty string if none.
+- `VINEXT_RUNTIME_SECRETS`: comma-separated names of Worker runtime secrets
+  that must exist. Use an empty string if none. Only these values are uploaded
+  as Worker secrets.
+- `VINEXT_SOURCE_REPOSITORY`: the exact `Lascade-Co/<repo>` allowed to use this
+  Infisical project. `VINEXT_WORKER_NAME` and `VINEXT_ACCOUNT_ID`: the exact
+  Worker target authorized for that project. The runner compares them to the
+  pinned source Wrangler config before building.
+- `VINEXT_SUBMODULE_REPOS`: comma-separated private submodule repository names
+  authorized for checkout, without owner prefixes. Omit it when there are no
+  private submodules. The checkout token is scoped to the source repo plus
+  this list.
 
-## Pipeline guarantees and boundaries
+These `VINEXT_*` values are deployment metadata and are never passed to the
+app. Other Infisical values are ignored. Local `.env*` and `.dev.vars*` files
+in the repository root are removed from the fresh CI checkout before building;
+environment files are excluded from the deployment artifact.
 
-- Validate the registered project and exact source SHA, check out that SHA, and
-  use recorded submodule gitlinks rather than remote submodule branch tips.
-- Download central scripts from this workflow's immutable `github.sha`. Caller
-  payloads cannot choose commands, accounts or Worker names. The registered source
-  repository supplies the Infisical project slug; branch mapping still determines
-  the environment. Restrict machine-identity access to intended Infisical projects.
-- Fetch secrets through the same Universal Auth and raw-secrets endpoints used
-  by the official Infisical action. Its file mode writes unescaped dotenv values;
-  the small `secrets.mjs` exporter instead masks fetched values and writes only
-  allowlisted build/runtime keys as mode-0600 JSON, preserving quotes/newlines.
-  Direct secrets override imports; later imports override earlier imports.
-- Build on a runner without Cloudflare deployment credentials or runtime secrets.
-  Strip source dotenv files in the disposable checkout; supply selected build
-  values explicitly. Frozen installation, registered checks and build must pass.
-- Transfer only the output bundle, removing generated dotenv files and rejecting
-  symlinks/dependencies. Record source SHA/target in the artifact. The deploy job
-  revalidates and sanitizes configuration before using standalone pinned Wrangler;
-  it never installs or executes application scripts.
-- Queue deploy jobs by account+Worker (`queue: max`, no in-flight cancellation),
-  sharing the lock across both targets. Recheck branch HEAD just before upload;
-  superseded deployments upload nothing. External/manual deployments do not share
-  this lock and must not run concurrently.
-- Supply every runtime secret during code upload. Check active and latest version
-  secret names first. Staging must leave production deployment metadata unchanged;
-  production must get 100% traffic and leave the recorded `dev` alias unchanged.
-- Source commit statuses `vinext/staging` / `vinext/production` link to the central
-  run. A green caller means dispatch accepted; the central status reports completion.
-  Invalid preparation fails before credentials/export, visible in central Actions.
-- Smoke failures report deployment failure but do not automatically roll back a
-  release that may already be active. Page/indexing checks are not full API, CORS,
-  catalog, authentication or payment verification. Artifacts expire after one day.
+The Worker must have an initial active deployment before the shared runner can
+update it. A missing Worker fails before upload, including for production.
+This guard lets the runner verify existing secret bindings and protect the
+production version during staging uploads. The runner does not
+create KV or R2 resources; source `wrangler.jsonc` must refer to existing
+resources. Vinext's optional `VINEXT_KV_CACHE` binding is unnecessary when its
+default in-memory cache is acceptable. App-data KV or R2 bindings remain valid.
 
-## Secrets and rollback
+The public run title and summary show the source repository and target
+environment. The runner masks private Infisical values during plan resolution
+and masks all exported values before build or deploy commands run. Metadata
+keys, account/Worker identifiers, and secret names are not credentials.
+API errors exclude response bodies, and temporary secret JSON is deleted.
 
-To rotate a value, update Infisical for that environment and deploy a fresh source
-commit (or rerun the existing request if it is still branch HEAD). To add a runtime
-secret, populate it for **both** targets before extending the registry allowlist.
-Omitted remote secrets are inherited by Cloudflare, so removing a name from the
-registry does not delete it: the runner stops until the removal has been reviewed
-and performed deliberately. Never use `wrangler secret put`/`secret bulk` as a
-preview update; use code upload with `--secrets-file`.
+The central run reports `vinext/staging` or `vinext/production` on the source
+commit. The caller job only confirms dispatch. A successful central run means
+Cloudflare accepted the upload and the runner verified the resulting version
+and deployment state. It does not report application health. Domain changes
+and authenticated UI checks are separate rollout steps.
 
-For a code rollback, revert the source change on the appropriate branch so the
-runner rebuilds with that environment's current configuration. An emergency
-production rollback may select a **verified production** version through Wrangler;
-do not choose the latest uploaded version blindly, since it may be staging. A
-preview rollback is a new preview upload from a revert on `dev`, never a production
-deployment. Record the resulting version and verify headers/backend behavior.
+## Runner checks
 
-## Local validation
-
-```sh
-node --test scripts/vinext/*.test.mjs
-actionlint .github/workflows/vinext-deploy-trigger.yml .github/workflows/vinext-deploy-runner.yml triggers/vinext-trigger.yml
-```
-
-Tests use synthetic values and mocked GitHub/Cloudflare/Infisical responses; they
-do not deploy or prove live credentials. Pilot staging after onboarding, verify
-active production is unchanged, then pilot production and verify the preview.
+Run `node --test scripts/vinext/*.test.mjs`. The suite covers dispatch
+validation, exact-source reads, Infisical selection, generated-config
+sanitization, secret isolation, version state, and missing-Worker rejection.

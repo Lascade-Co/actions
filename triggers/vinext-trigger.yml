@@ -1,5 +1,5 @@
-# Copy into the application's .github/workflows/deploy.yml after registering the
-# project in actions/data/vinext-projects.json and configuring CENTRAL_DISPATCH_TOKEN.
+# Copy into the application's .github/workflows/deploy.yml after configuring
+# its wrangler.jsonc, Infisical metadata, and CENTRAL_DISPATCH_TOKEN.
 name: Deploy Vinext
 
 on:

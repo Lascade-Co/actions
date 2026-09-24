@@ -16,14 +16,25 @@ export function inside(root, path) {
 const variable = /^[A-Z][A-Z0-9_]*$/;
 const reserved = /^(?:NODE_|NPM_|PNPM_|YARN_|GITHUB_|GH_|ACTIONS_|RUNNER_|CLOUDFLARE_|WRANGLER_|INFISICAL_|CI$|PATH$|HOME$|BASH_ENV$|ENV$)/;
 const script = /^[a-zA-Z0-9][a-zA-Z0-9:_-]*$/;
-const bindingKeys = ['kv_namespaces', 'r2_buckets', 'd1_databases', 'services', 'durable_objects', 'images', 'ai', 'version_metadata', 'analytics_engine_datasets', 'hyperdrive', 'vectorize', 'queues', 'workflows', 'secrets_store_secrets'];
+export const bindingKeys = ['kv_namespaces', 'r2_buckets', 'd1_databases', 'services', 'durable_objects', 'images', 'ai', 'version_metadata', 'analytics_engine_datasets', 'hyperdrive', 'vectorize', 'queues', 'workflows', 'secrets_store_secrets'];
 
-export function prepare(payload, registry) {
-  assert(payload && /^Lascade-Co\/[A-Za-z0-9_.-]+$/.test(payload.repo), 'Only registered Lascade-Co repositories are supported');
+export function validateDispatch(payload) {
+  assert(payload && /^Lascade-Co\/[A-Za-z0-9_.-]+$/.test(payload.repo), 'Only Lascade-Co repositories are supported');
   assert(['dev', 'main'].includes(payload.branch), 'Only dev and main can deploy');
   assert(/^[a-f0-9]{40}$/.test(payload.sha), 'An exact 40-character commit SHA is required');
   assert(typeof payload.source_run_url === 'string' && payload.source_run_url.startsWith(`https://github.com/${payload.repo}/actions/runs/`) && /^\d+$/.test(payload.source_run_url.split('/').at(-1)), 'Invalid source run URL');
-  const project = registry[payload.repo];
+  assert(typeof payload.project_slug === 'string' && /^[a-zA-Z0-9_-]+$/.test(payload.project_slug), 'Caller must supply a valid Infisical project slug');
+  const [owner, repo_name] = payload.repo.split('/');
+  return { owner, repo_name };
+}
+
+export function statusPlan(payload) {
+  validateDispatch(payload);
+  return { repo: payload.repo, sha: payload.sha, target: payload.branch === 'main' ? 'production' : 'staging' };
+}
+
+export function prepare(payload, project) {
+  const { owner, repo_name } = validateDispatch(payload);
   assert(project && /^[a-f0-9]{32}$/.test(project.account_id) && /^[a-z0-9][a-z0-9-]{0,62}$/.test(project.worker_name), 'Project must register a valid account and Worker');
   assert(/^[0-9]+(?:\.[0-9]+){0,2}$/.test(project.node_version) && Number(project.node_version.split('.')[0]) >= 22, 'Vinext requires Node 22 or newer');
   assert(/^[0-9]+\.[0-9]+\.[0-9]+$/.test(project.wrangler_version), 'Pin an exact Wrangler version');
@@ -38,22 +49,21 @@ export function prepare(payload, registry) {
   assert(project.required_build_variables.every(v => project.build_variables.includes(v)), 'Required build variables must be allowlisted');
   assert(project.runtime_secrets.every(v => !project.build_variables.includes(v) && !v.startsWith('NEXT_PUBLIC_')), 'Runtime secrets must not overlap public/build variables');
   const target = payload.branch === 'dev' ? 'staging' : 'production';
+  assert(project.environments?.production, 'Missing production environment');
+  assert(project.environments[target], `No ${target} environment is configured`);
   for (const name of ['staging', 'production']) {
-    const env = project.environments?.[name];
-    assert(env && /^[a-zA-Z0-9_-]+$/.test(env.infisical_env), 'Missing Infisical environment mapping');
+    const env = project.environments[name];
+    if (!env) continue;
+    assert(/^[a-zA-Z0-9_-]+$/.test(env.infisical_env), 'Missing Infisical environment mapping');
     assert(typeof env.infisical_path === 'string' && /^\/[a-zA-Z0-9_/-]*$/.test(env.infisical_path) && !env.infisical_path.includes('//'), 'Invalid Infisical path');
     assert(env.bindings && typeof env.bindings === 'object' && !Array.isArray(env.bindings) && Object.keys(env.bindings).every(k => bindingKeys.includes(k)), 'Unsupported resource binding configuration');
-    const url = new URL(env.smoke_url);
-    assert(url.protocol === 'https:' && !url.username && !url.password, 'Smoke URL must use HTTPS');
   }
-  const stageKv = project.environments.staging.bindings.kv_namespaces ?? [];
+  const stageKv = project.environments.staging?.bindings.kv_namespaces ?? [];
   const prodKv = project.environments.production.bindings.kv_namespaces ?? [];
   assert(stageKv.every(a => !prodKv.some(b => a.id === b.id)), 'Staging and production must use distinct KV namespaces');
   const slug = payload.project_slug;
-  assert(typeof slug === 'string' && /^[a-zA-Z0-9_-]+$/.test(slug), 'Caller must supply a valid Infisical project_slug');
   const environment = project.environments[target];
-  const [owner, repo_name] = payload.repo.split('/');
-  return { repo: payload.repo, branch: payload.branch, sha: payload.sha, source_run_url: payload.source_run_url, owner, repo_name, project, target, infisical_project_slug: slug, infisical_env: environment.infisical_env, infisical_path: environment.infisical_path, smoke_url: environment.smoke_url };
+  return { repo: payload.repo, branch: payload.branch, sha: payload.sha, source_run_url: payload.source_run_url, owner, repo_name, project, target, infisical_project_slug: slug, infisical_env: environment.infisical_env, infisical_path: environment.infisical_path };
 }
 
 const empty = value => value == null || (Array.isArray(value) ? value.length === 0 : typeof value === 'object' && Object.values(value).every(empty));

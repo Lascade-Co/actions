@@ -11,7 +11,7 @@ const blocks = [...workflow.matchAll(/^        run: \|\n((?:          .*\n)+)/gm
   .filter(match => match[1].includes('https://raw.githubusercontent.com/'))
   .map(match => ({ shell: match[1].replace(/^          /gm, ''), prefix: workflow.slice(Math.max(0, match.index - 200), match.index) }));
 const sha = 'a'.repeat(40);
-const files = ['scripts/vinext/cli.mjs', 'scripts/vinext/config.mjs', 'scripts/vinext/build.mjs', 'scripts/vinext/deploy.mjs', 'scripts/vinext/secrets.mjs', 'data/vinext-projects.json'];
+const files = ['scripts/vinext/cli.mjs', 'scripts/vinext/config.mjs', 'scripts/vinext/build.mjs', 'scripts/vinext/deploy.mjs', 'scripts/vinext/secrets.mjs', 'scripts/vinext/source.mjs'];
 const origin = 'https://raw.githubusercontent.com';
 
 // Exercise the workflow's shell verbatim except the fixture origin and bounded,

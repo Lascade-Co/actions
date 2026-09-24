@@ -1,5 +1,5 @@
 name: Vinext Deploy
-run-name: "${{ github.event.client_payload.repo }} · ${{ github.event.client_payload.branch }} · Vinext"
+run-name: "${{ github.event.client_payload.repo }} · ${{ github.event.client_payload.branch == 'main' && 'production' || github.event.client_payload.branch == 'dev' && 'staging' || 'invalid branch' }} · Vinext"
 
 on:
   repository_dispatch:
@@ -17,9 +17,6 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
-      owner: ${{ steps.prepare.outputs.owner }}
-      repositories: ${{ steps.prepare.outputs.repositories }}
-      repo_name: ${{ steps.prepare.outputs.repo_name }}
       worker_key: ${{ steps.prepare.outputs.worker_key }}
     steps:
       - uses: actions/setup-node@v7
@@ -32,31 +29,40 @@ jobs:
           CONTROL_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
-          mkdir -p control/scripts/vinext control/data
-          for file in scripts/vinext/{cli,config,build,deploy,secrets}.mjs data/vinext-projects.json; do
+          mkdir -p control/scripts/vinext
+          for file in scripts/vinext/{cli,config,build,deploy,secrets,source}.mjs; do
             rm -f "control/$file.tmp"
             curl --fail --silent --show-error --retry 5 --retry-all-errors --retry-delay 2 --retry-max-time 60 --connect-timeout 10 --max-time 20 "https://raw.githubusercontent.com/Lascade-Co/actions/$CONTROL_SHA/$file" -o "control/$file.tmp"
             test -s "control/$file.tmp"
             mv "control/$file.tmp" "control/$file"
           done
 
-      - name: Validate dispatch and resolve registered project
-        id: prepare
+      - name: Validate dispatch before minting a source token
+        id: preflight
         env:
           PAYLOAD_JSON: ${{ toJSON(github.event.client_payload) }}
-          REGISTRY_PATH: ${{ github.workspace }}/control/data/vinext-projects.json
-        run: node control/scripts/vinext/cli.mjs prepare
+        run: node control/scripts/vinext/cli.mjs preflight
 
-      - name: Mint source status token
+      - name: Mint source configuration and status token
         id: status-token
         uses: actions/create-github-app-token@v3
         with:
           client-id: ${{ secrets.CI_APP_CLIENT_ID }}
           private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
-          owner: ${{ steps.prepare.outputs.owner }}
-          repositories: ${{ steps.prepare.outputs.repo_name }}
+          owner: ${{ steps.preflight.outputs.owner }}
+          repositories: ${{ steps.preflight.outputs.repo_name }}
           permission-contents: read
           permission-statuses: write
+
+      - name: Resolve source Worker and Infisical deployment settings
+        id: prepare
+        env:
+          PAYLOAD_JSON: ${{ toJSON(github.event.client_payload) }}
+          GH_TOKEN: ${{ steps.status-token.outputs.token }}
+          INFISICAL_CLIENT_ID: ${{ secrets.INFISICAL_CLIENT_ID }}
+          INFISICAL_CLIENT_SECRET: ${{ secrets.INFISICAL_CLIENT_SECRET }}
+          INFISICAL_DOMAIN: ${{ secrets.INFISICAL_DOMAIN }}
+        run: node control/scripts/vinext/cli.mjs prepare
 
       - name: Verify requested commit is the branch head
         env:
@@ -88,19 +94,38 @@ jobs:
           CONTROL_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
-          mkdir -p control/scripts/vinext control/data
-          for file in scripts/vinext/{cli,config,build,deploy,secrets}.mjs data/vinext-projects.json; do
+          mkdir -p control/scripts/vinext
+          for file in scripts/vinext/{cli,config,build,deploy,secrets,source}.mjs; do
             rm -f "control/$file.tmp"
             curl --fail --silent --show-error --retry 5 --retry-all-errors --retry-delay 2 --retry-max-time 60 --connect-timeout 10 --max-time 20 "https://raw.githubusercontent.com/Lascade-Co/actions/$CONTROL_SHA/$file" -o "control/$file.tmp"
             test -s "control/$file.tmp"
             mv "control/$file.tmp" "control/$file"
           done
 
-      - name: Resolve the project locally without cross-job secret masking
+      - name: Validate dispatch before minting a source token
+        id: preflight
+        env:
+          PAYLOAD_JSON: ${{ toJSON(github.event.client_payload) }}
+        run: node control/scripts/vinext/cli.mjs preflight
+
+      - name: Mint read-only source configuration token
+        id: config-token
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ secrets.CI_APP_CLIENT_ID }}
+          private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
+          owner: ${{ steps.preflight.outputs.owner }}
+          repositories: ${{ steps.preflight.outputs.repo_name }}
+          permission-contents: read
+
+      - name: Resolve source Worker and Infisical deployment settings
         id: prepare
         env:
           PAYLOAD_JSON: ${{ toJSON(github.event.client_payload) }}
-          REGISTRY_PATH: ${{ github.workspace }}/control/data/vinext-projects.json
+          GH_TOKEN: ${{ steps.config-token.outputs.token }}
+          INFISICAL_CLIENT_ID: ${{ secrets.INFISICAL_CLIENT_ID }}
+          INFISICAL_CLIENT_SECRET: ${{ secrets.INFISICAL_CLIENT_SECRET }}
+          INFISICAL_DOMAIN: ${{ secrets.INFISICAL_DOMAIN }}
         run: node control/scripts/vinext/cli.mjs prepare
 
       - name: Set up project Node version
@@ -115,8 +140,8 @@ jobs:
         with:
           client-id: ${{ secrets.CI_APP_CLIENT_ID }}
           private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
-          owner: ${{ needs.prepare.outputs.owner }}
-          repositories: ${{ needs.prepare.outputs.repositories }}
+          owner: ${{ steps.preflight.outputs.owner }}
+          repositories: ${{ steps.prepare.outputs.repositories }}
           permission-contents: read
 
       - name: Checkout requested source and recorded submodule revisions
@@ -128,12 +153,12 @@ jobs:
           path: app
           submodules: recursive
           fetch-depth: 1
-          # Read-only token; recursive submodule checkout retains it until post-cleanup.
+          # Scoped read-only token remains available for recursive submodule cleanup.
           persist-credentials: true
 
       - name: Set up the project's pinned pnpm version
         if: ${{ fromJSON(steps.prepare.outputs.plan).project.package_manager == 'pnpm' }}
-        uses: pnpm/action-setup@v6
+        uses: pnpm/action-setup@v6.0.8
         with:
           package_json_file: app/${{ fromJSON(steps.prepare.outputs.plan).project.working_directory }}/package.json
           standalone: false
@@ -203,47 +228,56 @@ jobs:
           CONTROL_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
-          mkdir -p control/scripts/vinext control/data
-          for file in scripts/vinext/{cli,config,build,deploy,secrets}.mjs data/vinext-projects.json; do
+          mkdir -p control/scripts/vinext
+          for file in scripts/vinext/{cli,config,build,deploy,secrets,source}.mjs; do
             rm -f "control/$file.tmp"
             curl --fail --silent --show-error --retry 5 --retry-all-errors --retry-delay 2 --retry-max-time 60 --connect-timeout 10 --max-time 20 "https://raw.githubusercontent.com/Lascade-Co/actions/$CONTROL_SHA/$file" -o "control/$file.tmp"
             test -s "control/$file.tmp"
             mv "control/$file.tmp" "control/$file"
           done
 
-      - name: Resolve the project locally without cross-job secret masking
-        id: prepare
+      - name: Validate dispatch before minting a source token
+        id: preflight
         env:
           PAYLOAD_JSON: ${{ toJSON(github.event.client_payload) }}
-          REGISTRY_PATH: ${{ github.workspace }}/control/data/vinext-projects.json
-        run: node control/scripts/vinext/cli.mjs prepare
+        run: node control/scripts/vinext/cli.mjs preflight
 
-      - name: Mint source verification and status token
+      - name: Mint source configuration, verification, and status token
         id: source-token
         uses: actions/create-github-app-token@v3
         with:
           client-id: ${{ secrets.CI_APP_CLIENT_ID }}
           private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
-          owner: ${{ needs.prepare.outputs.owner }}
-          repositories: ${{ needs.prepare.outputs.repo_name }}
+          owner: ${{ steps.preflight.outputs.owner }}
+          repositories: ${{ steps.preflight.outputs.repo_name }}
           permission-contents: read
           permission-statuses: write
 
+      - name: Resolve source Worker and Infisical deployment settings
+        id: prepare
+        env:
+          PAYLOAD_JSON: ${{ toJSON(github.event.client_payload) }}
+          GH_TOKEN: ${{ steps.source-token.outputs.token }}
+          INFISICAL_CLIENT_ID: ${{ secrets.INFISICAL_CLIENT_ID }}
+          INFISICAL_CLIENT_SECRET: ${{ secrets.INFISICAL_CLIENT_SECRET }}
+          INFISICAL_DOMAIN: ${{ secrets.INFISICAL_DOMAIN }}
+        run: node control/scripts/vinext/cli.mjs prepare
+
       - name: Install pinned standalone Wrangler
-        if: ${{ needs.build.result == 'success' }}
+        if: ${{ needs.build.result == 'success' && steps.prepare.outcome == 'success' }}
         env:
           WRANGLER_VERSION: ${{ fromJSON(steps.prepare.outputs.plan).project.wrangler_version }}
         run: npm install --prefix "$RUNNER_TEMP/vinext-tools" --no-audit --no-fund "wrangler@$WRANGLER_VERSION"
 
       - name: Download deployment bundle
-        if: ${{ needs.build.result == 'success' }}
+        if: ${{ needs.build.result == 'success' && steps.prepare.outcome == 'success' }}
         uses: actions/download-artifact@v8
         with:
           name: vinext-bundle-${{ github.run_id }}-${{ github.run_attempt }}
           path: bundle
 
       - name: Import runtime secrets from Infisical
-        if: ${{ needs.build.result == 'success' }}
+        if: ${{ needs.build.result == 'success' && steps.prepare.outcome == 'success' }}
         env:
           PLAN_JSON: ${{ steps.prepare.outputs.plan }}
           INFISICAL_CLIENT_ID: ${{ secrets.INFISICAL_CLIENT_ID }}
@@ -254,7 +288,7 @@ jobs:
         run: node control/scripts/vinext/cli.mjs secrets
 
       - name: Deploy the preview or production version and verify it
-        if: ${{ needs.build.result == 'success' }}
+        if: ${{ needs.build.result == 'success' && steps.prepare.outcome == 'success' }}
         id: deploy
         env:
           PLAN_JSON: ${{ steps.prepare.outputs.plan }}
@@ -269,6 +303,7 @@ jobs:
         if: ${{ always() && steps.source-token.outcome == 'success' }}
         env:
           PLAN_JSON: ${{ steps.prepare.outputs.plan }}
+          PAYLOAD_JSON: ${{ toJSON(github.event.client_payload) }}
           GH_TOKEN: ${{ steps.source-token.outputs.token }}
           STATUS_STATE: ${{ needs.build.result == 'success' && steps.deploy.outcome == 'success' && 'success' || 'failure' }}
           STATUS_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
