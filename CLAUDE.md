@@ -19,6 +19,8 @@ Keep this public runner free of project-specific registries and examples. `dev`
 uploads alias `dev`; `main` deploys production. Serialize both targets by
 account/Worker. Never use secret bulk for previews. See
 `docs/vinext-deployment.md` before changing the shared runner.
+The reusable trigger accepts source pushes and manual `workflow_dispatch`
+runs on `main` or `dev`.
 
 Pin control downloads to the runner SHA; retry transport errors with bounded curl
 retries and promote only successful, nonempty temporary downloads.
