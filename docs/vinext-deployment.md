@@ -35,7 +35,7 @@ A main-only project omits `staging` in `wrangler.jsonc` and triggers only on
 
 The CI GitHub App needs read access to the source repository and any private
 submodules. The build checkout token is read-only and scoped to the source repo plus
-the Infisical-authorized submodules. It remains during the job for recursive
+the submodules declared at the dispatched commit. It remains during the job for recursive
 submodule cleanup. The central Cloudflare token and Infisical machine identity must be
 scoped to resources the source repositories are allowed to deploy; source
 maintainers control the Worker target in `wrangler.jsonc` and the Infisical
@@ -53,14 +53,14 @@ The runner reads the caller's project, environment `staging` or `prod`, path
 - `VINEXT_RUNTIME_SECRETS`: comma-separated names of Worker runtime secrets
   that must exist. Use an empty string if none. Only these values are uploaded
   as Worker secrets.
-- `VINEXT_SOURCE_REPOSITORY`: the exact `Lascade-Co/<repo>` allowed to use this
-  Infisical project. `VINEXT_WORKER_NAME` and `VINEXT_ACCOUNT_ID`: the exact
-  Worker target authorized for that project. The runner compares them to the
-  pinned source Wrangler config before building.
-- `VINEXT_SUBMODULE_REPOS`: comma-separated private submodule repository names
-  authorized for checkout, without owner prefixes. Omit it when there are no
-  private submodules. The checkout token is scoped to the source repo plus
-  this list.
+- `VINEXT_WORKER_NAME` and `VINEXT_ACCOUNT_ID`: the exact Worker target
+  authorized for that project. The runner compares them to the pinned source
+  Wrangler config before building.
+
+The runner reads `.gitmodules` from the exact source commit. Submodules must
+use same-organization GitHub URLs and have pinned gitlinks. The checkout token
+is scoped to the source repo plus the listed submodule repositories. Nested
+private submodules need separate support before they can be checked out.
 
 These `VINEXT_*` values are deployment metadata and are never passed to the
 app. Other Infisical values are ignored. Local `.env*` and `.dev.vars*` files
@@ -86,9 +86,3 @@ commit. The caller job only confirms dispatch. A successful central run means
 Cloudflare accepted the upload and the runner verified the resulting version
 and deployment state. It does not report application health. Domain changes
 and authenticated UI checks are separate rollout steps.
-
-## Runner checks
-
-Run `node --test scripts/vinext/*.test.mjs`. The suite covers dispatch
-validation, exact-source reads, Infisical selection, generated-config
-sanitization, secret isolation, version state, and missing-Worker rejection.
