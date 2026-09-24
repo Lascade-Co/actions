@@ -28,7 +28,7 @@ export async function loadSecrets(plan, { env = process.env, fetcher = fetch, ma
     assert(Array.isArray(list), 'Invalid Infisical import');
     for (const secret of list) {
       assert(typeof secret.secretKey === 'string' && typeof secret.secretValue === 'string', 'Invalid Infisical secret');
-      if (env.GITHUB_ACTIONS && secret.secretValue && (maskPublic || !secret.secretKey.startsWith('NEXT_PUBLIC_')) && !['VINEXT_RUNTIME_SECRETS', 'VINEXT_REQUIRED_BUILD_VARIABLES', 'VINEXT_SOURCE_REPOSITORY', 'VINEXT_WORKER_NAME', 'VINEXT_ACCOUNT_ID', 'VINEXT_SUBMODULE_REPOS'].includes(secret.secretKey)) console.log(`::add-mask::${secret.secretValue.replaceAll('%', '%25').replaceAll('\r', '%0D').replaceAll('\n', '%0A')}`);
+      if (env.GITHUB_ACTIONS && secret.secretValue && (maskPublic || !secret.secretKey.startsWith('NEXT_PUBLIC_'))) console.log(`::add-mask::${secret.secretValue.replaceAll('%', '%25').replaceAll('\r', '%0D').replaceAll('\n', '%0A')}`);
       if (!Object.hasOwn(values, secret.secretKey)) values[secret.secretKey] = secret.secretValue;
     }
   }
@@ -40,6 +40,9 @@ export async function exportSecrets(plan, { file, kind, env = process.env, fetch
   rmSync(file, { force: true });
   const values = await loadSecrets(plan, { env, fetcher });
   const p = plan.project;
+  const expected = kind === 'build' ? p.build_variables : p.runtime_secrets;
+  const actual = Object.keys(values).filter(key => kind === 'build' ? key.startsWith('NEXT_PUBLIC_') : !key.startsWith('NEXT_PUBLIC_'));
+  assert(actual.length === expected.length && actual.every(key => expected.includes(key)), 'Infisical variable names changed since deployment preparation; rerun this source commit');
   const selected = kind === 'build' ? selectValues(values, p.build_variables) : selectValues(values, p.runtime_secrets);
   writeFileSync(file, JSON.stringify(selected), { mode: 0o600, flag: 'wx' });
 }

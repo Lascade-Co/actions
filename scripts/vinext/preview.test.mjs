@@ -6,6 +6,8 @@ import { join } from 'node:path';
 import { projectFromSource } from './source.mjs';
 import { prepare, sanitizeConfig } from './config.mjs';
 import { deploy, deploymentArgs } from './deploy.mjs';
+import { exportSecrets } from './secrets.mjs';
+import { validateBundle } from './build.mjs';
 
 const payload = {
   repo: 'Lascade-Co/example-web', branch: 'dev', sha: 'a'.repeat(40),
@@ -21,8 +23,8 @@ function nativeSource() {
     },
     wrangler: {
       name: 'example-web', account_id: 'b'.repeat(32),
-      images: { binding: 'IMAGES' }, secrets: { required: ['APP_SECRET'] },
-      previews: { images: { binding: 'IMAGES' }, secrets: { required: ['APP_SECRET'] } },
+      images: { binding: 'IMAGES' },
+      previews: { images: { binding: 'IMAGES' } },
       env: {
         staging: { name: 'example-web', images: { binding: 'IMAGES' } },
         production: { name: 'example-web', images: { binding: 'IMAGES' } },
@@ -32,14 +34,14 @@ function nativeSource() {
   };
 }
 
-function nativeBundle(root, plan, source) {
+function nativeBundle(root, plan, source, values = { APP_SECRET: 'selected' }) {
   const bundleRoot = join(root, 'bundle');
   mkdirSync(join(bundleRoot, 'server'), { recursive: true });
   mkdirSync(join(bundleRoot, 'client'));
   writeFileSync(join(bundleRoot, 'server', 'index.mjs'), 'export default { fetch() { return new Response("ok") } };');
   writeFileSync(join(bundleRoot, 'server', 'wrangler.json'), JSON.stringify({
     name: 'example-web', account_id: 'b'.repeat(32), targetEnvironment: plan.target,
-    main: 'index.mjs', assets: { directory: '../client' }, no_bundle: true,
+    main: 'index.mjs', assets: { directory: '../client', binding: 'ASSETS' }, no_bundle: true,
     workers_dev: true, preview_urls: true, images: { binding: 'IMAGES' },
     previews: source.wrangler.previews,
   }));
@@ -47,29 +49,45 @@ function nativeBundle(root, plan, source) {
     repo: payload.repo, sha: payload.sha, target: plan.target, worker: 'example-web',
   }));
   const envFile = join(root, 'infisical.json');
-  writeFileSync(envFile, JSON.stringify({ APP_SECRET: 'selected' }));
+  writeFileSync(envFile, JSON.stringify(values));
   return { bundleRoot, envFile };
 }
 
-test('native Preview only uploads declared runtime secret names', () => {
+test('native Preview derives every private runtime secret from Infisical', () => {
   const source = nativeSource();
   const project = projectFromSource(payload, source, {
     NEXT_PUBLIC_API_URL: 'https://staging.example.com', APP_SECRET: 'selected',
-    UNRELATED_API_KEY: 'must-not-upload',
+    UNRELATED_API_KEY: 'also-upload', VINEXT_RUNTIME_SECRETS: 'also-upload',
   });
   const plan = prepare(payload, project);
-  assert.deepEqual(project.runtime_secrets, ['APP_SECRET']);
+  assert.deepEqual(project.runtime_secrets, ['APP_SECRET', 'UNRELATED_API_KEY', 'VINEXT_RUNTIME_SECRETS']);
   assert.equal(project.preview_name, 'stg');
   const built = {
     name: 'example-web', account_id: 'b'.repeat(32), targetEnvironment: 'staging',
-    main: 'index.mjs', assets: { directory: '../client' }, no_bundle: true,
+    main: 'index.mjs', assets: { directory: '../client', binding: 'ASSETS' }, no_bundle: true,
     workers_dev: true, preview_urls: true, images: { binding: 'IMAGES' },
     previews: source.wrangler.previews,
   };
-  assert.deepEqual(sanitizeConfig(built, plan).previews, source.wrangler.previews);
-  assert.deepEqual(sanitizeConfig(built, plan).secrets.required, ['APP_SECRET']);
+  assert.deepEqual(sanitizeConfig(built, plan).previews, { ...source.wrangler.previews, secrets: { required: project.runtime_secrets } });
+  assert.deepEqual(sanitizeConfig(built, plan).secrets.required, project.runtime_secrets);
   assert.throws(() => sanitizeConfig({ ...built, previews: undefined }, plan), /Generated Preview configuration differs from source/);
   assert.throws(() => sanitizeConfig({ ...built, vars: { API_URL: 'plain' } }, plan), /must not declare plaintext vars/);
+});
+
+test('sanitized native Preview bundle passes validation a second time', () => {
+  const source = nativeSource();
+  const plan = prepare(payload, projectFromSource(payload, source, { APP_SECRET: 'selected', VINEXT_METADATA: 'private-value' }));
+  const root = mkdtempSync(join(tmpdir(), 'vinext-second-pass-test-'));
+  try {
+    const { bundleRoot } = nativeBundle(root, plan, source);
+    const configPath = join(bundleRoot, 'server', 'wrangler.json');
+    const first = validateBundle(bundleRoot, plan).config;
+    writeFileSync(configPath, JSON.stringify(first));
+    const second = validateBundle(bundleRoot, plan).config;
+    assert.deepEqual(second, first);
+    assert.deepEqual(second.previews.secrets.required, ['APP_SECRET', 'VINEXT_METADATA']);
+    assert.throws(() => sanitizeConfig({ ...first, previews: { ...first.previews, vars: { EXTRA: 'plain' } } }, plan), /Generated Preview configuration differs from source/);
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
 test('native source rejects plaintext vars at every Wrangler level', () => {
@@ -82,12 +100,47 @@ test('native source rejects plaintext vars at every Wrangler level', () => {
   }
 });
 
-test('native Preview deploy passes Infisical secret file atomically and preserves production', async () => {
+test('runtime secrets cannot shadow production, Preview, or asset bindings', () => {
+  for (const [name, configure] of [
+    ['IMAGES', () => {}],
+    ['ASSETS', () => {}],
+    ['PREVIEW_KV', source => { source.wrangler.previews.kv_namespaces = [{ binding: 'PREVIEW_KV', id: 'preview-kv' }]; }],
+    ['PROD_R2', source => { source.wrangler.r2_buckets = [{ binding: 'PROD_R2', bucket_name: 'prod-bucket' }]; }],
+  ]) {
+    const source = nativeSource();
+    configure(source);
+    const project = projectFromSource(payload, source, { [name]: 'secret-value' });
+    assert.throws(() => prepare(payload, project), /collides with a Worker resource binding/, name);
+  }
+});
+
+test('runtime export fails if Infisical adds a private key after preparation', async () => {
   const source = nativeSource();
   const plan = prepare(payload, projectFromSource(payload, source, { APP_SECRET: 'selected' }));
+  const root = mkdtempSync(join(tmpdir(), 'vinext-infisical-drift-test-'));
+  try {
+    const file = join(root, 'runtime.json');
+    const fetcher = async url => ({
+      ok: true,
+      json: async () => url.pathname.endsWith('/login')
+        ? { accessToken: 'dummy-token' }
+        : { secrets: [{ secretKey: 'APP_SECRET', secretValue: 'selected' }, { secretKey: 'VINEXT_METADATA', secretValue: 'new-value' }] },
+    });
+    await assert.rejects(() => exportSecrets(plan, {
+      file, kind: 'runtime',
+      env: { INFISICAL_DOMAIN: 'https://infisical.example', INFISICAL_CLIENT_ID: 'id', INFISICAL_CLIENT_SECRET: 'secret' },
+      fetcher,
+    }), /variable names changed since deployment preparation/);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('native Preview deploy passes Infisical secret file atomically and preserves production', async () => {
+  const source = nativeSource();
+  const runtimeValues = { APP_SECRET: 'selected', VINEXT_METADATA: 'private-value' };
+  const plan = prepare(payload, projectFromSource(payload, source, runtimeValues));
   const root = mkdtempSync(join(tmpdir(), 'vinext-preview-test-'));
   try {
-    const { bundleRoot, envFile } = nativeBundle(root, plan, source);
+    const { bundleRoot, envFile } = nativeBundle(root, plan, source, runtimeValues);
     const production = { versions: [{ version_id: 'production-version', percentage: 100 }] };
     let executed = false;
     const result = await deploy(plan, {
@@ -101,9 +154,9 @@ test('native Preview deploy passes Infisical secret file atomically and preserve
         executed = true;
         assert.deepEqual(args.slice(1, 4), ['preview', '--name', 'stg']);
         assert(args.includes('--secrets-file') && args.includes('--json') && args.includes('--ignore-base-config'));
-        assert.deepEqual(JSON.parse(readFileSync(args[args.indexOf('--secrets-file') + 1], 'utf8')), { APP_SECRET: 'selected' });
+        assert.deepEqual(JSON.parse(readFileSync(args[args.indexOf('--secrets-file') + 1], 'utf8')), runtimeValues);
         assert.equal(options.env.CLOUDFLARE_ENV, undefined);
-        return JSON.stringify({ preview: { id: 'preview-id', name: 'stg', urls: ['https://stg.example.com'] }, deployment: { id: 'deployment-id', env: { APP_SECRET: { type: 'secret_text' }, IMAGES: { type: 'images' } } } });
+        return JSON.stringify({ preview: { id: 'preview-id', name: 'stg', urls: ['https://stg.example.com'] }, deployment: { id: 'deployment-id', env: { APP_SECRET: { type: 'secret_text' }, VINEXT_METADATA: { type: 'secret_text' }, IMAGES: { type: 'images' } } } });
       },
     });
     assert(executed);
@@ -156,10 +209,11 @@ test('first native Preview works without an active production deployment', async
 test('first native production deploy works after a Preview with no active version', async () => {
   const source = nativeSource();
   const productionPayload = { ...payload, branch: 'main' };
-  const plan = prepare(productionPayload, projectFromSource(productionPayload, source, { APP_SECRET: 'selected' }));
+  const runtimeValues = { APP_SECRET: 'selected', VINEXT_METADATA: 'private-value' };
+  const plan = prepare(productionPayload, projectFromSource(productionPayload, source, runtimeValues));
   const root = mkdtempSync(join(tmpdir(), 'vinext-first-production-test-'));
   try {
-    const { bundleRoot, envFile } = nativeBundle(root, plan, source);
+    const { bundleRoot, envFile } = nativeBundle(root, plan, source, runtimeValues);
     let deploymentCalls = 0;
     let uploadedTag;
     const result = await deploy(plan, {
@@ -168,15 +222,40 @@ test('first native production deploy works after a Preview with no active versio
       cloudflare: async path => {
         if (path.endsWith('/deployments')) return { deployments: ++deploymentCalls === 1 ? [] : [{ versions: [{ version_id: 'new-version', percentage: 100 }] }] };
         if (path.includes('/versions?')) return { items: /[?&]page=1$/.test(path) ? [{ id: 'new-version', metadata: { created_on: '2026-09-24T00:00:00Z' }, annotations: { 'workers/tag': uploadedTag } }] : [] };
-        if (path.endsWith('/versions/new-version')) return { resources: { bindings: [{ type: 'secret_text', name: 'APP_SECRET' }] } };
+        if (path.endsWith('/versions/new-version')) return { resources: { bindings: [{ type: 'secret_text', name: 'APP_SECRET' }, { type: 'secret_text', name: 'VINEXT_METADATA' }] } };
         throw new Error('Unexpected Cloudflare API call');
       },
       execute: (_command, args) => {
         assert.equal(args[1], 'deploy');
+        assert.deepEqual(JSON.parse(readFileSync(args[args.indexOf('--secrets-file') + 1], 'utf8')), runtimeValues);
         uploadedTag = args[args.indexOf('--tag') + 1];
       },
     });
     assert.deepEqual(result, { state: 'deployed', version_id: 'new-version' });
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('native production rejects an active version missing a runtime secret', async () => {
+  const source = nativeSource();
+  const productionPayload = { ...payload, branch: 'main' };
+  const runtimeValues = { APP_SECRET: 'selected', VINEXT_METADATA: 'private-value' };
+  const plan = prepare(productionPayload, projectFromSource(productionPayload, source, runtimeValues));
+  const root = mkdtempSync(join(tmpdir(), 'vinext-missing-production-secret-test-'));
+  try {
+    const { bundleRoot, envFile } = nativeBundle(root, plan, source, runtimeValues);
+    let deploymentCalls = 0;
+    let uploadedTag;
+    await assert.rejects(() => deploy(plan, {
+      bundleRoot, envFile, wranglerBin: '/wrangler.js', env: {},
+      github: async () => ({ sha: payload.sha }),
+      cloudflare: async path => {
+        if (path.endsWith('/deployments')) return { deployments: ++deploymentCalls === 1 ? [] : [{ versions: [{ version_id: 'new-version', percentage: 100 }] }] };
+        if (path.includes('/versions?')) return { items: /[?&]page=1$/.test(path) ? [{ id: 'new-version', metadata: { created_on: '2026-09-24T00:00:00Z' }, annotations: { 'workers/tag': uploadedTag } }] : [] };
+        if (path.endsWith('/versions/new-version')) return { resources: { bindings: [{ type: 'secret_text', name: 'APP_SECRET' }] } };
+        throw new Error('Unexpected Cloudflare API call');
+      },
+      execute: (_command, args) => { uploadedTag = args[args.indexOf('--tag') + 1]; },
+    }), /missing a required runtime secret/);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 

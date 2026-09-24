@@ -89,7 +89,7 @@ export function projectFromSource(payload, { pkg, wrangler, submodule_repos }, v
   assert(Array.isArray(submodule_repos) && submodule_repos.every(x => /^[A-Za-z0-9_.-]+$/.test(x)), 'Invalid source submodule repositories');
   const keys = Object.keys(values);
   const build = keys.filter(k => k.startsWith('NEXT_PUBLIC_'));
-  let runtime = keys.filter(k => !k.startsWith('NEXT_PUBLIC_') && !k.startsWith('VINEXT_'));
+  const runtime = keys.filter(k => !k.startsWith('NEXT_PUBLIC_'));
   assert(build.every(k => values[k].trim()), 'Empty NEXT_PUBLIC_ value in Infisical');
   const topName = wrangler.name, topAccount = wrangler.account_id;
   assert(typeof topName === 'string' && typeof topAccount === 'string', 'Source Wrangler must declare Worker and account');
@@ -99,11 +99,6 @@ export function projectFromSource(payload, { pkg, wrangler, submodule_repos }, v
     assert(noPlainVars(wrangler) && noPlainVars(wrangler.previews), 'Native Preview source must not declare plaintext vars; use Infisical');
     const [major, minor] = wranglerVersion.split('.').map(Number);
     assert(major > 4 || (major === 4 && minor >= 135), 'Native Previews require Wrangler 4.135.0 or later');
-    const required = wrangler.secrets?.required;
-    assert(Array.isArray(required) && required.length > 0 && new Set(required).size === required.length && required.every(key => typeof key === 'string' && /^[A-Z][A-Z0-9_]*$/.test(key) && !key.startsWith('NEXT_PUBLIC_') && !key.startsWith('VINEXT_')), 'Native Previews require source-declared runtime secret names');
-    assert(JSON.stringify(wrangler.previews.secrets?.required) === JSON.stringify(required), 'Production and Preview must declare the same required runtime secret names');
-    for (const key of required) assert(typeof values[key] === 'string' && values[key].trim(), `Missing Infisical value: ${key}`);
-    runtime = required;
   }
   const environments = {};
   for (const [target, infisical_env] of [['staging', 'staging'], ['production', 'prod']]) {
@@ -126,6 +121,7 @@ export function projectFromSource(payload, { pkg, wrangler, submodule_repos }, v
   }
   return {
     account_id: topAccount, worker_name: topName, node_version: '24',
+    asset_binding: wrangler.assets?.binding ?? 'ASSETS',
     package_manager: manager, wrangler_version: wranglerVersion,
     working_directory: '.', bundle_directory: 'dist', generated_config: 'dist/server/wrangler.json',
     build_script: 'build:vinext', check_scripts: ['check:deploy'], submodule_repos,

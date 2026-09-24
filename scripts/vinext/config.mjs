@@ -18,6 +18,19 @@ const reserved = /^(?:NODE_|NPM_|PNPM_|YARN_|GITHUB_|GH_|ACTIONS_|RUNNER_|CLOUDF
 const script = /^[a-zA-Z0-9][a-zA-Z0-9:_-]*$/;
 export const bindingKeys = ['kv_namespaces', 'r2_buckets', 'd1_databases', 'services', 'durable_objects', 'images', 'ai', 'version_metadata', 'analytics_engine_datasets', 'hyperdrive', 'vectorize', 'queues', 'workflows', 'secrets_store_secrets'];
 
+function resourceBindingNames(bindings) {
+  const names = new Set();
+  const visit = value => {
+    if (!value || typeof value !== 'object') return;
+    if (Array.isArray(value)) return value.forEach(visit);
+    if (typeof value.binding === 'string') names.add(value.binding);
+    for (const child of Object.values(value)) visit(child);
+  };
+  for (const key of bindingKeys) visit(bindings[key]);
+  for (const item of bindings.durable_objects?.bindings ?? []) if (typeof item.name === 'string') names.add(item.name);
+  return names;
+}
+
 export function validateDispatch(payload) {
   assert(payload && /^Lascade-Co\/[A-Za-z0-9_.-]+$/.test(payload.repo), 'Only Lascade-Co repositories are supported');
   assert(['dev', 'main'].includes(payload.branch), 'Only dev and main can deploy');
@@ -54,6 +67,8 @@ export function prepare(payload, project) {
     assert(Array.isArray(project[key]) && new Set(project[key]).size === project[key].length && project[key].every(v => variable.test(v) && !reserved.test(v)), `Invalid ${key}`);
   }
   assert(project.runtime_secrets.every(v => !project.build_variables.includes(v) && !v.startsWith('NEXT_PUBLIC_')), 'Runtime secrets must not overlap public/build variables');
+  const assetBinding = project.asset_binding ?? 'ASSETS';
+  assert(typeof assetBinding === 'string' && variable.test(assetBinding), 'Source must declare a valid asset binding');
   const target = payload.branch === 'dev' ? 'staging' : 'production';
   assert(project.environments?.production, 'Missing production environment');
   assert(project.environments[target], `No ${target} environment is configured`);
@@ -67,6 +82,9 @@ export function prepare(payload, project) {
   const stageKv = project.environments.staging?.bindings.kv_namespaces ?? [];
   const prodKv = project.environments.production.bindings.kv_namespaces ?? [];
   assert(stageKv.every(a => !prodKv.some(b => a.id === b.id)), 'Staging and production must use distinct KV namespaces');
+  const resourceNames = new Set([assetBinding]);
+  for (const environment of Object.values(project.environments)) for (const name of resourceBindingNames(environment.bindings)) resourceNames.add(name);
+  assert(project.runtime_secrets.every(name => !resourceNames.has(name)), 'Runtime secret name collides with a Worker resource binding');
   const slug = payload.project_slug;
   const environment = project.environments[target];
   return { repo: payload.repo, branch: payload.branch, sha: payload.sha, source_run_url: payload.source_run_url, owner, repo_name, project, target, infisical_project_slug: slug, infisical_env: environment.infisical_env, infisical_path: environment.infisical_path };
@@ -85,6 +103,7 @@ export function sanitizeConfig(config, plan) {
   assert(config.workers_dev === true && config.preview_urls === true, 'Enable workers_dev and preview_urls');
   assert(typeof config.main === 'string' && /\.(m?js)$/.test(config.main), 'Missing built Worker entry');
   assert(config.assets && typeof config.assets.directory === 'string', 'Missing built assets');
+  if (p.preview_mode === 'native') assert(config.assets.binding === (p.asset_binding ?? 'ASSETS') && !p.runtime_secrets.includes(config.assets.binding), 'Built asset binding differs from source or collides with a runtime secret');
   for (const key of p.runtime_secrets) assert(!Object.hasOwn(config.vars ?? {}, key), 'Runtime secret found in plaintext vars');
   const expected = p.environments[plan.target].bindings;
   for (const key of bindingKeys) {
@@ -97,12 +116,13 @@ export function sanitizeConfig(config, plan) {
   result.no_bundle = true;
   if (p.preview_mode === 'native') {
     assert(config.vars === undefined || (config.vars && typeof config.vars === 'object' && !Array.isArray(config.vars) && Object.keys(config.vars).length === 0), 'Generated native Preview config must not declare plaintext vars');
-    assert(isDeepStrictEqual(config.previews, p.preview_config), 'Generated Preview configuration differs from source');
+    const preview = { ...p.preview_config, secrets: { required: p.runtime_secrets } };
+    assert(isDeepStrictEqual(config.previews, p.preview_config) || isDeepStrictEqual(config.previews, preview), 'Generated Preview configuration differs from source');
     for (const key of bindingKeys) {
       if (p.environments.production.bindings[key] === undefined) delete result[key];
       else result[key] = p.environments.production.bindings[key];
     }
-    result.previews = p.preview_config;
+    result.previews = preview;
   } else {
     assert(empty(config.previews), 'Legacy alias build must not configure native Previews');
   }

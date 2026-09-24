@@ -29,6 +29,11 @@ export function assertSecretBindings(bindings, names) {
   assert(secrets.every(b => names.includes(b.name)), 'Unexpected remote secrets would be inherited; review their removal before deploying');
 }
 
+export function assertRequiredSecretBindings(bindings, names) {
+  assertSecretBindings(bindings, names);
+  assert(names.every(name => bindings.some(binding => binding.name === name && binding.type === 'secret_text')), 'Deployed Worker is missing a required runtime secret');
+}
+
 export function newest(versions, alias) {
   assert(Array.isArray(versions) && versions.every(v => typeof v.id === 'string' && Number.isFinite(Date.parse(v.metadata?.created_on))), 'Invalid version metadata');
   return versions.filter(v => alias === undefined || v.annotations?.['workers/alias'] === alias)
@@ -119,7 +124,7 @@ async function deployNative(plan, { configPath, secrets, wranglerBin, env, execu
     }
     assert(uploaded?.id === after.versions[0].version_id, 'Production active version differs from the uploaded source');
     const version = await cloudflare(`${workerPath}/versions/${after.versions[0].version_id}`);
-    assertSecretBindings(version.resources?.bindings, plan.project.runtime_secrets);
+    assertRequiredSecretBindings(version.resources?.bindings, plan.project.runtime_secrets);
     return { state: 'deployed', version_id: after.versions[0].version_id };
   } finally { rmSync(directory, { recursive: true, force: true }); }
 }
@@ -175,6 +180,8 @@ export async function deploy(plan, { bundleRoot, envFile, wranglerBin, env = pro
     } else {
       assert(after.versions.length === 1 && after.versions[0].version_id === uploaded.id && after.versions[0].percentage === 100, 'Production version is not receiving 100% traffic');
       assert(newest(afterVersions, 'dev')?.id === priorPreview?.id, 'Production deploy changed the dev preview alias');
+      const version = await cloudflare(`${workerPath}/versions/${uploaded.id}`);
+      assertRequiredSecretBindings(version.resources?.bindings, plan.project.runtime_secrets);
     }
     return { state: 'deployed', version_id: uploaded.id };
   } finally { rmSync(directory, { recursive: true, force: true }); }

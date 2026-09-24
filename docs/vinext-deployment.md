@@ -36,10 +36,10 @@ A main-only project omits `staging` in `wrangler.jsonc` and triggers only on
   Vinext build, with matching bindings. The runner validates both source and
   generated configuration and uses the stable Preview name `stg` for `dev`.
   Without a `previews` block, the existing version-alias path is unchanged.
-- Native Preview projects declare runtime secret names in both
-  `secrets.required` and `previews.secrets.required`. The lists must match.
-  The runner takes their values from the branch-selected Infisical environment
-  and does not upload unrelated Infisical values. Production deploy and Preview
+- Native Preview projects derive runtime secret names from the selected
+  Infisical environment. The runner writes those names into both
+  `secrets.required` and `previews.secrets.required` in the sanitized bundle.
+  Production deploy and Preview
   deployment both pass a temporary `--secrets-file` to the pinned Wrangler,
   so the secrets are included with the deployment. Preview deployment uses
   `--ignore-base-config` so dashboard Base settings cannot add bindings or secrets.
@@ -67,22 +67,22 @@ The runner reads the caller's project, environment `staging` or `prod`, path
 
 - App build variables prefixed `NEXT_PUBLIC_`. These are passed to the build
   and embedded into browser assets. Discovered public values must be nonempty.
-- Other app values become Worker runtime secrets automatically. This includes
-  values imported into this Infisical environment. Runtime values must be
-  nonempty. Invalid or reserved variable names fail preparation. Native Preview
-  projects upload only the names declared in source `secrets.required`.
+- Every other value becomes a Worker runtime secret automatically, including
+  `VINEXT_*` keys and values imported into this Infisical environment. Runtime
+  values must be nonempty. Invalid or system-reserved variable names fail
+  preparation to prevent runner environment shadowing. Runtime names also may
+  not collide with Worker resource or asset binding names.
 
 The runner reads `.gitmodules` from the exact source commit. Submodules must
 use same-organization GitHub URLs and have pinned gitlinks. The checkout token
 is scoped to the source repo plus the listed submodule repositories. Nested
 private submodules need separate support before they can be checked out.
 
-`VINEXT_*` keys are reserved and ignored by this runner; they are never passed to the
-app. Legacy projects need no build-variable or runtime-secret name lists;
-native Preview projects declare the runtime names in Wrangler. Local
+No build-variable or runtime-secret name lists are required. Local
 `.env*` and `.dev.vars*` files in the repository root are removed from the
 fresh CI checkout before building. Environment files are excluded from the
-deployment artifact.
+deployment artifact. If Infisical key names change between preparation and
+build or deploy, the run fails so a new run can capture the complete set.
 
 The legacy alias path requires an initial active Worker deployment before the
 shared runner can update it. Native Previews can be created before the first

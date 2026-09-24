@@ -16,13 +16,13 @@ Vinext deployments are source-owned: fetch `package.json`, `wrangler.jsonc`,
 and any `.gitmodules` at the dispatched commit, then read build and runtime
 values from Infisical. Derive checkout scope from pinned submodules.
 The Worker destination comes solely from the source `wrangler.jsonc`.
-Classify Infisical `NEXT_PUBLIC_*` keys as build values. Legacy sources use
-other app keys as runtime secrets; native Preview sources use only names in
-`secrets.required`. Reserve `VINEXT_*` for runner metadata.
+Classify Infisical `NEXT_PUBLIC_*` keys as build values and every other key
+as a runtime secret, including `VINEXT_*`. Keep the system-name validation
+guard for keys that could shadow runner process settings.
 Keep this public runner free of project-specific registries and examples. `dev`
 uses native Preview `stg` when source Wrangler declares `previews`, otherwise
-uploads legacy alias `dev`; `main` deploys production. Native Preview projects
-declare runtime secret names in both production and Preview `secrets.required`;
+uploads legacy alias `dev`; `main` deploys production. Runtime secret names
+are derived from Infisical for production and Preview `secrets.required`;
 values come only from Infisical. Reject plaintext Wrangler `vars` for native
 Preview projects and verify returned Preview secret bindings. Serialize both
 targets by account/Worker.
