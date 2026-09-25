@@ -1,0 +1,16 @@
+{
+  "people": [
+    {"name": "Rohit",    "colour": 0, "aliases": ["Rohit T P", "rohittp0"]},
+    {"name": "Ryyan",    "colour": 1, "aliases": ["Ryyan Safar", "ryyansafar"]},
+    {"name": "Riyan",    "colour": 2, "aliases": ["Muhammed Riyan", "Riyaaaaan"]},
+    {"name": "Mushfiq",  "colour": 3, "aliases": ["Mushfiq Humayoon", "Mushf1qHumayoon", "MushfiqHumayoon"]},
+    {"name": "Varsha",   "colour": 4, "aliases": ["Varsha Shaheen", "VarshaShaheen"]},
+    {"name": "Vaishnav", "colour": 5, "aliases": ["vaishnav-0"]},
+    {"name": "cherian",  "colour": 6, "aliases": []},
+    {"name": "Adarsh",   "colour": 7, "aliases": ["AdarshLascade"]},
+    {"name": "Fasna",    "aliases": ["Fasna F F", "Iamfasna"]},
+    {"name": "Angel",    "aliases": ["Angel Rose", "Angelrose19"]},
+    {"name": "Shaan",    "aliases": ["Shaan Shoukath", "Shaan-Shoukath"]}
+  ],
+  "bots": ["Claude", "Deploy", "Lascadesevices"]
+}

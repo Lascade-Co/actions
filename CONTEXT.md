@@ -45,14 +45,16 @@ A repo with non-bot commits in the look-back window — the only repos that get 
 appear in the daily file. (There is no "inactive" list in the email.)
 
 **Report JSON**:
-The email's intermediate `report.json` — Codex prose (executive summary, display names,
-patterns) merged with authoritative numbers and the deterministic **status** sections. The
-renderer turns it into the HTML email.
+The email's intermediate `report.json` — Codex prose (headline, Needs you, display names, one
+cited bullet per work item) merged with authoritative numbers, the deterministic **status**
+sections, the work no bullet cites (shown verbatim as "Also"), each product's facts line
+(version, merged PRs), and the icons and author tags from the data files
+(`catchup_icons.json`, `catchup_people.json`). The renderer turns it into the HTML email.
 
 **Authoritative**:
 A value not trusted from Codex — computed from git/GitHub (commit counts, contributor list,
 PR count, version, branches, stats) or derived deterministically (the **status** split).
-Codex supplies prose only (bullets, executive summary, display names, patterns).
+Codex supplies prose only (headline, Needs you, display names, bullets).
 
 ## Relationships — Daily Catchup
 

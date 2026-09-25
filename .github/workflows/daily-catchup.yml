@@ -2,6 +2,15 @@ name: Daily Org Catchup
 
 on:
   workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Render only: no email, no commit to the catchup archive"
+        type: boolean
+        default: false
+      to:
+        description: "Send a [TEST] email only to this address (no commit to the archive)"
+        type: string
+        default: ""
   schedule:
     # GitHub delays scheduled runs by hours, so fire three times the evening before;
     # the gate jobs hold each run until 05:45 America/Los_Angeles (DST-aware) and the
@@ -19,7 +28,9 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  RAW: https://raw.githubusercontent.com/Lascade-Co/actions/main
+  # The run's own commit: a scheduled run is main's HEAD at trigger, a branch test run is
+  # that branch. (`main` here would make every branch run execute main's scripts.)
+  RAW: https://raw.githubusercontent.com/Lascade-Co/actions/${{ github.sha }}
 
 jobs:
   # Hold until 05:45 Pacific. Two chained jobs because one job is capped at 6h.
@@ -191,7 +202,9 @@ jobs:
   # updating the running index). Runs in parallel with `email`.
   commit:
     needs: collect
-    if: needs.collect.outputs.wrote == 'true'
+    # Test runs (dry run, or a send to one address) never touch the archive. On a
+    # schedule `inputs` is empty, so both are falsy there.
+    if: needs.collect.outputs.wrote == 'true' && !inputs.dry_run && !inputs.to
     runs-on: ubuntu-latest
     steps:
       - name: Mint GitHub App token (catchup repo)
@@ -279,31 +292,49 @@ jobs:
         run: |
           curl -fsSL -o CATCHUP_REPORT.md "$RAW/data/CATCHUP_REPORT.md"
           curl -fsSL -o catchup_exclude.txt "$RAW/data/catchup_exclude.txt"
+          curl -fsSL -o catchup_icons.json "$RAW/data/catchup_icons.json"
+          curl -fsSL -o catchup_people.json "$RAW/data/catchup_people.json"
           curl -fsSL -o catchup_report.py "$RAW/scripts/catchup/catchup_report.py"
           python3 catchup_report.py \
             --daily daily.json \
             --report-prompt CATCHUP_REPORT.md \
             --exclude catchup_exclude.txt \
+            --icons catchup_icons.json \
+            --people catchup_people.json \
             --out report.json
 
       - name: Render email HTML
         if: steps.report.outputs.send == 'true'
         run: |
           curl -fsSL -o catchup_render_email.py "$RAW/scripts/catchup/catchup_render_email.py"
-          python3 catchup_render_email.py --report report.json --out email.html
+          python3 catchup_render_email.py --report report.json \
+            --org-label Lascade --hours 24 --people catchup_people.json \
+            --out email.html
 
+      # A test send (`to` set) goes to that one address only, with a [TEST] subject and a
+      # key of its own: a real send's key (daily-report-<date>) must stay free for the
+      # morning's email. The email is never uploaded as an artifact: this repo is public.
       - name: Send via Resend
-        if: steps.report.outputs.send == 'true'
+        if: steps.report.outputs.send == 'true' && !inputs.dry_run
         env:
           RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
           TODAY: ${{ needs.collect.outputs.today }}
           REPORT_DATE: ${{ needs.gate2.outputs.report_date }}
+          TO: ${{ inputs.to }}
         run: |
-          jq -n --rawfile html email.html --arg d "$TODAY" \
+          if [ -n "$TO" ]; then
+            PREFIX="[TEST] "
+            KEY="daily-report-test-${{ github.run_id }}-${{ github.run_attempt }}"
+          else
+            PREFIX=""
+            KEY="daily-report-$REPORT_DATE"
+          fi
+          # jq builds the recipient list from a plain string, so $TO can never add recipients.
+          jq -n --rawfile html email.html --arg d "$TODAY" --arg p "$PREFIX" --arg to "$TO" \
             '{from:"noreply@metrics.lascade.com",
-              to:["cherian@lascade.com","rohit@lascade.com"],
-              subject:"Lascade Daily Report — \($d)", html:$html}' \
+              to:(if $to != "" then [$to] else ["cherian@lascade.com","rohit@lascade.com"] end),
+              subject:"\($p)Lascade Daily Report — \($d)", html:$html}' \
           | curl -fsS -X POST https://api.resend.com/emails \
               -H "Authorization: Bearer $RESEND_API_KEY" \
-              -H "Idempotency-Key: daily-report-$REPORT_DATE" \
+              -H "Idempotency-Key: $KEY" \
               -H "Content-Type: application/json" --data @-
