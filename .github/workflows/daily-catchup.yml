@@ -311,9 +311,10 @@ jobs:
             --org-label Lascade --hours 24 --people catchup_people.json \
             --out email.html
 
-      # A test send (`to` set) goes to that one address only, with a [TEST] subject and a
-      # key of its own: a real send's key (daily-report-<date>) must stay free for the
-      # morning's email. The email is never uploaded as an artifact: this repo is public.
+      # A test send (`to` set) goes to that one address only, with a [TEST] subject plus a
+      # unique run-id suffix (so Gmail won't thread it with the real email) and a key of
+      # its own: a real send's key (daily-report-<date>) must stay free for the morning's
+      # email. The email is never uploaded as an artifact: this repo is public.
       - name: Send via Resend
         if: steps.report.outputs.send == 'true' && !inputs.dry_run
         env:
@@ -324,16 +325,18 @@ jobs:
         run: |
           if [ -n "$TO" ]; then
             PREFIX="[TEST] "
+            SUFFIX=" (test run ${{ github.run_id }})"
             KEY="daily-report-test-${{ github.run_id }}-${{ github.run_attempt }}"
           else
             PREFIX=""
+            SUFFIX=""
             KEY="daily-report-$REPORT_DATE"
           fi
           # jq builds the recipient list from a plain string, so $TO can never add recipients.
-          jq -n --rawfile html email.html --arg d "$TODAY" --arg p "$PREFIX" --arg to "$TO" \
+          jq -n --rawfile html email.html --arg d "$TODAY" --arg p "$PREFIX" --arg s "$SUFFIX" --arg to "$TO" \
             '{from:"noreply@metrics.lascade.com",
               to:(if $to != "" then [$to] else ["cherian@lascade.com","rohit@lascade.com"] end),
-              subject:"\($p)Lascade Daily Report — \($d)", html:$html}' \
+              subject:"\($p)Lascade Daily Report — \($d)\($s)", html:$html}' \
           | curl -fsS -X POST https://api.resend.com/emails \
               -H "Authorization: Bearer $RESEND_API_KEY" \
               -H "Idempotency-Key: $KEY" \
