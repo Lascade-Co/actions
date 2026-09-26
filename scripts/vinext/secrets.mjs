@@ -1,5 +1,5 @@
 import { writeFileSync, rmSync } from 'node:fs';
-import { assert } from './config.mjs';
+import { assert, nonemptyValues } from './config.mjs';
 import { selectValues } from './build.mjs';
 
 // Same Universal Auth and secret-list contract as Infisical/secrets-action.
@@ -32,7 +32,8 @@ export async function loadSecrets(plan, { env = process.env, fetcher = fetch, ma
       if (!Object.hasOwn(values, secret.secretKey)) values[secret.secretKey] = secret.secretValue;
     }
   }
-  return values;
+  // Resolve overrides before filtering: a blank project key suppresses imports.
+  return nonemptyValues(values);
 }
 
 export async function exportSecrets(plan, { file, kind, env = process.env, fetcher = fetch }) {

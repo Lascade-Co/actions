@@ -1,4 +1,4 @@
-import { assert, bindingKeys, validateDispatch } from './config.mjs';
+import { assert, bindingKeys, nonemptyValues, validateDispatch } from './config.mjs';
 
 const noPlainVars = source => source.vars === undefined || (source.vars && typeof source.vars === 'object' && !Array.isArray(source.vars) && Object.keys(source.vars).length === 0);
 
@@ -87,10 +87,9 @@ export function projectFromSource(payload, { pkg, wrangler, submodule_repos }, v
   assert(typeof wranglerVersion === 'string' && /^[0-9]+\.[0-9]+\.[0-9]+$/.test(wranglerVersion), 'Pin an exact Wrangler version in package.json');
   assert(typeof pkg.scripts?.['check:deploy'] === 'string' && typeof pkg.scripts?.['build:vinext'] === 'string', 'Provide check:deploy and build:vinext scripts');
   assert(Array.isArray(submodule_repos) && submodule_repos.every(x => /^[A-Za-z0-9_.-]+$/.test(x)), 'Invalid source submodule repositories');
-  const keys = Object.keys(values);
+  const keys = Object.keys(nonemptyValues(values));
   const build = keys.filter(k => k.startsWith('NEXT_PUBLIC_'));
   const runtime = keys.filter(k => !k.startsWith('NEXT_PUBLIC_'));
-  assert(build.every(k => values[k].trim()), 'Empty NEXT_PUBLIC_ value in Infisical');
   const topName = wrangler.name, topAccount = wrangler.account_id;
   assert(typeof topName === 'string' && typeof topAccount === 'string', 'Source Wrangler must declare Worker and account');
   const nativePreview = wrangler.previews !== undefined;

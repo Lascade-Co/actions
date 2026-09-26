@@ -67,10 +67,10 @@ The runner reads the caller's project, environment `staging` or `prod`, path
 `/`. It classifies the values as follows:
 
 - App build variables prefixed `NEXT_PUBLIC_`. These are passed to the build
-  and embedded into browser assets. Discovered public values must be nonempty.
+  and embedded into browser assets. Blank or whitespace-only values are ignored.
 - Every other value becomes a Worker runtime secret automatically, including
   `VINEXT_*` keys and values imported into this Infisical environment. Runtime
-  values must be nonempty. Invalid or system-reserved variable names fail
+  values that are blank or whitespace-only are ignored. Invalid or system-reserved variable names fail
   preparation to prevent runner environment shadowing. Runtime names also may
   not collide with Worker resource or asset binding names.
 
@@ -82,7 +82,7 @@ private submodules need separate support before they can be checked out.
 No build-variable or runtime-secret name lists are required. Local
 `.env*` and `.dev.vars*` files in the repository root are removed from the
 fresh CI checkout before building. Environment files are excluded from the
-deployment artifact. If Infisical key names change between preparation and
+deployment artifact. If nonempty Infisical key names change between preparation and
 build or deploy, the run fails so a new run can capture the complete set.
 
 The legacy alias path requires an initial active Worker deployment before the

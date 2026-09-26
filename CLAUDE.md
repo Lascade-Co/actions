@@ -17,7 +17,9 @@ and any `.gitmodules` at the dispatched commit, then read build and runtime
 values from Infisical. Derive checkout scope from pinned submodules.
 The Worker destination comes solely from the source `wrangler.jsonc`.
 Classify Infisical `NEXT_PUBLIC_*` keys as build values and every other key
-as a runtime secret, including `VINEXT_*`. Keep the system-name validation
+as a runtime secret, including `VINEXT_*`. Ignore blank and whitespace-only
+values after resolving import overrides; preserve nonempty values verbatim.
+Keep the system-name validation
 guard for keys that could shadow runner process settings.
 Keep this public runner free of project-specific registries and examples. `dev`
 uses native Preview `stg` when source Wrangler declares `previews`, otherwise

@@ -5,6 +5,14 @@ export function assert(condition, message) {
   if (!condition) throw new Error(message);
 }
 
+// Ignore unset Infisical entries without altering meaningful secret whitespace.
+export function nonemptyValues(values) {
+  return Object.fromEntries(Object.entries(values).filter(([, value]) => {
+    assert(typeof value === 'string', 'Infisical values must be strings');
+    return value.trim().length > 0;
+  }));
+}
+
 export function inside(root, path) {
   assert(typeof path === 'string' && path.length > 0 && !isAbsolute(path), 'Expected a relative path');
   const result = resolve(root, path);
