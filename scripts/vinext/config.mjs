@@ -100,6 +100,17 @@ export function prepare(payload, project) {
 
 const empty = value => value == null || (Array.isArray(value) ? value.length === 0 : typeof value === 'object' && Object.values(value).every(empty));
 
+// Vinext rebases migration paths relative to its generated config. They are
+// local migration-tool metadata, never part of a deployment-only bundle.
+function deploymentBindings(bindings) {
+  if (!Array.isArray(bindings.d1_databases)) return bindings;
+  return { ...bindings, d1_databases: bindings.d1_databases.map(database => {
+    const result = { ...database };
+    delete result.migrations_dir;
+    return result;
+  }) };
+}
+
 // Only deployment data crosses the build/deploy boundary. Never run build hooks
 // or use local files referenced by a caller-controlled Wrangler configuration.
 export function sanitizeConfig(config, plan) {
@@ -113,23 +124,25 @@ export function sanitizeConfig(config, plan) {
   assert(config.assets && typeof config.assets.directory === 'string', 'Missing built assets');
   if (p.preview_mode === 'native') assert(config.assets.binding === (p.asset_binding ?? 'ASSETS') && !p.runtime_secrets.includes(config.assets.binding), 'Built asset binding differs from source or collides with a runtime secret');
   for (const key of p.runtime_secrets) assert(!Object.hasOwn(config.vars ?? {}, key), 'Runtime secret found in plaintext vars');
-  const expected = p.environments[plan.target].bindings;
+  const expected = deploymentBindings(p.environments[plan.target].bindings);
+  const generated = deploymentBindings(config);
   for (const key of bindingKeys) {
-    assert(isDeepStrictEqual(config[key], expected[key]) || (empty(config[key]) && empty(expected[key])), `Unexpected ${plan.target} resource binding: ${key}`);
+    assert(isDeepStrictEqual(generated[key], expected[key]) || (empty(generated[key]) && empty(expected[key])), `Unexpected ${plan.target} resource binding: ${key}`);
   }
   const result = {};
   for (const key of ['name', 'account_id', 'compatibility_date', 'compatibility_flags', 'main', 'assets', 'rules', 'vars', 'workers_dev', 'preview_urls', 'observability', 'limits', 'placement', 'jsx_factory', 'jsx_fragment', ...bindingKeys]) {
-    if (config[key] !== undefined) result[key] = config[key];
+    if (generated[key] !== undefined) result[key] = generated[key];
   }
   result.no_bundle = true;
   if (p.preview_mode === 'native') {
     assert(config.vars === undefined || (config.vars && typeof config.vars === 'object' && !Array.isArray(config.vars) && Object.keys(config.vars).length === 0), 'Generated native Preview config must not declare plaintext vars');
-    assert(isDeepStrictEqual(config.previews, p.preview_config), 'Generated Preview configuration differs from source');
+    assert(isDeepStrictEqual(config.previews && deploymentBindings(config.previews), deploymentBindings(p.preview_config)), 'Generated Preview configuration differs from source');
+    const production = deploymentBindings(p.environments.production.bindings);
     for (const key of bindingKeys) {
-      if (p.environments.production.bindings[key] === undefined) delete result[key];
-      else result[key] = p.environments.production.bindings[key];
+      if (production[key] === undefined) delete result[key];
+      else result[key] = production[key];
     }
-    result.previews = p.preview_config;
+    result.previews = deploymentBindings(p.preview_config);
   } else {
     assert(empty(config.previews), 'Legacy alias build must not configure native Previews');
   }

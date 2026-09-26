@@ -16,6 +16,8 @@ Vinext deployments are source-owned: fetch `package.json`, `wrangler.jsonc`,
 and any `.gitmodules` at the dispatched commit, then read build and runtime
 values from Infisical. Derive checkout scope from pinned submodules.
 The Worker destination comes solely from the source `wrangler.jsonc`.
+Ignore D1 `migrations_dir` rebasing during binding comparison and omit that
+local path from deployment bundles; keep resource identities exact.
 Classify Infisical `NEXT_PUBLIC_*` keys as build values and every other key
 as a runtime secret, including `VINEXT_*`. Ignore blank and whitespace-only
 values after resolving import overrides; preserve nonempty values verbatim.
