@@ -14,7 +14,9 @@ This repo contains GitHub actions that are invokend by `repository_dispatch` / `
 
 Vinext deployments are source-owned: fetch `package.json`, `wrangler.jsonc`,
 and any `.gitmodules` at the dispatched commit, then read build and runtime
-values from Infisical. Derive checkout scope from pinned submodules.
+values from Infisical when the caller supplies `project_slug`. An omitted or empty
+slug skips Infisical and requires empty build/runtime lists; keep source and
+deployment validation unchanged. Derive checkout scope from pinned submodules.
 The Worker destination comes solely from the source `wrangler.jsonc`.
 Ignore D1 `migrations_dir` rebasing during binding comparison and omit that
 local path from deployment bundles; keep resource identities exact.

@@ -1,8 +1,9 @@
 # Shared Vinext Workers deployment
 
 The public runner contains deployment logic only. Each source repository owns its
-`wrangler.jsonc`, `package.json`, and caller workflow. The caller supplies only
-its Infisical project slug.
+`wrangler.jsonc`, `package.json`, and caller workflow. The caller may supply an
+Infisical project slug when the app needs environment values, or omit it for an
+app with no build variables or runtime secrets.
 No project registry or deployment manifest is stored here.
 
 | Source branch | Wrangler environment | Infisical environment | Runner action |
@@ -48,9 +49,9 @@ A main-only project omits `staging` in `wrangler.jsonc` and triggers only on
   and types through Cloudflare's API. Wrangler's asset progress shares stdout
   with `preview --json`, so stdout is not used for verification.
 - The source workflow calls
-  `Lascade-Co/actions/.github/workflows/vinext-deploy-trigger.yml@main` with
-  `project_slug`. It passes `CENTRAL_DISPATCH_TOKEN` as the reusable workflow
-  secret.
+  `Lascade-Co/actions/.github/workflows/vinext-deploy-trigger.yml@main`. The
+  `project_slug` input is optional. It passes `CENTRAL_DISPATCH_TOKEN` as the
+  reusable workflow secret.
 
 The CI GitHub App needs read access to the source repository and any private
 submodules. The build checkout token is read-only and scoped to the source repo plus
@@ -63,7 +64,15 @@ Infisical. Scope the Infisical machine identity to the intended projects.
 
 ## Infisical contract
 
-The runner reads the caller's project, environment `staging` or `prod`, path
+Omit `project_slug` (or pass an empty string) for an app without environment
+values. The runner skips Infisical authentication and network access and exports
+empty build/runtime JSON snapshots. It still validates the source Worker,
+account, bindings, exact commit, and deployment state. Both configuration lists
+must remain empty; omitting the slug cannot bypass required variables or secrets.
+Existing callers with a nonempty slug keep their Infisical behavior unchanged.
+
+When a slug is supplied, the runner reads the caller's project, environment
+`staging` or `prod`, path
 `/`. It classifies the values as follows:
 
 - App build variables prefixed `NEXT_PUBLIC_`. These are passed to the build

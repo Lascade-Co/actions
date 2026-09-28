@@ -39,14 +39,27 @@ function resourceBindingNames(bindings) {
   return names;
 }
 
+export function normalizeProjectSlug(value) {
+  const slug = value === undefined ? '' : value;
+  assert(typeof slug === 'string' && !/[^a-zA-Z0-9_-]/.test(slug), 'Expected an optional, valid Infisical project slug');
+  return slug;
+}
+
+export function assertNoInfisicalValues(project, slug) {
+  if (slug) return;
+  assert(project && Array.isArray(project.build_variables) && Array.isArray(project.runtime_secrets) &&
+    project.build_variables.length === 0 && project.runtime_secrets.length === 0,
+  'Omitting project_slug requires no build variables or runtime secrets');
+}
+
 export function validateDispatch(payload) {
   assert(payload && /^Lascade-Co\/[A-Za-z0-9_.-]+$/.test(payload.repo), 'Only Lascade-Co repositories are supported');
   assert(['dev', 'main'].includes(payload.branch), 'Only dev and main can deploy');
   assert(/^[a-f0-9]{40}$/.test(payload.sha), 'An exact 40-character commit SHA is required');
   assert(typeof payload.source_run_url === 'string' && payload.source_run_url.startsWith(`https://github.com/${payload.repo}/actions/runs/`) && /^\d+$/.test(payload.source_run_url.split('/').at(-1)), 'Invalid source run URL');
-  assert(typeof payload.project_slug === 'string' && /^[a-zA-Z0-9_-]+$/.test(payload.project_slug), 'Caller must supply a valid Infisical project slug');
+  const project_slug = normalizeProjectSlug(payload.project_slug);
   const [owner, repo_name] = payload.repo.split('/');
-  return { owner, repo_name };
+  return { owner, repo_name, project_slug };
 }
 
 export function statusPlan(payload) {
@@ -55,7 +68,7 @@ export function statusPlan(payload) {
 }
 
 export function prepare(payload, project) {
-  const { owner, repo_name } = validateDispatch(payload);
+  const { owner, repo_name, project_slug: slug } = validateDispatch(payload);
   assert(project && /^[a-f0-9]{32}$/.test(project.account_id) && /^[a-z0-9][a-z0-9-]{0,62}$/.test(project.worker_name), 'Project must register a valid account and Worker');
   assert(/^[0-9]+(?:\.[0-9]+){0,2}$/.test(project.node_version) && Number(project.node_version.split('.')[0]) >= 22, 'Vinext requires Node 22 or newer');
   assert(/^[0-9]+\.[0-9]+\.[0-9]+$/.test(project.wrangler_version), 'Pin an exact Wrangler version');
@@ -93,7 +106,7 @@ export function prepare(payload, project) {
   const resourceNames = new Set([assetBinding]);
   for (const environment of Object.values(project.environments)) for (const name of resourceBindingNames(environment.bindings)) resourceNames.add(name);
   assert(project.runtime_secrets.every(name => !resourceNames.has(name)), 'Runtime secret name collides with a Worker resource binding');
-  const slug = payload.project_slug;
+  assertNoInfisicalValues(project, slug);
   const environment = project.environments[target];
   return { repo: payload.repo, branch: payload.branch, sha: payload.sha, source_run_url: payload.source_run_url, owner, repo_name, project, target, infisical_project_slug: slug, infisical_env: environment.infisical_env, infisical_path: environment.infisical_path };
 }

@@ -25,13 +25,13 @@ try {
     output('repo_name', source.repo_name);
   } else if (command === 'prepare') {
     const payload = JSON.parse(env.PAYLOAD_JSON);
-    validateDispatch(payload);
+    const { project_slug } = validateDispatch(payload);
     const github = path => request(`https://api.github.com${path}`, env.GH_TOKEN);
     const source = await fetchSourceFiles(payload, github);
     const infisical_env = payload.branch === 'main' ? 'prod' : 'staging';
     // Public build values are embedded in browser assets; do not mask them before
     // GitHub records the plan output, where matching masks suppress job outputs.
-    const values = await loadSecrets({ infisical_project_slug: payload.project_slug, infisical_env, infisical_path: '/' }, { maskPublic: false });
+    const values = await loadSecrets({ infisical_project_slug: project_slug, infisical_env, infisical_path: '/' }, { maskPublic: false });
     const plan = prepare(payload, projectFromSource(payload, source, values));
     logTarget(plan);
     output('plan', JSON.stringify(plan));

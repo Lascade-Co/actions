@@ -1,11 +1,13 @@
 import { writeFileSync, rmSync } from 'node:fs';
-import { assert, nonemptyValues } from './config.mjs';
+import { assert, assertNoInfisicalValues, nonemptyValues, normalizeProjectSlug } from './config.mjs';
 import { selectValues } from './build.mjs';
 
 // Same Universal Auth and secret-list contract as Infisical/secrets-action.
 // Its file exporter interpolates unescaped quotes into dotenv. JSON preserves
 // multiline/quoted values and lets us expose only the keys needed by this job.
 export async function loadSecrets(plan, { env = process.env, fetcher = fetch, maskPublic = true } = {}) {
+  const slug = normalizeProjectSlug(plan.infisical_project_slug);
+  if (!slug) return {};
   const domain = new URL(env.INFISICAL_DOMAIN);
   assert(domain.protocol === 'https:' && !domain.username && !domain.password, 'Infisical must use HTTPS');
   assert(env.INFISICAL_CLIENT_ID && env.INFISICAL_CLIENT_SECRET, 'Missing Infisical Universal Auth credentials');
@@ -20,7 +22,7 @@ export async function loadSecrets(plan, { env = process.env, fetcher = fetch, ma
     body: new URLSearchParams({ clientId: env.INFISICAL_CLIENT_ID, clientSecret: env.INFISICAL_CLIENT_SECRET }).toString(),
   });
   assert(typeof login.accessToken === 'string' && login.accessToken, 'Infisical login returned no token');
-  const query = new URLSearchParams({ workspaceSlug: plan.infisical_project_slug, environment: plan.infisical_env, secretPath: plan.infisical_path, include_imports: 'true', recursive: 'false', expandSecretReferences: 'true' });
+  const query = new URLSearchParams({ workspaceSlug: slug, environment: plan.infisical_env, secretPath: plan.infisical_path, include_imports: 'true', recursive: 'false', expandSecretReferences: 'true' });
   const result = await call(`/api/v3/secrets/raw?${query}`, { headers: { Authorization: `Bearer ${login.accessToken}` } });
   assert(Array.isArray(result.secrets) && (result.imports === undefined || Array.isArray(result.imports)), 'Invalid Infisical secret list');
   const values = Object.create(null);
@@ -39,8 +41,9 @@ export async function loadSecrets(plan, { env = process.env, fetcher = fetch, ma
 export async function exportSecrets(plan, { file, kind, env = process.env, fetcher = fetch }) {
   assert(['build', 'runtime'].includes(kind), 'Invalid secret export kind');
   rmSync(file, { force: true });
-  const values = await loadSecrets(plan, { env, fetcher });
   const p = plan.project;
+  assertNoInfisicalValues(p, normalizeProjectSlug(plan.infisical_project_slug));
+  const values = await loadSecrets(plan, { env, fetcher });
   const expected = kind === 'build' ? p.build_variables : p.runtime_secrets;
   const actual = Object.keys(values).filter(key => kind === 'build' ? key.startsWith('NEXT_PUBLIC_') : !key.startsWith('NEXT_PUBLIC_'));
   assert(actual.length === expected.length && actual.every(key => expected.includes(key)), 'Infisical variable names changed since deployment preparation; rerun this source commit');

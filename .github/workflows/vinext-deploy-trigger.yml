@@ -4,8 +4,9 @@ on:
   workflow_call:
     inputs:
       project_slug:
-        description: Infisical project slug
-        required: true
+        description: Optional Infisical project slug for apps with environment values
+        required: false
+        default: ''
         type: string
     secrets:
       central_dispatch_token:
