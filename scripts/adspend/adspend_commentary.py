@@ -11,6 +11,7 @@ Public repo: Codex stdout/stderr go to files and are never echoed.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -136,23 +137,27 @@ def _run_codex(prompt: str, scratch: str, timeout: int = 90):
 
 
 def commentary(model: dict, variant: str, scratch: str, run=_run_codex) -> list:
-    """Cached per (ad_date, variant) so a retry re-sends identical bytes."""
+    """Cached per (ad_date, variant, facts) so a retry on unchanged data re-sends identical
+    bytes, while a rerun on changed numbers never reuses stale prose."""
+    facts = build_facts(model, variant)
+    payload = {fid: {**f["who"], "label": f["label"], "values": f["show"], "fields": sorted(f["show"])}
+               for fid, f in facts.items()}
+    fingerprint = hashlib.sha256(json.dumps(payload, sort_keys=True, default=str).encode()).hexdigest()
     cache = os.path.join(scratch, f"commentary-{variant}.json")
     if os.path.exists(cache):
         try:
             with open(cache) as fh:
-                return json.load(fh)["sentences"]
+                cached = json.load(fh)
+            if cached.get("facts") == fingerprint:
+                return cached["sentences"]
         except Exception:
             pass
-    facts = build_facts(model, variant)
     try:
-        payload = {fid: {**f["who"], "label": f["label"], "values": f["show"], "fields": sorted(f["show"])}
-                   for fid, f in facts.items()}
         raw = run(PROMPT + json.dumps(payload, indent=1), scratch)
-        names = _names(build_facts(model, "B")) | {"Meta", "Google", "iOS", "Android"}
+        names = _names(build_facts(model, "B")) | {"Meta", "Google", "Apple Search Ads", "iOS", "Android"}
         result = validate(raw, facts, names)
     except Exception:  # missing binary, timeout, crash: no commentary, never a failed send
         result = []
     with open(cache, "w") as fh:
-        json.dump({"sentences": result}, fh)
+        json.dump({"facts": fingerprint, "sentences": result}, fh)
     return result

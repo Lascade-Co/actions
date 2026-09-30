@@ -91,7 +91,7 @@ jobs:
           python-version: '3.13'
 
       - name: Install dependencies
-        run: pip install --quiet requests==2.34.2
+        run: pip install --quiet requests==2.34.2 pyjwt==2.13.0 cryptography==50.0.0
 
       - name: Import secrets from Infisical
         uses: Infisical/secrets-action@v1.0.16

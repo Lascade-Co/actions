@@ -1,4 +1,4 @@
-"""Campaign-level daily spend and installs from Meta and Google Ads.
+"""Campaign-level daily spend and installs from Meta, Google and Apple Search Ads.
 
 This repo is PUBLIC and the run log is world-readable. Nothing here may put a
 URL (the Meta token rides in its query string), a response body, a campaign
@@ -13,6 +13,7 @@ understate spend, and a plausible shortfall is the error a reader cannot see.
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal, InvalidOperation
@@ -27,6 +28,9 @@ GOOGLE_VERSION = "v25"
 _META = f"https://graph.facebook.com/{META_VERSION}"
 _GOOGLE = f"https://googleads.googleapis.com/{GOOGLE_VERSION}"
 _TOKEN_URL = "https://oauth2.googleapis.com/token"
+_APPLE_TOKEN_URL = "https://appleid.apple.com/auth/oauth2/token"
+_APPLE_API = "https://api.searchads.apple.com/api/v5"
+APPLE = "Apple Search Ads"
 _MICROS = Decimal("1000000")
 _TIMEOUT = 120
 
@@ -37,7 +41,7 @@ class FetchError(Exception):
 
 @dataclass(frozen=True)
 class Row:
-    channel: str            # "Meta" | "Google"
+    channel: str            # "Meta" | "Google" | "Apple Search Ads"
     account_id: str
     timezone: str
     currency: str
@@ -81,6 +85,14 @@ def _get_json(url: str, params: Optional[dict]) -> dict:
 
 def _post_json(url: str, body: Optional[dict], headers: dict, data: Optional[dict] = None) -> dict:
     return _request("Google", "POST", url, json=body, data=data, headers=headers)
+
+
+def _post_apple(url: str, body: Optional[dict], headers: dict, data: Optional[dict] = None) -> dict:
+    return _request(APPLE, "POST", url, json=body, data=data, headers=headers)
+
+
+def _get_apple(url: str, headers: dict) -> dict:
+    return _request(APPLE, "GET", url, headers=headers)
 
 
 def _dec(value, default="0") -> Decimal:
@@ -227,3 +239,64 @@ def fetch_google(creds: dict, start: date, end: date, post: Callable = _post_jso
         return Unavailable(str(exc))
     except (KeyError, TypeError, ValueError, AttributeError):
         return Unavailable("Google malformed response")
+
+
+# -------------------------------------------------------- Apple Search Ads
+
+_APPLE_PAGE = 1000
+
+
+def _apple_secret(creds: dict) -> str:
+    import jwt  # PyJWT, installed by the workflow; a missing key or library must not leak
+    now = int(time.time())
+    return jwt.encode({"iss": creds["team_id"], "sub": creds["client_id"],
+                       "aud": "https://appleid.apple.com", "iat": now, "exp": now + 3600},
+                      creds["private_key"], algorithm="ES256", headers={"kid": creds["key_id"]})
+
+
+def fetch_apple(creds, start: date, end: date, post: Callable = _post_apple, get: Callable = _get_apple):
+    if not isinstance(creds, dict) or not all(creds.get(k) for k in ("client_id", "team_id", "key_id", "org_id", "private_key")):
+        return Unavailable(f"{APPLE}: not configured")
+    org = str(creds["org_id"])
+    try:
+        token = post(_APPLE_TOKEN_URL, None, {}, data={
+            "grant_type": "client_credentials", "client_id": creds["client_id"],
+            "client_secret": _apple_secret(creds), "scope": "searchadsorg"})["access_token"]
+        headers = {"Authorization": f"Bearer {token}", "X-AP-Context": f"orgId={org}"}
+        acls = get(f"{_APPLE_API}/acls", headers).get("data") or []
+        tz = next((str(o["timeZone"]) for o in acls if str(o.get("orgId")) == org and o.get("timeZone")), None)
+        if not tz:  # day_closed needs the org's real zone
+            return Unavailable(f"{APPLE}: org timezone unavailable")
+        rows, offset = [], 0
+        while True:
+            payload = post(f"{_APPLE_API}/reports/campaigns", {
+                "startTime": start.isoformat(), "endTime": end.isoformat(), "timeZone": "ORTZ",
+                "granularity": "DAILY", "returnRowTotals": False, "returnGrandTotals": False,
+                "selector": {"orderBy": [{"field": "localSpend", "sortOrder": "DESCENDING"}],
+                             "pagination": {"offset": offset, "limit": _APPLE_PAGE}}}, headers)
+            # A truncated or reshaped response must fail the channel, never read as "nothing spent".
+            page = payload["data"]["reportingDataResponse"]["row"]
+            total = payload["pagination"]["totalResults"]
+            if not isinstance(page, list) or not isinstance(total, int) or isinstance(total, bool):
+                raise FetchError(f"{APPLE} malformed response")
+            if not page and offset < total:
+                raise FetchError(f"{APPLE} malformed response")
+            for r in page:
+                meta = r["metadata"]
+                for g in r.get("granularity") or []:
+                    if "localSpend" not in g:  # Apple sends idle days as {"date": ...} only
+                        continue
+                    spend = _dec(g["localSpend"]["amount"])
+                    # Missing totalInstalls is 0 only because this request succeeded.
+                    installs = _dec(g.get("totalInstalls"))
+                    if spend == 0 and installs == 0:
+                        continue
+                    rows.append(Row(APPLE, org, tz, g["localSpend"]["currency"], str(meta["campaignId"]),
+                                    meta.get("campaignName", ""), date.fromisoformat(g["date"]), spend, installs))
+            offset += len(page)
+            if offset >= total:
+                return rows
+    except FetchError as exc:
+        return Unavailable(str(exc))
+    except Exception:  # never str(exc): key material or response fragments must not reach the log
+        return Unavailable(f"{APPLE} malformed response")

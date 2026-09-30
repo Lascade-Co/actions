@@ -18,7 +18,7 @@ from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 
 from adspend_commentary import commentary
-from adspend_fetch import fetch_google, fetch_meta
+from adspend_fetch import fetch_apple, fetch_google, fetch_meta
 from adspend_model import WINDOW_DAYS, build_model
 from adspend_render_email import render
 from pnl_fx import build_rate_table
@@ -27,11 +27,20 @@ from pnl_money import Unavailable
 
 def load_creds(env=os.environ) -> dict:
     ads = json.loads(base64.b64decode(env["ADS_CREDENTIALS_JSON_B64"]).decode("utf-8"))
-    for group in ("meta", "google"):
-        for key in ("token", "client_secret", "refresh_token", "dev_token"):
-            value = ads.get(group, {}).get(key)
+    if env.get("GITHUB_ACTIONS") != "true":
+        return ads  # locally the mask lines would echo the secrets to the terminal
+    # A group that is missing, null or not an object must never crash masking: that would
+    # stop the whole email, and the apple block in particular is optional.
+    groups = {g: ads.get(g) if isinstance(ads.get(g), dict) else {} for g in ("meta", "google", "apple")}
+    for group, cfg in groups.items():
+        for key in ("token", "client_secret", "refresh_token", "dev_token", "client_id", "key_id"):
+            value = cfg.get(key)
             if value:
                 print(f"::add-mask::{value}")
+    # A multi-line value needs one mask per key line (the PEM armor is not secret).
+    for line in str(groups["apple"].get("private_key", "")).splitlines():
+        if line.strip() and not line.startswith("-----"):
+            print(f"::add-mask::{line.strip()}")
     return ads
 
 
@@ -81,11 +90,12 @@ def main(argv=None):
 
     ads = load_creds()
     rows = {"Meta": fetch_meta(ads["meta"], start, ad_date),
-            "Google": fetch_google(ads["google"], start, ad_date)}
+            "Google": fetch_google(ads["google"], start, ad_date),
+            "Apple Search Ads": fetch_apple(ads.get("apple"), start, ad_date)}
     for name, data in rows.items():
         print(status_line(name, data))
     if all(isinstance(v, Unavailable) for v in rows.values()):
-        print("both channels unavailable; nothing to send", file=sys.stderr)
+        print("all channels unavailable; nothing to send", file=sys.stderr)
         return 1
 
     table = build_rate_table([], ad_date)

@@ -60,7 +60,7 @@ def base_rows():
 
 
 def test_model_basics():
-    model = m.build_model({"Meta": base_rows(), "Google": []}, TABLE, AD, NOW, APPS)
+    model = m.build_model({"Meta": base_rows(), "Google": [], "Apple Search Ads": []}, TABLE, AD, NOW, APPS)
     assert model["partial"] is False         # empty Google list = fetched, nothing spent
     ta = next(p for p in model["projects"] if p["name"] == "Travel Animator")
     ios = next(l for l in ta["lines"] if l["os"] == "iOS")
@@ -77,13 +77,13 @@ def test_model_basics():
 
 def test_missing_rate_makes_channel_unavailable():
     rows = base_rows() + [row("TA - Z", d(0), 1, cur="XXX")]
-    model = m.build_model({"Meta": rows, "Google": []}, TABLE, AD, NOW, APPS)
+    model = m.build_model({"Meta": rows, "Google": [], "Apple Search Ads": []}, TABLE, AD, NOW, APPS)
     assert model["channels"]["Meta"]["status"] == "unavailable" and model["partial"]
     assert model["total"]["d"] == 0
 
 
 def test_unavailable_channel_and_partial_subject():
-    model = m.build_model({"Meta": base_rows(), "Google": Unavailable("Google HTTP 503")},
+    model = m.build_model({"Meta": base_rows(), "Google": Unavailable("Google HTTP 503"), "Apple Search Ads": []},
                           TABLE, AD, NOW, APPS)
     assert model["channels"]["Google"]["status"] == "unavailable"
     s = m.subject_of(model, "A", APPS)
@@ -94,13 +94,13 @@ def test_unclosed_day_marks_partial():
     early = datetime(2026, 9, 22, 22, 0, tzinfo=timezone.utc)   # 02:00 Dubai on the 23rd? no: 02:00 on 23rd -> closed
     assert m.day_closed("Asia/Dubai", AD, early) is True
     assert m.day_closed("Asia/Dubai", AD, datetime(2026, 9, 22, 19, 0, tzinfo=timezone.utc)) is False
-    model = m.build_model({"Meta": base_rows(), "Google": []}, TABLE, AD,
+    model = m.build_model({"Meta": base_rows(), "Google": [], "Apple Search Ads": []}, TABLE, AD,
                           datetime(2026, 9, 22, 19, 0, tzinfo=timezone.utc), APPS)
     assert model["channels"]["Meta"]["status"] == "partial"
 
 
 def test_subject_and_variants():
-    model = m.build_model({"Meta": base_rows(), "Google": []}, TABLE, AD, NOW, APPS)
+    model = m.build_model({"Meta": base_rows(), "Google": [], "Apple Search Ads": []}, TABLE, AD, NOW, APPS)
     a, b = m.subject_of(model, "A", APPS), m.subject_of(model, "B", APPS)
     assert a.startswith("Ad spend · Tue 22 Sep — ") and b.startswith("Ad spend + CPI · Tue 22 Sep — ")
     assert a.endswith("· MR Meta ↓$50")      # biggest absolute mover: the $50 stop
@@ -108,7 +108,7 @@ def test_subject_and_variants():
 
 def test_installs_unavailable_yields_none():
     rows = [row("TA - IOS", d(1), 10, ch="Google", inst=None), row("TA - IOS", d(0), 20, ch="Google", inst=None)]
-    model = m.build_model({"Meta": [], "Google": rows}, TABLE, AD, NOW, APPS)
+    model = m.build_model({"Meta": [], "Google": rows, "Apple Search Ads": []}, TABLE, AD, NOW, APPS)
     assert model["channels"]["Google"]["installs_ok"] is False
     ln = model["projects"][0]["lines"][0]
     assert ln["installs_d"] is None and ln["cpi_d"] is None
@@ -247,7 +247,7 @@ import adspend_render_email as r
 
 
 def full_model():
-    return m.build_model({"Meta": base_rows(), "Google": []}, TABLE, AD, NOW, APPS)
+    return m.build_model({"Meta": base_rows(), "Google": [], "Apple Search Ads": []}, TABLE, AD, NOW, APPS)
 
 
 def js(*sentences):
@@ -327,11 +327,11 @@ def test_render_variants_and_stability():
 
 
 def test_render_banner_on_partial():
-    model = m.build_model({"Meta": base_rows(), "Google": Unavailable("Google HTTP 503")}, TABLE, AD, NOW, APPS)
+    model = m.build_model({"Meta": base_rows(), "Google": Unavailable("Google HTTP 503"), "Apple Search Ads": []}, TABLE, AD, NOW, APPS)
     _, _, h, t = r.render(model, "A", [], APPS)
     assert "Google unavailable (Google HTTP 503)" in h and "partial" in h.lower()
     rows = [row("TA - IOS", d(1), 10, ch="Google", inst=None), row("TA - IOS", d(0), 20, ch="Google", inst=None)]
-    mb = m.build_model({"Meta": [], "Google": rows}, TABLE, AD, NOW, APPS)
+    mb = m.build_model({"Meta": [], "Google": rows, "Apple Search Ads": []}, TABLE, AD, NOW, APPS)
     hb = r.render(mb, "B", [], APPS)[2]
     assert "Google installs unavailable" in hb and "installs \u2014" in hb or "installs —" in hb
 
@@ -342,10 +342,14 @@ def test_main_masks_and_never_logs_figures(capsys=None):
     import adspend_main as mm
     secret = {"meta": {"token": SENTINEL + "M", "account_ids": ["1"]},
               "google": {"client_id": "a", "client_secret": SENTINEL + "C", "refresh_token": SENTINEL + "R",
-                         "dev_token": SENTINEL + "D", "login_customer_id": "1"}}
+                         "dev_token": SENTINEL + "D", "login_customer_id": "1"},
+              "apple": {"client_id": SENTINEL + "AC", "team_id": "t", "key_id": SENTINEL + "AK", "org_id": "9",
+                        "private_key": "-----BEGIN PRIVATE KEY-----\n" + SENTINEL + "L1\n" + SENTINEL + "L2\n-----END PRIVATE KEY-----\n"}}
     os.environ["ADS_CREDENTIALS_JSON_B64"] = base64.b64encode(json.dumps(secret).encode()).decode()
     mm.fetch_meta = lambda *a, **k: base_rows()
     mm.fetch_google = lambda *a, **k: Unavailable("Google HTTP 503")
+    mm.fetch_apple = lambda *a, **k: [row("TA - TIER 1 - BRAND - EXACT", AD, 12, ch="Apple Search Ads")]
+    os.environ["GITHUB_ACTIONS"] = "true"
     mm.build_rate_table = lambda *a, **k: TABLE
     out, scratch = tempfile.mkdtemp(), tempfile.mkdtemp()
     buf = io.StringIO()
@@ -356,13 +360,38 @@ def test_main_masks_and_never_logs_figures(capsys=None):
     log = buf.getvalue()
     assert rc == 0 and os.path.exists(os.path.join(out, "email-A.html")) and os.path.exists(os.path.join(out, "email-B.subject"))
     assert "::add-mask::" + SENTINEL + "M" in log
+    for tail in ("L1", "L2", "AC", "AK"):
+        assert "::add-mask::" + SENTINEL + tail in log
     visible = "\n".join(l for l in log.splitlines() if not l.startswith("::add-mask::"))
     assert "$" not in visible and "TA - " not in visible and SENTINEL not in visible
     assert "commentary=no" in visible and "Google: unavailable" in visible
+    assert "Apple Search Ads: 1 rows" in visible
+    # Meta down but Apple up: still sendable. Only all-channels-down is "nothing to send".
     mm.fetch_meta = lambda *a, **k: Unavailable("Meta HTTP 500")
     with contextlib.redirect_stdout(io.StringIO()):
         assert mm.main(["--ad-date", "2026-09-22", "--out", out, "--scratch", scratch,
+                        "--apps", os.path.join(HERE, "..", "..", "data", "adspend_apps.json")]) == 0
+    mm.fetch_apple = lambda *a, **k: Unavailable("Apple Search Ads HTTP 500")
+    with contextlib.redirect_stdout(io.StringIO()):
+        assert mm.main(["--ad-date", "2026-09-22", "--out", out, "--scratch", scratch,
                         "--apps", os.path.join(HERE, "..", "..", "data", "adspend_apps.json")]) == 1
+
+
+def test_masks_only_on_actions():
+    import base64, io, contextlib
+    import adspend_main as mm
+    secret = {"meta": {"token": SENTINEL + "M"},
+              "apple": {"client_id": SENTINEL + "AC", "key_id": SENTINEL + "AK",
+                        "private_key": "-----BEGIN PRIVATE KEY-----\n" + SENTINEL + "L1\n-----END PRIVATE KEY-----\n"}}
+    env = {"ADS_CREDENTIALS_JSON_B64": base64.b64encode(json.dumps(secret).encode()).decode()}
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        mm.load_creds(env)
+    assert buf.getvalue() == ""                       # local run: nothing that echoes a secret
+    with contextlib.redirect_stdout(buf):
+        mm.load_creds({**env, "GITHUB_ACTIONS": "true"})
+    out = buf.getvalue()
+    assert "::add-mask::" + SENTINEL + "L1" in out and "::add-mask::-----BEGIN" not in out
 
 
 def test_reconcile_prints_no_figures():
@@ -378,9 +407,199 @@ def test_reconcile_prints_no_figures():
 
 def test_small_dollar_move_is_not_shown_as_big_percent():
     rows = [row("TA - IOS", d(1), 8), row("TA - IOS", d(0), 17)]      # +112% but only $9
-    model = m.build_model({"Meta": rows, "Google": []}, TABLE, AD, NOW, APPS)
+    model = m.build_model({"Meta": rows, "Google": [], "Apple Search Ads": []}, TABLE, AD, NOW, APPS)
     h = r.render(model, "A", [], APPS)[2]
     assert "small change vs Mon (+$9)" in h and "steady vs Mon (+1" not in h
+
+
+# ---- Apple Search Ads
+def _ec_pem():
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+    key = ec.generate_private_key(ec.SECP256R1())
+    return key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
+                             serialization.NoEncryption()).decode()
+
+
+ASA_CREDS = {"client_id": "SEARCHADS.x", "team_id": "SEARCHADS.t", "key_id": "kid", "org_id": "9",
+             "private_key": _ec_pem()}
+
+
+def _asa_fakes(report_pages, acls=None, token_error=None, report_error=None):
+    calls = {"post": [], "get": []}
+
+    def post(url, body, headers, data=None):
+        calls["post"].append((url, body, headers, data))
+        if "appleid.apple.com" in url:
+            if token_error:
+                raise f.FetchError(token_error)
+            return {"access_token": "T"}
+        if report_error:
+            raise f.FetchError(report_error)
+        return report_pages[len(calls["post"]) - 2]
+
+    def get(url, headers):
+        calls["get"].append((url, headers))
+        return {"data": [{"orgId": 9, "timeZone": "Asia/Dubai"}] if acls is None else acls}
+    return post, get, calls
+
+
+def _asa_page(items, total, offset=0):
+    return {"data": {"reportingDataResponse": {"row": items}},
+            "pagination": {"totalResults": total, "startIndex": offset, "itemsPerPage": 1}}
+
+
+def _asa_item(cid, name, days):
+    return {"metadata": {"campaignId": cid, "campaignName": name},
+            "granularity": [{"date": dt, "localSpend": {"amount": amt, "currency": "USD"},
+                             **({"totalInstalls": inst} if inst is not None else {})}
+                            for dt, amt, inst in days]}
+
+
+def test_fetch_apple_pages_and_parses():
+    import jwt
+    item = _asa_item(7, "TA - TIER 1 - BRAND - EXACT",
+                     [("2026-09-21", "10.5", 2), ("2026-09-22", "12.60", None), ("2026-09-20", "0", 0)])
+    item["granularity"].append({"date": "2026-09-19"})        # idle day: date only
+    pages = [_asa_page([item], 2),
+             _asa_page([_asa_item(8, "AR - X", [("2026-09-22", "4", 1)])], 2)]
+    post, get, calls = _asa_fakes(pages)
+    rows = f.fetch_apple(ASA_CREDS, date(2026, 9, 8), AD, post=post, get=get)
+    assert [(r.channel, r.timezone, r.currency, r.campaign_id, r.day, r.spend, r.installs) for r in rows] == [
+        ("Apple Search Ads", "Asia/Dubai", "USD", "7", date(2026, 9, 21), D("10.5"), D(2)),
+        ("Apple Search Ads", "Asia/Dubai", "USD", "7", date(2026, 9, 22), D("12.60"), D(0)),
+        ("Apple Search Ads", "Asia/Dubai", "USD", "8", date(2026, 9, 22), D(4), D(1))]   # zero-zero day skipped
+    token_url, _, _, form = calls["post"][0]
+    assert form["grant_type"] == "client_credentials" and form["scope"] == "searchadsorg"
+    claims = jwt.decode(form["client_secret"], options={"verify_signature": False})
+    assert claims["iss"] == "SEARCHADS.t" and claims["sub"] == "SEARCHADS.x" and claims["aud"] == "https://appleid.apple.com"
+    assert jwt.get_unverified_header(form["client_secret"])["kid"] == "kid"
+    (_, b1, h1, _), (_, b2, _, _) = calls["post"][1], calls["post"][2]
+    assert h1["X-AP-Context"] == "orgId=9" and h1["Authorization"] == "Bearer T"
+    assert b1["timeZone"] == "ORTZ" and b1["granularity"] == "DAILY" and b1["startTime"] == "2026-09-08"
+    assert b1["returnGrandTotals"] is False and b1["returnRowTotals"] is False
+    assert b1["selector"]["orderBy"][0]["field"] == "localSpend"   # Apple 400s without orderBy
+    assert b1["selector"]["pagination"]["offset"] == 0 and b2["selector"]["pagination"]["offset"] == 1
+
+
+def test_fetch_apple_failures_are_sanitized():
+    for kw in ({"token_error": "Apple Search Ads HTTP 401"}, {"report_error": "Apple Search Ads HTTP 403 code 403"}):
+        post, get, _ = _asa_fakes([], **kw)
+        out = f.fetch_apple(ASA_CREDS, date(2026, 9, 8), AD, post=post, get=get)
+        assert isinstance(out, Unavailable) and out.reason.startswith("Apple Search Ads HTTP 40")
+        assert ASA_CREDS["private_key"][40:60] not in out.reason
+    post, get, _ = _asa_fakes([], acls=[{"orgId": 1, "timeZone": "Asia/Dubai"}])
+    out = f.fetch_apple(ASA_CREDS, date(2026, 9, 8), AD, post=post, get=get)
+    assert isinstance(out, Unavailable) and "timezone" in out.reason
+    ok_empty = {"data": {"reportingDataResponse": {"row": []}}, "pagination": {"totalResults": 0}}
+    post, get, _ = _asa_fakes([ok_empty])
+    assert f.fetch_apple(ASA_CREDS, date(2026, 9, 8), AD, post=post, get=get) == []   # genuinely empty = fetched, nothing spent
+    bad_pages = [{"unexpected": 1},                                                      # no envelope
+                 {"data": {"reportingDataResponse": {"row": []}}},                       # no pagination
+                 {"data": {"reportingDataResponse": {"row": []}}, "pagination": {"totalResults": "x"}},
+                 {"data": {"reportingDataResponse": {"row": []}}, "pagination": {"totalResults": 5}}]  # empty page before total
+    for page in bad_pages:
+        post, get, _ = _asa_fakes([page])
+        out = f.fetch_apple(ASA_CREDS, date(2026, 9, 8), AD, post=post, get=get)
+        assert isinstance(out, Unavailable) and out.reason == "Apple Search Ads malformed response", page
+    post, get, _ = _asa_fakes([{"data": {"reportingDataResponse": {"row": [{"metadata": {"campaignId": 1}, "granularity": [{"date": "2026-09-22", "localSpend": {"amount": "1"}}]}]}}}])
+    assert isinstance(f.fetch_apple(ASA_CREDS, date(2026, 9, 8), AD, post=post, get=get), Unavailable)
+
+
+def test_fetch_apple_not_configured():
+    for creds in (None, {}, {**ASA_CREDS, "private_key": ""}):
+        out = f.fetch_apple(creds, date(2026, 9, 8), AD)
+        assert isinstance(out, Unavailable) and out.reason == "Apple Search Ads: not configured"
+
+
+def test_apple_rows_are_ios_without_os_token():
+    rows = [row("TA - TIER 1 - BRAND - EXACT", d(1), 10, ch="Apple Search Ads"),
+            row("TA - TIER 1 - BRAND - EXACT", d(0), 12, ch="Apple Search Ads")]
+    model = m.build_model({"Meta": [], "Google": [], "Apple Search Ads": rows}, TABLE, AD, NOW, APPS)
+    ta = next(p for p in model["projects"] if p["name"] == "Travel Animator")
+    assert [(l["channel"], l["os"]) for l in ta["lines"]] == [("Apple Search Ads", "iOS")]
+    assert model["partial"] is False
+
+
+def test_footnotes_cover_apple():
+    h, t = r.render(full_model(), "A", [], APPS)[2:]
+    for body in (h, t):
+        assert "not included" not in body and "Meta and Google only" not in body
+    assert "Meta, Google and Apple Search Ads" in h and "Apple Search Ads" in t
+
+
+def test_commentary_cache_is_keyed_on_facts():
+    import tempfile
+    d_ = tempfile.mkdtemp()
+    calls = []
+
+    def ok(prompt, scratch):
+        calls.append(1)
+        return "[]"
+    m1 = full_model()
+    c.commentary(m1, "A", d_, run=ok)
+    c.commentary(m1, "A", d_, run=ok)
+    assert len(calls) == 1                              # same facts: cache reused
+    rows = base_rows() + [row("TA - TIER 1", d(0), 20, ch="Apple Search Ads")]
+    m2 = m.build_model({"Meta": rows, "Google": [], "Apple Search Ads": []}, TABLE, AD, NOW, APPS)
+    c.commentary(m2, "A", d_, run=ok)
+    assert len(calls) == 2                              # facts changed: not this morning's prose
+
+
+def test_non_object_apple_block_is_not_configured():
+    import base64, io, contextlib
+    import adspend_main as mm
+    for bad in (None, "x", 5, []):
+        env = {"ADS_CREDENTIALS_JSON_B64": base64.b64encode(json.dumps(
+            {"meta": None, "google": "x", "apple": bad}).encode()).decode(), "GITHUB_ACTIONS": "true"}
+        with contextlib.redirect_stdout(io.StringIO()):
+            assert mm.load_creds(env)["apple"] == bad          # masking must not crash
+        assert isinstance(f.fetch_apple(bad, date(2026, 9, 8), AD), Unavailable)
+
+
+def test_apple_missing_creds_main_path_sends_with_warning():
+    import base64, io, contextlib, tempfile
+    import adspend_main as mm
+    secret = {"meta": {"token": "m", "account_ids": ["1"]}, "google": {"client_id": "a"}}   # no apple key
+    os.environ["ADS_CREDENTIALS_JSON_B64"] = base64.b64encode(json.dumps(secret).encode()).decode()
+    os.environ.pop("GITHUB_ACTIONS", None)
+    mm.fetch_meta = lambda *a, **k: base_rows()
+    mm.fetch_google = lambda *a, **k: []
+    mm.fetch_apple = f.fetch_apple                               # the real not-configured path
+    mm.build_rate_table = lambda *a, **k: TABLE
+    out, scratch = tempfile.mkdtemp(), tempfile.mkdtemp()
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        rc = mm.main(["--ad-date", "2026-09-22", "--out", out, "--scratch", scratch, "--break-commentary",
+                      "--apps", os.path.join(HERE, "..", "..", "data", "adspend_apps.json")])
+    assert rc == 0 and "Apple Search Ads: unavailable (Apple Search Ads: not configured)" in buf.getvalue()
+    html = open(os.path.join(out, "email-A.html")).read()
+    assert "Apple Search Ads unavailable (Apple Search Ads: not configured). Totals below are partial." in html
+    assert "! Apple Search Ads: not configured" in open(os.path.join(out, "email-A.txt")).read()
+    assert "partial" in open(os.path.join(out, "email-A.subject")).read()
+
+
+def test_apple_errors_never_carry_secrets():
+    import requests
+    marker = SENTINEL + "LEAK"
+
+    class Resp:
+        status_code = 401
+        def json(self):
+            return {"error": {"code": 401, "message": marker}, "detail": marker}
+    orig = requests.request
+    try:
+        requests.request = lambda *a, **k: Resp()
+        out = f.fetch_apple({**ASA_CREDS, "private_key": ASA_CREDS["private_key"]}, date(2026, 9, 8), AD)
+        assert isinstance(out, Unavailable) and marker not in out.reason and "BEGIN" not in out.reason
+
+        def boom(*a, **k):
+            raise RuntimeError(marker)
+        requests.request = boom
+        out = f.fetch_apple(ASA_CREDS, date(2026, 9, 8), AD)
+        assert isinstance(out, Unavailable) and marker not in out.reason
+    finally:
+        requests.request = orig
 
 
 if __name__ == "__main__":

@@ -18,7 +18,7 @@ DEADBAND_PCT = Decimal("0.15")
 DEADBAND_USD = Decimal("10")
 WINDOW_DAYS = 14
 ZERO = Decimal("0")
-CHANNELS = ("Meta", "Google")
+CHANNELS = ("Meta", "Google", "Apple Search Ads")
 UNASSIGNED = "Unassigned"
 UNATTRIBUTED = "Unattributed"
 
@@ -78,7 +78,7 @@ def day_closed(tz: str, ad_date: date, now: datetime) -> bool:
 
 
 def build_model(rows: dict, table, ad_date: date, now: datetime, apps: dict) -> dict:
-    """rows: {"Meta": list[Row] | Unavailable, "Google": ...} in native currency."""
+    """rows: {"Meta": list[Row] | Unavailable, "Google": ..., "Apple Search Ads": ...} in native currency."""
     days = [ad_date - timedelta(days=n) for n in range(WINDOW_DAYS, -1, -1)]
     d, d1 = ad_date, ad_date - timedelta(days=1)
     avg_days = [ad_date - timedelta(days=n) for n in range(2, 9)]
@@ -114,7 +114,9 @@ def build_model(rows: dict, table, ad_date: date, now: datetime, apps: dict) -> 
         for r, usd in converted:
             if r.day not in days:
                 continue
-            key = (app_of(r.campaign, apps), channel, os_of(r.campaign))
+            # Apple Search Ads is iOS-only; its campaign names carry no OS token.
+            key = (app_of(r.campaign, apps), channel,
+                   "iOS" if channel == "Apple Search Ads" else os_of(r.campaign))
             ln = lines.setdefault(key, {"spend": {}, "installs": {}})
             ln["spend"][r.day] = ln["spend"].get(r.day, ZERO) + usd
             if r.installs is not None:
