@@ -1,10 +1,10 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { tmpdir } from 'node:os';
 import { randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import { assert } from './config.mjs';
-import { readSecrets, selectValues, validateBundle, run } from './build.mjs';
+import { readSecrets, selectValues, validateBundle, validateD1Migrations, run } from './build.mjs';
 
 export async function request(url, token, options = {}) {
   const response = await fetch(url, {
@@ -21,6 +21,42 @@ export async function request(url, token, options = {}) {
 export async function isCurrent(plan, github) {
   const branch = await github(`/repos/${plan.repo}/commits/${plan.branch}`);
   return branch.sha === plan.sha;
+}
+
+function cloudflareEnvironment(plan, env) {
+  const childEnv = { ...env, CLOUDFLARE_ACCOUNT_ID: plan.project.account_id, WRANGLER_SEND_METRICS: 'false', CI: 'true' };
+  for (const key of Object.keys(childEnv)) if (key === 'CLOUDFLARE_ENV' || key === 'GH_TOKEN' || key === 'GITHUB_TOKEN' || key.startsWith('INFISICAL_') || plan.project.runtime_secrets.includes(key)) delete childEnv[key];
+  return childEnv;
+}
+
+export function applyD1Migrations(plan, { bundleRoot, wranglerBin, env, execute }) {
+  const databases = validateD1Migrations(bundleRoot, plan);
+  if (!databases.length) return false;
+  const directory = mkdtempSync(join(tmpdir(), 'vinext-d1-migrations-'));
+  try {
+    const config = {
+      name: plan.project.worker_name,
+      account_id: plan.project.account_id,
+      d1_databases: databases.map((database, index) => {
+        const migrationDirectory = `migrations-${index + 1}`;
+        cpSync(join(bundleRoot, database.directory), join(directory, migrationDirectory), { recursive: true, dereference: false });
+        return {
+          binding: database.binding,
+          database_name: database.database_name,
+          database_id: database.database_id,
+          ...(database.migrations_table === undefined ? {} : { migrations_table: database.migrations_table }),
+          migrations_dir: migrationDirectory,
+        };
+      }),
+    };
+    const configPath = join(directory, 'wrangler.json');
+    writeFileSync(configPath, JSON.stringify(config), { mode: 0o600, flag: 'wx' });
+    const childEnv = cloudflareEnvironment(plan, env);
+    for (const database of config.d1_databases) {
+      execute(process.execPath, [wranglerBin, 'd1', 'migrations', 'apply', database.binding, '--remote', '--config', configPath], { cwd: directory, env: childEnv });
+    }
+    return true;
+  } finally { rmSync(directory, { recursive: true, force: true }); }
 }
 
 export function assertSecretBindings(bindings, names) {
@@ -93,8 +129,7 @@ async function deployNative(plan, { configPath, secrets, wranglerBin, env, execu
     const secretsPath = join(directory, 'secrets.json');
     writeFileSync(secretsPath, JSON.stringify(secrets), { mode: 0o600, flag: 'wx' });
     const tag = `${plan.branch}-${randomUUID()}`;
-    const childEnv = { ...env, CLOUDFLARE_ACCOUNT_ID: plan.project.account_id, WRANGLER_SEND_METRICS: 'false', CI: 'true' };
-    for (const key of Object.keys(childEnv)) if (key === 'CLOUDFLARE_ENV' || key === 'GH_TOKEN' || key === 'GITHUB_TOKEN' || key.startsWith('INFISICAL_') || plan.project.runtime_secrets.includes(key)) delete childEnv[key];
+    const childEnv = cloudflareEnvironment(plan, env);
     if (!await isCurrent(plan, github)) return { state: 'superseded' };
     execute(process.execPath, [wranglerBin, ...deploymentArgs(plan, configPath, secretsPath, tag)], {
       cwd: dirname(configPath), env: childEnv,
@@ -145,9 +180,12 @@ export async function deploy(plan, { bundleRoot, envFile, wranglerBin, env = pro
   const release = JSON.parse(readFileSync(join(bundleRoot, 'vinext-release.json'), 'utf8'));
   assert(isDeepStrictEqual(release, { repo: plan.repo, sha: plan.sha, target: plan.target, worker: plan.project.worker_name }), 'Artifact release does not match dispatch');
   const { config, configPath } = validateBundle(bundleRoot, plan);
+  validateD1Migrations(bundleRoot, plan);
   // Re-sanitize on the clean runner, not just in the application build job.
   writeFileSync(configPath, JSON.stringify(config));
   if (!await isCurrent(plan, github)) return { state: 'superseded' };
+  const migrated = applyD1Migrations(plan, { bundleRoot, wranglerBin, env, execute });
+  if (migrated && !await isCurrent(plan, github)) return { state: 'superseded' };
   if (plan.project.preview_mode === 'native') return deployNative(plan, { configPath, secrets, wranglerBin, env, execute, github, cloudflare, pause });
   const workerPath = `/accounts/${plan.project.account_id}/workers/scripts/${plan.project.worker_name}`;
   const versionsForWorker = () => listVersions(cloudflare, workerPath);
@@ -170,8 +208,7 @@ export async function deploy(plan, { bundleRoot, envFile, wranglerBin, env = pro
     const secretsPath = join(directory, 'secrets.json');
     writeFileSync(secretsPath, JSON.stringify(secrets), { mode: 0o600, flag: 'wx' });
     const tag = `${plan.branch}-${randomUUID()}`;
-    const childEnv = { ...env, CLOUDFLARE_ACCOUNT_ID: plan.project.account_id, WRANGLER_SEND_METRICS: 'false', CI: 'true' };
-    for (const key of Object.keys(childEnv)) if (key === 'CLOUDFLARE_ENV' || key === 'GH_TOKEN' || key === 'GITHUB_TOKEN' || key.startsWith('INFISICAL_') || plan.project.runtime_secrets.includes(key)) delete childEnv[key];
+    const childEnv = cloudflareEnvironment(plan, env);
     if (!await isCurrent(plan, github)) return { state: 'superseded' };
     execute(process.execPath, [wranglerBin, ...deploymentArgs(plan, configPath, secretsPath, tag)], { cwd: dirname(configPath), env: childEnv });
     let uploaded;

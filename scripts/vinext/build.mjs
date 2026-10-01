@@ -1,4 +1,5 @@
-import { cpSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { basename, dirname, join, relative, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { assert, inside, sanitizeConfig } from './config.mjs';
@@ -29,6 +30,109 @@ export function run(command, args, options = {}) {
 }
 
 const environmentFile = name => /^(?:\.env(?:\.|$)|\.dev\.vars(?:\.|$))/.test(name);
+const migrationRootName = 'vinext-d1-migrations';
+const migrationManifestName = 'vinext-d1-migrations.json';
+const migrationFileName = /^[A-Za-z0-9][A-Za-z0-9_.-]*\.sql$/;
+
+function targetMigrationDatabases(plan) {
+  const databases = plan.project.environments[plan.target].bindings.d1_databases ?? [];
+  assert(Array.isArray(databases), 'D1 bindings must be an array');
+  const configured = databases.filter(database => database.migrations_dir !== undefined);
+  if (!configured.length) return [];
+  const bindings = new Set(), identities = new Set();
+  for (const database of databases) {
+    assert(database && typeof database === 'object' && !Array.isArray(database), 'Invalid D1 migration binding');
+    assert(/^[A-Za-z_][A-Za-z0-9_]*$/.test(database.binding ?? ''), 'Invalid D1 migration binding name');
+    assert(typeof database.database_name === 'string' && database.database_name.length > 0, 'Missing D1 migration database name');
+    assert(/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(database.database_id ?? ''), 'Missing D1 migration database ID');
+    assert(!bindings.has(database.binding), 'Duplicate D1 migration binding');
+    assert(!identities.has(database.database_id), 'A migrated D1 database may only be bound once per target');
+    bindings.add(database.binding);
+    identities.add(database.database_id);
+  }
+  for (const database of configured) {
+    assert(typeof database.migrations_dir === 'string' && database.migrations_dir.length > 0, 'Invalid D1 migrations_dir');
+    assert(database.migrations_pattern === undefined, 'D1 migrations_pattern is not supported; use top-level SQL files');
+    assert(database.migrations_table === undefined || (typeof database.migrations_table === 'string' && database.migrations_table.length > 0 && database.migrations_table.length <= 128), 'Invalid D1 migrations_table');
+  }
+  return configured.toSorted((a, b) => a.binding.localeCompare(b.binding));
+}
+
+const digest = contents => createHash('sha256').update(contents).digest('hex');
+
+export function stageD1Migrations(cwd, bundleRoot, plan) {
+  const databases = targetMigrationDatabases(plan);
+  if (!databases.length) return [];
+  const migrationRoot = join(bundleRoot, migrationRootName);
+  const manifestPath = join(bundleRoot, migrationManifestName);
+  assert(!existsSync(migrationRoot) && !existsSync(manifestPath), 'Bundle collides with reserved D1 migration paths');
+  mkdirSync(migrationRoot);
+  const manifest = { version: 1, databases: [] };
+  let totalSize = 0;
+  for (const database of databases) {
+    const source = inside(realpathSync(cwd), database.migrations_dir);
+    const sourceStat = lstatSync(source);
+    assert(sourceStat.isDirectory() && !sourceStat.isSymbolicLink(), 'D1 migrations_dir must be an ordinary directory');
+    assert(realpathSync(source) === source, 'D1 migrations_dir must not traverse symlinks');
+    const entries = readdirSync(source, { withFileTypes: true }).toSorted((a, b) => a.name.localeCompare(b.name));
+    assert(entries.length > 0 && entries.length <= 100, 'D1 migrations_dir must contain 1-100 SQL files');
+    const directory = `${migrationRootName}/${database.binding}`;
+    const target = inside(bundleRoot, directory);
+    mkdirSync(target);
+    const files = [];
+    for (const entry of entries) {
+      assert(entry.isFile() && !entry.isSymbolicLink() && migrationFileName.test(entry.name), 'D1 migrations_dir may contain only top-level .sql files');
+      const contents = readFileSync(join(source, entry.name));
+      assert(contents.length > 0 && contents.length <= 1024 * 1024, 'D1 migration file must be 1 byte to 1 MiB');
+      totalSize += contents.length;
+      assert(totalSize <= 10 * 1024 * 1024, 'D1 migration files exceed 10 MiB');
+      writeFileSync(join(target, entry.name), contents, { flag: 'wx' });
+      files.push({ name: entry.name, size: contents.length, sha256: digest(contents) });
+    }
+    manifest.databases.push({
+      binding: database.binding,
+      database_name: database.database_name,
+      database_id: database.database_id,
+      ...(database.migrations_table === undefined ? {} : { migrations_table: database.migrations_table }),
+      directory,
+      files,
+    });
+  }
+  writeFileSync(manifestPath, JSON.stringify(manifest), { flag: 'wx' });
+  return manifest.databases;
+}
+
+export function validateD1Migrations(bundleRoot, plan) {
+  const expected = targetMigrationDatabases(plan);
+  const manifestPath = join(bundleRoot, migrationManifestName);
+  const migrationRoot = join(bundleRoot, migrationRootName);
+  if (!expected.length) {
+    assert(!existsSync(manifestPath) && !existsSync(migrationRoot), 'Unexpected D1 migration artifact');
+    return [];
+  }
+  assert(lstatSync(manifestPath).isFile() && !lstatSync(manifestPath).isSymbolicLink(), 'Missing D1 migration manifest');
+  const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
+  assert(manifest?.version === 1 && Array.isArray(manifest.databases) && manifest.databases.length === expected.length, 'Invalid D1 migration manifest');
+  let totalSize = 0;
+  for (const [index, database] of manifest.databases.entries()) {
+    const source = expected[index];
+    assert(database.binding === source.binding && database.database_name === source.database_name && database.database_id === source.database_id && database.migrations_table === source.migrations_table, 'D1 migration manifest differs from source configuration');
+    assert(database.directory === `${migrationRootName}/${source.binding}` && Array.isArray(database.files) && database.files.length > 0 && database.files.length <= 100, 'Invalid D1 migration directory manifest');
+    const directory = inside(bundleRoot, database.directory);
+    const entries = readdirSync(directory, { withFileTypes: true }).toSorted((a, b) => a.name.localeCompare(b.name));
+    assert(entries.length === database.files.length, 'D1 migration artifact file count differs from manifest');
+    for (const [fileIndex, file] of database.files.entries()) {
+      const entry = entries[fileIndex];
+      assert(entry.isFile() && !entry.isSymbolicLink() && entry.name === file.name && migrationFileName.test(file.name), 'Invalid D1 migration artifact file');
+      const contents = readFileSync(join(directory, file.name));
+      assert(contents.length > 0 && contents.length <= 1024 * 1024, 'D1 migration artifact file must be 1 byte to 1 MiB');
+      totalSize += contents.length;
+      assert(totalSize <= 10 * 1024 * 1024, 'D1 migration artifact files exceed 10 MiB');
+      assert(contents.length === file.size && digest(contents) === file.sha256, 'D1 migration artifact hash mismatch');
+    }
+  }
+  return manifest.databases;
+}
 
 export function inspectTree(root, ignoreEnvironmentFiles = false) {
   assert(!lstatSync(root).isSymbolicLink(), 'Bundle must not contain symlinks');
@@ -81,5 +185,7 @@ export function build(plan, { appRoot, envFile, bundleRoot, execute = run, env =
   cpSync(source, bundleRoot, { recursive: true, dereference: false, filter: path => !environmentFile(basename(path)) });
   writeFileSync(inside(bundleRoot, relative(source, configPath)), JSON.stringify(config));
   writeFileSync(join(bundleRoot, 'vinext-release.json'), JSON.stringify({ repo: plan.repo, sha: plan.sha, target: plan.target, worker: p.worker_name }));
+  stageD1Migrations(cwd, bundleRoot, plan);
+  validateD1Migrations(bundleRoot, plan);
   validateBundle(bundleRoot, plan);
 }

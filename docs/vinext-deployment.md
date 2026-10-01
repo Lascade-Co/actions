@@ -53,6 +53,34 @@ A main-only project omits `staging` in `wrangler.jsonc` and triggers only on
   `project_slug` input is optional. It passes `CENTRAL_DISPATCH_TOKEN` as the
   reusable workflow secret.
 
+## D1 migrations
+
+D1 migrations are explicit and source-owned. A target opts in by setting
+`migrations_dir` on its `d1_databases` entry. The directory must remain beneath
+the application working directory and contain only 1-100 nonempty, top-level
+`.sql` files, with each file at most 1 MiB and the full set at most 10 MiB.
+Symlinks, nested directories, non-SQL files, duplicate bindings, and duplicate
+database identities are rejected. A D1 binding without `migrations_dir` is left
+untouched.
+
+The build runner copies those files into a reserved artifact directory and
+records their SHA-256 hashes. The deploy runner validates the files again and
+uses the project's pinned Wrangler to run `d1 migrations apply --remote` for
+each configured target database, in stable binding order, before uploading the
+Worker. Wrangler's configured migration ledger (the `d1_migrations` table by
+default) provides idempotency and Cloudflare captures its normal migration
+backup. The deploy runner then rechecks that the source commit is still current
+before upload. Migration files must therefore be backward-compatible with the
+currently deployed Worker: a migration can finish before a later upload fails
+or becomes superseded.
+
+Wrangler and application frameworks may use separate migration ledgers. Each
+SQL migration is responsible for updating any framework-specific ledger in the
+same file. Never edit, rename, or reorder an applied SQL migration; add a new
+forward migration. A migrated D1 database must be exclusive to one centrally
+deployed Worker because serialization is keyed by account and Worker, not by
+database identity.
+
 The CI GitHub App needs read access to the source repository and any private
 submodules. The build checkout token is read-only and scoped to the source repo plus
 the submodules declared at the dispatched commit. It remains during the job for recursive

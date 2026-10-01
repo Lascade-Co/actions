@@ -18,8 +18,12 @@ values from Infisical when the caller supplies `project_slug`. An omitted or emp
 slug skips Infisical and requires empty build/runtime lists; keep source and
 deployment validation unchanged. Derive checkout scope from pinned submodules.
 The Worker destination comes solely from the source `wrangler.jsonc`.
-Ignore D1 `migrations_dir` rebasing during binding comparison and omit that
-local path from deployment bundles; keep resource identities exact.
+An explicit D1 `migrations_dir` opts that target into pre-deploy Wrangler SQL
+migrations. Copy only validated top-level `.sql` files into the artifact, verify
+their hashes again on the deploy runner, and apply them before upload while the
+Worker lock is held. Keep `migrations_dir` out of the deployed Worker config and
+keep resource identities exact. D1 bindings without `migrations_dir` are not
+migrated.
 Classify Infisical `NEXT_PUBLIC_*` keys as build values and every other key
 as a runtime secret, including `VINEXT_*`. Ignore blank and whitespace-only
 values after resolving import overrides; preserve nonempty values verbatim.
