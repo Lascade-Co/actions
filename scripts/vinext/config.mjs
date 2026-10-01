@@ -137,10 +137,14 @@ export function sanitizeConfig(config, plan) {
   assert(config.assets && typeof config.assets.directory === 'string', 'Missing built assets');
   if (p.preview_mode === 'native') assert(config.assets.binding === (p.asset_binding ?? 'ASSETS') && !p.runtime_secrets.includes(config.assets.binding), 'Built asset binding differs from source or collides with a runtime secret');
   for (const key of p.runtime_secrets) assert(!Object.hasOwn(config.vars ?? {}, key), 'Runtime secret found in plaintext vars');
-  const expected = deploymentBindings(p.environments[plan.target].bindings);
+  // Native Preview bundles are validated again after sanitization. Their
+  // top-level bindings have intentionally been restored to production while
+  // the staging bindings remain under `previews`.
+  const bindingTarget = p.preview_mode === 'native' && config.targetEnvironment === undefined ? 'production' : plan.target;
+  const expected = deploymentBindings(p.environments[bindingTarget].bindings);
   const generated = deploymentBindings(config);
   for (const key of bindingKeys) {
-    assert(isDeepStrictEqual(generated[key], expected[key]) || (empty(generated[key]) && empty(expected[key])), `Unexpected ${plan.target} resource binding: ${key}`);
+    assert(isDeepStrictEqual(generated[key], expected[key]) || (empty(generated[key]) && empty(expected[key])), `Unexpected ${bindingTarget} resource binding: ${key}`);
   }
   const result = {};
   for (const key of ['name', 'account_id', 'compatibility_date', 'compatibility_flags', 'main', 'assets', 'rules', 'vars', 'workers_dev', 'preview_urls', 'observability', 'limits', 'placement', 'jsx_factory', 'jsx_fragment', ...bindingKeys]) {
