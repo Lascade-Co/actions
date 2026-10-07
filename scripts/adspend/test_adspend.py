@@ -300,8 +300,8 @@ def test_commentary_failure_and_cache(tmp_path=None):
         calls.append(1)
         raise FileNotFoundError("codex")
     assert c.commentary(full_model(), "A", d_, run=crash) == []
-    assert c.commentary(full_model(), "A", d_, run=crash) == []      # cached outcome, no second call
-    assert len(calls) == 1
+    assert c.commentary(full_model(), "A", d_, run=crash) == []      # a failure is never cached
+    assert len(calls) == 2
     d2 = tempfile.mkdtemp()
     facts = c.build_facts(full_model(), "A")
     up = next(k for k, v in facts.items() if k != "t" and v["label"] == "up")
@@ -337,6 +337,77 @@ def test_render_banner_on_partial():
 
 
 # ---- main (no network)
+def _logged(fn):
+    import io, contextlib
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        out = fn()
+    return out, buf.getvalue()
+
+
+def test_commentary_skip_reasons_are_one_safe_word():
+    import tempfile, subprocess, json as _json
+    secret = "Spend $491 Travel Animator"
+
+    def timeout(*a, **k):
+        raise subprocess.TimeoutExpired("codex", 90)
+
+    def junk(*a, **k):
+        return "not json " + secret
+
+    def auth(prompt, scratch):
+        with open(os.path.join(scratch, "codex.log"), "w") as fh:
+            fh.write("ERROR: refresh token was already used. Please log out and sign in again. " + secret)
+        raise subprocess.CalledProcessError(1, "codex")
+
+    def other(prompt, scratch):
+        with open(os.path.join(scratch, "codex.log"), "w") as fh:
+            fh.write("ERROR: model overloaded " + secret)
+        raise subprocess.CalledProcessError(1, "codex")
+
+    for run, word in ((timeout, "timeout"), (junk, "rejected"), (auth, "auth"), (other, "codex-error")):
+        out, log = _logged(lambda: c.commentary(full_model(), "A", tempfile.mkdtemp(), run=run))
+        assert out == []
+        assert f"::warning title=Ad spend synopsis skipped::{word}" in log, (word, log)
+        assert "$" not in log and "Travel" not in log and "refresh" not in log
+
+
+def test_empty_cache_entry_does_not_block_a_rerun():
+    import tempfile
+    d_ = tempfile.mkdtemp()
+    model = full_model()
+    facts = c.build_facts(model, "A")
+    up = next(k for k, v in facts.items() if k != "t" and v["label"] == "up")
+    c.commentary(model, "A", d_, run=lambda *a, **k: js((f"Spend rose to {{{up}.d}}.", [up])))
+    path = os.path.join(d_, "commentary-A.json")
+    cached = json.load(open(path))
+    json.dump({"facts": cached["facts"], "sentences": []}, open(path, "w"))     # a [] left by an old run
+    again = c.commentary(model, "A", d_, run=lambda *a, **k: js((f"Spend rose to {{{up}.d}}.", [up])))
+    assert again, "an old empty cache entry must not suppress the synopsis"
+    assert json.load(open(path))["sentences"] == again
+
+
+def test_break_commentary_bypasses_a_good_cache():
+    import tempfile
+    d_ = tempfile.mkdtemp()
+    model = full_model()
+    facts = c.build_facts(model, "A")
+    up = next(k for k, v in facts.items() if k != "t" and v["label"] == "up")
+    assert c.commentary(model, "A", d_, run=lambda *a, **k: js((f"Spend rose to {{{up}.d}}.", [up])))
+
+    def broken(*a, **k):
+        raise RuntimeError("off")
+    assert _logged(lambda: c.commentary(model, "A", d_, run=broken, cache=False))[0] == []
+
+
+def test_summary_missing_notice_only_when_there_is_no_synopsis():
+    model = full_model()
+    h, t = r.render(model, "A", [], APPS)[2:]
+    assert "Summary unavailable today." in h and "Summary unavailable today." in t
+    h2, t2 = r.render(model, "A", ["Spend rose."], APPS)[2:]
+    assert "Summary unavailable today." not in h2 and "Summary unavailable today." not in t2
+
+
 def test_main_masks_and_never_logs_figures(capsys=None):
     import base64, io, contextlib, tempfile
     import adspend_main as mm
@@ -533,10 +604,13 @@ def test_commentary_cache_is_keyed_on_facts():
     d_ = tempfile.mkdtemp()
     calls = []
 
+    m1 = full_model()
+    facts1 = c.build_facts(m1, "A")
+    up1 = next(k for k, v in facts1.items() if k != "t" and v["label"] == "up")
+
     def ok(prompt, scratch):
         calls.append(1)
-        return "[]"
-    m1 = full_model()
+        return js((f"Spend rose to {{{up1}.d}}.", [up1]))
     c.commentary(m1, "A", d_, run=ok)
     c.commentary(m1, "A", d_, run=ok)
     assert len(calls) == 1                              # same facts: cache reused

@@ -2,8 +2,9 @@ name: Refresh Codex auth.json
 
 on:
   schedule:
-    # Mon + Thu 03:00 UTC — well inside the ~8-day Codex staleness window
-    - cron: "0 3 * * 1,4"
+    # Daily 03:00 UTC. Codex only refreshes itself within five minutes of the access token
+    # expiring, so this job rotates the shared token long before any consumer gets there.
+    - cron: "0 3 * * *"
   workflow_dispatch:
 
 concurrency:
@@ -13,8 +14,9 @@ concurrency:
 jobs:
   refresh:
     runs-on: ubuntu-latest
-    # Device codes expire after 15 minutes; leave time for setup and Infisical afterward.
-    timeout-minutes: 25
+    # A device code lives 15 minutes; the refresh step is capped below this so the publish,
+    # verify and alert steps always get their turn.
+    timeout-minutes: 35
     steps:
       - name: Restore Codex auth.json from GH secret
         shell: bash
@@ -23,12 +25,12 @@ jobs:
         run: |
           mkdir -p "$HOME/.codex"
           printf '%s' "$CODEX_AUTH_JSON_BASE_64" | tr -d '\n\r ' | base64 -d > "$HOME/.codex/auth.json"
-          jq -r '.tokens.last_refresh // .last_refresh // "unknown"' "$HOME/.codex/auth.json" > /tmp/before_refresh
+          jq -r '.last_refresh // .tokens.last_refresh // "unknown"' "$HOME/.codex/auth.json" > /tmp/before_refresh
 
       - name: Install Codex CLI & enable user namespaces
         shell: bash
         run: |
-          npm install -g @openai/codex
+          npm install -g @openai/codex@0.160.1
 
           current_userns="$(sysctl -n kernel.unprivileged_userns_clone 2>/dev/null || true)"
           if [ -n "$current_userns" ] && [ "$current_userns" != "1" ]; then
@@ -39,7 +41,24 @@ jobs:
             sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           fi
 
+      # Installed before the refresh so a rotated token is never stranded by a failed install.
+      - name: Install Infisical CLI
+        shell: bash
+        run: |
+          curl -1sLf 'https://artifacts-cli.infisical.com/setup.deb.sh' | sudo -E bash
+          sudo apt-get update && sudo apt-get install -y infisical
+
+      # Fetched before the rotation: a failed download afterwards must not strand a new token.
+      - name: Download the publish helper
+        shell: bash
+        run: |
+          curl -fsSL --retry 3 --max-time 30 \
+            -o "$RUNNER_TEMP/publish_codex_auth.sh" \
+            https://raw.githubusercontent.com/Lascade-Co/actions/main/scripts/codex/publish_codex_auth.sh
+          bash -n "$RUNNER_TEMP/publish_codex_auth.sh"
+
       - name: Refresh Codex token
+        timeout-minutes: 22
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: '1575855120'
@@ -49,45 +68,62 @@ jobs:
             https://raw.githubusercontent.com/Lascade-Co/actions/main/scripts/codex/refresh_codex_auth.py
           python3 "$RUNNER_TEMP/refresh_codex_auth.py"
 
-      - name: Verify auth.json was refreshed
-        shell: bash
-        run: |
-          test -s "$HOME/.codex/auth.json" || { echo "auth.json missing or empty"; exit 1; }
-          jq empty "$HOME/.codex/auth.json" || { echo "auth.json is not valid JSON"; exit 1; }
-          AFTER=$(jq -r '.tokens.last_refresh // .last_refresh // "unknown"' "$HOME/.codex/auth.json")
-          BEFORE=$(cat /tmp/before_refresh)
-          echo "last_refresh before: $BEFORE"
-          echo "last_refresh after:  $AFTER"
-          if [ "$BEFORE" = "$AFTER" ]; then
-            echo "::warning::last_refresh did not change — token may already have been fresh, continuing"
-          fi
-
-      - name: Install Infisical CLI
-        shell: bash
-        run: |
-          curl -1sLf 'https://artifacts-cli.infisical.com/setup.deb.sh' | sudo -E bash
-          sudo apt-get update && sudo apt-get install -y infisical
-
+      # Publish first, check afterwards: a rotation burns the old refresh token, so a
+      # valid new auth.json must reach Infisical even if a later check fails.
       - name: Push refreshed auth.json to Infisical (common/dev/Actions)
+        if: always()
         shell: bash
         env:
           INFISICAL_CLIENT_ID: ${{ secrets.INFISICAL_CLIENT_ID }}
           INFISICAL_CLIENT_SECRET: ${{ secrets.INFISICAL_CLIENT_SECRET }}
           INFISICAL_DOMAIN: ${{ secrets.INFISICAL_DOMAIN }}
           PROJECT_ID: db94ba33-278d-4425-a6c9-a7cf7c9cae88
+        run: bash "$RUNNER_TEMP/publish_codex_auth.sh"
+
+      - name: Verify the token was rotated and is fresh
+        if: always()
+        shell: bash
         run: |
-          INFISICAL_TOKEN=$(infisical login \
-            --method=universal-auth \
-            --client-id="$INFISICAL_CLIENT_ID" \
-            --client-secret="$INFISICAL_CLIENT_SECRET" \
-            --domain="$INFISICAL_DOMAIN" \
-            --silent --plain)
-          export INFISICAL_TOKEN
-          NEW_B64=$(base64 -w0 < "$HOME/.codex/auth.json")
-          infisical secrets set "CODEX_AUTH_JSON_BASE_64=$NEW_B64" \
-            --projectId="$PROJECT_ID" \
-            --env=dev \
-            --path=/Actions \
-            --type=shared \
-            --silent
-          echo "Pushed refreshed auth.json to Infisical (common/dev/Actions/CODEX_AUTH_JSON_BASE_64)"
+          python3 - "$(cat /tmp/before_refresh)" <<'PY'
+          import base64, json, os, sys, time
+          from datetime import datetime, timezone
+
+          before = sys.argv[1]
+          auth = json.load(open(os.path.expanduser("~/.codex/auth.json")))
+          after = auth.get("last_refresh") or auth.get("tokens", {}).get("last_refresh") or "unknown"
+          payload = auth["tokens"]["access_token"].split(".")[1]
+          payload += "=" * (-len(payload) % 4)
+          days = (json.loads(base64.urlsafe_b64decode(payload))["exp"] - time.time()) / 86400
+          print(f"last_refresh before: {before}")
+          print(f"last_refresh after:  {after}")
+          print(f"access token valid for another {days:.1f} days")
+          errors = []
+          # The secret this run restored was last rotated yesterday. If it is older, the Infisical to
+          # GitHub sync broke (or a run failed). Manual runs are exempt: they exist to repair that.
+          if os.environ.get("GITHUB_EVENT_NAME") == "schedule" and before != "unknown":
+              restored_hours = (datetime.now(timezone.utc) - datetime.fromisoformat(before)).total_seconds() / 3600
+              print(f"restored secret was {restored_hours:.0f} hours old")
+              if restored_hours > 40:
+                  errors.append("the restored secret was over 40 hours old: the Infisical to GitHub sync or yesterday's run failed")
+          if after == before:
+              errors.append("the token was not rotated")
+          if days < 5:
+              errors.append("the access token expires in under 5 days")
+          for error in errors:
+              print(f"::error::{error}")
+          sys.exit(1 if errors else 0)
+          PY
+
+      - name: Alert on Telegram
+        if: always() && (failure() || cancelled())
+        shell: bash
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: '1575855120'
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          curl --fail --silent --show-error --retry 3 --max-time 20 --request POST \
+            "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
+            --data-urlencode "text=Codex auth refresh failed. The ad-spend email loses its synopsis, and the daily report its summary, once the stored token expires. ${RUN_URL}" \
+            > /dev/null

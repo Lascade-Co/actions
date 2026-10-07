@@ -5,18 +5,27 @@ from __future__ import annotations
 
 import json
 import os
+import queue
 import re
 import subprocess
 import sys
+import tempfile
+import threading
 from collections.abc import Mapping
 
 
 DEVICE_LOGIN_REQUIRED_MARKERS = (
     "refresh token was already used",
     "refresh token was revoked",
+    "refresh token has expired",
     "refresh_token_invalidated",
+    "refresh_token_reused",
+    "refresh_token_expired",
     "token_revoked",
+    "log out and sign in again",
 )
+APP_SERVER_TIMEOUT_SECONDS = 60
+EXEC_TIMEOUT_SECONDS = 90
 ANSI_ESCAPE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 VERIFICATION_URL = re.compile(r"https://[^\s]+")
 DEVICE_CODE = re.compile(r"^[A-Z0-9]+(?:-[A-Z0-9]+)+$")
@@ -55,12 +64,100 @@ def run_codex_exec() -> subprocess.CompletedProcess[str]:
             stderr=subprocess.STDOUT,
             text=True,
             check=False,
+            timeout=EXEC_TIMEOUT_SECONDS,
         )
+    except subprocess.TimeoutExpired as error:
+        # A hang here must not outlast the job: the workflow publishes any rotated token afterwards.
+        output = error.stdout if isinstance(error.stdout, str) else ""
+        print(output, end="" if output.endswith("\n") or not output else "\n")
+        print("Codex exec timed out.")
+        return subprocess.CompletedProcess(CODEX_EXEC, 124, stdout=output)
     except OSError as error:
         raise RefreshError(f"Could not start Codex: {error}") from error
 
     print(result.stdout, end="" if result.stdout.endswith("\n") else "\n")
     return result
+
+
+def force_refresh() -> str:
+    """Rotate the stored token now and return Codex's stderr for failure triage.
+
+    Codex only refreshes on its own once the access token is within five minutes of
+    expiring, so a plain `codex exec` leaves a healthy token alone. Consumers would
+    then meet the expiry together and burn the shared refresh token. `account/read`
+    with `refreshToken` runs the normal refresh flow and persists the result.
+    Never raises: the caller falls back to `codex exec`, which reports real failures.
+    Only fixed status words are printed; backend text goes to the caller for triage alone.
+    """
+    with tempfile.TemporaryFile("w+") as errors:
+        try:
+            process = subprocess.Popen(
+                ("codex", "app-server"),
+                env=codex_environment(),
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=errors,
+                text=True,
+                bufsize=1,
+            )
+        except OSError as error:
+            print(f"Forced refresh unavailable: {error}")
+            return ""
+
+        responses: queue.Queue[dict | None] = queue.Queue()
+
+        def read_responses() -> None:
+            assert process.stdout is not None
+            for line in process.stdout:
+                try:
+                    message = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(message, dict) and "id" in message:
+                    responses.put(message)
+            responses.put(None)  # stdout closed: the server exited
+
+        threading.Thread(target=read_responses, daemon=True).start()
+
+        def request(request_id: int, method: str, params: dict) -> dict | None:
+            assert process.stdin is not None
+            try:
+                process.stdin.write(
+                    json.dumps({"id": request_id, "method": method, "params": params}) + "\n"
+                )
+                process.stdin.flush()
+                while True:
+                    message = responses.get(timeout=APP_SERVER_TIMEOUT_SECONDS)
+                    if message is None:
+                        return None
+                    if message["id"] == request_id:
+                        return message
+            except (OSError, queue.Empty):
+                return None
+
+        rpc_error = ""
+        try:
+            if request(1, "initialize", {"clientInfo": {"name": "refresh-codex-auth", "version": "1"}}) is None:
+                print("Forced refresh failed: app-server did not initialize")
+            else:
+                assert process.stdin is not None
+                process.stdin.write(json.dumps({"method": "initialized"}) + "\n")
+                process.stdin.flush()
+                answer = request(2, "account/read", {"refreshToken": True})
+                if answer is None:
+                    print("Forced refresh failed: no answer from app-server")
+                elif "error" in answer:
+                    rpc_error = json.dumps(answer["error"])
+                    dead = requires_device_login(rpc_error)
+                    print("Forced refresh failed:", "the refresh token is no longer valid" if dead else "see exec check")
+                else:
+                    print("Forced refresh requested.")
+        except OSError as error:
+            print(f"Forced refresh failed: {error}")
+        finally:
+            stop_process(process)
+        errors.seek(0)
+        return errors.read() + rpc_error
 
 
 def workflow_run_url() -> str | None:
@@ -199,10 +296,13 @@ def run_device_login(token: str, chat_id: str) -> None:
 
 
 def main() -> int:
+    forced_output = force_refresh()
     initial = run_codex_exec()
-    if initial.returncode == 0:
+    # A refresh token the forced refresh already found dead needs a login now, even
+    # while the access token still works; waiting only moves the failure to the consumers.
+    if initial.returncode == 0 and not requires_device_login(forced_output):
         return 0
-    if not requires_device_login(initial.stdout):
+    if not requires_device_login(initial.stdout + forced_output):
         return initial.returncode or 1
 
     token = os.environ.get("TELEGRAM_BOT_TOKEN")

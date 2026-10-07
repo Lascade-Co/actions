@@ -110,7 +110,7 @@ def main(argv=None):
         raise RuntimeError("commentary disabled for test")
 
     for variant in [v.strip() for v in a.variants.split(",") if v.strip()]:
-        sentences = commentary(model, variant, a.scratch, run=broken) if a.break_commentary \
+        sentences = commentary(model, variant, a.scratch, run=broken, cache=False) if a.break_commentary \
             else commentary(model, variant, a.scratch)
         subject, _pre, html, text = render(model, variant, sentences, apps)
         for ext, body in (("html", html), ("txt", text), ("subject", subject)):

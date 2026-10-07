@@ -22,6 +22,7 @@ from pnl_money import format_usd
 from adspend_model import UNASSIGNED, round_pct
 
 MAX_FACTS = 8
+_AUTH_MARKERS = ("sign in", "log in", "not logged", "unauthorized", "refresh token")
 _PLACEHOLDER = re.compile(r"\{(t|f\d+)\.(\w+)\}")
 _UP = {"up", "rose", "increased", "higher", "climbed", "grew", "jumped", "raised"}
 _DOWN = {"down", "fell", "dropped", "lower", "cut", "declined", "decreased", "shrank", "reduced"}
@@ -136,28 +137,47 @@ def _run_codex(prompt: str, scratch: str, timeout: int = 90):
         return fh.read()
 
 
-def commentary(model: dict, variant: str, scratch: str, run=_run_codex) -> list:
-    """Cached per (ad_date, variant, facts) so a retry on unchanged data re-sends identical
-    bytes, while a rerun on changed numbers never reuses stale prose."""
+def _failure_reason(exc: Exception, scratch: str) -> str:
+    """One safe word for the public log; Codex's own output is never echoed."""
+    if isinstance(exc, subprocess.TimeoutExpired):
+        return "timeout"
+    try:
+        with open(os.path.join(scratch, "codex.log")) as fh:
+            log = fh.read().lower()
+    except OSError:
+        return "codex-error"
+    return "auth" if any(marker in log for marker in _AUTH_MARKERS) else "codex-error"
+
+
+def commentary(model: dict, variant: str, scratch: str, run=_run_codex, cache: bool = True) -> list:
+    """Cached per (ad_date, variant, facts) so a rerun on changed numbers never reuses stale
+    prose. Only good prose is cached: an empty result must not block a rerun after a fix.
+    Every skip is announced with a one-word reason."""
     facts = build_facts(model, variant)
     payload = {fid: {**f["who"], "label": f["label"], "values": f["show"], "fields": sorted(f["show"])}
                for fid, f in facts.items()}
     fingerprint = hashlib.sha256(json.dumps(payload, sort_keys=True, default=str).encode()).hexdigest()
-    cache = os.path.join(scratch, f"commentary-{variant}.json")
-    if os.path.exists(cache):
+    cache_path = os.path.join(scratch, f"commentary-{variant}.json")
+    if cache and os.path.exists(cache_path):
         try:
-            with open(cache) as fh:
+            with open(cache_path) as fh:
                 cached = json.load(fh)
-            if cached.get("facts") == fingerprint:
+            if cached.get("facts") == fingerprint and cached["sentences"]:
                 return cached["sentences"]
         except Exception:
             pass
+    reason = ""
     try:
         raw = run(PROMPT + json.dumps(payload, indent=1), scratch)
         names = _names(build_facts(model, "B")) | {"Meta", "Google", "Apple Search Ads", "iOS", "Android"}
         result = validate(raw, facts, names)
-    except Exception:  # missing binary, timeout, crash: no commentary, never a failed send
-        result = []
-    with open(cache, "w") as fh:
-        json.dump({"facts": fingerprint, "sentences": result}, fh)
+        if not result:
+            reason = "rejected"
+    except Exception as exc:  # missing binary, timeout, crash: no commentary, never a failed send
+        result, reason = [], _failure_reason(exc, scratch)
+    if reason:
+        print(f"::warning title=Ad spend synopsis skipped::{reason}")
+    elif cache:
+        with open(cache_path, "w") as fh:
+            json.dump({"facts": fingerprint, "sentences": result}, fh)
     return result

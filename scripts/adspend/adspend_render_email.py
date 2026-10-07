@@ -18,6 +18,7 @@ FONT_HEADING = "'Inter', system-ui, -apple-system, 'Segoe UI', sans-serif"
 FONT_BODY = "'Inter', system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', sans-serif"
 ACCENT = "#2980b9"
 WORKFLOW_URL = "https://github.com/Lascade-Co/actions/actions/workflows/daily-ad-spend.yml"
+SUMMARY_MISSING = "Summary unavailable today."
 
 HEAD = """\
 <!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
@@ -287,12 +288,14 @@ def _chart(model) -> str:
                 f'<table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" class="tfix"><tr>{"".join(cells)}</tr></table>', 32)
 
 
-def _footnotes(model, variant) -> str:
+def _footnotes(model, variant, summary_missing=False) -> str:
     lines = ["Channels covered: Meta, Google and Apple Search Ads."]
     tz = "; ".join(f"{ch} {', '.join(s['timezones'])}" for ch, s in model["channels"].items() if s["timezones"])
     if tz:
         lines.append(f"Each channel's own ad-account day ({tz}), not the Pacific day.")
     lines.append("All figures in US dollars.")
+    if summary_missing:
+        lines.append(SUMMARY_MISSING)
     lines.append(f"A line is up or down only when it moves at least {int(DEADBAND_PCT * 100)}% and {_usd(DEADBAND_USD)} "
                  "against the day before. Meta pacing alone can move a campaign 10–20% a day.")
     if variant == "B":
@@ -318,7 +321,7 @@ def render(model: dict, variant: str, sentences: list, apps: dict) -> tuple:
         _masthead(eyebrow, f"{ad:%A} {ad.day} {ad:%B}", "ad-account day · Meta, Google, Apple Search Ads"),
         _banners(model, variant), lead, _stat_grid(model),
         "".join(_project(p, d1_name, variant) for p in model["projects"]),
-        _chart(model), _footnotes(model, variant),
+        _chart(model), _footnotes(model, variant, summary_missing=not sentences),
     ]
     html = (
         HEAD.replace("__TITLE__", esc(subject)) +
@@ -346,5 +349,7 @@ def render(model: dict, variant: str, sentences: list, apps: dict) -> tuple:
             os_ = "" if ln["os"] == UNASSIGNED else f" {ln['os']}"
             text.append(f"  {ln['channel']}{os_}: {_usd(ln['d'])} - {_detail(ln, d1_name, variant)}")
     text += ["", "Last 14 days: " + ", ".join(_compact(p["total"]) for p in model["chart"][-14:])]
+    if not sentences:
+        text += ["", SUMMARY_MISSING]
     text += ["", "Meta, Google and Apple Search Ads. Each channel's own ad-account day. Workflow: " + WORKFLOW_URL]
     return subject, preheader, html, "\n".join(text)

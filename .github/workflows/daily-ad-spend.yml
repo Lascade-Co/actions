@@ -115,13 +115,6 @@ jobs:
           mkdir -p data && curl -fsSL --retry 3 --retry-delay 2 -o data/adspend_apps.json "$RAW/data/adspend_apps.json"
           chmod +x send_resend.sh
 
-      - name: Restore the commentary cache
-        # Commentary is generated once per ad date so a retry re-sends identical bytes.
-        uses: actions/cache/restore@v6
-        with:
-          path: scratch
-          key: adspend-commentary-${{ steps.dates.outputs.ad_date }}
-
       - name: Restore Codex auth.json
         continue-on-error: true
         env:
@@ -132,18 +125,10 @@ jobs:
 
       - name: Install codex
         continue-on-error: true
-        run: npm install -g @openai/codex
+        run: npm install -g @openai/codex@0.160.1
 
       - name: Build the emails
-        run: python3 adspend_main.py --ad-date "${{ steps.dates.outputs.ad_date }}" --variants "$VARIANTS" --out out --scratch scratch ${{ inputs.reconcile && '--reconcile' || '' }}
-
-      - name: Save the commentary cache
-        if: always()
-        continue-on-error: true
-        uses: actions/cache/save@v6
-        with:
-          path: scratch
-          key: adspend-commentary-${{ steps.dates.outputs.ad_date }}
+        run: python3 adspend_main.py --ad-date "${{ steps.dates.outputs.ad_date }}" --variants "$VARIANTS" --out out --scratch scratch ${{ inputs.reconcile && '--reconcile' || '' }} ${{ inputs.break_commentary && '--break-commentary' || '' }}
 
       - name: Send variant A
         id: sendA
