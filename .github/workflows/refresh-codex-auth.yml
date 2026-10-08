@@ -125,5 +125,5 @@ jobs:
           curl --fail --silent --show-error --retry 3 --max-time 20 --request POST \
             "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
             --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
-            --data-urlencode "text=Codex auth refresh failed. The ad-spend email loses its synopsis, and the daily report its summary, once the stored token expires. ${RUN_URL}" \
+            --data-urlencode "text=Codex auth refresh failed. ${RUN_URL}" \
             > /dev/null
