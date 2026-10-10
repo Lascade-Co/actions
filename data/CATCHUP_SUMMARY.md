@@ -1,8 +1,7 @@
-# Codex Developer-Summary Prompt
+# Claude Developer-Summary Prompt
 
 This file is fetched verbatim by `Lascade-Co/actions/.github/workflows/daily-catchup.yml`.
-The workflow appends a JSON payload below this line and hands the result to the
-`@openai/codex` CLI (`codex exec --sandbox workspace-write`).
+The workflow appends a JSON payload and sends the prompt to the Claude API.
 
 ## Role
 
@@ -39,10 +38,10 @@ only when the developer has commits in it.
 
 ## Output
 
-Write a single file `repo-summary.json` at the current working directory, and modify NOTHING
-else. Preserve each developer's `login`, `name`, and `commit_count` exactly as given. Replace
-`work` with `bullets`: the same status keys, each mapping to a bullet list. Include a status
-key **only** if it had commits in the input.
+Return one JSON object only. The workflow saves it as `repo-summary.json`. Preserve each
+developer's `login`, `name`, and `commit_count` exactly as given. Replace `work` with
+`bullets`: the same status keys, each mapping to a bullet list. Include a status key
+**only** if it had commits in the input.
 
 ```json
 {
@@ -78,8 +77,7 @@ key **only** if it had commits in the input.
   changed — describe it generically (e.g. "🔧 Rotated an API credential").
 - NEVER include personally identifiable information or real customer data found in diffs
   (emails, phone numbers, names of end users, addresses).
-- DO NOT run `git`, `gradle`, build, test, or network commands. Only write `repo-summary.json`.
-- DO NOT create commits.
+- Return only the requested JSON; no Markdown fences or surrounding prose.
 
 ## Payload
 

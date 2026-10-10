@@ -1,12 +1,12 @@
-"""One or two sentences of commentary, written by Codex, that cannot state a number.
+"""One or two sentences of commentary, written by Claude, that cannot state a number.
 
-Codex is shown computed facts with ids. It answers with sentences whose only
+Claude is shown computed facts with ids. It answers with sentences whose only
 numbers are ``{fid.field}`` placeholders, and this module fills them from the
 model. Any literal digit, unknown fact, contradicted direction, advice, or name
 that is not backed by a referenced fact drops the whole commentary. Commentary
 is decoration: every failure path returns ``[]`` and the email still sends.
 
-Public repo: Codex stdout/stderr go to files and are never echoed.
+Public repo: prompts, generated prose and API error bodies are never logged.
 """
 
 from __future__ import annotations
@@ -15,14 +15,16 @@ import hashlib
 import json
 import os
 import re
-import subprocess
+import sys
 from decimal import Decimal
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "ai"))
+from claude_api import ClaudeError, generate_text
 
 from pnl_money import format_usd
 from adspend_model import UNASSIGNED, round_pct
 
 MAX_FACTS = 8
-_AUTH_MARKERS = ("sign in", "log in", "not logged", "unauthorized", "refresh token")
 _PLACEHOLDER = re.compile(r"\{(t|f\d+)\.(\w+)\}")
 _UP = {"up", "rose", "increased", "higher", "climbed", "grew", "jumped", "raised"}
 _DOWN = {"down", "fell", "dropped", "lower", "cut", "declined", "decreased", "shrank", "reduced"}
@@ -125,31 +127,16 @@ def validate(raw: str, facts: dict, all_names=()) -> list:
         return []
 
 
-def _run_codex(prompt: str, scratch: str, timeout: int = 90):
-    out = os.path.join(scratch, "codex-last.txt")
-    if os.path.exists(out):
-        os.remove(out)
-    with open(os.path.join(scratch, "codex.log"), "w") as log:
-        subprocess.run(["codex", "exec", "--sandbox", "read-only", "--skip-git-repo-check",
-                        "-o", out, "-"], input=prompt, text=True, stdout=log, stderr=log,
-                       timeout=timeout, check=True)
-    with open(out) as fh:
-        return fh.read()
+def _run_claude(prompt: str, scratch: str, timeout: int = 90):
+    return generate_text(prompt, max_tokens=1024, timeout=timeout)
 
 
 def _failure_reason(exc: Exception, scratch: str) -> str:
-    """One safe word for the public log; Codex's own output is never echoed."""
-    if isinstance(exc, subprocess.TimeoutExpired):
-        return "timeout"
-    try:
-        with open(os.path.join(scratch, "codex.log")) as fh:
-            log = fh.read().lower()
-    except OSError:
-        return "codex-error"
-    return "auth" if any(marker in log for marker in _AUTH_MARKERS) else "codex-error"
+    """One safe reason for the public log; never inspect or echo API bodies."""
+    return exc.reason if isinstance(exc, ClaudeError) else "claude-error"
 
 
-def commentary(model: dict, variant: str, scratch: str, run=_run_codex, cache: bool = True) -> list:
+def commentary(model: dict, variant: str, scratch: str, run=_run_claude, cache: bool = True) -> list:
     """Cached per (ad_date, variant, facts) so a rerun on changed numbers never reuses stale
     prose. Only good prose is cached: an empty result must not block a rerun after a fix.
     Every skip is announced with a one-word reason."""
@@ -173,7 +160,7 @@ def commentary(model: dict, variant: str, scratch: str, run=_run_codex, cache: b
         result = validate(raw, facts, names)
         if not result:
             reason = "rejected"
-    except Exception as exc:  # missing binary, timeout, crash: no commentary, never a failed send
+    except Exception as exc:  # auth, timeout, API failure: no commentary, never a failed send
         result, reason = [], _failure_reason(exc, scratch)
     if reason:
         print(f"::warning title=Ad spend synopsis skipped::{reason}")

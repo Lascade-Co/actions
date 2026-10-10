@@ -22,7 +22,7 @@ from release_blog_digest import (
     previous_tag,
     truncate,
 )
-from release_blog_draft import build_prompt, parse_output, run_codex
+from release_blog_draft import build_prompt, parse_output, run_claude
 from release_blog_cms import (
     LinkCandidate,
     build_payload,
@@ -109,7 +109,7 @@ CANDIDATES = [
     LinkCandidate(url="https://www.travelanimator.com/hub/export-for-instagram", slug="export-for-instagram", title="Export"),
 ]
 
-BASE_PROMPT = "# Codex Draft Prompt\n\nWrite two files.\n"
+BASE_PROMPT = "# Claude Draft Prompt\n\nReturn draft JSON.\n"
 
 
 def ids(findings):
@@ -574,7 +574,6 @@ class BuildPromptTest(unittest.TestCase):
             "marker": MARKER,
             "digest": "## Release notes\n\n- Drag waypoints\n",
             "candidates": CANDIDATES,
-            "out_dir": "/tmp/out",
         }
         kwargs.update(over)
         return build_prompt(**kwargs)
@@ -582,9 +581,10 @@ class BuildPromptTest(unittest.TestCase):
     def test_base_prompt_comes_first_and_verbatim(self):
         self.assertTrue(self.prompt().startswith(BASE_PROMPT))
 
-    def test_run_context_names_the_output_dir_marker_and_host(self):
+    def test_run_context_names_the_response_fields_marker_and_host(self):
         text = self.prompt()
-        self.assertIn("/tmp/out", text)
+        self.assertIn("`meta`", text)
+        self.assertIn("`html`", text)
         self.assertIn(MARKER, text)
         self.assertIn("www.travelanimator.com", text)
         self.assertIn("3.9.3", text)
@@ -652,69 +652,52 @@ class ParseOutputTest(unittest.TestCase):
         self.assertIn("empty", error)
 
 
-class RunCodexTest(unittest.TestCase):
-    def test_invokes_codex_with_workspace_write_and_the_prompt_on_stdin(self):
+class RunClaudeTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.out = self.tmp.name
+
+    def test_saves_api_response_as_the_existing_artifacts(self):
         seen = {}
 
-        class Result:
-            returncode = 0
-            stdout = "done"
-            stderr = ""
+        def generate(prompt, **kwargs):
+            seen.update(prompt=prompt, **kwargs)
+            return {"meta": GOOD_META, "html": "<h2>Body</h2>"}
 
-        def fake_run(cmd, **kwargs):
-            seen["cmd"] = cmd
-            seen["input"] = kwargs.get("input")
-            seen["cwd"] = kwargs.get("cwd")
-            seen["env"] = kwargs.get("env")
-            return Result()
-
-        with patch.dict(os.environ, {"CMS_APP_PASSWORD": "must-not-reach-codex"}):
-            ok, detail = run_codex("PROMPT TEXT", "/tmp/out", run=fake_run)
+        ok, detail = run_claude("PROMPT TEXT", self.out, generate=generate)
         self.assertTrue(ok)
-        self.assertIn("codex", seen["cmd"][0])
-        self.assertIn("--sandbox", seen["cmd"])
-        self.assertIn("workspace-write", seen["cmd"])
-        self.assertIn("--ephemeral", seen["cmd"])
-        self.assertIn("--skip-git-repo-check", seen["cmd"])
-        self.assertEqual(seen["input"], "PROMPT TEXT")
-        self.assertEqual(seen["cwd"], "/tmp/out")
-        self.assertNotIn("CMS_APP_PASSWORD", seen["env"])
+        self.assertEqual(seen["prompt"], "PROMPT TEXT")
+        self.assertEqual(seen["timeout"], 900)
+        self.assertEqual(parse_output(self.out)[:2], (GOOD_META, "<h2>Body</h2>"))
 
-    def test_a_non_zero_exit_reports_the_stderr_tail(self):
-        class Result:
-            returncode = 1
-            stdout = ""
-            stderr = "not logged in"
+    def test_failure_removes_stale_output_and_reports_only_the_safe_reason(self):
+        from claude_api import ClaudeError
+        Path(self.out, "blog.json").write_text(json.dumps(GOOD_META))
+        Path(self.out, "blog.html").write_text("old draft")
 
-        ok, detail = run_codex("PROMPT", "/tmp/out", run=lambda cmd, **kw: Result())
+        def fail(*args, **kwargs):
+            raise ClaudeError("auth")
+
+        ok, detail = run_claude("PROMPT", self.out, generate=fail)
         self.assertFalse(ok)
-        self.assertIn("not logged in", detail)
+        self.assertEqual(detail, "Claude API: auth")
+        self.assertFalse(Path(self.out, "blog.html").exists())
 
-    def test_a_missing_codex_binary_is_not_an_exception(self):
-        def fake_run(cmd, **kwargs):
-            raise FileNotFoundError("codex")
+    def test_malformed_output_is_left_for_validation(self):
+        ok, _ = run_claude("PROMPT", self.out, generate=lambda *a, **kw: {"meta": [], "html": "body"})
+        self.assertTrue(ok)
+        self.assertIn("not a JSON object", parse_output(self.out)[2])
 
-        ok, detail = run_codex("PROMPT", "/tmp/out", run=fake_run)
-        self.assertFalse(ok)
-        self.assertIn("codex", detail)
-
-    def test_reports_start_and_periodic_status_while_codex_runs(self):
-        class Result:
-            returncode = 0
-            stdout = "done"
-            stderr = ""
-
-        def slow_run(cmd, **kwargs):
+    def test_reports_start_and_periodic_status_while_claude_runs(self):
+        def slow_generate(*args, **kwargs):
             time.sleep(0.04)
-            return Result()
+            return {"meta": GOOD_META, "html": "body"}
 
         messages = []
-        ok, _detail = run_codex(
-            "PROMPT",
-            "/tmp/out",
-            run=slow_run,
-            status=messages.append,
-            status_interval=0.01,
+        ok, _detail = run_claude(
+            "PROMPT", self.out, generate=slow_generate,
+            status=messages.append, status_interval=0.01,
         )
         self.assertTrue(ok)
         self.assertIn("generation started", messages[0])
@@ -732,31 +715,19 @@ class CliTest(unittest.TestCase):
             "--config", self.config,
             "--tag", "3.9.3",
             "--out", self.out,
-            "--prompt", "../../data/RELEASE_BLOG.md",
-            "--diff-file", str(Path("fixtures/release_blog_sample.diff")),
+            "--prompt", str(Path(__file__).resolve().parents[2] / "data/RELEASE_BLOG.md"),
+            "--diff-file", str(Path(__file__).resolve().parent / "fixtures/release_blog_sample.diff"),
             "--notes-text", "- Drag waypoints to reshape routes",
             *extra,
         ]
 
-    def fake_codex(self, meta=None, html=None):
-        payload = json.dumps(meta or GOOD_META)
+    def fake_claude(self, meta=None, html=None):
         body = html if html is not None else fixture("release_blog_good.html")
-
-        class Result:
-            returncode = 0
-            stdout = ""
-            stderr = ""
-
-        def runner(cmd, **kwargs):
-            Path(self.out, "blog.json").write_text(payload, encoding="utf-8")
-            Path(self.out, "blog.html").write_text(body, encoding="utf-8")
-            return Result()
-
-        return runner
+        return lambda *args, **kwargs: {"meta": meta or GOOD_META, "html": body}
 
     def test_dry_run_writes_artifacts_and_performs_no_write(self):
         http = FakeHttp((200, fixture("release_blog_candidates.json")))
-        code = release_blog.main(self.args("--dry-run"), http=http, run=self.fake_codex())
+        code = release_blog.main(self.args("--dry-run"), http=http, generate=self.fake_claude())
         self.assertEqual(code, 0)
         self.assertTrue(Path(self.out, "blog.html").exists())
         self.assertTrue(Path(self.out, "wp-payload.json").exists())
@@ -766,7 +737,7 @@ class CliTest(unittest.TestCase):
 
     def test_dry_run_payload_is_a_draft_with_the_generated_content(self):
         http = FakeHttp((200, fixture("release_blog_candidates.json")))
-        release_blog.main(self.args("--dry-run"), http=http, run=self.fake_codex())
+        release_blog.main(self.args("--dry-run"), http=http, generate=self.fake_claude())
         payload = json.loads(Path(self.out, "wp-payload.json").read_text())
         self.assertEqual(payload["body"]["status"], "draft")
         self.assertIn("waypoint", payload["body"]["content"].lower())
@@ -781,7 +752,7 @@ class CliTest(unittest.TestCase):
         code = release_blog.main(
             self.args("--publish", "--cms-user", "u", "--cms-password", "p"),
             http=http,
-            run=self.fake_codex(),
+            generate=self.fake_claude(),
         )
         self.assertEqual(code, 0)
         writes = [call for call in http.calls if call["method"] == "POST"]
@@ -800,7 +771,7 @@ class CliTest(unittest.TestCase):
         release_blog.main(
             self.args("--publish", "--cms-user", "u", "--cms-password", "p"),
             http=http,
-            run=self.fake_codex(),
+            generate=self.fake_claude(),
         )
         writes = [call for call in http.calls if call["method"] == "POST"]
         self.assertTrue(writes[0]["url"].endswith("/posts/41"))
@@ -814,12 +785,12 @@ class CliTest(unittest.TestCase):
 
         def runner(cmd, **kwargs):
             calls.append(cmd)
-            raise AssertionError("codex must not run when the release is already published")
+            raise AssertionError("claude must not run when the release is already published")
 
         code = release_blog.main(
             self.args("--publish", "--cms-user", "u", "--cms-password", "p"),
             http=http,
-            run=runner,
+            generate=runner,
         )
         self.assertEqual(code, 0)
         self.assertEqual(calls, [])
@@ -827,7 +798,7 @@ class CliTest(unittest.TestCase):
 
     def test_missing_credentials_generate_but_do_not_write(self):
         http = FakeHttp((200, fixture("release_blog_candidates.json")))
-        code = release_blog.main(self.args("--publish"), http=http, run=self.fake_codex())
+        code = release_blog.main(self.args("--publish"), http=http, generate=self.fake_claude())
         self.assertEqual(code, 0)
         self.assertTrue(Path(self.out, "blog.html").exists())
         self.assertEqual([call for call in http.calls if call["method"] == "POST"], [])
@@ -843,7 +814,7 @@ class CliTest(unittest.TestCase):
                 "--dry-run",
             ],
             http=FakeHttp(),
-            run=self.fake_codex(),
+            generate=self.fake_claude(),
         )
         self.assertEqual(code, 0)
         self.assertFalse(Path(self.out, "blog.html").exists())
@@ -860,20 +831,37 @@ class CliTest(unittest.TestCase):
                 "--dry-run",
             ],
             http=FakeHttp(),
-            run=self.fake_codex(),
+            generate=self.fake_claude(),
         )
         self.assertEqual(code, 0)
         self.assertFalse(Path(self.out, "blog.html").exists())
 
-    def test_codex_failure_exits_zero(self):
-        class Failed:
-            returncode = 1
-            stdout = ""
-            stderr = "not logged in"
+    def test_claude_failure_exits_zero(self):
+        from claude_api import ClaudeError
+
+        def fail(*args, **kwargs):
+            raise ClaudeError("auth")
 
         http = FakeHttp((200, fixture("release_blog_candidates.json")))
-        code = release_blog.main(self.args("--dry-run"), http=http, run=lambda cmd, **kw: Failed())
+        code = release_blog.main(self.args("--dry-run"), http=http, generate=fail)
         self.assertEqual(code, 0)
+        self.assertEqual([call for call in http.calls if call["method"] == "POST"], [])
+
+    def test_invalid_json_from_api_triggers_one_retry(self):
+        from claude_api import ClaudeError
+        good = self.fake_claude()
+        calls = []
+
+        def generate(*args, **kwargs):
+            calls.append(1)
+            if len(calls) == 1:
+                raise ClaudeError("invalid-json")
+            return good(*args, **kwargs)
+
+        http = FakeHttp((200, fixture("release_blog_candidates.json")))
+        self.assertEqual(release_blog.main(self.args("--dry-run"), http=http, generate=generate), 0)
+        self.assertEqual(len(calls), 2)
+        self.assertTrue(Path(self.out, "wp-payload.json").exists())
 
     def test_no_candidates_skips_generation(self):
         http = FakeHttp((503, ""), (503, ""))
@@ -881,9 +869,9 @@ class CliTest(unittest.TestCase):
 
         def runner(cmd, **kwargs):
             calls.append(cmd)
-            raise AssertionError("codex must not run without link candidates")
+            raise AssertionError("claude must not run without link candidates")
 
-        code = release_blog.main(self.args("--dry-run"), http=http, run=runner)
+        code = release_blog.main(self.args("--dry-run"), http=http, generate=runner)
         self.assertEqual(code, 0)
         self.assertEqual(calls, [])
 
@@ -892,18 +880,11 @@ class CliTest(unittest.TestCase):
         bodies = [fixture("release_blog_bad.html"), fixture("release_blog_good.html")]
         attempts = []
 
-        class Result:
-            returncode = 0
-            stdout = ""
-            stderr = ""
-
         def runner(cmd, **kwargs):
-            attempts.append(kwargs.get("input", ""))
-            Path(self.out, "blog.json").write_text(json.dumps(GOOD_META), encoding="utf-8")
-            Path(self.out, "blog.html").write_text(bodies[len(attempts) - 1], encoding="utf-8")
-            return Result()
+            attempts.append(cmd)
+            return {"meta": GOOD_META, "html": bodies[len(attempts) - 1]}
 
-        release_blog.main(self.args("--dry-run"), http=http, run=runner)
+        release_blog.main(self.args("--dry-run"), http=http, generate=runner)
         self.assertEqual(len(attempts), 2)
         self.assertIn("PREVIOUS ATTEMPT", attempts[1])
         self.assertTrue(Path(self.out, "prompt-retry.md").exists())
@@ -914,22 +895,13 @@ class CliTest(unittest.TestCase):
         http = FakeHttp((200, fixture("release_blog_candidates.json")))
         attempts = []
 
-        class Result:
-            returncode = 0
-            stdout = ""
-            stderr = ""
-
         def runner(cmd, **kwargs):
             attempts.append(1)
             if len(attempts) == 1:
-                Path(self.out, "blog.json").write_text("{bad", encoding="utf-8")
-                Path(self.out, "blog.html").write_text("<h2>bad</h2>", encoding="utf-8")
-            else:
-                Path(self.out, "blog.json").write_text(json.dumps(GOOD_META), encoding="utf-8")
-                Path(self.out, "blog.html").write_text(fixture("release_blog_good.html"), encoding="utf-8")
-            return Result()
+                return {"meta": [], "html": "<h2>bad</h2>"}
+            return {"meta": GOOD_META, "html": fixture("release_blog_good.html")}
 
-        code = release_blog.main(self.args("--dry-run"), http=http, run=runner)
+        code = release_blog.main(self.args("--dry-run"), http=http, generate=runner)
         self.assertEqual(code, 0)
         self.assertEqual(len(attempts), 2)
         self.assertTrue(Path(self.out, "wp-payload.json").exists())
@@ -938,18 +910,11 @@ class CliTest(unittest.TestCase):
         http = FakeHttp((200, fixture("release_blog_candidates.json")))
         attempts = []
 
-        class Result:
-            returncode = 0
-            stdout = ""
-            stderr = ""
-
         def runner(cmd, **kwargs):
             attempts.append(1)
-            Path(self.out, "blog.json").write_text(json.dumps(GOOD_META), encoding="utf-8")
-            Path(self.out, "blog.html").write_text(fixture("release_blog_bad.html"), encoding="utf-8")
-            return Result()
+            return {"meta": GOOD_META, "html": fixture("release_blog_bad.html")}
 
-        release_blog.main(self.args("--dry-run", "--no-retry"), http=http, run=runner)
+        release_blog.main(self.args("--dry-run", "--no-retry"), http=http, generate=runner)
         self.assertEqual(len(attempts), 1)
 
     def test_validation_findings_are_printed_after_the_attempt_summary(self):
@@ -959,7 +924,7 @@ class CliTest(unittest.TestCase):
             release_blog.main(
                 self.args("--dry-run", "--no-retry"),
                 http=http,
-                run=self.fake_codex(html=fixture("release_blog_bad.html")),
+                generate=self.fake_claude(html=fixture("release_blog_bad.html")),
             )
         text = output.getvalue()
         self.assertIn("attempt 1: 3 errors, 4 warns", text)
@@ -972,27 +937,20 @@ class CliTest(unittest.TestCase):
         html = fixture("release_blog_good.html").replace(">route animation guide<", ">read more<")
         attempts = []
 
-        class Result:
-            returncode = 0
-            stdout = ""
-            stderr = ""
-
         def runner(cmd, **kwargs):
             attempts.append(1)
-            Path(self.out, "blog.json").write_text(json.dumps(GOOD_META), encoding="utf-8")
-            Path(self.out, "blog.html").write_text(html, encoding="utf-8")
-            return Result()
+            return {"meta": GOOD_META, "html": html}
 
         code = release_blog.main(
             [*self.args("--dry-run")[:3], write_config(entries), *self.args("--dry-run")[4:]],
             http=FakeHttp((200, fixture("release_blog_candidates.json"))),
-            run=runner,
+            generate=runner,
         )
         self.assertEqual(code, 0)
         self.assertEqual(len(attempts), 1)
         self.assertIn("info", Path(self.out, "validation.txt").read_text())
 
-    def test_html_flag_skips_codex_entirely(self):
+    def test_html_flag_skips_claude_entirely(self):
         meta_path = Path(self.out, "hand.json")
         html_path = Path(self.out, "hand.html")
         meta_path.write_text(json.dumps(GOOD_META), encoding="utf-8")
@@ -1000,18 +958,18 @@ class CliTest(unittest.TestCase):
         http = FakeHttp((200, fixture("release_blog_candidates.json")))
 
         def runner(cmd, **kwargs):
-            raise AssertionError("codex must not run with --html")
+            raise AssertionError("claude must not run with --html")
 
         code = release_blog.main(
             self.args("--dry-run", "--html", str(html_path), "--meta", str(meta_path)),
             http=http,
-            run=runner,
+            generate=runner,
         )
         self.assertEqual(code, 0)
         self.assertTrue(Path(self.out, "wp-payload.json").exists())
 
     def test_invalid_arguments_still_return_zero(self):
-        self.assertEqual(release_blog.main([], http=FakeHttp(), run=self.fake_codex()), 0)
+        self.assertEqual(release_blog.main([], http=FakeHttp(), generate=self.fake_claude()), 0)
 
 
 if __name__ == "__main__":

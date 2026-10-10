@@ -1,41 +1,23 @@
-"""Assemble the writer prompt, invoke Codex, and parse its draft output."""
+"""Assemble the writer prompt, invoke Claude, and parse its draft output."""
 
 from __future__ import annotations
 
 import json
 import os
-import subprocess
+import sys
 import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
 
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "ai"))
+from claude_api import ClaudeError, generate_json
+
 from seo_model import SEVERITY_ERROR, SEVERITY_WARN
 
 PROMPT_URL = "https://raw.githubusercontent.com/Lascade-Co/actions/main/data/RELEASE_BLOG.md"
-CODEX_TIMEOUT = 900
-CODEX_STATUS_INTERVAL = 20
-
-CODEX_ENV_ALLOWLIST = (
-    "PATH",
-    "HOME",
-    "USER",
-    "LOGNAME",
-    "SHELL",
-    "LANG",
-    "LC_ALL",
-    "LC_CTYPE",
-    "TMPDIR",
-    "TEMP",
-    "TMP",
-    "XDG_CONFIG_HOME",
-    "CODEX_HOME",
-    "SSL_CERT_FILE",
-    "SSL_CERT_DIR",
-    "HTTPS_PROXY",
-    "HTTP_PROXY",
-    "NO_PROXY",
-)
+CLAUDE_TIMEOUT = 900
+CLAUDE_STATUS_INTERVAL = 20
 
 
 def load_prompt(source: str | None = None, *, http=None) -> str:
@@ -61,11 +43,6 @@ def _candidate_lines(candidates) -> str:
     return "\n".join(lines) if lines else "(none available)"
 
 
-def _codex_env() -> dict[str, str]:
-    """Keep Infisical and CMS credentials out of the model subprocess."""
-    return {name: os.environ[name] for name in CODEX_ENV_ALLOWLIST if name in os.environ}
-
-
 def build_prompt(
     *,
     base_prompt: str,
@@ -74,7 +51,6 @@ def build_prompt(
     marker: str,
     digest: str,
     candidates,
-    out_dir: str,
     previous: str | None = None,
     findings=None,
 ) -> str:
@@ -87,8 +63,8 @@ def build_prompt(
         f"- Site: {site.label} ({site.canonical_host})",
         f"- Blogs live under: https://{site.canonical_host}{site.listing_path}/<slug>",
         f"- Marketing version shipping now: {marketing_version}",
-        f"- Write `blog.json` and `blog.html` into: {out_dir}",
-        f"- Close `blog.html` with exactly this line:\n\n      <!-- {marker} -->",
+        "- Return one JSON object with `meta` (blog metadata) and `html` (the draft body).",
+        f"- Close the HTML with exactly this line:\n\n      <!-- {marker} -->",
         "",
         "## LINK CANDIDATES",
         "",
@@ -135,70 +111,55 @@ def _emit_status(status: Callable[[str], None] | None, message: str) -> None:
         pass
 
 
-def run_codex(
+def run_claude(
     prompt_text: str,
     out_dir: str,
     *,
-    run=subprocess.run,
+    generate=None,
     status: Callable[[str], None] | None = None,
-    status_interval: float = CODEX_STATUS_INTERVAL,
+    status_interval: float = CLAUDE_STATUS_INTERVAL,
 ) -> tuple[bool, str]:
-    """Run Codex once in an isolated output directory without raising."""
+    """Request a draft from the API and save the same two validated artifacts."""
+    generate = generate or generate_json
     output = Path(out_dir)
     output.mkdir(parents=True, exist_ok=True)
     try:
         for name in ("blog.json", "blog.html"):
             output.joinpath(name).unlink(missing_ok=True)
     except OSError as exc:
-        return False, f"could not clear stale codex output: {exc}"
+        return False, f"could not clear stale claude output: {exc}"
 
     stopped = threading.Event()
     heartbeat = None
-    _emit_status(status, "Codex generation started; this can take several minutes")
+    _emit_status(status, "Claude generation started; this can take several minutes")
     if status is not None and status_interval > 0:
         started_at = time.monotonic()
 
         def report_while_running():
             while not stopped.wait(status_interval):
                 elapsed = int(time.monotonic() - started_at)
-                _emit_status(status, f"Codex is still generating ({elapsed}s elapsed)")
+                _emit_status(status, f"Claude is still generating ({elapsed}s elapsed)")
 
         heartbeat = threading.Thread(target=report_while_running, daemon=True)
         heartbeat.start()
     try:
         try:
-            result = run(
-                [
-                    "codex",
-                    "exec",
-                    "--ephemeral",
-                    "--skip-git-repo-check",
-                    "--sandbox",
-                    "workspace-write",
-                    "-",
-                ],
-                input=prompt_text,
-                capture_output=True,
-                text=True,
-                timeout=CODEX_TIMEOUT,
-                check=False,
-                cwd=out_dir,
-                env=_codex_env(),
-            )
-        except FileNotFoundError:
-            return False, "codex is not installed or not on PATH"
-        except subprocess.TimeoutExpired:
-            return False, f"codex timed out after {CODEX_TIMEOUT}s"
-        except OSError as exc:
-            return False, f"codex could not be started: {exc}"
+            result = generate(prompt_text, max_tokens=16384, timeout=CLAUDE_TIMEOUT)
+            output.joinpath("blog.json").write_text(
+                json.dumps(result.get("meta"), ensure_ascii=False), encoding="utf-8")
+            html = result.get("html")
+            if isinstance(html, str):
+                output.joinpath("blog.html").write_text(html, encoding="utf-8")
+        except ClaudeError as exc:
+            return False, str(exc)
+        except (OSError, ValueError, TypeError, AttributeError):
+            return False, "Claude draft could not be saved"
+
     finally:
         stopped.set()
         if heartbeat is not None:
             heartbeat.join()
-    if result.returncode != 0:
-        tail = (result.stderr or result.stdout or "").strip()[-800:]
-        return False, f"codex exited {result.returncode}: {tail}"
-    return True, "codex completed"
+    return True, "Claude completed"
 
 
 def parse_output(out_dir: str) -> tuple[dict | None, str, str]:
@@ -206,9 +167,9 @@ def parse_output(out_dir: str) -> tuple[dict | None, str, str]:
     meta_path = Path(out_dir, "blog.json")
     html_path = Path(out_dir, "blog.html")
     if not meta_path.exists():
-        return None, "", f"codex wrote no blog.json in {out_dir}"
+        return None, "", f"Claude returned no blog.json in {out_dir}"
     if not html_path.exists():
-        return None, "", f"codex wrote no blog.html in {out_dir}"
+        return None, "", f"Claude returned no blog.html in {out_dir}"
     try:
         meta = json.loads(meta_path.read_text(encoding="utf-8"))
     except (OSError, ValueError, UnicodeDecodeError) as exc:

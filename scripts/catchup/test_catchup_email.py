@@ -36,7 +36,7 @@ def dev(name, login, bullets, commits=1):
     return {"name": name, "login": login, "commit_count": commits, "bullets": bullets}
 
 
-def codex_for(rid, **groups):
+def claude_for(rid, **groups):
     return {"headline": "h", "decisions_needed": [],
             "repos": [{"repo": rid, "display_name": "Name", "emoji": "🌳", **groups}]}
 
@@ -96,8 +96,8 @@ def people_of(*entries, bots=()):
 CHECKED_IN = R.load_people(PEOPLE_FILE)
 
 
-def fake_codex(prompt_path, payload_text, scratch, output_name):
-    """Stands in for `codex exec`: one bullet per input item, citing that item's id."""
+def fake_claude(prompt_path, payload_text, scratch, output_name):
+    """Stands in for `claude exec`: one bullet per input item, citing that item's id."""
     keys = {"Done": "done", "Testing": "testing", "In progress": "in_progress"}
     repos = []
     for r in json.loads(payload_text)["repos"]:
@@ -109,7 +109,7 @@ def fake_codex(prompt_path, payload_text, scratch, output_name):
 
 
 def run_report(repos, people=PEOPLE_FILE):
-    """report.json from the real main(): exclusions, people pass, payload, (fake) Codex, merge.
+    """report.json from the real main(): exclusions, people pass, payload, (fake) Claude, merge.
 
     `people` is a path, a dict/str written to a temp file, or None for no --people flag.
     """
@@ -125,7 +125,7 @@ def run_report(repos, people=PEOPLE_FILE):
                 with open(path, "w") as fh:
                     fh.write(people if isinstance(people, str) else json.dumps(people))
             argv += ["--people", path]
-        with mock.patch.object(R, "run_codex", fake_codex), mock.patch.object(sys, "argv", argv), \
+        with mock.patch.object(R, "run_claude", fake_claude), mock.patch.object(sys, "argv", argv), \
                 mock.patch.dict(os.environ), captured_log():
             os.environ.pop("GITHUB_OUTPUT", None)
             R.main()
@@ -137,7 +137,7 @@ class MergeTests(unittest.TestCase):
     def test_full_length_bullet_never_truncated(self):
         long = " ".join(f"word{i}" for i in range(60))
         r = repo("a", {"Published": ["src"]})
-        rep = R.merge([r], codex_for("Lascade-Co/a", done=[{"text": long, "from": ["R0.P1"]}]))
+        rep = R.merge([r], claude_for("Lascade-Co/a", done=[{"text": long, "from": ["R0.P1"]}]))
         self.assertIn(long, html_of(rep))
         self.assertNotIn("…", html_of(rep))
 
@@ -145,27 +145,27 @@ class MergeTests(unittest.TestCase):
         src = [f"s{i}" for i in range(8)]
         r = repo("a", {"Published": src})
         done = [{"text": f"outcome {i}", "from": [f"R0.P{i + 1}"]} for i in range(8)]
-        h = html_of(R.merge([r], codex_for("Lascade-Co/a", done=done)))
+        h = html_of(R.merge([r], claude_for("Lascade-Co/a", done=done)))
         for i in range(8):
             self.assertIn(f"outcome {i}", h)
         self.assertNotIn("Also (technical detail)", h)
 
     def test_testing_and_in_progress_are_separate_groups(self):
         r = repo("a", {"Testing": ["t"], "Work in Progress": ["w"]})
-        rep = R.merge([r], codex_for("Lascade-Co/a",
+        rep = R.merge([r], claude_for("Lascade-Co/a",
                                      testing=[{"text": "T", "from": ["R0.T1"]}],
                                      in_progress=[{"text": "W", "from": ["R0.W1"]}]))
         self.assertEqual([g["label"] for g in rep["repos"][0]["groups"]], ["Testing", "In progress"])
 
     def test_group_with_no_source_work_is_not_rendered(self):
         r = repo("a", {"Testing": ["t"]})
-        rep = R.merge([r], codex_for("Lascade-Co/a", done=[{"text": "Invented", "from": ["R0.P1"]}]))
+        rep = R.merge([r], claude_for("Lascade-Co/a", done=[{"text": "Invented", "from": ["R0.P1"]}]))
         self.assertNotIn("Invented", html_of(rep))
         self.assertEqual([g["key"] for g in rep["repos"][0]["groups"]], ["testing"])
 
     def test_invented_bullet_dropped_and_source_shown_verbatim(self):
         r = repo("a", {"Published": ["Real source detail"]})
-        rep = R.merge([r], codex_for("Lascade-Co/a", done=[{"text": "Invented", "from": ["R9.P9"]}]))
+        rep = R.merge([r], claude_for("Lascade-Co/a", done=[{"text": "Invented", "from": ["R9.P9"]}]))
         h = html_of(rep)
         self.assertNotIn("Invented", h)
         self.assertIn("Real source detail", h)
@@ -173,13 +173,13 @@ class MergeTests(unittest.TestCase):
 
     def test_uncovered_source_bullet_is_shown_verbatim(self):
         r = repo("a", {"Published": ["one", "two"]})
-        rep = R.merge([r], codex_for("Lascade-Co/a", done=[{"text": "First", "from": ["R0.P1"]}]))
+        rep = R.merge([r], claude_for("Lascade-Co/a", done=[{"text": "First", "from": ["R0.P1"]}]))
         h = html_of(rep)
         self.assertIn("First", h)
         self.assertIn("two", h)
         self.assertNotIn(">one<", h.split("Also")[0])
 
-    def test_codex_failure_still_shows_all_work(self):
+    def test_claude_failure_still_shows_all_work(self):
         r = repo("a", {"Published": ["p1"], "Testing": ["t1"]})
         rep = R.merge([r], {}, assessed=False)
         h = html_of(rep)
@@ -187,7 +187,7 @@ class MergeTests(unittest.TestCase):
         self.assertIn("t1", h)
         self.assertIn("Couldn't be assessed", h)
 
-    def test_malformed_codex_shapes_do_not_crash(self):
+    def test_malformed_claude_shapes_do_not_crash(self):
         r = repo("a", {"Published": ["p"]})
         for bad in [{}, [], None, {"repos": None}, {"repos": [None]}, {"repos": [{"repo": []}]},
                     {"repos": [{"repo": "Lascade-Co/a", "done": "str"}]},
@@ -204,7 +204,7 @@ class MergeTests(unittest.TestCase):
 
     def test_duplicate_repo_entries_are_ignored(self):
         r = repo("a", {"Published": ["p"]})
-        c = codex_for("Lascade-Co/a", done=[{"text": "A", "from": ["R0.P1"]}])
+        c = claude_for("Lascade-Co/a", done=[{"text": "A", "from": ["R0.P1"]}])
         c["repos"].append(dict(c["repos"][0]))
         h = html_of(R.merge([r], c))
         self.assertNotIn(">A<", h)
@@ -221,36 +221,36 @@ class MergeTests(unittest.TestCase):
 
     def test_decisions_are_not_clipped(self):
         long = "d" * 400
-        c = codex_for("Lascade-Co/a")
+        c = claude_for("Lascade-Co/a")
         c["decisions_needed"] = [long]
         self.assertIn(long, html_of(R.merge([repo("a", {"Published": ["p"]})], c)))
 
     def test_invalid_decisions_are_not_a_quiet_day(self):
         r = repo("a", {"Published": ["p"]})
         for bad in ([None], [""], ["  "], [5], [{"x": 1}]):
-            c = codex_for("Lascade-Co/a")
+            c = claude_for("Lascade-Co/a")
             c["decisions_needed"] = bad
             rep = R.merge([r], c)
             self.assertFalse(rep["assessed"], bad)
             self.assertIn("Couldn't be assessed", html_of(rep))
 
     def test_valid_decision_still_shown_alongside_an_invalid_one(self):
-        c = codex_for("Lascade-Co/a")
+        c = claude_for("Lascade-Co/a")
         c["decisions_needed"] = ["Pick one", ""]
         h = html_of(R.merge([repo("a", {"Published": ["p"]})], c))
         self.assertIn("Pick one", h)
 
 
 class IconTests(unittest.TestCase):
-    def test_icon_map_wins_and_codex_emoji_is_ignored(self):
+    def test_icon_map_wins_and_claude_emoji_is_ignored(self):
         r = repo("a", {"Published": ["p"]})
-        rep = R.merge([r], codex_for("Lascade-Co/a"), icons={"Lascade-Co/a": "🤖"})
-        self.assertEqual(rep["repos"][0]["emoji"], "🤖")      # codex_for says 🌳
+        rep = R.merge([r], claude_for("Lascade-Co/a"), icons={"Lascade-Co/a": "🤖"})
+        self.assertEqual(rep["repos"][0]["emoji"], "🤖")      # claude_for says 🌳
 
-    def test_unknown_repo_gets_default_even_if_codex_picked_one(self):
+    def test_unknown_repo_gets_default_even_if_claude_picked_one(self):
         r = repo("a", {"Published": ["p"]})
         for icons in (None, {}, {"Lascade-Co/other": "🤖"}):
-            rep = R.merge([r], codex_for("Lascade-Co/a"), icons=icons)
+            rep = R.merge([r], claude_for("Lascade-Co/a"), icons=icons)
             self.assertEqual(rep["repos"][0]["emoji"], "📦")
 
     def test_load_icons_survives_a_bad_edit(self):
@@ -284,7 +284,7 @@ class SoftLengthTests(unittest.TestCase):
         text = " ".join(["word"] * n_words)
         r = repo("a", {"Published": ["src"]})
         with captured_log() as logged:
-            rep = R.merge([r], codex_for("Lascade-Co/a", done=[{"text": text, "from": ["R0.P1"]}]))
+            rep = R.merge([r], claude_for("Lascade-Co/a", done=[{"text": text, "from": ["R0.P1"]}]))
         group = rep["repos"][0]["groups"][0]
         self.assertEqual([b["text"] for b in group["bullets"]], [text])  # never altered
         self.assertEqual(group["also"], [])          # coverage unchanged
@@ -304,7 +304,7 @@ class SoftLengthTests(unittest.TestCase):
         secret = " ".join(["confidential"] * 25)
         with captured_log() as logged:
             R.merge([repo("a", {"Published": [secret]})],
-                    codex_for("Lascade-Co/a", done=[{"text": secret, "from": ["R0.P1"]}]))
+                    claude_for("Lascade-Co/a", done=[{"text": secret, "from": ["R0.P1"]}]))
             R.merge([repo("a", {"Published": [secret]})], {}, assessed=False)
             R.merge([repo("a", {"Weird": [secret]})], {}, assessed=False)
         long = [m for m in logged if m.startswith("Long bullet")]
@@ -407,7 +407,7 @@ class PeopleTests(unittest.TestCase):
         r = multi_repo("a", [dev("Rohit T P", "rohittp0", {"Published": ["x", "y"]}, 3),
                              dev("rohittp0", "rohittp0", {"Published": ["z"]}, 2)])
         active = R.apply_people([r], CHECKED_IN)
-        rep = R.merge(active, codex_for("Lascade-Co/a", done=[{"text": "T", "from": ["R0.P1"]}]))
+        rep = R.merge(active, claude_for("Lascade-Co/a", done=[{"text": "T", "from": ["R0.P1"]}]))
         self.assertEqual(rep["repos"][0]["commit_count"], 5)
         self.assertEqual([(c["name"], c["commits"], c["key"]) for c in rep["repos"][0]["contributors"]],
                          [("Rohit", 5, "rohit")])
@@ -419,7 +419,7 @@ class PeopleTests(unittest.TestCase):
 
     def test_full_pipeline_with_interleaved_aliases_attributes_each_bullet_correctly(self):
         # Rohit, Varsha, Rohit again: merging the two Rohit entries renumbers ids, so the
-        # payload Codex cites from must be built AFTER the people pass or bullets go to the wrong person.
+        # payload Claude cites from must be built AFTER the people pass or bullets go to the wrong person.
         r = multi_repo("a", [dev("Rohit T P", "rohittp0", {"Published": ["r1"]}, 2),
                              dev("Varsha Shaheen", "VarshaShaheen", {"Published": ["v1"]}, 1),
                              dev("rohittp0", "rohittp0", {"Published": ["r2"]}, 1)])
@@ -448,9 +448,9 @@ class BotTests(unittest.TestCase):
         r = multi_repo("a", [dev("Ada Lovelace", "ada", {"Published": ["human work"]}, 2),
                              dev("Claude", "claude", {"Published": ["bot work", "bot extra"]}, 7)])
         active = R.apply_people([r], CHECKED_IN)
-        codex = codex_for("Lascade-Co/a", done=[{"text": "Bot did it", "from": ["R0.P2"]},
+        claude = claude_for("Lascade-Co/a", done=[{"text": "Bot did it", "from": ["R0.P2"]},
                                                 {"text": "Both did it", "from": ["R0.P1", "R0.P2"]}])
-        rep = R.merge(active, codex)
+        rep = R.merge(active, claude)
         h = html_of(rep)
         rp = rep["repos"][0]
         self.assertIn("Bot did it", h)
@@ -500,7 +500,7 @@ class NameTests(unittest.TestCase):
 
     def test_unmapped_person_gets_a_grey_tag_with_their_name(self):
         r = multi_repo("a", [dev("Ada Lovelace", "ada", {"Published": ["x"]})])
-        rep = R.merge(R.apply_people([r], CHECKED_IN), codex_for("Lascade-Co/a", done=[{"text": "T", "from": ["R0.P1"]}]))
+        rep = R.merge(R.apply_people([r], CHECKED_IN), claude_for("Lascade-Co/a", done=[{"text": "T", "from": ["R0.P1"]}]))
         h = html_of(rep, pins=E.load_pins(PEOPLE_FILE))
         self.assertGreaterEqual(len(tag_classes(h, "Ada")), 2)
         self.assertEqual(set(tag_classes(h, "Ada")), {"tag-grey"})
@@ -626,7 +626,7 @@ class AuthorTests(unittest.TestCase):
     def test_bullet_authors_come_from_cited_ids_deduped_in_order(self):
         r = multi_repo("a", [dev("Ada Lovelace", "ada", {"Published": ["x", "y"]}),
                              dev("Bob Ray", "bob", {"Published": ["z"]})])
-        c = codex_for("Lascade-Co/a", done=[
+        c = claude_for("Lascade-Co/a", done=[
             {"text": "Both", "from": ["R0.P3", "R0.P1", "R0.P2"]},
             {"text": "Bob only", "from": ["R0.P3", "R9.P9"]},
             {"text": "Nobody", "from": ["R9.P9"]}])
@@ -639,7 +639,7 @@ class AuthorTests(unittest.TestCase):
     def test_first_name_collision_uses_full_names(self):
         r = multi_repo("a", [dev("Alex Smith", "as", {"Published": ["x"]}, 3),
                              dev("Alex Jones", "aj", {"Published": ["y"]}, 2)])
-        c = codex_for("Lascade-Co/a", done=[{"text": "T", "from": ["R0.P1", "R0.P2"]}])
+        c = claude_for("Lascade-Co/a", done=[{"text": "T", "from": ["R0.P1", "R0.P2"]}])
         rep = R.merge([r], c)["repos"][0]
         authors = rep["groups"][0]["bullets"][0]["authors"]
         self.assertEqual([a["name"] for a in authors], ["Alex Smith", "Alex Jones"])
@@ -648,7 +648,7 @@ class AuthorTests(unittest.TestCase):
 
     def test_names_render_escaped_as_tags(self):
         r = multi_repo("a", [dev("<b>Eve", "eve", {"Published": ["x"]})])
-        c = codex_for("Lascade-Co/a", done=[{"text": "T", "from": ["R0.P1"]}])
+        c = claude_for("Lascade-Co/a", done=[{"text": "T", "from": ["R0.P1"]}])
         h = html_of(R.merge([r], c))
         self.assertIn("&lt;b&gt;Eve", h)
         self.assertNotIn("<b>Eve", h)
@@ -656,10 +656,10 @@ class AuthorTests(unittest.TestCase):
 
 
 class ColourTests(unittest.TestCase):
-    def rendered(self, devs, codex_done=None, name="a", pins=None):
+    def rendered(self, devs, claude_done=None, name="a", pins=None):
         r = multi_repo(name, devs)
         ids = [f"R0.P{i + 1}" for i in range(sum(len(d["bullets"].get("Published", [])) for d in devs))]
-        c = codex_for(f"Lascade-Co/{name}", done=codex_done or [{"text": "T", "from": ids[:1]}])
+        c = claude_for(f"Lascade-Co/{name}", done=claude_done or [{"text": "T", "from": ids[:1]}])
         return html_of(R.merge([r], c), pins=pins)
 
     def test_unpinned_people_are_grey_never_hashed(self):
@@ -699,13 +699,13 @@ class ColourTests(unittest.TestCase):
 
     def test_bullet_authors_dedupe_by_identity_not_display_name(self):
         r = multi_repo("a", [dev("Sam Lee", "s1", {"Published": ["x"]}), dev("Sam Lee", "s2", {"Published": ["y"]})])
-        c = codex_for("Lascade-Co/a", done=[{"text": "T", "from": ["R0.P1", "R0.P2"]}])
+        c = claude_for("Lascade-Co/a", done=[{"text": "T", "from": ["R0.P1", "R0.P2"]}])
         authors = R.merge([r], c)["repos"][0]["groups"][0]["bullets"][0]["authors"]
         self.assertEqual(len(authors), 2)
 
     def test_one_person_has_one_colour_in_bullets_also_items_and_count_line(self):
         devs = [dev("Ada Lovelace", "ada", {"Published": ["x", "y"]}, 2)]
-        h = self.rendered(devs, codex_done=[{"text": "T", "from": ["R0.P1"]}], pins={"ada lovelace": 4})
+        h = self.rendered(devs, claude_done=[{"text": "T", "from": ["R0.P1"]}], pins={"ada lovelace": 4})
         self.assertIn("Also (technical detail)", h)
         classes = tag_classes(h, "Ada")
         self.assertGreaterEqual(len(classes), 3)                                  # bullet, also, count line
@@ -800,7 +800,7 @@ class DesignTests(unittest.TestCase):
 
     def test_status_bullets_carry_their_marker_and_colour(self):
         r = repo("a", {"Published": ["p"], "Testing": ["t"], "Work in Progress": ["w"]})
-        c = codex_for("Lascade-Co/a", done=[{"text": "D", "from": ["R0.P1"]}],
+        c = claude_for("Lascade-Co/a", done=[{"text": "D", "from": ["R0.P1"]}],
                       testing=[{"text": "T", "from": ["R0.T1"]}],
                       in_progress=[{"text": "W", "from": ["R0.W1"]}])
         h = html_of(R.merge([r], c))
@@ -813,7 +813,7 @@ class DesignTests(unittest.TestCase):
 
     def test_also_items_keep_the_group_marker_but_are_muted(self):
         r = repo("a", {"Testing": ["only source"]})
-        h = html_of(R.merge([r], codex_for("Lascade-Co/a")))                # nothing cited: shown as "Also"
+        h = html_of(R.merge([r], claude_for("Lascade-Co/a")))                # nothing cited: shown as "Also"
         self.assertRegex(h, r'color:#666666;[^"]*" class="text-muted"><li[^>]*><span aria-hidden="true"'
                             r'[^>]*class="status-testing">◐</span>only source')
 
@@ -855,7 +855,7 @@ class DesignTests(unittest.TestCase):
 
     def test_repeated_styles_live_on_the_list_not_on_every_item(self):
         r = repo("a", {"Published": ["p", "q"]})
-        h = html_of(R.merge([r], codex_for("Lascade-Co/a", done=[{"text": "D", "from": ["R0.P1"]}])),
+        h = html_of(R.merge([r], claude_for("Lascade-Co/a", done=[{"text": "D", "from": ["R0.P1"]}])),
                     pins={"ada lovelace": 0})
         lists = re.findall(r'<ul role="list" style="([^"]*)" class="(text-main|text-muted)">', h)
         self.assertEqual([c for _, c in lists], ["text-main", "text-muted"])      # bullets, then the muted "Also" list
@@ -908,9 +908,9 @@ def heaviest_day():
                        "prs": [{"number": n, "title": "t", "author": "x"} for n in range(ri % 4)],
                        "branches": ["feature/x"], "version": f"v4.0.{ri}" if ri % 2 else None})
     assert item == 63
-    codex = {"headline": "A busy day across every product.", "decisions_needed": [], "repos": []}
+    claude = {"headline": "A busy day across every product.", "decisions_needed": [], "repos": []}
     seen = 0
-    for ri, r in enumerate(R.build_codex_payload("2026-09-18", active)["repos"]):
+    for ri, r in enumerate(R.build_claude_payload("2026-09-18", active)["repos"]):
         entry = {"repo": r["repo"], "display_name": f"Product number {ri:02d}"}
         for label, key in (("Done", "done"), ("Testing", "testing"), ("In progress", "in_progress")):
             entry[key] = []
@@ -919,8 +919,8 @@ def heaviest_day():
                 if seen % 3:                        # cite two of every three; the third becomes "Also"
                     entry[key].append({"text": f"Improved the {w['text'].split()[3]} experience for travellers",
                                        "from": [w["id"]]})
-        codex["repos"].append(entry)
-    return active, codex
+        claude["repos"].append(entry)
+    return active, claude
 
 
 class ScaleTests(unittest.TestCase):
@@ -932,8 +932,8 @@ class ScaleTests(unittest.TestCase):
         the content is hidden, not deleted, and the renderer's ::warning:: flags it. Splitting
         into two emails is a follow-up only if that warning ever fires.
         """
-        active, codex = heaviest_day()
-        rep = R.merge(active, codex)
+        active, claude = heaviest_day()
+        rep = R.merge(active, claude)
         self.assertEqual(sum(len(g["bullets"]) + len(g["also"]) for r in rep["repos"] for g in r["groups"]), 63)
         self.assertEqual(len({c["key"] for r in rep["repos"] for c in r["contributors"]}), 18)
         h = html_of(rep, pins={f"person{n:02d} tester": n for n in range(8)})

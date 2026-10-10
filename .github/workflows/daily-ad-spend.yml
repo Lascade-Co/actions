@@ -18,7 +18,7 @@ on:
         type: boolean
         default: false
       break_commentary:
-        description: Test only, corrupt the Codex auth so commentary must be skipped
+        description: Test only, disable AI commentary to exercise the report fallback
         type: boolean
         default: false
   schedule:
@@ -37,7 +37,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  RAW: https://raw.githubusercontent.com/Lascade-Co/actions/main
+  RAW: https://raw.githubusercontent.com/Lascade-Co/actions/${{ github.sha }}
 
 jobs:
   gate:
@@ -115,19 +115,19 @@ jobs:
           mkdir -p data && curl -fsSL --retry 3 --retry-delay 2 -o data/adspend_apps.json "$RAW/data/adspend_apps.json"
           chmod +x send_resend.sh
 
-      - name: Restore Codex auth.json
+      - name: Install Claude API SDK
         continue-on-error: true
-        env:
-          CODEX_AUTH: ${{ inputs.break_commentary && 'garbage' || secrets.CODEX_AUTH_JSON_BASE_64 }}
+        shell: bash
         run: |
-          mkdir -p "$HOME/.codex"
-          printf '%s' "$CODEX_AUTH" | tr -d '\n\r ' | base64 -d > "$HOME/.codex/auth.json"
-
-      - name: Install codex
-        continue-on-error: true
-        run: npm install -g @openai/codex@0.160.1
+          curl -fsSL --retry 3 --retry-delay 2 --max-time 60 -o claude-requirements.txt.tmp "$RAW/scripts/ai/requirements.txt"
+          test -s claude-requirements.txt.tmp && mv claude-requirements.txt.tmp claude-requirements.txt
+          curl -fsSL --retry 3 --retry-delay 2 --max-time 60 -o claude_api.py.tmp "$RAW/scripts/ai/claude_api.py"
+          test -s claude_api.py.tmp && mv claude_api.py.tmp claude_api.py
+          pip install --quiet -r claude-requirements.txt
 
       - name: Build the emails
+        env:
+          CLAUDE_API_KEY: ${{ secrets.CLAUDE_API_KEY }}
         run: python3 adspend_main.py --ad-date "${{ steps.dates.outputs.ad_date }}" --variants "$VARIANTS" --out out --scratch scratch ${{ inputs.reconcile && '--reconcile' || '' }} ${{ inputs.break_commentary && '--break-commentary' || '' }}
 
       - name: Send variant A

@@ -8,20 +8,20 @@ Runs in the `email` job. Steps:
   2. People pass: resolve git identities through data/catchup_people.json. One
      person who commits under several names becomes one developer, and bots
      (Claude, Deploy) keep their work in the email but lose their author tag.
-     This runs BEFORE the Codex payload is built, because merging duplicate
-     entries renumbers the work ids Codex cites.
-  3. Codex pass: hand the active repos to Codex with CATCHUP_REPORT.md, which
+     This runs BEFORE the Claude payload is built, because merging duplicate
+     entries renumbers the work ids Claude cites.
+  3. Claude pass: hand the active repos to Claude with CATCHUP_REPORT.md, which
      returns PROSE ONLY — a headline, a display name per repo, plain-English
      bullets per status group that each cite the source bullet ids they cover,
-     and decisions_needed (report-codex.json). Any source bullet no Codex bullet
+     and decisions_needed (report-claude.json). Any source bullet no Claude bullet
      cites is shown verbatim, so nothing is silently dropped. Each repo's emoji
-     comes from the icons file (data/catchup_icons.json), never from Codex.
+     comes from the icons file (data/catchup_icons.json), never from Claude.
   4. Build the report: the per-repo Published/Testing/Work-in-Progress sections
      come straight from the deterministic status split upstream; all numbers
      (commit counts, contributor list, PR count, version, branches, org stats)
-     are computed here, and bots are left out of the counts. Codex is trusted only for the prose in step 2.
+     are computed here, and bots are left out of the counts. Claude is trusted only for the prose in step 2.
 
-If the Codex pass fails, the prose is dropped (generic headline, repo-name display
+If the Claude pass fails, the prose is dropped (generic headline, repo-name display
 names, assessed=false) but the sections and numbers are intact, so the email still sends.
 
 Usage:
@@ -33,15 +33,17 @@ Usage:
         --people catchup_people.json \
         --out report.json
 
-Requires: the `codex` CLI on PATH (Codex auth pre-restored).
+Requires: the `anthropic` SDK and CLAUDE_API_KEY.
 """
 
 import argparse
 import json
 import os
-import subprocess
 import sys
 import tempfile
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "ai"))
+from claude_api import ClaudeError, generate_json
 
 DEFAULT_EMOJI = "📦"
 # Soft length target for a bullet. Longer bullets are logged, never cut: the
@@ -56,27 +58,19 @@ def log(msg):
     print(msg, file=sys.stderr)
 
 
-def run_codex(prompt_template_path, payload_text, scratch, output_name):
-    """Append payload to the prompt template, run Codex, return parsed JSON."""
+def run_claude(prompt_template_path, payload_text, scratch, output_name):
+    """Append the payload, request JSON from Claude, and retain the local artifact."""
     with open(prompt_template_path) as fh:
-        prompt = fh.read()
-    prompt_file = os.path.join(scratch, "prompt.md")
-    with open(prompt_file, "w") as fh:
-        fh.write(prompt + "\n\n" + payload_text + "\n")
-
+        prompt = fh.read() + "\n\n" + payload_text + "\n"
+    with open(os.path.join(scratch, "prompt.md"), "w") as fh:
+        fh.write(prompt)
     out_path = os.path.join(scratch, output_name)
     if os.path.exists(out_path):
         os.remove(out_path)
-
-    with open(prompt_file) as stdin:
-        subprocess.run(
-            ["codex", "exec", "--sandbox", "workspace-write",
-             "--skip-git-repo-check", "-"],
-            stdin=stdin, cwd=scratch, check=True,
-            capture_output=True, text=True,
-        )
-    with open(out_path) as fh:
-        return json.load(fh)
+    result = generate_json(prompt, max_tokens=16384)
+    with open(out_path, "w") as fh:
+        json.dump(result, fh, ensure_ascii=False)
+    return result
 
 
 def load_exclude(path):
@@ -186,7 +180,7 @@ def apply_people(active, people):
     summed, bullets joined per status in order. A bot is flagged `bot` (its work
     stays, its tag and counts go). Anyone else is unchanged.
 
-    Call it ONCE, before build_codex_payload(): merging renumbers the work ids.
+    Call it ONCE, before build_claude_payload(): merging renumbers the work ids.
     """
     aliases, bots = people
     out = []
@@ -293,8 +287,8 @@ def normalize_work(repo, ri):
     return work
 
 
-def build_codex_payload(date, active):
-    """What Codex needs for prose: every source bullet, with its id."""
+def build_claude_payload(date, active):
+    """What Claude needs for prose: every source bullet, with its id."""
     repos = []
     for ri, r in enumerate(active):
         work = normalize_work(r, ri)
@@ -312,9 +306,9 @@ def _text(value):
     return value.strip() if isinstance(value, str) else ""
 
 
-def _codex_repos(codex):
+def _claude_repos(claude):
     """{repo: entry}; non-dict entries, non-string ids and duplicates rejected."""
-    entries = codex.get("repos")
+    entries = claude.get("repos")
     seen, dupes, out = set(), set(), {}
     for c in (entries if isinstance(entries, list) else []):
         rid = c.get("repo") if isinstance(c, dict) else None
@@ -325,7 +319,7 @@ def _codex_repos(codex):
         seen.add(rid)
         out[rid] = c
     for rid in dupes:
-        log(f"Codex returned {rid} more than once; ignoring its prose.")
+        log(f"Claude returned {rid} more than once; ignoring its prose.")
         del out[rid]
     return out
 
@@ -343,9 +337,9 @@ def warn_if_long(text, where):
 
 
 def build_groups(work, entry, where=""):
-    """Codex bullets ({text, authors:[{name, key}]}) that cite real source ids, plus every uncovered source bullet.
+    """Claude bullets ({text, authors:[{name, key}]}) that cite real source ids, plus every uncovered source bullet.
 
-    A Codex bullet is kept only if at least one of the source ids it cites
+    A Claude bullet is kept only if at least one of the source ids it cites
     exists in that group (so invented work is dropped); source bullets that no
     kept bullet cites are returned verbatim under `also`, so nothing is silently
     lost. A group with no source work is never rendered.
@@ -364,7 +358,7 @@ def build_groups(work, entry, where=""):
             ids = {i for i in _as_list(b.get("from")) if isinstance(i, str)} & valid
             if text and ids:
                 warn_if_long(text, f"{where} {label}".strip())
-                # Authors come from the cited source items, never from Codex. Bots have no tag.
+                # Authors come from the cited source items, never from Claude. Bots have no tag.
                 cited = [w for w in source if w["id"] in ids]
                 authors = list({w["dev"]: w["who"] for w in cited if w["who"]}.values())
                 bullets.append({"text": text, "authors": authors})
@@ -377,21 +371,21 @@ def build_groups(work, entry, where=""):
     return groups
 
 
-def merge(active, codex, assessed=True, icons=None):
-    """Combine Codex prose with authoritative numbers and deterministic work.
+def merge(active, claude, assessed=True, icons=None):
+    """Combine Claude prose with authoritative numbers and deterministic work.
 
-    `icons` ({repo: emoji}) supplies each repo's emoji; Codex's is ignored.
+    `icons` ({repo: emoji}) supplies each repo's emoji; Claude's is ignored.
 
-    Codex output is validated by type: wrong-shaped JSON degrades to defaults
+    Claude output is validated by type: wrong-shaped JSON degrades to defaults
     rather than aborting, and `assessed` is only true when it returned a real
     repos list and decisions list.
     """
-    if not isinstance(codex, dict):
-        codex, assessed = {}, False
-    if not isinstance(codex.get("repos"), list) or not isinstance(
-            codex.get("decisions_needed"), list):
+    if not isinstance(claude, dict):
+        claude, assessed = {}, False
+    if not isinstance(claude.get("repos"), list) or not isinstance(
+            claude.get("decisions_needed"), list):
         assessed = False
-    by_repo = _codex_repos(codex)
+    by_repo = _claude_repos(claude)
 
     repos_out = []
     for ri, r in enumerate(active):
@@ -416,13 +410,13 @@ def merge(active, codex, assessed=True, icons=None):
             if not d.get("bot"):
                 org_contributors.add(dev_key(d))
 
-    raw_decisions = _as_list(codex.get("decisions_needed"))
+    raw_decisions = _as_list(claude.get("decisions_needed"))
     decisions_needed = [t for t in (_text(d) for d in raw_decisions) if t]
     if len(decisions_needed) != len(raw_decisions):
         assessed = False    # a blank or non-string decision is bad output, not a quiet day
 
     n = len(repos_out)
-    headline = _text(codex.get("headline"))
+    headline = _text(claude.get("headline"))
     if not assessed or not headline:
         headline = f"Activity in {n} product{'s' if n != 1 else ''} today"
 
@@ -474,21 +468,20 @@ def main():
         return
 
     # Resolve people BEFORE the payload: merging duplicates renumbers work ids, and
-    # Codex must cite the ids that merge() will see.
+    # Claude must cite the ids that merge() will see.
     active = apply_people(active, load_people(args.people))
 
     scratch = tempfile.mkdtemp(prefix="report-")
-    payload = build_codex_payload(date, active)
+    payload = build_claude_payload(date, active)
     assessed = True
     try:
-        codex = run_codex(args.report_prompt, json.dumps(payload, indent=2),
-                          scratch, "report-codex.json")
-    except (subprocess.CalledProcessError, json.JSONDecodeError,
-            FileNotFoundError) as exc:
-        log(f"Codex prose pass failed; sections/numbers stand, prose dropped: {exc}")
-        codex, assessed = {}, False
+        claude = run_claude(args.report_prompt, json.dumps(payload, indent=2),
+                          scratch, "report-claude.json")
+    except (ClaudeError, OSError, ValueError, TypeError, AttributeError) as exc:
+        log(f"Claude prose pass failed; sections/numbers stand, prose dropped: {exc}")
+        claude, assessed = {}, False
 
-    report = merge(active, codex, assessed, load_icons(args.icons))
+    report = merge(active, claude, assessed, load_icons(args.icons))
     report["date"] = date
 
     with open(args.out, "w") as fh:

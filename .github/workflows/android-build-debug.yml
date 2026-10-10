@@ -198,68 +198,57 @@ jobs:
           set -o pipefail
           curl -sSL https://raw.githubusercontent.com/Lascade-Co/actions/main/scripts/android/lint_android.py | python3 - --run-lint --base-ref ${{ steps.base.outputs.ref }} | tee lint-output.txt
 
-      - name: Loop guard — skip Codex if HEAD is already a Codex fix
+      - name: Loop guard — skip AI if HEAD is already an auto-fix
         id: loopguard
         if: steps.lint.outcome == 'failure'
         shell: bash
         run: |
           SUBJECT=$(git log -1 --pretty=%s || echo "")
-          if printf '%s' "$SUBJECT" | grep -qE '^lint: Lint fix by Codex'; then
+          if printf '%s' "$SUBJECT" | grep -qE '^lint: Lint fix by (Claude|Codex)'; then
             echo "skip=true"  >> "$GITHUB_OUTPUT"
           else
             echo "skip=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Restore Codex auth.json
-        if: steps.lint.outcome == 'failure' && steps.loopguard.outputs.skip == 'false'
-        shell: bash
-        env:
-          CODEX_AUTH_JSON_BASE_64: ${{ secrets.CODEX_AUTH_JSON_BASE_64 }}
-        run: |
-          mkdir -p "$HOME/.codex"
-          printf '%s' "$CODEX_AUTH_JSON_BASE_64" | tr -d '\n\r ' | base64 -d > "$HOME/.codex/auth.json"
-
-      - name: Install Codex CLI and Enable user namespaces for Codex sandbox
+      - name: Build Claude prompt from LINT.md (inject lint output only)
         if: steps.lint.outcome == 'failure' && steps.loopguard.outputs.skip == 'false'
         shell: bash
         run: |
-          npm install -g @openai/codex
-          
-          current_userns="$(sysctl -n kernel.unprivileged_userns_clone 2>/dev/null || true)"
-          if [ -n "$current_userns" ] && [ "$current_userns" != "1" ]; then
-            sudo sysctl -w kernel.unprivileged_userns_clone=1
-          fi
-          current_apparmor="$(sysctl -n kernel.apparmor_restrict_unprivileged_userns 2>/dev/null || true)"
-          if [ -n "$current_apparmor" ] && [ "$current_apparmor" != "0" ]; then
-            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
-          fi
-
-      - name: Build Codex prompt from LINT.md (inject lint output only)
-        if: steps.lint.outcome == 'failure' && steps.loopguard.outputs.skip == 'false'
-        shell: bash
-        run: |
-          curl -sSL https://raw.githubusercontent.com/Lascade-Co/actions/main/data/LINT.md > codex-prompt.md
+          curl -fsSL --retry 3 --retry-delay 2 --max-time 60 -o claude-prompt.md.tmp https://raw.githubusercontent.com/Lascade-Co/actions/${{ github.sha }}/data/LINT.md
+          test -s claude-prompt.md.tmp && mv claude-prompt.md.tmp claude-prompt.md
+          rm -f claude-report.md
           {
             echo ""
             echo '```'
             cat lint-output.txt
             echo '```'
-          } >> codex-prompt.md
+          } >> claude-prompt.md
 
-      - name: Run Codex to apply lint fixes
-        id: codex
+      - name: Run Claude to apply lint fixes
+        id: claude
         continue-on-error: true
         if: steps.lint.outcome == 'failure' && steps.loopguard.outputs.skip == 'false'
-        shell: bash
-        run: codex exec --sandbox workspace-write "$(cat codex-prompt.md)"
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.CLAUDE_API_KEY }}
+          github_token: ${{ github.token }}
+          allowed_bots: ${{ github.actor }}
+          prompt: |
+            Read claude-prompt.md in the checked-out source repository and apply its instructions.
+            Edit source files and write claude-report.md. Do not commit, push or comment;
+            the workflow handles those steps.
+          claude_args: >-
+            --model claude-sonnet-5-5
+            --tools Read,Edit,Write,Glob,Grep
+            --allowedTools Read,Edit,Write,Glob,Grep
 
-      - name: Read Codex report
+      - name: Read Claude report
         id: report
         if: steps.lint.outcome == 'failure' && steps.loopguard.outputs.skip == 'false'
         shell: bash
         run: |
-          if [ -f codex-report.md ]; then
-            if head -1 codex-report.md | grep -q '^Status: SUCCESS'; then
+          if [ -f claude-report.md ]; then
+            if head -1 claude-report.md | grep -q '^Status: SUCCESS'; then
               echo "ok=true" >> "$GITHUB_OUTPUT"
             else
               echo "ok=false" >> "$GITHUB_OUTPUT"
@@ -267,15 +256,15 @@ jobs:
           else
             echo "ok=false" >> "$GITHUB_OUTPUT"
             {
-              echo "Status: FAILURE: Codex did not produce a report."
+              echo "Status: FAILURE: Claude did not produce a report."
               echo ""
-              echo "openai/codex-action@v1 outcome: ${{ steps.codex.outcome }}. See workflow run logs."
-            } > codex-report.md
+              echo "anthropics/claude-code-action@v1 outcome: ${{ steps.claude.outcome }}. See workflow run logs."
+            } > claude-report.md
           fi
 
-      - name: Commit and push Codex fix to PR head
+      - name: Commit and push Claude fix to PR head
         id: push
-        if: steps.lint.outcome == 'failure' && steps.codex.outcome == 'success' && steps.report.outputs.ok == 'true'
+        if: steps.lint.outcome == 'failure' && steps.claude.outcome == 'success' && steps.report.outputs.ok == 'true'
         shell: bash
         env:
           GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
@@ -284,22 +273,22 @@ jobs:
         run: |
           git config user.name  "octopoocha"
           git config user.email "octopoocha@lascade.com"
-          rm -f lint-output.txt codex-prompt.md
-          if git diff --quiet -- ':!codex-report.md' && git diff --cached --quiet -- ':!codex-report.md'; then
-            echo "Codex returned SUCCESS but no diff. Treating as failure."
+          rm -f lint-output.txt claude-prompt.md
+          if git diff --quiet -- ':!claude-report.md' && git diff --cached --quiet -- ':!claude-report.md'; then
+            echo "Claude returned SUCCESS but no diff. Treating as failure."
             echo "pushed=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          git add -A -- ':!codex-report.md'
-          git commit -m "lint: Lint fix by Codex
+          git add -A -- ':!claude-report.md'
+          git commit -m "lint: Lint fix by Claude
 
-          Auto-generated by openai/codex-action@v1 from Lascade-Co/actions.
+          Auto-generated by anthropics/claude-code-action@v1 from Lascade-Co/actions.
           Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           REMOTE="https://x-access-token:${GITHUB_TOKEN}@github.com/${REPO}.git"
           git push "$REMOTE" "HEAD:${HEAD_BRANCH}"
           echo "pushed=true" >> "$GITHUB_OUTPUT"
 
-      - name: Update PR comment after Codex push
+      - name: Update PR comment after Claude push
         if: steps.push.outputs.pushed == 'true' && github.event.client_payload.pr && github.event.client_payload.pr != '' && github.event.client_payload.pr != 'null'
         uses: peter-evans/create-or-update-comment@v5
         with:
@@ -310,14 +299,14 @@ jobs:
           edit-mode: replace
           body: |
             <!-- central-build-debug -->
-            🤖 Codex pushed an auto-fix for the Android Lint issues. CI will retrigger on the new commit.
+            🤖 Claude pushed an auto-fix for the Android Lint issues. CI will retrigger on the new commit.
             Workflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
 
       - name: Fail job if lint still broken (no push happened)
         if: steps.lint.outcome == 'failure' && steps.push.outputs.pushed != 'true'
         shell: bash
         run: |
-          echo "Lint failed and Codex did not push a fix (skipped=${{ steps.loopguard.outputs.skip }}, codex=${{ steps.codex.outcome }}, report-ok=${{ steps.report.outputs.ok }})."
+          echo "Lint failed and Claude did not push a fix (skipped=${{ steps.loopguard.outputs.skip }}, claude=${{ steps.claude.outcome }}, report-ok=${{ steps.report.outputs.ok }})."
           exit 1
 
       - name: Build Debug APK
@@ -385,19 +374,19 @@ jobs:
             const lintOutcome  = "${{ steps.lint.outcome }}";
             const testOutcome  = "${{ steps.test.outcome }}";
             const buildOutcome = "${{ steps.build.outcome }}";
-            const codexOutcome = "${{ steps.codex.outcome }}";
+            const claudeOutcome = "${{ steps.claude.outcome }}";
 
             let reason = "Unknown step";
             let extra  = "";
             if (testOutcome === "failure") reason = "Unit tests";
             else if (buildOutcome === "failure") reason = "Build";
             else if (lintOutcome === "failure") {
-              reason = "Android Lint (Codex auto-fix did not resolve)";
-              const reportPath = "codex-report.md";
+              reason = "Android Lint (Claude auto-fix did not resolve)";
+              const reportPath = "claude-report.md";
               if (fs.existsSync(reportPath)) {
-                extra = "\n\n---\n\n**Codex report:**\n\n" + fs.readFileSync(reportPath, "utf-8");
+                extra = "\n\n---\n\n**Claude report:**\n\n" + fs.readFileSync(reportPath, "utf-8");
               } else {
-                extra = `\n\n(Codex action outcome: ${codexOutcome}; no report file produced.)`;
+                extra = `\n\n(Claude action outcome: ${claudeOutcome}; no report file produced.)`;
               }
             }
 

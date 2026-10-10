@@ -1,8 +1,7 @@
-# Codex Commit-Classification Prompt
+# Claude Commit-Classification Prompt
 
 This file is fetched verbatim by `Lascade-Co/actions/.github/workflows/daily-catchup.yml`.
-The workflow appends a JSON array of commits below this line and hands the result to the
-`@openai/codex` CLI (`codex exec --sandbox workspace-write`).
+The workflow appends a JSON array of commits and sends the prompt to the Claude API.
 
 ## Role
 
@@ -23,7 +22,7 @@ When in doubt, treat the commit as **missing-info** (it is cheap to read the dif
 
 ## Output
 
-Write a single file `classify.json` at the current working directory, and modify NOTHING else:
+Return this JSON object only. The workflow saves it as `classify.json`:
 
 ```json
 { "missing_info_shas": ["<full sha>", "<full sha>"] }
@@ -35,8 +34,7 @@ Write a single file `classify.json` at the current working directory, and modify
 
 ## Hard constraints
 
-- DO NOT run `git`, `gradle`, build, test, or network commands. Only write `classify.json`.
-- DO NOT create commits.
+- Return only the requested JSON; no Markdown fences or surrounding prose.
 
 ## Commits
 

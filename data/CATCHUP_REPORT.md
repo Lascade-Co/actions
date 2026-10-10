@@ -1,8 +1,7 @@
-# Codex Daily-Report Prompt
+# Claude Daily-Report Prompt
 
 This file is fetched verbatim by `Lascade-Co/actions/.github/workflows/daily-catchup.yml`.
-The workflow appends a JSON payload below this line and hands the result to the
-`@openai/codex` CLI (`codex exec --sandbox workspace-write`).
+The workflow appends a JSON payload and sends the prompt to the Claude API.
 
 ## Role
 
@@ -46,9 +45,9 @@ progress (`R0.P1` is the first Done item of the first repo).
 
 ## Output
 
-Write a single file `report-codex.json` at the current working directory, and modify
-NOTHING else. Echo each repo's `repo` string back exactly so it can be matched, once per
-repo. Output valid JSON only — no markdown, no code fences, no trailing commas:
+Return one JSON object only. The workflow saves it as `report-claude.json`. Echo each
+repo's `repo` string back exactly so it can be matched, once per repo. Output valid JSON
+only — no markdown, no code fences, no trailing commas:
 
 ```json
 {
@@ -104,8 +103,7 @@ repo. Output valid JSON only — no markdown, no code fences, no trailing commas
 - NEVER include personally identifiable information or real customer data.
 - Do NOT emit sections, counts, `commit_count`, `version`, `branches`, or contributor lists
   — those are built deterministically after you run. Stick to the fields above.
-- DO NOT run `git`, build, test, or network commands. Only write `report-codex.json`.
-- DO NOT create commits.
+- Return only the requested JSON; no Markdown fences or surrounding prose.
 
 ## Payload
 

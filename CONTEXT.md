@@ -6,7 +6,7 @@ The shared vocabulary for this repo's pipelines. Five have enough domain languag
 ## Language — Daily Catchup
 
 The org-wide daily engineering report pipeline (`.github/workflows/daily-catchup.yml`):
-discover active repos → summarise each with Codex → merge into one daily file → commit it
+discover active repos → summarise each with Claude → merge into one daily file → commit it
 to the `catchup` repo and email a styled report.
 
 **Catchup**:
@@ -20,7 +20,7 @@ and enrichment. The single source the commit and email steps both consume.
 _Avoid_: report (that's the email), summary (that's per-repo).
 
 **Per-repo summary**:
-One repo's `summary-*.json` artifact: developers with Codex bullets plus enrichment.
+One repo's `summary-*.json` artifact: developers with Claude bullets plus enrichment.
 Produced by the `summarize` matrix job.
 
 **Enrichment**:
@@ -29,7 +29,7 @@ the in-window release **version** tag, and the repo's **tags**. All best-effort.
 
 **Status**:
 A commit's delivery state, decided deterministically from branch/PR state in the per-repo
-step (never by Codex): **Published** (reachable from the default branch), **Testing** (on a
+step (never by Claude): **Published** (reachable from the default branch), **Testing** (on a
 branch with an open PR), **Work in Progress** (on a branch with no PR). Bullets are grouped
 by status, and these are the email's section headings.
 _Avoid_: Shipped, In Progress (earlier freeform names — superseded by these three)._
@@ -45,16 +45,16 @@ A repo with non-bot commits in the look-back window — the only repos that get 
 appear in the daily file. (There is no "inactive" list in the email.)
 
 **Report JSON**:
-The email's intermediate `report.json` — Codex prose (headline, Needs you, display names, one
+The email's intermediate `report.json` — Claude prose (headline, Needs you, display names, one
 cited bullet per work item) merged with authoritative numbers, the deterministic **status**
 sections, the work no bullet cites (shown verbatim as "Also"), each product's facts line
 (version, merged PRs), and the icons and author tags from the data files
 (`catchup_icons.json`, `catchup_people.json`). The renderer turns it into the HTML email.
 
 **Authoritative**:
-A value not trusted from Codex — computed from git/GitHub (commit counts, contributor list,
+A value not trusted from Claude — computed from git/GitHub (commit counts, contributor list,
 PR count, version, branches, stats) or derived deterministically (the **status** split).
-Codex supplies prose only (headline, Needs you, display names, bullets).
+Claude supplies prose only (headline, Needs you, display names, bullets).
 
 ## Relationships — Daily Catchup
 
@@ -374,7 +374,7 @@ A workflow in this repo that does the work, invoked by `repository_dispatch` fro
 > `data-placeholder` in served HTML. So the pipeline puts them in and the audit takes them out, and
 > the only person who can move it between those two states is the **editor**."
 
-> **Dev:** "Codex linked to /hub/best-travel-routes and that page doesn't exist. Why didn't it just
+> **Dev:** "Claude linked to /hub/best-travel-routes and that page doesn't exist. Why didn't it just
 > pick a real one?"
 > **Maintainer:** "It invented a plausible URL, which is the failure this pipeline expects. Every
 > **contextual internal link** has to match a **link candidate** verbatim or validation rejects it and

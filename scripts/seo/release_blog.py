@@ -24,7 +24,7 @@ from release_blog_cms import (
     write_draft,
 )
 from release_blog_digest import build_digest, marketing_version_from_tag, previous_tag
-from release_blog_draft import build_prompt, load_prompt, parse_output, run_codex
+from release_blog_draft import build_prompt, load_prompt, parse_output, run_claude
 from seo_model import SEVERITY_ERROR, SEVERITY_WARN, load_site_config, resolve_site_for_repo
 
 
@@ -55,7 +55,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--notes-text", help="release notes inline, for tests and local runs")
     parser.add_argument("--diff-file", help="skip git and use this saved patch")
     parser.add_argument("--candidates-file", help="skip the CMS and use this link-candidate JSON")
-    parser.add_argument("--html", help="skip Codex and validate this draft fragment")
+    parser.add_argument("--html", help="skip Claude and validate this draft fragment")
     parser.add_argument("--meta", help="blog.json to use with --html")
     parser.add_argument("--no-retry", action="store_true")
     parser.add_argument("--ignore-marker", action="store_true")
@@ -121,7 +121,7 @@ def _write_text(path: Path, text: str) -> None:
     path.write_text(text, encoding="utf-8")
 
 
-def _run(argv=None, *, http=None, run=None) -> int:
+def _run(argv=None, *, http=None, run=None, generate=None) -> int:
     args = build_parser().parse_args(argv)
     if bool(args.html) != bool(args.meta):
         raise ValueError("--html and --meta must be supplied together")
@@ -208,21 +208,22 @@ def _run(argv=None, *, http=None, run=None) -> int:
                 marker=marker,
                 digest=digest,
                 candidates=candidates,
-                out_dir=str(out.resolve()),
                 previous=previous_html,
                 findings=previous_findings,
             )
             name = "prompt.md" if index == 0 else "prompt-retry.md"
             _write_text(out / name, prompt)
-            ok, detail = run_codex(
+            ok, detail = run_claude(
                 prompt,
                 str(out),
-                run=run,
+                generate=generate,
                 status=lambda message, attempt=index + 1: log(f"attempt {attempt}: {message}"),
             )
             log(f"attempt {index + 1}: {detail}")
             if not ok:
                 notes.append(detail)
+                if detail == "Claude API: invalid-json" and index + 1 < attempt_limit:
+                    continue
                 break
             meta, html, error = parse_output(str(out))
             if error:
@@ -286,10 +287,10 @@ def _run(argv=None, *, http=None, run=None) -> int:
     return 0
 
 
-def main(argv=None, *, http=None, run=None) -> int:
+def main(argv=None, *, http=None, run=None, generate=None) -> int:
     """Run the pipeline and convert every failure into an exit-zero skip."""
     try:
-        return _run(argv, http=http, run=run)
+        return _run(argv, http=http, run=run, generate=generate)
     except SystemExit as exc:
         # ``--help`` and any argparse-controlled exit remain non-blocking.
         if exc.code not in (0, None):

@@ -1,6 +1,6 @@
-"""Summarise one repo's last-24h developer activity with Codex.
+"""Summarise one repo's last-24h developer activity with Claude.
 
-Run inside a matrix job AFTER Codex auth + sandbox are set up. For a single
+Run inside a matrix job with CLAUDE_API_KEY available. For a single
 repo it:
 
   1. Shallow-clones every branch within the look-back window.
@@ -8,10 +8,10 @@ repo it:
   3. Classifies each commit's delivery status DETERMINISTICALLY from branch/PR
      state: on the default branch -> Published; on a branch with an open PR ->
      Testing; on a branch with no PR -> Work in Progress.
-  4. Codex pass 1: classifies each commit message as descriptive or
+  4. Claude pass 1: classifies each commit message as descriptive or
      missing-info (writes classify.json).
   5. Pulls the git diff only for missing-info commits.
-  6. Codex pass 2: writes emoji bullets per developer, grouped by the status
+  6. Claude pass 2: writes emoji bullets per developer, grouped by the status
      from step 3 (repo-summary.json).
   7. Resolves each author's GitHub login and writes the per-repo artifact.
   8. Enriches with merged PRs, active branches, and the in-window version tag.
@@ -23,7 +23,7 @@ The published schema:
                              "Work in Progress": [str]}}],
      prs: [{number, title, author}], branches: [str], version: str|null}
 `bullets` keys only the statuses that have work. commit_count is authoritative
-from git and the status split is deterministic — Codex is trusted only for the
+from git and the status split is deterministic — Claude is trusted only for the
 bullet prose. Enrichment fields are best-effort: a lookup failure degrades to
 [] / null without aborting.
 
@@ -34,7 +34,7 @@ Usage:
         --summary-prompt CATCHUP_SUMMARY.md \
         --out summary-Lascade-Co__example.json
 
-Requires: `git`, `gh`, and the `codex` CLI on PATH (Codex auth pre-restored).
+Requires: `git`, `gh`, and the `anthropic` SDK and CLAUDE_API_KEY.
 """
 
 import argparse
@@ -43,6 +43,9 @@ import os
 import subprocess
 import sys
 import tempfile
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "ai"))
+from claude_api import ClaudeError, generate_json
 from datetime import datetime, timedelta, timezone
 
 FIELD = "\x1f"   # unit separator between log fields
@@ -52,8 +55,8 @@ BOT_NAMES = {"dependabot", "dependabot[bot]", "github-actions",
              "github-actions[bot]", "web-flow"}
 
 MAX_DIFF_CHARS = 15000      # cap a single commit diff
-MAX_TOTAL_DIFF_CHARS = 120000  # cap the combined diff payload to Codex
-MAX_COMMITS_PER_DEV = 50    # cap commits sent to Codex (count stays accurate)
+MAX_TOTAL_DIFF_CHARS = 120000  # cap the combined diff payload to Claude
+MAX_COMMITS_PER_DEV = 50    # cap commits sent to Claude (count stays accurate)
 
 # Delivery status of a commit, decided deterministically from branch/PR state.
 STATUS_PUBLISHED = "Published"          # reachable from the default branch
@@ -120,27 +123,19 @@ def collect_commits(workdir, hours):
     return commits
 
 
-def run_codex(prompt_template_path, payload_text, scratch, output_name):
-    """Append payload to the prompt template, run Codex, return parsed JSON."""
+def run_claude(prompt_template_path, payload_text, scratch, output_name):
+    """Append the payload, request JSON from Claude, and retain the local artifact."""
     with open(prompt_template_path) as fh:
-        prompt = fh.read()
-    prompt_file = os.path.join(scratch, "prompt.md")
-    with open(prompt_file, "w") as fh:
-        fh.write(prompt + "\n\n" + payload_text + "\n")
-
+        prompt = fh.read() + "\n\n" + payload_text + "\n"
+    with open(os.path.join(scratch, "prompt.md"), "w") as fh:
+        fh.write(prompt)
     out_path = os.path.join(scratch, output_name)
     if os.path.exists(out_path):
         os.remove(out_path)
-
-    with open(prompt_file) as stdin:
-        subprocess.run(
-            ["codex", "exec", "--sandbox", "workspace-write",
-             "--skip-git-repo-check", "-"],
-            stdin=stdin, cwd=scratch, check=True,
-            capture_output=True, text=True,
-        )
-    with open(out_path) as fh:
-        return json.load(fh)
+    result = generate_json(prompt, max_tokens=16384)
+    with open(out_path, "w") as fh:
+        json.dump(result, fh, ensure_ascii=False)
+    return result
 
 
 def resolve_logins(repo, devs):
@@ -267,7 +262,7 @@ def build_summary_payload(repo, devs, missing_shas, status_by_sha, workdir):
 
 
 def fallback_bullets(dev, status_by_sha):
-    """Degraded status-grouped bullets from commit subjects (no Codex)."""
+    """Degraded status-grouped bullets from commit subjects (no Claude)."""
     grouped, seen = {}, set()
     for c in dev["commits"]:
         subj = c["subject"].strip()
@@ -389,7 +384,7 @@ def main():
     devs = merge_by_login(devs)
 
     # Deterministic delivery status per commit (Published/Testing/WIP) from
-    # branch + open-PR state — decided here, never by Codex.
+    # branch + open-PR state — decided here, never by Claude.
     default_branch = default_branch_name(workdir)
     status_by_sha = classify_status(workdir, args.repo, args.hours,
                                      default_branch, [c["sha"] for c in commits])
@@ -401,12 +396,11 @@ def main():
     ], indent=2)
     missing = set()
     try:
-        result = run_codex(args.classify_prompt, classify_input, scratch,
+        result = run_claude(args.classify_prompt, classify_input, scratch,
                            "classify.json")
         missing = set(result.get("missing_info_shas", []))
         log(f"{args.repo}: {len(missing)} commit(s) flagged missing-info")
-    except (subprocess.CalledProcessError, json.JSONDecodeError,
-            FileNotFoundError) as exc:
+    except (ClaudeError, OSError, ValueError, TypeError, AttributeError) as exc:
         log(f"classify pass failed, treating all commits as missing-info: {exc}")
         missing = {c["sha"] for c in commits}
 
@@ -415,14 +409,14 @@ def main():
                                     workdir)
     developers = []
     try:
-        result = run_codex(args.summary_prompt, json.dumps(payload, indent=2),
+        result = run_claude(args.summary_prompt, json.dumps(payload, indent=2),
                            scratch, "repo-summary.json")
         bullets_by_key = {}
         for d in result.get("developers", []):
             key = d.get("login") or d.get("name")
             b = d.get("bullets")
             bullets_by_key[key] = b if isinstance(b, dict) else None
-        # Rebuild from authoritative dev list; trust Codex only for bullets.
+        # Rebuild from authoritative dev list; trust Claude only for bullets.
         for dev in devs:
             key = dev.get("login") or dev["name"]
             developers.append({
@@ -432,8 +426,7 @@ def main():
                 "bullets": bullets_by_key.get(key)
                 or fallback_bullets(dev, status_by_sha),
             })
-    except (subprocess.CalledProcessError, json.JSONDecodeError,
-            FileNotFoundError) as exc:
+    except (ClaudeError, OSError, ValueError, TypeError, AttributeError) as exc:
         log(f"summary pass failed, using fallback bullets: {exc}")
         for dev in devs:
             developers.append({

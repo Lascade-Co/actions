@@ -1,0 +1,42 @@
+name: Test AI workflows
+
+on:
+  push:
+    paths: &ai_paths
+      - scripts/ai/**
+      - scripts/android/release_notes.py
+      - scripts/android/test_release_notes.py
+      - scripts/adspend/**
+      - scripts/catchup/**
+      - scripts/seo/**
+      - data/CATCHUP_*.md
+      - data/RELEASE_*.md
+      - data/LINT.md
+      - .github/workflows/test-ai.yml
+      - .github/workflows/android-build-debug.yml
+      - .github/workflows/android-build-release.yml
+      - .github/workflows/daily-ad-spend.yml
+      - .github/workflows/daily-catchup.yml
+      - .github/workflows/release-blog.yml
+  pull_request:
+    paths: *ai_paths
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+      - name: Install test dependencies
+        run: >-
+          pip install -r scripts/ai/requirements.txt pytest==9.1.1 requests==2.34.2
+          beautifulsoup4==4.15.0 lxml==6.1.1 pyjwt==2.13.0 cryptography==50.0.0
+      - name: Test API integration and existing report behavior without network or secrets
+        run: >-
+          python -m pytest -q scripts/ai scripts/android/test_release_notes.py
+          scripts/adspend scripts/catchup scripts/seo

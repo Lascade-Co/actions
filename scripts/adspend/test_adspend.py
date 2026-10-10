@@ -298,7 +298,7 @@ def test_commentary_failure_and_cache(tmp_path=None):
 
     def crash(*a, **k):
         calls.append(1)
-        raise FileNotFoundError("codex")
+        raise FileNotFoundError("claude")
     assert c.commentary(full_model(), "A", d_, run=crash) == []
     assert c.commentary(full_model(), "A", d_, run=crash) == []      # a failure is never cached
     assert len(calls) == 2
@@ -346,30 +346,27 @@ def _logged(fn):
 
 
 def test_commentary_skip_reasons_are_one_safe_word():
-    import tempfile, subprocess, json as _json
+    import tempfile
+    from claude_api import ClaudeError
     secret = "Spend $491 Travel Animator"
 
     def timeout(*a, **k):
-        raise subprocess.TimeoutExpired("codex", 90)
+        raise ClaudeError("timeout")
 
     def junk(*a, **k):
         return "not json " + secret
 
-    def auth(prompt, scratch):
-        with open(os.path.join(scratch, "codex.log"), "w") as fh:
-            fh.write("ERROR: refresh token was already used. Please log out and sign in again. " + secret)
-        raise subprocess.CalledProcessError(1, "codex")
+    def auth(*a, **k):
+        raise ClaudeError("auth")
 
-    def other(prompt, scratch):
-        with open(os.path.join(scratch, "codex.log"), "w") as fh:
-            fh.write("ERROR: model overloaded " + secret)
-        raise subprocess.CalledProcessError(1, "codex")
+    def other(*a, **k):
+        raise RuntimeError("model overloaded " + secret)
 
-    for run, word in ((timeout, "timeout"), (junk, "rejected"), (auth, "auth"), (other, "codex-error")):
+    for run, word in ((timeout, "timeout"), (junk, "rejected"), (auth, "auth"), (other, "claude-error")):
         out, log = _logged(lambda: c.commentary(full_model(), "A", tempfile.mkdtemp(), run=run))
         assert out == []
         assert f"::warning title=Ad spend synopsis skipped::{word}" in log, (word, log)
-        assert "$" not in log and "Travel" not in log and "refresh" not in log
+        assert "$" not in log and "Travel" not in log
 
 
 def test_empty_cache_entry_does_not_block_a_rerun():

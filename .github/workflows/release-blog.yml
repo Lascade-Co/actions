@@ -36,7 +36,7 @@ permissions:
   contents: read
 
 env:
-  RAW: https://raw.githubusercontent.com/Lascade-Co/actions/main
+  RAW: https://raw.githubusercontent.com/Lascade-Co/actions/${{ github.sha }}
 
 jobs:
   draft:
@@ -91,29 +91,15 @@ jobs:
           secret-path: /Build
           export-type: env
 
-      - name: Restore Codex auth
-        continue-on-error: true
-        shell: bash
-        env:
-          CODEX_AUTH_JSON_BASE_64: ${{ secrets.CODEX_AUTH_JSON_BASE_64 }}
-        run: |
-          mkdir -p "$HOME/.codex"
-          printf '%s' "$CODEX_AUTH_JSON_BASE_64" | tr -d '\n\r ' | base64 -d > "$HOME/.codex/auth.json"
-
-      - name: Install Codex and enable user namespaces for its sandbox
+      - name: Install Claude API SDK
         continue-on-error: true
         shell: bash
         run: |
-          npm install -g @openai/codex
-
-          current_userns="$(sysctl -n kernel.unprivileged_userns_clone 2>/dev/null || true)"
-          if [ -n "$current_userns" ] && [ "$current_userns" != "1" ]; then
-            sudo sysctl -w kernel.unprivileged_userns_clone=1
-          fi
-          current_apparmor="$(sysctl -n kernel.apparmor_restrict_unprivileged_userns 2>/dev/null || true)"
-          if [ -n "$current_apparmor" ] && [ "$current_apparmor" != "0" ]; then
-            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
-          fi
+          curl -fsSL --retry 3 --retry-delay 2 --max-time 60 -o claude-requirements.txt.tmp "$RAW/scripts/ai/requirements.txt"
+          test -s claude-requirements.txt.tmp && mv claude-requirements.txt.tmp claude-requirements.txt
+          curl -fsSL --retry 3 --retry-delay 2 --max-time 60 -o claude_api.py.tmp "$RAW/scripts/ai/claude_api.py"
+          test -s claude_api.py.tmp && mv claude_api.py.tmp claude_api.py
+          pip install --quiet -r claude-requirements.txt
 
       - name: Download the draft pipeline
         id: scripts
@@ -138,6 +124,7 @@ jobs:
         continue-on-error: true
         shell: bash
         env:
+          CLAUDE_API_KEY: ${{ secrets.CLAUDE_API_KEY }}
           BASE: ${{ inputs.base }}
           DRY_RUN: ${{ inputs.dry_run }}
           REPO: ${{ inputs.repo }}

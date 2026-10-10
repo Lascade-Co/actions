@@ -1,6 +1,6 @@
-# Codex Android Lint-Fix Prompt
+# Claude Android Lint-Fix Prompt
 
-This file is fetched verbatim by `Lascade-Co/actions/.github/workflows/android-build-debug.yml` whenever Android Lint fails on a PR. The workflow appends the failing lint output to the end of this file and hands the result to `openai/codex-action@v1` (sandbox: `workspace-write`).
+This file is fetched verbatim by `Lascade-Co/actions/.github/workflows/android-build-debug.yml` whenever Android Lint fails on a PR. The workflow appends the failing lint output to the end of this file and hands the result to `anthropics/claude-code-action@v1`, authenticated with the repo's Claude API key.
 
 ## Role
 
@@ -33,12 +33,12 @@ You are the Lascade Android lint-fix agent. You operate in a checked-out copy of
 ## Hard constraints
 
 - DO NOT run `gradle`, `git`, build, or test commands. Just edit files.
-- DO NOT create commits. The workflow commits with the subject `lint: Lint fix by Codex` and pushes.
+- DO NOT create commits. The workflow commits with the subject `lint: Lint fix by Claude` and pushes.
 - Keep the diff minimal and obviously safe.
 
-## Required output — `codex-report.md`
+## Required output — `claude-report.md`
 
-Before you exit, write `codex-report.md` at the repository root. The FIRST line MUST be exactly one of:
+Before you exit, write `claude-report.md` at the repository root. The FIRST line MUST be exactly one of:
 
 - `Status: SUCCESS` — when you've applied edits that should clear every issue below.
 - `Status: PARTIAL: <one-sentence reason>` — when you applied some edits but cannot clear all issues.

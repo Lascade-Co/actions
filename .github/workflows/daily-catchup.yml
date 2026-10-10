@@ -117,30 +117,23 @@ jobs:
           owner: ${{ steps.repo.outputs.owner }}
           repositories: ${{ steps.repo.outputs.name }}
 
-      - name: Restore Codex auth.json
-        shell: bash
-        env:
-          CODEX_AUTH_JSON_BASE_64: ${{ secrets.CODEX_AUTH_JSON_BASE_64 }}
-        run: |
-          mkdir -p "$HOME/.codex"
-          printf '%s' "$CODEX_AUTH_JSON_BASE_64" | tr -d '\n\r ' | base64 -d > "$HOME/.codex/auth.json"
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
 
-      - name: Install codex & enable user namespaces for Codex sandbox
+      - name: Install Claude API SDK
         shell: bash
         run: |
-          npm install -g @openai/codex
+          curl -fsSL --retry 3 --retry-delay 2 --max-time 60 -o claude-requirements.txt.tmp "$RAW/scripts/ai/requirements.txt"
+          test -s claude-requirements.txt.tmp && mv claude-requirements.txt.tmp claude-requirements.txt
+          curl -fsSL --retry 3 --retry-delay 2 --max-time 60 -o claude_api.py.tmp "$RAW/scripts/ai/claude_api.py"
+          test -s claude_api.py.tmp && mv claude_api.py.tmp claude_api.py
+          pip install --quiet -r claude-requirements.txt
 
-          current_userns="$(sysctl -n kernel.unprivileged_userns_clone 2>/dev/null || true)"
-          if [ -n "$current_userns" ] && [ "$current_userns" != "1" ]; then
-            sudo sysctl -w kernel.unprivileged_userns_clone=1
-          fi
-          current_apparmor="$(sysctl -n kernel.apparmor_restrict_unprivileged_userns 2>/dev/null || true)"
-          if [ -n "$current_apparmor" ] && [ "$current_apparmor" != "0" ]; then
-            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
-          fi
-
-      - name: Summarise repo activity with Codex
+      - name: Summarise repo activity with Claude
         env:
+          CLAUDE_API_KEY: ${{ secrets.CLAUDE_API_KEY }}
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
           curl -fsSL -o CATCHUP_CLASSIFY.md "$RAW/data/CATCHUP_CLASSIFY.md"
@@ -252,7 +245,7 @@ jobs:
           git commit -m "Daily catchup: ${TODAY}"
           git push "https://x-access-token:${GITHUB_TOKEN}@github.com/Lascade-Co/catchup.git" HEAD:main
 
-  # Build the rich HTML report (Codex prose + deterministic render) for all
+  # Build the rich HTML report (Claude prose + deterministic render) for all
   # active repos except those in data/catchup_exclude.txt, and email it via
   # Resend. Runs in parallel with `commit`; an email failure can't block the commit.
   email:
@@ -260,27 +253,19 @@ jobs:
     if: needs.collect.outputs.wrote == 'true'
     runs-on: ubuntu-latest
     steps:
-      - name: Restore Codex auth.json
-        shell: bash
-        env:
-          CODEX_AUTH_JSON_BASE_64: ${{ secrets.CODEX_AUTH_JSON_BASE_64 }}
-        run: |
-          mkdir -p "$HOME/.codex"
-          printf '%s' "$CODEX_AUTH_JSON_BASE_64" | tr -d '\n\r ' | base64 -d > "$HOME/.codex/auth.json"
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
 
-      - name: Install codex & enable user namespaces for Codex sandbox
+      - name: Install Claude API SDK
         shell: bash
         run: |
-          npm install -g @openai/codex
-
-          current_userns="$(sysctl -n kernel.unprivileged_userns_clone 2>/dev/null || true)"
-          if [ -n "$current_userns" ] && [ "$current_userns" != "1" ]; then
-            sudo sysctl -w kernel.unprivileged_userns_clone=1
-          fi
-          current_apparmor="$(sysctl -n kernel.apparmor_restrict_unprivileged_userns 2>/dev/null || true)"
-          if [ -n "$current_apparmor" ] && [ "$current_apparmor" != "0" ]; then
-            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
-          fi
+          curl -fsSL --retry 3 --retry-delay 2 --max-time 60 -o claude-requirements.txt.tmp "$RAW/scripts/ai/requirements.txt"
+          test -s claude-requirements.txt.tmp && mv claude-requirements.txt.tmp claude-requirements.txt
+          curl -fsSL --retry 3 --retry-delay 2 --max-time 60 -o claude_api.py.tmp "$RAW/scripts/ai/claude_api.py"
+          test -s claude_api.py.tmp && mv claude_api.py.tmp claude_api.py
+          pip install --quiet -r claude-requirements.txt
 
       - name: Download merged daily report
         uses: actions/download-artifact@v8
@@ -289,6 +274,8 @@ jobs:
 
       - name: Generate report JSON
         id: report
+        env:
+          CLAUDE_API_KEY: ${{ secrets.CLAUDE_API_KEY }}
         run: |
           curl -fsSL -o CATCHUP_REPORT.md "$RAW/data/CATCHUP_REPORT.md"
           curl -fsSL -o catchup_exclude.txt "$RAW/data/catchup_exclude.txt"

@@ -1,7 +1,7 @@
-# Codex Draft Prompt
+# Claude Draft Prompt
 
 This file is fetched verbatim by `Lascade-Co/actions/scripts/seo/release_blog.py`, which appends the
-release digest and link candidates before invoking Codex with a workspace-write sandbox.
+release digest and link candidates before requesting a draft from the Claude API.
 
 ## Role
 
@@ -41,10 +41,11 @@ it with generic "see also" sentences.
 
 ## Output
 
-Write exactly two files into the directory named in the RUN CONTEXT section below. Create or modify
-nothing else. Do not run git, gradle, tests, or any build command.
+Return one JSON object with exactly two fields: `meta` (the metadata object below) and
+`html` (a string containing the draft body). No Markdown fences or surrounding prose.
+The workflow saves these as `blog.json` and `blog.html` and validates them before creating a draft.
 
-**`blog.json`**
+**`meta`**
 
 ```json
 {
@@ -65,7 +66,7 @@ nothing else. Do not run git, gradle, tests, or any build command.
 }
 ```
 
-**`blog.html`** — the draft body only. No `<html>`, `<head>`, `<body>`, `<script>`, `<style>` or
+**`html`** — the draft body only. No `<html>`, `<head>`, `<body>`, `<script>`, `<style>` or
 `<iframe>`.
 
 ## Structure
@@ -86,7 +87,7 @@ nothing else. Do not run git, gradle, tests, or any build command.
 - Keep the version out of the title, slug, excerpt, focus keyword, and headings. Mention it at most
   once in the body, after the editorial idea is established, and only when the sentence benefits
   from it.
-- Close the file with the release marker line given in RUN CONTEXT, exactly as written.
+- Close the HTML with the release marker line given in RUN CONTEXT, exactly as written.
 - 900–1400 words of body text.
 - 3–5 contextual internal links, each to a **different** URL, each copied **verbatim** from the
   LINK CANDIDATES list. Never invent a URL. Never link to `hub.` — always the `www.` host.

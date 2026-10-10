@@ -20,7 +20,7 @@ jobs:
     outputs:
       owner: ${{ steps.repo.outputs.owner }}
       name: ${{ steps.repo.outputs.name }}
-      branch: ${{ steps.branch.outputs.branch }}
+      branch: ${{ github.event.client_payload.branch }}
       token_repos: ${{ steps.token_repos.outputs.list }}
     steps:
       - name: Extract owner/repo
@@ -291,50 +291,49 @@ jobs:
             echo "outdated=true" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Restore Codex auth.json
+      - name: Set up Python
+        if: steps.notes.outputs.outdated == 'true'
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+
+      - name: Install Claude API SDK
         if: steps.notes.outputs.outdated == 'true'
         shell: bash
         env:
-          CODEX_AUTH_JSON_BASE_64: ${{ secrets.CODEX_AUTH_JSON_BASE_64 }}
+          RAW: https://raw.githubusercontent.com/Lascade-Co/actions/${{ github.sha }}
         run: |
-          mkdir -p "$HOME/.codex"
-          printf '%s' "$CODEX_AUTH_JSON_BASE_64" | tr -d '\n\r ' | base64 -d > "$HOME/.codex/auth.json"
+          curl -fsSL --retry 3 --retry-delay 2 --max-time 60 -o claude-requirements.txt.tmp "$RAW/scripts/ai/requirements.txt"
+          test -s claude-requirements.txt.tmp && mv claude-requirements.txt.tmp claude-requirements.txt
+          curl -fsSL --retry 3 --retry-delay 2 --max-time 60 -o claude_api.py.tmp "$RAW/scripts/ai/claude_api.py"
+          test -s claude_api.py.tmp && mv claude_api.py.tmp claude_api.py
+          pip install --quiet -r claude-requirements.txt
+          curl -fsSL --retry 3 --retry-delay 2 --max-time 60 -o release_notes.py.tmp "$RAW/scripts/android/release_notes.py"
+          test -s release_notes.py.tmp && mv release_notes.py.tmp release_notes.py
 
-      - name: Install codex & Enable user namespaces for Codex sandbox
-        if: steps.notes.outputs.outdated == 'true'
-        shell: bash
-        run: |
-          npm install -g @openai/codex
-          
-          current_userns="$(sysctl -n kernel.unprivileged_userns_clone 2>/dev/null || true)"
-          if [ -n "$current_userns" ] && [ "$current_userns" != "1" ]; then
-            sudo sysctl -w kernel.unprivileged_userns_clone=1
-          fi
-          current_apparmor="$(sysctl -n kernel.apparmor_restrict_unprivileged_userns 2>/dev/null || true)"
-          if [ -n "$current_apparmor" ] && [ "$current_apparmor" != "0" ]; then
-            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
-          fi
-
-      - name: Build Codex release-notes prompt (inject git diff)
+      - name: Build Claude release-notes prompt (inject git diff)
         if: steps.notes.outputs.outdated == 'true'
         shell: bash
         env:
           BASE: ${{ steps.notes.outputs.base }}
         run: |
-          curl -sSL https://raw.githubusercontent.com/Lascade-Co/actions/main/data/RELEASE_NOTES.md > codex-release-prompt.md
+          curl -fsSL --retry 3 --retry-delay 2 --max-time 60 -o claude-release-prompt.md.tmp https://raw.githubusercontent.com/Lascade-Co/actions/${{ github.sha }}/data/RELEASE_NOTES.md
+          test -s claude-release-prompt.md.tmp && mv claude-release-prompt.md.tmp claude-release-prompt.md
           {
             echo ""
             echo '```diff'
             git diff "$BASE" HEAD
             echo '```'
-          } >> codex-release-prompt.md
+          } >> claude-release-prompt.md
 
-      - name: Run Codex to write release notes
-        id: codex_notes
+      - name: Run Claude to write release notes
+        id: claude_notes
         continue-on-error: true
         if: steps.notes.outputs.outdated == 'true'
         shell: bash
-        run: codex exec --sandbox workspace-write - < codex-release-prompt.md
+        env:
+          CLAUDE_API_KEY: ${{ secrets.CLAUDE_API_KEY }}
+        run: python3 release_notes.py --prompt claude-release-prompt.md --out releasenotes.txt
 
       - name: Create GitHub Release in source repo
         uses: softprops/action-gh-release@v2
