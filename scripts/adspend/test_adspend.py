@@ -673,6 +673,208 @@ def test_apple_errors_never_carry_secrets():
         requests.request = orig
 
 
+# ---- change log (adspend_changes)
+
+import adspend_changes as ch
+from adspend_render_email import render as _render
+from zoneinfo import ZoneInfo as _Z
+
+CH_CFG = {"url": "https://x.supabase.co", "key": "sb_publishable_" + SENTINEL, "email": "c@x.com",
+          "password": SENTINEL + "PW"}
+
+
+def ch_row(entity, at="2026-09-22T15:14:51.19+00:00", platform="meta", kind="Paused", why="Over budget.",
+           before=None, after="217$ per day", author="jishnu@lascade.com", rid="1"):
+    return {"id": rid, "happened_at": at, "platform": platform, "kind": kind, "entity": entity,
+            "before_value": before, "after_value": after, "why": why, "author_email": author}
+
+
+def ch_fetch(pages, token="T"):
+    calls = []
+
+    def post(url, headers, body):
+        calls.append(("POST", url, headers, body))
+        return {"access_token": token} if token else {}
+
+    def get(url, headers, params):
+        calls.append(("GET", url, headers, params))
+        return pages.pop(0)
+    return post, get, calls
+
+
+def test_changes_window_and_signin():
+    post, get, calls = ch_fetch([[ch_row("TA - WW - IOS - A")], []])
+    out = ch.fetch(CH_CFG, AD, "Asia/Dubai", post=post, get=get)
+    assert len(out) == 1 and out[0].author == "Jishnu" and out[0].channel == "Meta"
+    assert out[0].at.tzinfo is not None and out[0].at.strftime("%a %H:%M") == "Tue 19:14"   # UTC+4
+    assert calls[0][0] == "POST" and calls[0][1].endswith("/auth/v1/token?grant_type=password")
+    params = calls[1][3]
+    assert ("happened_at", "gte.2026-09-20T20:00:00Z") in params      # Dubai 21 Sep 00:00
+    assert ("happened_at", "lt.2026-09-22T20:00:00Z") in params       # Dubai 23 Sep 00:00
+    assert calls[1][2]["Authorization"] == "Bearer T"
+
+
+def test_changes_paginate():
+    orig = ch.PAGE
+    try:
+        ch.PAGE = 2
+        post, get, calls = ch_fetch([[ch_row("A", rid="1"), ch_row("B", rid="2")], [ch_row("C", rid="3")], []])
+        out = ch.fetch(CH_CFG, AD, post=post, get=get)
+        assert len(out) == 3
+        assert [dict(c[3])["offset"] for c in calls[1:]] == ["0", "2", "3"]
+        # A server row cap below PAGE (2 per page, PAGE 1000) must not truncate.
+        ch.PAGE = 1000
+        post, get, calls = ch_fetch([[ch_row("A"), ch_row("B")], [ch_row("C")], []])
+        assert len(ch.fetch(CH_CFG, AD, post=post, get=get)) == 3
+    finally:
+        ch.PAGE = orig
+
+
+def test_changes_failure_is_unavailable_and_sanitized():
+    import requests
+
+    class Resp:
+        def __init__(self, code, body=None):
+            self.status_code, self._b = code, body
+        def json(self):
+            if self._b is None:
+                raise ValueError(SENTINEL)
+            return self._b
+    orig = requests.request
+    try:
+        for resp, word in ((Resp(401, {"msg": SENTINEL}), "auth"), (Resp(500, {"msg": SENTINEL}), "http"),
+                           (Resp(200, None), "shape")):
+            requests.request = lambda *a, _r=resp, **k: _r
+            out = ch.fetch(CH_CFG, AD)
+            assert isinstance(out, Unavailable) and out.reason == word, (word, out)
+
+        def slow(*a, **k):
+            raise requests.Timeout(SENTINEL + "https://x.supabase.co")
+        requests.request = slow
+        assert ch.fetch(CH_CFG, AD).reason == "timeout"
+    finally:
+        requests.request = orig
+    post, get, _ = ch_fetch([], token=None)
+    assert ch.fetch(CH_CFG, AD, post=post, get=get).reason == "auth"
+    post, get, _ = ch_fetch([{"not": "a list"}])
+    assert ch.fetch(CH_CFG, AD, post=post, get=get).reason == "shape"
+    post, get, _ = ch_fetch([[ch_row("A", at="garbage")], []])
+    assert ch.fetch(CH_CFG, AD, post=post, get=get).reason == "shape"
+    # Overall deadline: a request that never finishes can't hold up the send.
+    import time as _t
+    post, _g, _ = ch_fetch([])
+    t0 = _t.monotonic()
+    out = ch.fetch(CH_CFG, AD, post=post, get=lambda *a: _t.sleep(5), deadline=0.2)
+    assert out.reason == "timeout" and _t.monotonic() - t0 < 2
+
+
+def test_changes_load_contract():
+    assert ch.load({}) is None and ch.load({"changes": None}) is None
+    assert ch.load({"changes": {"url": "u"}}) is None
+    assert ch.load({"changes": CH_CFG}) == CH_CFG
+
+
+def _c(entity, channel="Meta", at=datetime(2026, 9, 22, 19, 14, tzinfo=_Z("Asia/Dubai")), **kw):
+    base = dict(at=at, channel=channel, app="", kind="Paused", entity=entity, before="", after="", why="", author="Jishnu")
+    base.update(kw)
+    return ch.Change(**base)
+
+
+def test_place_matches_spend_attribution():
+    model = full_model()
+    ta_ios = _c("TA - WW - IOS - A")
+    unattributed = _c("Nope - 2")            # app field is never consulted
+    google_ta = _c("TA - WW - ANDROID", channel="Google")    # no Google line has spend
+    by_line, orphans = ch.place([ta_ios, unattributed, google_ta], model, APPS)
+    assert by_line[("Travel Animator", "Meta", "iOS")] == [ta_ios]
+    assert by_line[("Unattributed", "Meta", "Unassigned")] == [unattributed]
+    assert orphans == [google_ta]
+    # The key is the one build_model gives the campaign's spend, Apple always iOS.
+    asa = _c("TA - TIER 1 - BRAND - EXACT", channel="Apple Search Ads")
+    assert ch.line_key(asa, APPS) == ("Travel Animator", "Apple Search Ads", "iOS")
+    model2 = m.build_model({"Meta": [], "Google": [], "Apple Search Ads":
+                            [row("TA - TIER 1 - BRAND - EXACT", AD, 12, ch="Apple Search Ads")]},
+                           TABLE, AD, NOW, APPS)
+    assert ch.place([asa], model2, APPS)[0] == {("Travel Animator", "Apple Search Ads", "iOS"): [asa]}
+
+
+def test_render_cause_line_and_no_change_logged():
+    model = full_model()
+    long_why = "word " * 60
+    cause = _c("TA - WW - IOS - A", why=long_why.strip(), after="130$ per day")
+    changes = {"ok": True, "by_line": {("Travel Animator", "Meta", "iOS"): [cause]}, "orphans": []}
+    _s, _p, h, t = _render(model, "A", [], APPS, changes)
+    assert "<em>TA - WW - IOS - A</em>" in h and "130$ per day" in h and "— Jishnu" in h
+    assert "Tue 19:14" in h and "Tue 19:14 · Paused · TA - WW - IOS - A" in t
+    assert "…" in h and long_why.strip() not in h                       # capped
+    # iOS moved and has a cause: no phrase. Android started, MR stopped, no cause: phrase.
+    assert h.count("no change logged") == 3                             # Android, Unattributed, MR
+    assert "#c0392b" not in h and "#27ae60" not in h
+    assert "as logged by the ads team" in h and "Change log unavailable today." not in h
+    # Log unreachable: no phrase, a footnote instead.
+    _s, _p, h2, t2 = _render(model, "A", [], APPS, {"ok": False, "by_line": {}, "orphans": []})
+    assert "no change logged" not in h2 + t2
+    assert "Change log unavailable today." in h2 and "Change log unavailable today." in t2
+    assert "as logged by the ads team" in t and "as logged by the ads team" not in t2
+
+
+def test_render_escapes_and_orphans():
+    model = full_model()
+    evil = _c("<script>x</script>", channel="Google", why="<b>why</b>", author="<i>", app="Pingee")
+    changes = {"ok": True, "by_line": {}, "orphans": [evil]}
+    h, t = _render(model, "A", [], APPS, changes)[2:]
+    assert "<script>" not in h and "&lt;script&gt;" in h and "&lt;b&gt;why&lt;/b&gt;" in h
+    assert "Also changed" in h and "Also changed:" in t and "Pingee Google" in t and "Pingee Google" in h
+    # Steady lines never carry the phrase; nothing configured = no change-log trace at all.
+    h3, t3 = _render(model, "A", [], APPS)[2:]
+    assert "no change logged" not in h3 and "Also changed" not in h3 and "as logged" not in h3
+
+
+def test_render_without_changes_is_byte_stable():
+    import hashlib
+    want = {"A": "e1f0a24fbc6206b3c3f3bd13571ba68d900b9bf8529ff0c8a1c347aa3caa08cd",
+            "B": "19ea0ccf66678ae616f739c8e3e0e097da4abdf62cbe63232a4388f5fcfffd87"}
+    for v, sent in (("A", []), ("B", ["Spend was steady."])):
+        out = _render(full_model(), v, sent, APPS)
+        assert hashlib.sha256("\x00".join(out).encode()).hexdigest() == want[v], v
+
+
+def test_main_never_logs_change_content():
+    import io, contextlib
+    import adspend_main as mm
+    model = full_model()
+    cause = _c("TA - WW - IOS - A", why="Secret reason " + SENTINEL)
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        got = mm.load_changes({"changes": CH_CFG}, model, AD, APPS, fetch=lambda *a: [cause, _c("ZZ - 1", channel="Google")])
+        none = mm.load_changes({}, model, AD, APPS)
+        bad = mm.load_changes({"changes": CH_CFG}, model, AD, APPS, fetch=lambda *a: Unavailable("auth"))
+    log = buf.getvalue()
+    assert got["ok"] and none is None and bad == {"ok": False, "by_line": {}, "orphans": []}
+    assert "changes: ok, 1 placed, 1 orphans" in log and "changes: not configured" in log
+    assert "changes: unavailable (auth)" in log
+    assert SENTINEL not in log and "TA - " not in log and "Jishnu" not in log and "ZZ" not in log
+    # Masking covers the change-log password, key and email on Actions.
+    import base64
+    env = {"ADS_CREDENTIALS_JSON_B64": base64.b64encode(json.dumps({"changes": CH_CFG}).encode()).decode(),
+           "GITHUB_ACTIONS": "true"}
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        mm.load_creds(env)
+    for v in (CH_CFG["password"], CH_CFG["key"], CH_CFG["email"]):
+        assert "::add-mask::" + v in buf.getvalue()
+    # A multi-line or %-bearing secret: every line masked, whole value command-encoded.
+    tricky = {**CH_CFG, "password": "HEAD%" + SENTINEL + "\nTAIL" + SENTINEL}
+    env["ADS_CREDENTIALS_JSON_B64"] = base64.b64encode(json.dumps({"changes": tricky}).encode()).decode()
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        mm.load_creds(env)
+    lines = buf.getvalue().splitlines()
+    assert all(l.startswith("::add-mask::") for l in lines)
+    assert "::add-mask::TAIL" + SENTINEL in lines and "::add-mask::HEAD%" + SENTINEL in lines
+    assert "::add-mask::HEAD%25" + SENTINEL + "%0ATAIL" + SENTINEL in lines
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):
