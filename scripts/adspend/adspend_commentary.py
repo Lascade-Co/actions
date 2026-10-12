@@ -148,7 +148,8 @@ def build_facts(model: dict, variant: str) -> dict:
                                    "pct": _n(t["pct_d1"], "pct") if t["pct_d1"] is not None else None}.items() if v},
     }}
     lines = [ln for p in model["projects"] for ln in p["lines"] if ln["label"] != "steady"]
-    lines.sort(key=lambda ln: -abs(ln["d"] - ln["d1"]))
+    # Ties broken by name, never by display order: the page's order must not change what Claude is told.
+    lines.sort(key=lambda ln: (-abs(ln["d"] - ln["d1"]), ln["project"], ln["channel"], ln["os"]))
     for i, ln in enumerate(lines[:MAX_FACTS], 1):
         show = {"d": _n(ln["d"]), "d1": _n(ln["d1"]), "avg7": _n(ln["avg7"])}
         if ln["pct"] is not None:

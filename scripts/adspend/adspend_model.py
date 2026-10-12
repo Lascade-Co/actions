@@ -165,7 +165,12 @@ def build_model(rows: dict, table, ad_date: date, now: datetime, apps: dict) -> 
         p["lines"].append(ln)
         for k in ("d", "d1", "avg7"):
             p[k] += ln[k]
-    plist = sorted(projects.values(), key=lambda p: -p["d"])
+    def place(p):
+        """A fixed place for the ranked products, so the eye learns where each one lives; the
+        rest follow by yesterday's spend; Unattributed, the residue, always comes last."""
+        rank = apps.get(p["name"], {}).get("rank")
+        return (p["name"] == UNATTRIBUTED, rank is None, rank or 0, -p["d"], p["name"])
+    plist = sorted(projects.values(), key=place)
     for p in plist:
         p["lines"].sort(key=lambda x: (-x["d"], x["channel"], x["os"]))
 

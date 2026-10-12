@@ -834,8 +834,10 @@ def test_render_escapes_and_orphans():
 
 def test_render_without_changes_is_byte_stable():
     import hashlib
-    want = {"A": "e1f0a24fbc6206b3c3f3bd13571ba68d900b9bf8529ff0c8a1c347aa3caa08cd",
-            "B": "19ea0ccf66678ae616f739c8e3e0e097da4abdf62cbe63232a4388f5fcfffd87"}
+    # Re-baselined 2026-10-11 for the fixed product order (only change for this fixture:
+    # Unattributed moved after Marine Radar; verified by diffing the text output).
+    want = {"A": "ca50b252087e64100cd7392c48d3d9a2de52ded2934bc76286f19fb173a6973d",
+            "B": "69644beae2125ab209483f6575b548cb495d832c4a1245fea515fbd024f76146"}
     for v, sent in (("A", []), ("B", ["Spend was steady."])):
         out = _render(full_model(), v, sent, APPS)
         assert hashlib.sha256("\x00".join(out).encode()).hexdigest() == want[v], v
@@ -1297,6 +1299,56 @@ def test_prose_never_names_a_person():
             raise AssertionError(text)
         except c._Reject as exc:
             assert exc.word == "name"
+
+
+
+# ---- fixed product order, quiet dark lines
+def test_fixed_product_order():
+    rows = [row("PINGEE - WW", AD, 500), row("Nope - 1", AD, 400), row("GEO - WW - ANDROID", AD, 300),
+            row("Mail AI - US", AD, 500), row("MR - IOS", AD, 20), row("TA - IOS", AD, 10), row("AR - IOS", AD, 5)]
+    model = m.build_model({"Meta": rows, "Google": [], "Apple Search Ads": []}, TABLE, AD, NOW, APPS)
+    assert [p["name"] for p in model["projects"]] == [
+        "Travel Animator", "Marine Radar", "Smart Ruler", "GeoAnimator", "Mail AI", "Pingee", m.UNATTRIBUTED]
+    assert [APPS[n]["rank"] for n in ("Travel Animator", "Marine Radar", "Smart Ruler", "GeoAnimator")] == [1, 2, 3, 4]
+
+
+def _fold_model():
+    rows = [row("TA - IOS", d(1), 90), row("TA - IOS", AD, 100),                  # active
+            row("TA - ANDROID", d(3), 20),                                        # dark
+            row("TA - WW", d(4), 30, ch="Google"),                                 # dark, no OS
+            row("TA - X - ANDROID", d(1), 50, ch="Google"),                        # stopped yesterday
+            row("MR - IOS", d(3), 10)]                                            # MR: dark only
+    google = [r_ for r_ in rows if r_.channel == "Google"]
+    return m.build_model({"Meta": [r_ for r_ in rows if r_.channel == "Meta"], "Google": google,
+                          "Apple Search Ads": []}, TABLE, AD, NOW, APPS)
+
+
+def test_dark_lines_fold():
+    model = _fold_model()
+    h, t = _render(model, "A", [], APPS)[2:]
+    assert "  No spend: Google · Meta Android" in t
+    assert "Google: $0" not in t and "Meta Android: $0" not in t                  # no $0 rows for dark lines
+    assert "Google Android: $0 - spend stopped, was $50 Mon" in t                  # a stop stays loud
+    assert "  Meta iOS: $100 - steady vs Mon" in t
+    assert "Marine Radar  $0\n  No spend: Meta iOS" in t                           # heading + fold only
+    assert ">No spend: Google · Meta Android</p>" in h and 'class="text-muted">No spend: Meta iOS</p>' in h
+    assert h.count("No spend:") == 2
+    # A dark line with a logged change keeps its row; the fold names only the rest.
+    dark = _c("TA - ANDROID", kind="Paused")
+    changes = {"ok": True, "by_line": {("Travel Animator", "Meta", "Android"): [dark]}, "orphans": []}
+    t2 = _render(model, "A", [], APPS, changes)[3]
+    assert "  Meta Android: $0 - no spend Mon or yesterday" in t2 and "  No spend: Google\n" in t2
+
+
+def test_facts_independent_of_display_order():
+    rows = [row(f"{app} - {n} - IOS", d(3), 10, cid=f"{app}{n}") for app in ("TA", "MR") for n in range(5)]
+    rows += [row(f"{app} - {n} - IOS", d(3), 10, ch="Google", cid=f"g{app}{n}") for app in ("TA", "MR") for n in range(5)]
+    model = m.build_model({"Meta": [r_ for r_ in rows if r_.channel == "Meta"],
+                           "Google": [r_ for r_ in rows if r_.channel == "Google"], "Apple Search Ads": []},
+                          TABLE, AD, NOW, APPS)
+    flipped = {**model, "projects": list(reversed(model["projects"]))}
+    for v in ("A", "B"):
+        assert c.build_facts(model, v) == c.build_facts(flipped, v)
 
 
 if __name__ == "__main__":

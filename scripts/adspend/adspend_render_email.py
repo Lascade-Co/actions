@@ -334,7 +334,24 @@ def _project(p, d1_name, variant, changes=None) -> str:
             f'<td style="font-family:{FONT_HEADING}; font-size:18px; font-weight:700; color:#222222;" class="heading-dm">{esc(p["name"])}</td>'
             f'<td align="right" style="font-family:{FONT_HEADING}; font-size:18px; font-weight:700; color:#222222; '
             f'font-variant-numeric:tabular-nums;" class="heading-dm">{esc(_usd(p["d"]))}</td></tr></table>')
-    return _row(head + "".join(_ledger_line(ln, d1_name, variant, changes) for ln in p["lines"]), 30)
+    active, quiet = _split(p["lines"], changes)
+    fold = _muted(esc(_no_spend(quiet)), 12, 6) if quiet else ""
+    return _row(head + "".join(_ledger_line(ln, d1_name, variant, changes) for ln in active) + fold, 30)
+
+
+def _quiet(ln, changes) -> bool:
+    """Dark: no spend yesterday or the day before. Nothing happened, so no row of its own; a
+    stop (money the day before) or a logged change keeps the full row."""
+    return ln["label"] == "dark" and not _line_changes(ln, changes)
+
+
+def _split(lines, changes):
+    return [ln for ln in lines if not _quiet(ln, changes)], [ln for ln in lines if _quiet(ln, changes)]
+
+
+def _no_spend(quiet) -> str:
+    return "No spend: " + " · ".join(ln["channel"] + ("" if ln["os"] == UNASSIGNED else f" {ln['os']}")
+                                     for ln in quiet)
 
 
 def _also_changed(changes) -> str:
@@ -449,10 +466,13 @@ def render(model: dict, variant: str, sentences: list, apps: dict, changes=None)
              f"vs {d1_name}: {_pct(t['pct_d1'])} ({_usd(t['d1'])})", f"vs 7-day avg: {_pct(t['pct_avg'])} ({_usd(t['avg7'])})"]
     for p in model["projects"]:
         text += ["", f"{p['name']}  {_usd(p['d'])}"]
-        for ln in p["lines"]:
+        active, quiet = _split(p["lines"], changes)
+        for ln in active:
             os_ = "" if ln["os"] == UNASSIGNED else f" {ln['os']}"
             text.append(f"  {ln['channel']}{os_}: {_usd(ln['d'])} - {_line_detail(ln, d1_name, variant, changes)}")
             text += [f"      {_change_text(c, changes)}" for c in _line_changes(ln, changes)]
+        if quiet:
+            text.append(f"  {_no_spend(quiet)}")
     if changes and changes["orphans"]:
         text += ["", "Also changed:"] + [f"  {_change_text(c, changes, with_channel=True)}" for c in changes["orphans"]]
     text += ["", "Last 14 days: " + ", ".join(_compact(p["total"]) for p in model["chart"][-14:])]
