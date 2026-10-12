@@ -251,7 +251,8 @@ def full_model():
 
 
 def js(*sentences):
-    return json.dumps({"sentences": [{"text": t, "refs": refs} for t, refs in sentences]})
+    """Claude's answer shape: items of an observed spend sentence and the facts it uses."""
+    return json.dumps({"items": [{"observed": t, "refs": refs} for t, refs in sentences]})
 
 
 def test_validator_accepts_and_fills():
@@ -362,7 +363,7 @@ def test_commentary_skip_reasons_are_one_safe_word():
     def other(*a, **k):
         raise RuntimeError("model overloaded " + secret)
 
-    for run, word in ((timeout, "timeout"), (junk, "rejected"), (auth, "auth"), (other, "claude-error")):
+    for run, word in ((timeout, "timeout"), (junk, "rejected:shape"), (auth, "auth"), (other, "claude-error")):
         out, log = _logged(lambda: c.commentary(full_model(), "A", tempfile.mkdtemp(), run=run))
         assert out == []
         assert f"::warning title=Ad spend synopsis skipped::{word}" in log, (word, log)
@@ -672,6 +673,694 @@ def test_apple_errors_never_carry_secrets():
     finally:
         requests.request = orig
 
+
+# ---- change log (adspend_changes)
+
+import adspend_changes as ch
+from adspend_render_email import render as _render
+from zoneinfo import ZoneInfo as _Z
+
+CH_CFG = {"url": "https://x.supabase.co", "key": "sb_publishable_" + SENTINEL, "email": "c@x.com",
+          "password": SENTINEL + "PW"}
+
+
+def ch_row(entity, at="2026-09-22T15:14:51.19+00:00", platform="meta", kind="Paused", why="Over budget.",
+           before=None, after="217$ per day", author="jishnu@lascade.com", rid="1"):
+    return {"id": rid, "happened_at": at, "platform": platform, "kind": kind, "entity": entity,
+            "before_value": before, "after_value": after, "why": why, "author_email": author}
+
+
+def ch_fetch(pages, token="T"):
+    calls = []
+
+    def post(url, headers, body):
+        calls.append(("POST", url, headers, body))
+        return {"access_token": token} if token else {}
+
+    def get(url, headers, params):
+        calls.append(("GET", url, headers, params))
+        return pages.pop(0)
+    return post, get, calls
+
+
+def test_changes_window_and_signin():
+    post, get, calls = ch_fetch([[ch_row("TA - WW - IOS - A")], []])
+    out = ch.fetch(CH_CFG, AD, "Asia/Dubai", post=post, get=get)
+    assert len(out) == 1 and out[0].author == "Jishnu" and out[0].channel == "Meta"
+    assert out[0].at.tzinfo is not None and out[0].at.strftime("%a %H:%M") == "Tue 19:14"   # UTC+4
+    assert calls[0][0] == "POST" and calls[0][1].endswith("/auth/v1/token?grant_type=password")
+    params = calls[1][3]
+    assert ("happened_at", "gte.2026-09-20T20:00:00Z") in params      # Dubai 21 Sep 00:00
+    assert ("happened_at", "lt.2026-09-22T20:00:00Z") in params       # Dubai 23 Sep 00:00
+    assert calls[1][2]["Authorization"] == "Bearer T"
+
+
+def test_changes_paginate():
+    orig = ch.PAGE
+    try:
+        ch.PAGE = 2
+        post, get, calls = ch_fetch([[ch_row("A", rid="1"), ch_row("B", rid="2")], [ch_row("C", rid="3")], []])
+        out = ch.fetch(CH_CFG, AD, post=post, get=get)
+        assert len(out) == 3
+        assert [dict(c[3])["offset"] for c in calls[1:]] == ["0", "2", "3"]
+        # A server row cap below PAGE (2 per page, PAGE 1000) must not truncate.
+        ch.PAGE = 1000
+        post, get, calls = ch_fetch([[ch_row("A"), ch_row("B")], [ch_row("C")], []])
+        assert len(ch.fetch(CH_CFG, AD, post=post, get=get)) == 3
+    finally:
+        ch.PAGE = orig
+
+
+def test_changes_failure_is_unavailable_and_sanitized():
+    import requests
+
+    class Resp:
+        def __init__(self, code, body=None):
+            self.status_code, self._b = code, body
+        def json(self):
+            if self._b is None:
+                raise ValueError(SENTINEL)
+            return self._b
+    orig = requests.request
+    try:
+        for resp, word in ((Resp(401, {"msg": SENTINEL}), "auth"), (Resp(500, {"msg": SENTINEL}), "http"),
+                           (Resp(200, None), "shape")):
+            requests.request = lambda *a, _r=resp, **k: _r
+            out = ch.fetch(CH_CFG, AD)
+            assert isinstance(out, Unavailable) and out.reason == word, (word, out)
+
+        def slow(*a, **k):
+            raise requests.Timeout(SENTINEL + "https://x.supabase.co")
+        requests.request = slow
+        assert ch.fetch(CH_CFG, AD).reason == "timeout"
+    finally:
+        requests.request = orig
+    post, get, _ = ch_fetch([], token=None)
+    assert ch.fetch(CH_CFG, AD, post=post, get=get).reason == "auth"
+    post, get, _ = ch_fetch([{"not": "a list"}])
+    assert ch.fetch(CH_CFG, AD, post=post, get=get).reason == "shape"
+    post, get, _ = ch_fetch([[ch_row("A", at="garbage")], []])
+    assert ch.fetch(CH_CFG, AD, post=post, get=get).reason == "shape"
+    # Overall deadline: a request that never finishes can't hold up the send.
+    import time as _t
+    post, _g, _ = ch_fetch([])
+    t0 = _t.monotonic()
+    out = ch.fetch(CH_CFG, AD, post=post, get=lambda *a: _t.sleep(5), deadline=0.2)
+    assert out.reason == "timeout" and _t.monotonic() - t0 < 2
+
+
+def test_changes_load_contract():
+    assert ch.load({}) is None and ch.load({"changes": None}) is None
+    assert ch.load({"changes": {"url": "u"}}) is None
+    assert ch.load({"changes": CH_CFG}) == CH_CFG
+
+
+def _c(entity, channel="Meta", at=datetime(2026, 9, 22, 19, 14, tzinfo=_Z("Asia/Dubai")), **kw):
+    base = dict(at=at, channel=channel, app="", kind="Paused", entity=entity, before="", after="", why="", author="Jishnu")
+    base.update(kw)
+    return ch.Change(**base)
+
+
+def test_place_matches_spend_attribution():
+    model = full_model()
+    ta_ios = _c("TA - WW - IOS - A")
+    unattributed = _c("Nope - 2")            # app field is never consulted
+    google_ta = _c("TA - WW - ANDROID", channel="Google")    # no Google line has spend
+    by_line, orphans = ch.place([ta_ios, unattributed, google_ta], model, APPS)
+    assert by_line[("Travel Animator", "Meta", "iOS")] == [ta_ios]
+    assert by_line[("Unattributed", "Meta", "Unassigned")] == [unattributed]
+    assert orphans == [google_ta]
+    # The key is the one build_model gives the campaign's spend, Apple always iOS.
+    asa = _c("TA - TIER 1 - BRAND - EXACT", channel="Apple Search Ads")
+    assert ch.line_key(asa, APPS) == ("Travel Animator", "Apple Search Ads", "iOS")
+    model2 = m.build_model({"Meta": [], "Google": [], "Apple Search Ads":
+                            [row("TA - TIER 1 - BRAND - EXACT", AD, 12, ch="Apple Search Ads")]},
+                           TABLE, AD, NOW, APPS)
+    assert ch.place([asa], model2, APPS)[0] == {("Travel Animator", "Apple Search Ads", "iOS"): [asa]}
+
+
+def test_render_cause_line_and_no_change_logged():
+    model = full_model()
+    long_why = "word " * 60
+    cause = _c("TA - WW - IOS - A", why=long_why.strip(), after="130$ per day")
+    changes = {"ok": True, "by_line": {("Travel Animator", "Meta", "iOS"): [cause]}, "orphans": []}
+    _s, _p, h, t = _render(model, "A", [], APPS, changes)
+    # No plain-English sentence: the log's own words, author first, nothing lost.
+    assert "Paused · TA - WW - IOS - A · 130$ per day" in h and "<em>" not in h and "— Jishnu" not in h
+    assert "Tue 19:14" in h and "Tue 19:14  Paused · TA - WW - IOS - A" in t
+    assert "…" in h and long_why.strip() not in h                       # capped
+    # iOS moved and has a cause: no phrase. Android started, MR stopped, no cause: phrase.
+    assert h.count("no change logged") == 3                             # Android, Unattributed, MR
+    assert "#c0392b" not in h and "#27ae60" not in h
+    assert "as logged by the ads team" in h and "Change log unavailable today." not in h
+    # Log unreachable: no phrase, a footnote instead.
+    _s, _p, h2, t2 = _render(model, "A", [], APPS, {"ok": False, "by_line": {}, "orphans": []})
+    assert "no change logged" not in h2 + t2
+    assert "Change log unavailable today." in h2 and "Change log unavailable today." in t2
+    assert "as logged by the ads team" in t and "as logged by the ads team" not in t2
+
+
+def test_render_escapes_and_orphans():
+    model = full_model()
+    evil = _c("<script>x</script>", channel="Google", why="<b>why</b>", author="<i>", app="Pingee")
+    changes = {"ok": True, "by_line": {}, "orphans": [evil]}
+    h, t = _render(model, "A", [], APPS, changes)[2:]
+    assert "<script>" not in h and "&lt;script&gt;" in h and "&lt;b&gt;why&lt;/b&gt;" in h
+    assert "Also changed" in h and "Also changed:" in t and "Pingee Google" in t and "Pingee Google" in h
+    # Steady lines never carry the phrase; nothing configured = no change-log trace at all.
+    h3, t3 = _render(model, "A", [], APPS)[2:]
+    assert "no change logged" not in h3 and "Also changed" not in h3 and "as logged" not in h3
+
+
+def test_render_without_changes_is_byte_stable():
+    import hashlib
+    # Re-baselined 2026-10-11 for the fixed product order (only change for this fixture:
+    # Unattributed moved after Marine Radar; verified by diffing the text output).
+    want = {"A": "ca50b252087e64100cd7392c48d3d9a2de52ded2934bc76286f19fb173a6973d",
+            "B": "69644beae2125ab209483f6575b548cb495d832c4a1245fea515fbd024f76146"}
+    for v, sent in (("A", []), ("B", ["Spend was steady."])):
+        out = _render(full_model(), v, sent, APPS)
+        assert hashlib.sha256("\x00".join(out).encode()).hexdigest() == want[v], v
+
+
+def test_main_never_logs_change_content():
+    import io, contextlib
+    import adspend_main as mm
+    model = full_model()
+    cause = _c("TA - WW - IOS - A", why="Secret reason " + SENTINEL)
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        got = mm.load_changes({"changes": CH_CFG}, model, AD, APPS, fetch=lambda *a: [cause, _c("ZZ - 1", channel="Google")])
+        none = mm.load_changes({}, model, AD, APPS)
+        bad = mm.load_changes({"changes": CH_CFG}, model, AD, APPS, fetch=lambda *a: Unavailable("auth"))
+    log = buf.getvalue()
+    assert got["ok"] and none is None and bad == {"ok": False, "by_line": {}, "orphans": []}
+    assert "changes: ok, 1 placed, 1 orphans" in log and "changes: not configured" in log
+    assert "changes: unavailable (auth)" in log
+    assert SENTINEL not in log and "TA - " not in log and "Jishnu" not in log and "ZZ" not in log
+    # Masking covers the change-log password, key and email on Actions.
+    import base64
+    env = {"ADS_CREDENTIALS_JSON_B64": base64.b64encode(json.dumps({"changes": CH_CFG}).encode()).decode(),
+           "GITHUB_ACTIONS": "true"}
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        mm.load_creds(env)
+    for v in (CH_CFG["password"], CH_CFG["key"], CH_CFG["email"]):
+        assert "::add-mask::" + v in buf.getvalue()
+    # A multi-line or %-bearing secret: every line masked, whole value command-encoded.
+    tricky = {**CH_CFG, "password": "HEAD%" + SENTINEL + "\nTAIL" + SENTINEL}
+    env["ADS_CREDENTIALS_JSON_B64"] = base64.b64encode(json.dumps({"changes": tricky}).encode()).decode()
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        mm.load_creds(env)
+    lines = buf.getvalue().splitlines()
+    assert all(l.startswith("::add-mask::") for l in lines)
+    assert "::add-mask::TAIL" + SENTINEL in lines and "::add-mask::HEAD%" + SENTINEL in lines
+    assert "::add-mask::HEAD%25" + SENTINEL + "%0ATAIL" + SENTINEL in lines
+
+
+
+# ---- round 2: GeoAnimator, change table, structured lead, narration, two registers
+def test_app_of_tokens_and_new_projects():
+    for name in ("GEO - WW EN - INST - ANDROID", "GEO - WW - INST - ANDROID", "GEO - IN EN - INST - ANDROID",
+                 "Brand test - geoanimator - IN"):
+        assert m.app_of(name, APPS) == "GeoAnimator", name
+    assert m.app_of("MR - WW - geoanimator promo", APPS) == "Marine Radar"     # the prefix always wins
+    assert m.app_of("GEOX - 1", APPS) == m.UNATTRIBUTED                      # prefix ends at a boundary
+    assert m.app_of("PTW - ASA - Tier1 - Competitor", APPS) == m.UNATTRIBUTED   # not tracked
+    assert m.app_of("C1WH - US - EN", APPS) == m.UNATTRIBUTED
+    model = m.build_model({"Meta": [row("GEO - WW EN - INST - ANDROID", AD, 16)], "Google": [],
+                           "Apple Search Ads": []}, TABLE, AD, NOW, APPS)
+    assert [p["name"] for p in model["projects"]] == ["GeoAnimator"]
+    geo = _c("GEO - WW EN - INST - ANDROID", kind="Launched")
+    assert ch.place([geo], model, APPS)[0] == {("GeoAnimator", "Meta", "Android"): [geo]}
+
+
+def _changes_fixture():
+    cause = _c("TA - WW - IOS - A", kind="Paused", after="130$ per day", why="Over budget.", app="TravelAnimator")
+    orphan = _c("PTW - ASA - Tier1 - Category", channel="Apple Search Ads", kind="Launched",
+                after="25$ per day", app="Plant the World")
+    return {"ok": True, "by_line": {("Travel Animator", "Meta", "iOS"): [cause]}, "orphans": [orphan]}, cause, orphan
+
+
+def test_change_table():
+    model = full_model()
+    changes, cause, orphan = _changes_fixture()
+    table = c.change_table(changes, model, APPS)
+    assert [r["id"] for r in table] == ["c1", "c2"] and table[0]["change"] is cause and table[1]["change"] is orphan
+    facts = c.build_facts(model, "A")
+    ta_ios = next(k for k, v in facts.items() if v.get("key") == ("Travel Animator", "Meta", "iOS"))
+    assert table[0]["line_fact"] == ta_ios and table[1]["line_fact"] is None
+    assert table[0]["dir"] == "down" and table[1]["dir"] == "up"
+    assert table[0]["show"] == {"budget": "$130 a day"}
+    assert (table[1]["project"], table[1]["channel"], table[1]["os"]) == (m.UNATTRIBUTED, "Apple Search Ads", "iOS")
+    assert c.change_table(None, model, APPS) == [] and c.change_table({"ok": False, "by_line": {}, "orphans": []}, model, APPS) == []
+    for ok, want in (("45$ per day", "45"), ("$45/day", "45"), ("45.50 $ a day", "45.50"), ("$45 daily", "45")):
+        assert c.parse_budget(ok) == D(want), ok
+    for bad in ("45$ per month", "$45$ per day", "about 45$ per day", "45.5.0$", "45 per day", "", None):
+        assert c.parse_budget(bad) is None, bad
+    assert c._budget_words(D("45.5")) == "$45.50 a day"
+    assert c._direction("Budget", "40$ per day", "60$ per day") == "up"
+    assert c._direction("Budget", "60$ per day", "40$ per day") == "down"
+    assert c._direction("Targeting / geo", "", "45$ per day") is None
+    # The cache key follows attribution: the registry moving a campaign changes it.
+    apps2 = {**APPS, "Plant the World": {"short": "PTW", "prefixes": ["PTW"]}}
+    assert c.change_table(changes, model, apps2)[1]["key"] != table[1]["key"]
+    names = c.name_universe(APPS, table)
+    assert "Jishnu" in names and "Plant the World" in names and "" not in names and "GEO" not in names
+
+
+def _lead(*items):
+    return json.dumps({"items": list(items)})
+
+
+def _reason(raw, facts, table, names):
+    try:
+        c._check(raw, facts, table, names)
+    except c._Reject as exc:
+        return exc.word
+    return None
+
+
+def test_validate_reasons_are_one_word():
+    model = full_model()
+    changes, cause, orphan = _changes_fixture()
+    table = c.change_table(changes, model, APPS)
+    facts = c.build_facts(model, "A")
+    names = c.name_universe(APPS, table) | c._names(facts)
+    ios = table[0]["line_fact"]
+    other = next(k for k, v in facts.items() if k not in ("t", ios))
+    good = _lead({"observed": f"Travel Animator Meta spend rose to {{{ios}.d}}.", "refs": [ios],
+                  "cause": {"change": "c1", "action": "Paused the iPhone campaign at {c1.budget}",
+                            "reason": "because it overspent"}})
+    out = c._check(good, facts, table, names)
+    assert out == [f"Travel Animator Meta spend rose to {facts[ios]['show']['d']}. "
+                   "Paused the iPhone campaign at $130 a day because it overspent."]
+    obs = {"observed": f"Spend rose to {{{ios}.d}}.", "refs": [ios]}
+    cases = {
+        "shape": ["not json", _lead(), _lead({"observed": "x"}),
+                  _lead({**obs, "cause": {"change": "c1", "action": "Paused it. Then more."}})],
+        "digit": [_lead({"observed": "Spend rose 18%.", "refs": [ios]}),
+                  _lead({**obs, "cause": {"change": "c1", "action": "Paused campaign 7."}})],
+        "placeholder": [_lead({"observed": "Spend rose to {c1.budget}.", "refs": [ios]}),
+                        _lead({**obs, "cause": {"change": "c1", "action": f"Paused it at {{{ios}.d}}."}})],
+        "advice": [_lead({"observed": f"Spend rose to {{{ios}.d}} against budget.", "refs": [ios]}),
+                   _lead({**obs, "cause": {"change": "c1", "action": "Paused it, as the team decided."}})],
+        "direction": [_lead({"observed": f"Spend fell to {{{ios}.d}}.", "refs": [ios],
+                             "cause": {"change": "c1", "action": "Paused it."}}),
+                      _lead({**obs, "cause": {"change": "c1", "action": "Raised the spend cap."}})],
+        "name": [_lead({"observed": f"Jishnu's spend rose to {{{ios}.d}}.", "refs": [ios]}),
+                 _lead({**obs, "cause": {"change": "c1", "action": "Paused the Marine Radar campaign."}}),
+                 _lead({**obs, "cause": {"change": "c1", "action": "Jishnu paused the iPhone campaign."}}),
+                 _lead({**obs, "cause": {"change": "c1", "action": "Paused the Google campaign."}})],
+        "link": [_lead({**obs, "cause": {"change": "c2", "action": "Launched it."}}),         # orphan
+                 _lead({"observed": "Total spend was {t.d}.", "refs": ["t"],
+                        "cause": {"change": "c1", "action": "Paused it."}}),
+                 _lead({"observed": f"Spend rose to {{{ios}.d}} and {{{other}.d}}.", "refs": [ios, other],
+                        "cause": {"change": "c1", "action": "Paused it."}})],
+        "code": [_lead({**obs, "cause": {"change": "c1", "action": "Paused TA - WW - IOS - A."}}),
+                 _lead({**obs, "cause": {"change": "c1", "action": "Paused the ASA - Brand campaign."}})],
+        "length": [_lead({**obs, "cause": {"change": "c1", "action": "Paused " + "paused " * 30 + "it."}})],
+    }
+    for word, raws in cases.items():
+        for raw in raws:
+            assert _reason(raw, facts, table, names) == word, (word, raw, _reason(raw, facts, table, names))
+    # A down cause under an up line is fine: the cause is checked against what the person did.
+    assert c._check(_lead({**obs, "cause": {"change": "c1", "action": "Cut the iPhone campaign."}}),
+                    facts, table, names)
+    # "budget" belongs to causes only; "Apple" is a backed alias of Apple Search Ads.
+    assert c._check(_lead({**obs, "cause": {"change": "c1", "action": "Paused it to protect the budget."}}),
+                    facts, table, names)
+    assert c.validate(js(("Spend rose 18%.", [ios])), facts, names) == []
+
+
+def test_commentary_retries_with_reason():
+    import tempfile
+    model = full_model()
+    facts = c.build_facts(model, "A")
+    up = next(k for k, v in facts.items() if k != "t" and v["label"] == "up")
+    prompts = []
+
+    def flaky(prompt, scratch):
+        prompts.append(prompt)
+        return js(("Spend rose 18%.", [up])) if len(prompts) == 1 else js((f"Spend rose to {{{up}.d}}.", [up]))
+    out, log = _logged(lambda: c.commentary(model, "A", tempfile.mkdtemp(), run=flaky))
+    assert out and len(prompts) == 2 and "rejected for: digit" in prompts[1] and "Spend rose 18%." in prompts[1]
+    assert "synopsis: retry (digit)" in log and "18%" not in log and "warning" not in log
+    prompts.clear()
+    bad = lambda p, s: prompts.append(p) or js(("Spend rose 18%.", [up]))
+    out, log = _logged(lambda: c.commentary(model, "A", tempfile.mkdtemp(), run=bad))
+    assert out == [] and len(prompts) == 3 and "::warning title=Ad spend synopsis skipped::rejected:digit" in log
+    from claude_api import ClaudeError
+    calls = []
+
+    def down(p, s):
+        calls.append(1)
+        raise ClaudeError("rate-limit")
+    out, log = _logged(lambda: c.commentary(model, "A", tempfile.mkdtemp(), run=down))
+    assert out == [] and len(calls) == 1 and "skipped::rate-limit" in log
+
+
+def test_commentary_with_changes_reaches_claude_and_the_cache():
+    import tempfile
+    model = full_model()
+    changes, cause, orphan = _changes_fixture()
+    table = c.change_table(changes, model, APPS)
+    names = c.name_universe(APPS, table)
+    ios = table[0]["line_fact"]
+    seen = []
+
+    def ok(prompt, scratch):
+        seen.append(prompt)
+        return _lead({"observed": f"Travel Animator spend rose to {{{ios}.d}}.", "refs": [ios],
+                      "cause": {"change": "c1", "action": "Paused the iPhone campaign at {c1.budget}."}})
+    d_ = tempfile.mkdtemp()
+    out = c.commentary(model, "A", d_, run=ok, table=table, names=names)
+    assert out[0].endswith("Paused the iPhone campaign at $130 a day.")
+    assert '"line_fact"' in seen[0] and "Over budget." in seen[0]
+    c.commentary(model, "A", d_, run=ok, table=table, names=names)
+    assert len(seen) == 1                                     # cached
+    c.commentary(model, "A", d_, run=ok, table=table[:1], names=names)
+    assert len(seen) == 2                                     # a different change set is not this prose
+
+
+def test_narrate():
+    import tempfile
+    model = full_model()
+    changes, cause, orphan = _changes_fixture()
+    table = c.change_table(changes, model, APPS)
+    names = c.name_universe(APPS, table)
+    calls = []
+
+    def half(prompt, scratch, max_tokens=None):
+        calls.append((prompt, max_tokens))
+        return json.dumps({"c1": "Paused the iPhone campaign at {c1.budget} because it overspent.",
+                           "c2": "Launched PTW - ASA - Category."})
+    d_ = tempfile.mkdtemp()
+    out, log = _logged(lambda: c.narrate(table, d_, half, names=names))
+    assert out == {table[0]["key"]: "Paused the iPhone campaign at $130 a day because it overspent."}
+    assert len(calls) == 3 and "c2: code" in calls[1][0] and calls[0][1] == 256 + 120 * 2
+    assert "narration: ok 1 of 2" in log and "narration: retry (code)" in log
+    assert "Jishnu" not in log and "PTW" not in log and "iPhone" not in log
+    cached = json.load(open(os.path.join(d_, "narration.json")))
+    assert cached == {table[0]["key"]: "Paused the iPhone campaign at {self.budget} because it overspent."}
+    calls.clear()
+    fixed = lambda p, s, max_tokens=None: calls.append(p) or json.dumps(
+        {"c2": "Launched a Plant the World category campaign on Apple at {c2.budget}."})
+    out2, _ = _logged(lambda: c.narrate(table, d_, fixed, names=names))
+    assert len(calls) == 1 and '"c1"' not in calls[0].split("CHANGES:")[1]     # c1 came from the cache
+    assert out2[table[1]["key"]].endswith("at $25 a day.") and out2[table[0]["key"]].endswith("overspent.")
+    row = table[0]
+    for text, word in (("Paused it. Then resumed it.", "shape"), ("Paused ads.Resumed.", "shape"),
+                       ("Did " + "x " * 25 + "done.", "length"), ("Paused the Marine Radar ads.", "name"),
+                       ("Paused campaign 7.", "digit"), ("Jishnu paused it.", "name"),
+                       ("Paused it at {c2.budget}.", "placeholder"), ("Should pause it.", "advice")):
+        try:
+            c._check_narration(text, row, names)
+            raise AssertionError(text)
+        except c._Reject as exc:
+            assert exc.word == word, (text, exc.word)
+    assert c._check_narration("Set the budget to {c1.budget}.", row, names) == "Set the budget to $130 a day."
+    # An empty logged app never poisons the name check.
+    blank = c.change_table({"ok": True, "by_line": {("Travel Animator", "Meta", "iOS"): [_c("TA - WW - IOS - A", app="")]},
+                            "orphans": []}, model, APPS)
+    assert c._check_narration("Paused the iPhone campaign.", blank[0], c.name_universe(APPS, blank))
+    # A cached template that no longer validates is regenerated.
+    json.dump({table[0]["key"]: "Paused it. Twice."}, open(os.path.join(d_, "narration.json"), "w"))
+    calls.clear()
+    _logged(lambda: c.narrate(table[:1], d_, lambda p, s, max_tokens=None: calls.append(p) or json.dumps(
+        {"c1": "Paused the iPhone campaign."}), names=names))
+    assert len(calls) == 1
+    # Batches, transport failure, empty table.
+    many = [{**table[0], "id": f"c{i}", "key": f"k{i}"} for i in range(1, 42)]
+    sizes = []
+    _logged(lambda: c.narrate(many, tempfile.mkdtemp(), lambda p, s, max_tokens=None: sizes.append(max_tokens) or json.dumps(
+        {f"c{i}": "Paused the iPhone campaign." for i in range(1, 42)}), names=names))
+    assert sizes == [256 + 120 * 40, 256 + 120 * 1]
+    from claude_api import ClaudeError
+
+    def boom(*a, **k):
+        raise ClaudeError("auth")
+    out3, log3 = _logged(lambda: c.narrate(table, tempfile.mkdtemp(), boom, names=names))
+    assert out3 == {} and "narration: unavailable (auth)" in log3
+    assert c.narrate([], d_, boom, names=names) == {}
+
+
+def test_render_two_registers():
+    model = full_model()
+    changes, cause, orphan = _changes_fixture()
+    changes = {**changes, "text": {cause: "Paused the iPhone campaign because it overspent."}}
+    _s, _p, h, t = _render(model, "A", [], APPS, changes)
+    assert ('<span style="font-size:14px; color:#222222;" class="text-main">Paused the iPhone campaign '
+            'because it overspent.</span>') in h
+    assert 'class="text-muted">Tue 19:14</span>' in h and "<em>" not in h and "— Jishnu" not in h
+    assert "      Tue 19:14  Paused the iPhone campaign because it overspent." in t
+    # The orphan has no sentence: the log's words, with its app and channel, still escaped.
+    assert ('class="text-muted">Tue 19:14 · Plant the World Apple Search Ads</span>&nbsp;&nbsp;<span style="font-size:14px; '
+            'color:#222222;" class="text-main">Launched · PTW - ASA - Tier1 - Category · 25$ per day') in h
+    assert "  Tue 19:14 · Plant the World Apple Search Ads  Launched" in t
+    # A narrated orphan keeps its app and channel in the stamp.
+    narrated = {**changes, "text": {**changes["text"], orphan: "Launched a category campaign."}}
+    h4 = _render(model, "A", [], APPS, narrated)[2]
+    assert 'Tue 19:14 · Plant the World Apple Search Ads</span>&nbsp;&nbsp;<span style="font-size:14px; color:#222222;" class="text-main">Launched a category campaign.' in h4
+    assert "Change log &#8599;" in h and "Change log: https://jishnu-ads-taskboard.vercel.app/" in t
+    assert "plain-English rendering" in h
+    h0, t0 = _render(model, "A", [], APPS)[2:]
+    assert "Change log" not in h0 and "Change log" not in t0
+
+
+def test_main_picks_runner_and_guards_none():
+    import adspend_main as mm
+    for env, which, want in (({"CLAUDE_API_KEY": "k"}, lambda n: "/x/claude", "claude: api"),
+                             ({}, lambda n: "/x/claude", "claude: cli"),
+                             ({"GITHUB_ACTIONS": "true"}, lambda n: "/x/claude", "claude: none"),
+                             ({}, lambda n: None, "claude: none")):
+        run, log = _logged(lambda: mm.pick_runner(env, which))
+        assert log.strip() == want, (env, log)
+        assert run is (mm._run_cli if want == "claude: cli" else mm._run_claude)
+    model = full_model()
+    assert c.change_table(None, model, APPS) == []
+    assert c.name_universe(APPS, [])            # no table: still a usable name set
+
+
+
+def test_codex_round2_findings():
+    import tempfile
+    model = full_model()
+    changes, cause, orphan = _changes_fixture()
+    table = c.change_table(changes, model, APPS)
+    names = c.name_universe(APPS, table)
+    facts = c.build_facts(model, "A")
+    ios = table[0]["line_fact"]
+    # 1. An observation carries no cause, no code and one sentence only.
+    for observed, word in (("Total spend was {t.d} after pausing TA - WW - A.", "code"),
+                           ("Total spend was {t.d} because Meta was paused.", "cause"),
+                           ("Total spend was {t.d} after stopping the campaign.", "cause"),
+                           ("Spend fell to {t.d} following campaign pauses.", "cause"),
+                           ("Total spend was {t.d}. It was quiet.", "shape")):
+        assert _reason(_lead({"observed": observed, "refs": ["t"]}), facts, table, names) == word, observed
+    # 2. Identical changes share one sentence; a shifted id still reuses the cached template.
+    twin = {"ok": True, "by_line": {("Travel Animator", "Meta", "iOS"): [cause, cause]}, "orphans": []}
+    t2 = c.change_table(twin, model, APPS)
+    assert t2[0]["key"] == t2[1]["key"] and (t2[0]["id"], t2[1]["id"]) == ("c1", "c2")
+    d_ = tempfile.mkdtemp()
+    calls = []
+    run = lambda p, s, max_tokens=None: calls.append(p) or json.dumps(
+        {"c1": "Paused the iPhone campaign at {c1.budget}.", "c2": "Paused it at {c2.budget}."})
+    out, _ = _logged(lambda: c.narrate(t2, d_, run, names=names))
+    assert out == {t2[0]["key"]: "Paused the iPhone campaign at $130 a day."} and len(calls) == 1
+    shifted = {"ok": True, "by_line": {("Travel Animator", "Meta", "iOS"): [_c("TA - WW - IOS - A", kind="Launched", at=cause.at.replace(hour=20)), cause]},
+               "orphans": []}
+    t3 = c.change_table(shifted, model, APPS)
+    assert t3[1]["change"] is cause and t3[1]["id"] == "c2"
+    calls.clear()
+    out, _ = _logged(lambda: c.narrate(t3, d_, lambda p, s, max_tokens=None: calls.append(p) or json.dumps(
+        {"c1": "Launched the iPhone campaign."}), names=names))
+    assert out[t3[1]["key"]] == "Paused the iPhone campaign at $130 a day." and '"c2"' not in calls[0].split("CHANGES:")[1]
+    # 3. A short code of another project is a name; lower-case "geo" is not.
+    for text, word in (("Paused the MR campaign.", "name"), ("Jishnu paused the campaign.", "name")):
+        try:
+            c._check_narration(text, table[0], names); raise AssertionError(text)
+        except c._Reject as exc:
+            assert exc.word == word
+    assert c._check_narration("Paused the TA iPhone campaign over geo targeting.", table[0], names)
+    # 4. The logged spelling of a backed app is the same name.
+    assert c._check(_lead({"observed": f"TravelAnimator Meta spend rose to {{{ios}.d}}.", "refs": [ios]}),
+                    facts, table, names)
+    # 5. Direction is judged on the action, not on the reason.
+    assert c._check(_lead({"observed": f"Spend rose to {{{ios}.d}}.", "refs": [ios],
+                           "cause": {"change": "c1", "action": "Paused the campaign",
+                                     "reason": "over higher acquisition costs, which had increased."}}),
+                    facts, table, names)
+    assert _reason(_lead({"observed": f"Spend rose to {{{ios}.d}}.", "refs": [ios],
+                          "cause": {"change": "c1", "action": "Paused the campaign because costs increased"}}),
+                   facts, table, names) == "cause"
+    assert _reason(_lead({"observed": f"Spend rose to {{{ios}.d}}.", "refs": [ios],
+                          "cause": {"change": "c1", "action": "Set the campaign to a higher level"}}),
+                   facts, table, names) == "direction"
+    # Honest factual observations pass.
+    for observed in ("Travel Animator Meta spend changed from {%s.d1} to {%s.d}." % (ios, ios),
+                     "Travel Animator Meta spend rose since yesterday to {%s.d}." % ios,
+                     "Travel Animator Meta spend was {%s.d} vs. {%s.d1} the day before." % (ios, ios)):
+        assert c._check(_lead({"observed": observed, "refs": [ios]}), facts, table, names), observed
+    # A registered alias of another project is still that project; validate() keeps the short codes.
+    assert _reason(_lead({"observed": f"Geo Animator Meta spend rose to {{{ios}.d}}.", "refs": [ios]}),
+                   facts, table, names) == "name"
+    assert c.validate(_lead({"observed": f"MR spend rose to {{{ios}.d}}.", "refs": [ios]}), facts, names) == []
+    # An unwritable cache never stops the email.
+    ro = tempfile.mkdtemp()
+    os.makedirs(os.path.join(ro, "commentary-A.json"))          # a directory where the file should go
+    os.makedirs(os.path.join(ro, "narration.json"))
+    assert c.commentary(model, "A", ro, run=lambda p, s: _lead({"observed": f"Travel Animator spend rose to {{{ios}.d}}.",
+                                                                 "refs": [ios]}), table=table, names=names)
+    out, _ = _logged(lambda: c.narrate(table[:1], ro, lambda p, s, max_tokens=None: json.dumps(
+        {"c1": "Paused the iPhone campaign."}), names=names))
+    assert out
+    assert _reason(_lead({"observed": f"Spend rose to {{{ios}.d}}.", "refs": [ios],
+                          "cause": {"change": "c1", "action": "Raised the campaign", "reason": "because it worked"}}),
+                   facts, table, names) == "direction"
+    # 6. A cached lead is re-validated: a rule that now fails it forces a fresh answer.
+    d_ = tempfile.mkdtemp()
+    good = lambda p, s: _lead({"observed": f"Travel Animator spend rose to {{{ios}.d}}.", "refs": [ios]})
+    assert c.commentary(model, "A", d_, run=good, table=table, names=names)
+    path = os.path.join(d_, "commentary-A.json")
+    cached = json.load(open(path))
+    assert cached["v"] == c.CACHE_VERSION and cached["raw"]
+    cached["raw"] = _lead({"observed": f"Jishnu's spend rose to {{{ios}.d}}.", "refs": [ios]})
+    json.dump(cached, open(path, "w"))
+    calls = []
+    c.commentary(model, "A", d_, run=lambda p, s: calls.append(p) or good(p, s), table=table, names=names)
+    assert len(calls) == 1
+
+
+
+def test_synopsis_salvage_after_three_failures():
+    import tempfile
+    model = full_model()
+    changes, cause, orphan = _changes_fixture()
+    table = c.change_table(changes, model, APPS)
+    names = c.name_universe(APPS, table)
+    ios = table[0]["line_fact"]
+    other = next(k for k, v in c.build_facts(model, "A").items() if k not in ("t", ios))
+    long_cause = {"change": "c1", "action": "Paused the iPhone campaign", "reason": "because " + "it overspent " * 15}
+    answer = _lead({"observed": f"Travel Animator Meta spend rose to {{{ios}.d}}.", "refs": [ios], "cause": long_cause},
+                   {"observed": "Spend rose 18%.", "refs": [other]})
+    calls = []
+    d_ = tempfile.mkdtemp()
+    out, log = _logged(lambda: c.commentary(model, "A", d_, run=lambda p, s: calls.append(p) or answer,
+                                            table=table, names=names))
+    facts = c.build_facts(model, "A")
+    assert out == [f"Travel Animator Meta spend rose to {facts[ios]['show']['d']}."]     # cause and bad item dropped
+    assert len(calls) == 3 and "synopsis: partial (length)" in log and "warning" not in log
+    assert not os.path.exists(os.path.join(d_, "commentary-A.json"))                   # a salvage is never cached
+    # A later call failing in transport still leaves the first answer's good item.
+    from claude_api import ClaudeError
+    seq = [answer]
+
+    def then_timeout(p, s):
+        if seq:
+            return seq.pop()
+        raise ClaudeError("timeout")
+    out, log = _logged(lambda: c.commentary(model, "A", tempfile.mkdtemp(), run=then_timeout, table=table, names=names))
+    assert out == [f"Travel Animator Meta spend rose to {facts[ios]['show']['d']}."] and "synopsis: partial" in log
+    assert "warning" not in log
+    fenced = "```json\n" + _lead({"observed": f"Travel Animator Meta spend rose to {{{ios}.d}}.", "refs": [ios]}) + "\n```"
+    assert c.commentary(model, "A", d_, run=lambda p, s: fenced, table=table, names=names)
+    assert os.path.exists(os.path.join(d_, "commentary-A.json"))
+
+
+
+def test_budget_unit_is_never_doubled():
+    model = full_model()
+    changes, cause, orphan = _changes_fixture()
+    table = c.change_table(changes, model, APPS)
+    names = c.name_universe(APPS, table)
+    for text, want in (("Paused the iPhone campaign, budgeted at {c1.budget} daily.", "budgeted at $130 a day."),
+                       ("Paused the iPhone campaign at {c1.budget} a day.", "at $130 a day."),
+                       ("Paused the iPhone campaign on a daily budget of {c1.budget}.", "on a budget of $130 a day.")):
+        assert c._check_narration(text, table[0], names).endswith(want), text
+
+
+
+def test_prose_never_names_a_person():
+    model = full_model()
+    named = _c("TA - WW - IOS - A", why="Jishnu asked for this; jishnu's call.", after="130$ per day")
+    changes = {"ok": True, "by_line": {("Travel Animator", "Meta", "iOS"): [named]}, "orphans": []}
+    h, t = _render(model, "A", [], APPS, changes)[2:]
+    h, t = (x.replace(r.CHANGE_LOG_URL, "") for x in (h, t))     # the log's web address is not prose
+    assert "jishnu" not in h.lower() and "jishnu" not in t.lower()
+    assert "the ads team asked for this; the ads team call." in t
+    table = c.change_table(changes, model, APPS)
+    names = c.name_universe(APPS, table)
+    assert "author" not in c._payload_row(table[0])
+    for text in ("Jishnu paused the iPhone campaign.", "Paused the iPhone campaign because Jishnu asked."):
+        try:
+            c._check_narration(text, table[0], names)
+            raise AssertionError(text)
+        except c._Reject as exc:
+            assert exc.word == "name"
+
+
+
+# ---- fixed product order, quiet dark lines
+def test_fixed_product_order():
+    rows = [row("PINGEE - WW", AD, 500), row("Nope - 1", AD, 400), row("GEO - WW - ANDROID", AD, 300),
+            row("Mail AI - US", AD, 500), row("MR - IOS", AD, 20), row("TA - IOS", AD, 10), row("AR - IOS", AD, 5)]
+    model = m.build_model({"Meta": rows, "Google": [], "Apple Search Ads": []}, TABLE, AD, NOW, APPS)
+    assert [p["name"] for p in model["projects"]] == [
+        "Travel Animator", "Marine Radar", "Smart Ruler", "GeoAnimator", "Mail AI", "Pingee", m.UNATTRIBUTED]
+    assert [APPS[n]["rank"] for n in ("Travel Animator", "Marine Radar", "Smart Ruler", "GeoAnimator")] == [1, 2, 3, 4]
+
+
+def _fold_model():
+    rows = [row("TA - IOS", d(1), 90), row("TA - IOS", AD, 100),                  # active
+            row("TA - ANDROID", d(3), 20),                                        # dark
+            row("TA - WW", d(4), 30, ch="Google"),                                 # dark, no OS
+            row("TA - X - ANDROID", d(1), 50, ch="Google"),                        # stopped yesterday
+            row("MR - IOS", d(3), 10)]                                            # MR: dark only
+    google = [r_ for r_ in rows if r_.channel == "Google"]
+    return m.build_model({"Meta": [r_ for r_ in rows if r_.channel == "Meta"], "Google": google,
+                          "Apple Search Ads": []}, TABLE, AD, NOW, APPS)
+
+
+def test_dark_lines_fold():
+    model = _fold_model()
+    h, t = _render(model, "A", [], APPS)[2:]
+    assert "  No spend: Google · Meta Android" in t
+    assert "Google: $0" not in t and "Meta Android: $0" not in t                  # no $0 rows for dark lines
+    assert "Google Android: $0 - spend stopped, was $50 Mon" in t                  # a stop stays loud
+    assert "  Meta iOS: $100 - steady vs Mon" in t
+    assert "Marine Radar  $0\n  No spend: Meta iOS" in t                           # heading + fold only
+    assert ">No spend: Google · Meta Android</p>" in h and 'class="text-muted">No spend: Meta iOS</p>' in h
+    assert h.count("No spend:") == 2
+    # A dark line with a logged change keeps its row; the fold names only the rest.
+    dark = _c("TA - ANDROID", kind="Paused")
+    changes = {"ok": True, "by_line": {("Travel Animator", "Meta", "Android"): [dark]}, "orphans": []}
+    t2 = _render(model, "A", [], APPS, changes)[3]
+    assert "  Meta Android: $0 - no spend Mon or yesterday" in t2 and "  No spend: Google\n" in t2
+
+
+def test_facts_independent_of_display_order():
+    # Twelve tied dark lines (six projects x two channels): more than MAX_FACTS, all tied at zero.
+    camps = ["TA", "MR", "AR", "GEO", "PINGEE", "Mail AI"]
+    meta = [row(f"{p} - IOS", d(3), 10) for p in camps]
+    google = [row(f"{p} - IOS", d(3), 10, ch="Google") for p in camps]
+    model = m.build_model({"Meta": meta, "Google": google, "Apple Search Ads": []}, TABLE, AD, NOW, APPS)
+    lines = [ln for p in model["projects"] for ln in p["lines"]]
+    assert len(lines) == 12 > c.MAX_FACTS
+    flipped = {**model, "projects": [{**p, "lines": list(reversed(p["lines"]))} for p in reversed(model["projects"])]}
+    for v in ("A", "B"):
+        facts = c.build_facts(model, v)
+        assert facts == c.build_facts(flipped, v)
+        assert [f["key"] for k, f in facts.items() if k != "t"] == sorted(
+            (ln["project"], ln["channel"], ln["os"]) for ln in lines)[:c.MAX_FACTS]
+    # Change ids follow line keys, not the page: reordering projects renumbers nothing.
+    ta, mr = _c("TA - IOS"), _c("MR - IOS")
+    changes = {"ok": True, "by_line": {("Travel Animator", "Meta", "iOS"): [ta], ("Marine Radar", "Meta", "iOS"): [mr]},
+               "orphans": []}
+    a = [(r_["id"], r_["change"]) for r_ in c.change_table(changes, model, APPS)]
+    b = [(r_["id"], r_["change"]) for r_ in c.change_table(changes, flipped, APPS)]
+    assert a == b and a[0][1] is mr                                           # "Marine Radar" < "Travel Animator"
 
 if __name__ == "__main__":
     for name, fn in list(globals().items()):

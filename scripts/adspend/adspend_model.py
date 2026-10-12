@@ -24,7 +24,9 @@ UNATTRIBUTED = "Unattributed"
 
 
 def app_of(name: str, apps: dict) -> str:
-    """Longest matching prefix wins; the prefix must end at a non-alphanumeric."""
+    """Longest matching prefix wins; the prefix must end at a non-alphanumeric. Only when no
+    prefix matches, a project's optional `tokens` are tried as whole words anywhere in the name
+    (registry order), so a prefix can never be stolen by a word later in the name."""
     lowered = (name or "").strip().lower()
     best, best_len = UNATTRIBUTED, 0
     for project, spec in apps.items():
@@ -34,6 +36,11 @@ def app_of(name: str, apps: dict) -> str:
                 nxt = lowered[len(p):len(p) + 1]
                 if nxt == "" or not nxt.isalnum():
                     best, best_len = project, len(p)
+    if best == UNATTRIBUTED:
+        toks = set(re.split(r"[^a-z0-9]+", lowered))
+        for project, spec in apps.items():
+            if toks & {t.lower() for t in spec.get("tokens", [])}:
+                return project
     return best
 
 
@@ -158,7 +165,12 @@ def build_model(rows: dict, table, ad_date: date, now: datetime, apps: dict) -> 
         p["lines"].append(ln)
         for k in ("d", "d1", "avg7"):
             p[k] += ln[k]
-    plist = sorted(projects.values(), key=lambda p: -p["d"])
+    def place(p):
+        """A fixed place for the ranked products, so the eye learns where each one lives; the
+        rest follow by yesterday's spend; Unattributed, the residue, always comes last."""
+        rank = apps.get(p["name"], {}).get("rank")
+        return (p["name"] == UNATTRIBUTED, rank is None, rank or 0, -p["d"], p["name"])
+    plist = sorted(projects.values(), key=place)
     for p in plist:
         p["lines"].sort(key=lambda x: (-x["d"], x["channel"], x["os"]))
 

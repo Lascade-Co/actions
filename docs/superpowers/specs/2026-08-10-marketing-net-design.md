@@ -274,6 +274,13 @@ succeeding.
 `google` carries `client_id`, `client_secret`, `refresh_token`, `project_id`, `dev_token`, `email`,
 `login_customer_id`, `skip_customer_ids[]`; `meta` carries `token`, `account_ids[]`.
 
+The daily ad-spend email (`scripts/adspend/`) also reads two optional blocks from the same blob.
+`apple` carries `client_id`, `team_id`, `key_id`, `org_id`, `private_key` (PEM). `changes`
+carries `url`, `key`, `email`, `password` and optionally `table` (default `changes`): the ads
+team's change log in Supabase, shown under the ledger line each change explains. The table is
+behind row-level security, so the publishable `key` alone reads nothing and `email` + `password`
+sign in first. A missing `changes` block leaves the email exactly as it was.
+
 ## Testing
 
 `pytest`, offline fixtures, no network — mirroring `scripts/seo/`. Coverage that matters:

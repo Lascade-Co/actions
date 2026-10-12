@@ -13,16 +13,30 @@ import argparse
 import base64
 import json
 import os
+import shutil
 import sys
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 
-from adspend_commentary import commentary
+import adspend_changes
+from adspend_commentary import _run_claude, change_table, commentary, name_universe, narrate
+from claude_api import generate_text_cli
 from adspend_fetch import fetch_apple, fetch_google, fetch_meta
 from adspend_model import WINDOW_DAYS, build_model
 from adspend_render_email import render
 from pnl_fx import build_rate_table
 from pnl_money import Unavailable
+
+
+def _mask(value) -> None:
+    """Mask a secret in the public log. Every line separately (a log line can only ever show
+    one), plus the whole value encoded the way the runner decodes command data."""
+    s = str(value)
+    enc = s.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+    print(f"::add-mask::{enc}")
+    for line in s.splitlines():
+        if line.strip() and line != s:
+            print(f"::add-mask::{line.strip()}")
 
 
 def load_creds(env=os.environ) -> dict:
@@ -31,12 +45,13 @@ def load_creds(env=os.environ) -> dict:
         return ads  # locally the mask lines would echo the secrets to the terminal
     # A group that is missing, null or not an object must never crash masking: that would
     # stop the whole email, and the apple block in particular is optional.
-    groups = {g: ads.get(g) if isinstance(ads.get(g), dict) else {} for g in ("meta", "google", "apple")}
+    groups = {g: ads.get(g) if isinstance(ads.get(g), dict) else {} for g in ("meta", "google", "apple", "changes")}
     for group, cfg in groups.items():
-        for key in ("token", "client_secret", "refresh_token", "dev_token", "client_id", "key_id"):
+        for key in ("token", "client_secret", "refresh_token", "dev_token", "client_id", "key_id",
+                    "password", "key", "email"):
             value = cfg.get(key)
             if value:
-                print(f"::add-mask::{value}")
+                _mask(value)
     # A multi-line value needs one mask per key line (the PEM armor is not secret).
     for line in str(groups["apple"].get("private_key", "")).splitlines():
         if line.strip() and not line.startswith("-----"):
@@ -68,6 +83,41 @@ def status_line(name, data) -> str:
     cur = sorted({r.currency for r in data})
     inst = "n/a" if not data else ("ok" if all(r.installs is not None for r in data) else "unavailable")
     return f"{name}: {len(data)} rows, tz={tzs}, currency={cur}, installs={inst}"
+
+
+def load_changes(ads, model, ad_date, apps, fetch=None):
+    """-> None when the change log is not configured, else the render's `changes` dict.
+    Public log: counts or a one-word reason only, never a campaign, a why or an author."""
+    cfg = adspend_changes.load(ads)
+    if cfg is None:
+        print("changes: not configured")
+        return None
+    tz = next(iter(model["channels"]["Meta"]["timezones"] or model["channels"]["Google"]["timezones"]),
+              adspend_changes.DEFAULT_TZ)
+    got = (fetch or adspend_changes.fetch)(cfg, ad_date, tz)
+    if isinstance(got, Unavailable):
+        print(f"changes: unavailable ({got.reason})")
+        return {"ok": False, "by_line": {}, "orphans": []}
+    by_line, orphans = adspend_changes.place(got, model, apps)
+    print(f"changes: ok, {sum(map(len, by_line.values()))} placed, {len(orphans)} orphans")
+    return {"ok": True, "by_line": by_line, "orphans": orphans}
+
+
+def _run_cli(prompt, scratch, max_tokens=1024):
+    return generate_text_cli(prompt)
+
+
+def pick_runner(env=os.environ, which=shutil.which):
+    """The API key wherever it is set (CI). Locally, without a key, the `claude` CLI, i.e. the
+    Claude subscription. Never the CLI on Actions."""
+    if env.get("CLAUDE_API_KEY", "").strip():
+        print("claude: api")
+        return _run_claude
+    if env.get("GITHUB_ACTIONS") != "true" and which("claude"):
+        print("claude: cli")
+        return _run_cli
+    print("claude: none")
+    return _run_claude          # fails with "auth": no synopsis, the email still sends
 
 
 def main(argv=None):
@@ -105,14 +155,23 @@ def main(argv=None):
         for line in reconcile(rows, table, ad_date, ads, fetch_meta_ads_daily, fetch_google_ads_daily):
             print(line)
     model = build_model(rows, table, ad_date, datetime.now(timezone.utc), apps)
+    changes = load_changes(ads, model, ad_date, apps)
+    table = change_table(changes, model, apps)            # [] unless the log was read
+    names = name_universe(apps, table)
 
     def broken(*_a, **_k):
         raise RuntimeError("commentary disabled for test")
 
+    run = broken if a.break_commentary else pick_runner()
+    if table and not a.break_commentary:                  # break: the rule-based wording everywhere
+        text = narrate(table, a.scratch, run, names=names)
+        change_of = {row["key"]: row["change"] for row in table}
+        changes["text"] = {change_of[k]: t for k, t in text.items()}
+
     for variant in [v.strip() for v in a.variants.split(",") if v.strip()]:
-        sentences = commentary(model, variant, a.scratch, run=broken, cache=False) if a.break_commentary \
-            else commentary(model, variant, a.scratch)
-        subject, _pre, html, text = render(model, variant, sentences, apps)
+        sentences = commentary(model, variant, a.scratch, run=broken, cache=False, table=table, names=names) \
+            if a.break_commentary else commentary(model, variant, a.scratch, run=run, table=table, names=names)
+        subject, _pre, html, text = render(model, variant, sentences, apps, changes)
         for ext, body in (("html", html), ("txt", text), ("subject", subject)):
             with open(os.path.join(a.out, f"email-{variant}.{ext}"), "w") as fh:
                 fh.write(body)

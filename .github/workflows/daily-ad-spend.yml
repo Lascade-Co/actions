@@ -108,7 +108,7 @@ jobs:
       - name: Download scripts
         run: |
           for m in pnl_money pnl_fx pnl_metaads pnl_googleads; do curl -fsSL --retry 3 --retry-delay 2 -o "$m.py" "$RAW/scripts/pnl/$m.py"; done
-          for m in adspend_fetch adspend_model adspend_commentary adspend_render_email adspend_main; do
+          for m in adspend_fetch adspend_model adspend_changes adspend_commentary adspend_render_email adspend_main; do
             curl -fsSL --retry 3 --retry-delay 2 -o "$m.py" "$RAW/scripts/adspend/$m.py"
           done
           curl -fsSL --retry 3 --retry-delay 2 -o send_resend.sh "$RAW/scripts/adspend/send_resend.sh"

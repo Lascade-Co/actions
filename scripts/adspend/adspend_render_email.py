@@ -7,6 +7,7 @@ prose is #222, accent blue marks structure only.
 """
 from __future__ import annotations
 
+import re
 from datetime import timedelta
 from decimal import Decimal
 from html import escape as esc
@@ -19,6 +20,13 @@ FONT_BODY = "'Inter', system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica N
 ACCENT = "#2980b9"
 WORKFLOW_URL = "https://github.com/Lascade-Co/actions/actions/workflows/daily-ad-spend.yml"
 SUMMARY_MISSING = "Summary unavailable today."
+CHANGES_MISSING = "Change log unavailable today."
+CHANGES_NOTE = ("Changes are from the ad-account day and the day before, as logged by the ads team. "
+                "An evening change shows in the next day's figures. "
+                "Wording is a plain-English rendering of the log.")
+CHANGE_LOG_URL = "https://jishnu-ads-taskboard.vercel.app/"
+WHY_CAP = 160
+MOVED = ("up", "down", "started", "stopped")
 
 HEAD = """\
 <!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
@@ -227,7 +235,83 @@ def _detail(ln, d1_name, variant) -> str:
     return " · ".join(bits)
 
 
-def _ledger_line(ln, d1_name, variant) -> str:
+def _why(text: str) -> str:
+    if len(text) <= WHY_CAP:
+        return text
+    cut = text[:WHY_CAP].rsplit(" ", 1)[0].rstrip(" ,.;:")
+    return cut + "…"
+
+
+def _change_bits(c) -> list:
+    """Plain-text pieces of one logged change, in reading order."""
+    bits = [f"{c.at:%a %H:%M}"]
+    bits += [x for x in (c.kind, c.entity) if x]
+    if c.before and c.after:
+        bits.append(f"{c.before} → {c.after}")
+    elif c.before or c.after:
+        bits.append(c.before or c.after)
+    if c.why:
+        bits.append(f"“{_why(c.why)}”")
+    return bits
+
+
+def _authors(changes) -> set:
+    every = [c for cs in (changes or {}).get("by_line", {}).values() for c in cs] + list((changes or {}).get("orphans", []))
+    return {c.author for c in every if c.author and c.author.strip()}
+
+
+def _unnamed(text: str, authors) -> str:
+    """The prose names no person: an author named in a logged reason becomes 'the ads team'."""
+    for a in sorted(authors, key=len, reverse=True):
+        text = re.sub(rf"(?<![A-Za-z0-9]){re.escape(a)}(?:'s)?(?![A-Za-z0-9])", "the ads team", text, flags=re.I)
+    return text
+
+
+def _change_fallback(c, authors=()) -> str:
+    """The log's own words when there is no plain-English sentence. No author: who made the
+    change is implicit."""
+    return _unnamed(" · ".join(_change_bits(c)[1:]), set(authors) | ({c.author} if c.author else set()))
+
+
+def _change_sentence(c, changes) -> str:
+    return ((changes or {}).get("text") or {}).get(c) or _change_fallback(c, _authors(changes))
+
+
+def _stamp(c, with_channel=False) -> str:
+    """When, and for an orphan (no ledger line above it) whose: always shown, never left to the
+    wording, so a narrated orphan cannot lose its app and channel."""
+    who = " ".join(x for x in (c.app, c.channel) if x) if with_channel else ""
+    return f"{c.at:%a %H:%M}" + (f" · {who}" if who else "")
+
+
+def _change_html(c, changes, with_channel=False) -> str:
+    """Two registers: a small grey stamp, then the sentence in body text. The sentence is what
+    to read; the statistics above it stay grey."""
+    return (f'<p style="margin:4px 0 0 0; Margin:4px 0 0 0; padding:0 0 2px 12px; font-family:{FONT_BODY}; '
+            f'line-height:1.5;"><span style="font-size:12px; color:#777777; font-variant-numeric:tabular-nums;" '
+            f'class="text-muted">{esc(_stamp(c, with_channel))}</span>&nbsp;&nbsp;<span style="font-size:14px; '
+            f'color:#222222;" class="text-main">{esc(_change_sentence(c, changes))}</span></p>')
+
+
+def _change_text(c, changes, with_channel=False) -> str:
+    return f"{_stamp(c, with_channel)}  {_change_sentence(c, changes)}"
+
+
+def _line_detail(ln, d1_name, variant, changes) -> str:
+    """The existing detail line, plus 'no change logged' when a moved line has no cause."""
+    detail = _detail(ln, d1_name, variant)
+    if changes and changes["ok"] and ln["label"] in MOVED and not _line_changes(ln, changes):
+        detail += " · no change logged"
+    return detail
+
+
+def _line_changes(ln, changes) -> list:
+    if not changes:
+        return []
+    return changes["by_line"].get((ln["project"], ln["channel"], ln["os"]), [])
+
+
+def _ledger_line(ln, d1_name, variant, changes=None) -> str:
     os_ = "" if ln["os"] == UNASSIGNED else f" · {ln['os']}"
     weight = "700" if ln["label"] in ("started", "stopped") else "600"
     return (
@@ -240,16 +324,43 @@ def _ledger_line(ln, d1_name, variant) -> str:
         f'class="divider-line">&nbsp;</td>'
         f'<td align="right" style="font-family:{FONT_HEADING}; font-size:16px; font-weight:700; color:#222222; '
         f'padding:0 0 2px 8px; font-variant-numeric:tabular-nums;" class="heading-dm">{esc(_usd(ln["d"]))}</td>'
-        '</tr></table>' + _muted(esc(_detail(ln, d1_name, variant)), 12, 0, "padding-bottom:2px;")
+        '</tr></table>' + _muted(esc(_line_detail(ln, d1_name, variant, changes)), 12, 0, "padding-bottom:2px;")
+        + "".join(_change_html(c, changes) for c in _line_changes(ln, changes))
     )
 
 
-def _project(p, d1_name, variant) -> str:
+def _project(p, d1_name, variant, changes=None) -> str:
     head = (f'<table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" class="tfix"><tr>'
             f'<td style="font-family:{FONT_HEADING}; font-size:18px; font-weight:700; color:#222222;" class="heading-dm">{esc(p["name"])}</td>'
             f'<td align="right" style="font-family:{FONT_HEADING}; font-size:18px; font-weight:700; color:#222222; '
             f'font-variant-numeric:tabular-nums;" class="heading-dm">{esc(_usd(p["d"]))}</td></tr></table>')
-    return _row(head + "".join(_ledger_line(ln, d1_name, variant) for ln in p["lines"]), 30)
+    active, quiet = _split(p["lines"], changes)
+    fold = _muted(esc(_no_spend(quiet)), 12, 6) if quiet else ""
+    return _row(head + "".join(_ledger_line(ln, d1_name, variant, changes) for ln in active) + fold, 30)
+
+
+def _quiet(ln, changes) -> bool:
+    """Dark: no spend yesterday or the day before. Nothing happened, so no row of its own; a
+    stop (money the day before) or a logged change keeps the full row."""
+    return ln["label"] == "dark" and not _line_changes(ln, changes)
+
+
+def _split(lines, changes):
+    return [ln for ln in lines if not _quiet(ln, changes)], [ln for ln in lines if _quiet(ln, changes)]
+
+
+def _no_spend(quiet) -> str:
+    return "No spend: " + " · ".join(ln["channel"] + ("" if ln["os"] == UNASSIGNED else f" {ln['os']}")
+                                     for ln in quiet)
+
+
+def _also_changed(changes) -> str:
+    """Logged changes that match no line in this email (a campaign with no spend yet, an
+    unknown prefix). Absent on most days."""
+    if not changes or not changes["orphans"]:
+        return ""
+    body = "".join(_change_html(c, changes, with_channel=True) for c in changes["orphans"])
+    return _row(f'<p style="margin:0 0 2px 0; Margin:0 0 2px 0;">{_small_caps("Also changed")}</p>' + body, 30)
 
 
 def _compact(v: Decimal) -> str:
@@ -288,7 +399,7 @@ def _chart(model) -> str:
                 f'<table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" class="tfix"><tr>{"".join(cells)}</tr></table>', 32)
 
 
-def _footnotes(model, variant, summary_missing=False) -> str:
+def _footnotes(model, variant, summary_missing=False, changes=None) -> str:
     lines = ["Channels covered: Meta, Google and Apple Search Ads."]
     tz = "; ".join(f"{ch} {', '.join(s['timezones'])}" for ch, s in model["channels"].items() if s["timezones"])
     if tz:
@@ -296,21 +407,30 @@ def _footnotes(model, variant, summary_missing=False) -> str:
     lines.append("All figures in US dollars.")
     if summary_missing:
         lines.append(SUMMARY_MISSING)
+    if changes and not changes["ok"]:
+        lines.append(CHANGES_MISSING)
+    elif changes:
+        lines.append(CHANGES_NOTE)
     lines.append(f"A line is up or down only when it moves at least {int(DEADBAND_PCT * 100)}% and {_usd(DEADBAND_USD)} "
                  "against the day before. Meta pacing alone can move a campaign 10–20% a day.")
     if variant == "B":
         lines.append("Installs are as attributed by each platform. iOS installs for the latest day are delayed "
                      "and modelled, so they are usually undercounted.")
     body = "".join(_muted(esc(l), 11, 0 if i == 0 else 6, "text-align:center;") for i, l in enumerate(lines))
+    log_link = (f' &nbsp;·&nbsp; <a href="{esc(CHANGE_LOG_URL)}" style="color:#888888; text-decoration:underline;" '
+                f'class="email-link">Change log &#8599;</a>') if changes is not None else ""
     link = (f'<p style="margin:10px 0 0 0; Margin:10px 0 0 0; font-family:{FONT_BODY}; font-size:11px; text-align:center;" '
             f'class="text-muted"><a href="{esc(WORKFLOW_URL)}" style="color:#888888; text-decoration:underline;" '
-            f'class="email-link">Workflow &#8599;</a></p>')
+            f'class="email-link">Workflow &#8599;</a>{log_link}</p>')
     return _section_open() + f'<tr><td style="padding:32px 40px 40px 40px;" class="body-cell">{body}{link}</td></tr></table>'
 
 
-def render(model: dict, variant: str, sentences: list, apps: dict) -> tuple:
+def render(model: dict, variant: str, sentences: list, apps: dict, changes=None) -> tuple:
     """Pure. -> (subject, preheader, html, text). Byte-stable for a given input:
-    no run id, timestamp or URL that changes per run."""
+    no run id, timestamp or URL that changes per run.
+
+    changes: None (log not configured: output identical to before the log existed) or
+    {"ok": bool, "by_line": {(project, channel, os): [Change]}, "orphans": [Change]}."""
     ad = model["ad_date"]
     d1_name = (ad - timedelta(days=1)).strftime("%a")
     subject = subject_of(model, variant, apps)
@@ -320,8 +440,9 @@ def render(model: dict, variant: str, sentences: list, apps: dict) -> tuple:
     parts = [
         _masthead(eyebrow, f"{ad:%A} {ad.day} {ad:%B}", "ad-account day · Meta, Google, Apple Search Ads"),
         _banners(model, variant), lead, _stat_grid(model),
-        "".join(_project(p, d1_name, variant) for p in model["projects"]),
-        _chart(model), _footnotes(model, variant, summary_missing=not sentences),
+        "".join(_project(p, d1_name, variant, changes) for p in model["projects"]),
+        _also_changed(changes),
+        _chart(model), _footnotes(model, variant, summary_missing=not sentences, changes=changes),
     ]
     html = (
         HEAD.replace("__TITLE__", esc(subject)) +
@@ -345,11 +466,23 @@ def render(model: dict, variant: str, sentences: list, apps: dict) -> tuple:
              f"vs {d1_name}: {_pct(t['pct_d1'])} ({_usd(t['d1'])})", f"vs 7-day avg: {_pct(t['pct_avg'])} ({_usd(t['avg7'])})"]
     for p in model["projects"]:
         text += ["", f"{p['name']}  {_usd(p['d'])}"]
-        for ln in p["lines"]:
+        active, quiet = _split(p["lines"], changes)
+        for ln in active:
             os_ = "" if ln["os"] == UNASSIGNED else f" {ln['os']}"
-            text.append(f"  {ln['channel']}{os_}: {_usd(ln['d'])} - {_detail(ln, d1_name, variant)}")
+            text.append(f"  {ln['channel']}{os_}: {_usd(ln['d'])} - {_line_detail(ln, d1_name, variant, changes)}")
+            text += [f"      {_change_text(c, changes)}" for c in _line_changes(ln, changes)]
+        if quiet:
+            text.append(f"  {_no_spend(quiet)}")
+    if changes and changes["orphans"]:
+        text += ["", "Also changed:"] + [f"  {_change_text(c, changes, with_channel=True)}" for c in changes["orphans"]]
     text += ["", "Last 14 days: " + ", ".join(_compact(p["total"]) for p in model["chart"][-14:])]
     if not sentences:
         text += ["", SUMMARY_MISSING]
+    if changes and not changes["ok"]:
+        text += ["", CHANGES_MISSING]
+    elif changes:
+        text += ["", CHANGES_NOTE]
+    if changes is not None:
+        text += ["", "Change log: " + CHANGE_LOG_URL]
     text += ["", "Meta, Google and Apple Search Ads. Each channel's own ad-account day. Workflow: " + WORKFLOW_URL]
     return subject, preheader, html, "\n".join(text)

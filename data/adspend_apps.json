@@ -1,7 +1,8 @@
 {
-  "Travel Animator": {"short": "TA", "prefixes": ["Travel Animator", "TA"]},
-  "Marine Radar": {"short": "MR", "prefixes": ["Marine Radar", "MR", "MT"]},
-  "Smart Ruler": {"short": "SR", "prefixes": ["Smart Ruler", "SR", "AR", "Measure"]},
+  "Travel Animator": {"rank": 1, "short": "TA", "prefixes": ["Travel Animator", "TA"]},
+  "Marine Radar": {"rank": 2, "short": "MR", "prefixes": ["Marine Radar", "MR", "MT"]},
+  "Smart Ruler": {"rank": 3, "short": "SR", "prefixes": ["Smart Ruler", "SR", "AR", "Measure"]},
   "Mail AI": {"short": "Mail AI", "prefixes": ["Mail AI"]},
-  "Pingee": {"short": "Pingee", "prefixes": ["Pingee"]}
+  "Pingee": {"short": "Pingee", "prefixes": ["Pingee"]},
+  "GeoAnimator": {"rank": 4, "short": "GEO", "prefixes": ["GeoAnimator", "Geo Animator", "GEO"], "tokens": ["geoanimator"]}
 }
