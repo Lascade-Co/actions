@@ -3,7 +3,7 @@
 Two tasks share one table of the day's logged campaign changes:
 
 * ``commentary``: the lead. One or two items, each an observed spend sentence and, when a
-  logged change sits under that same line, a cause sentence naming the person.
+  logged change sits under that same line, a cause sentence (no person: the author is implicit).
 * ``narrate``: one plain-English sentence per logged change, shown under its ledger line.
 
 Claude is shown computed facts with ids. Numbers only appear as ``{id.field}``
@@ -65,11 +65,11 @@ HINTS = {
     "digit": "Replace every number with a placeholder; do not spell numbers out either",
     "placeholder": "Use only the placeholders listed for the ids you reference",
     "advice": "Remove advice and words like should, must, consider, recommend, team, decided",
-    "direction": "Use up/down words only when they match the fact's label, or in a cause what the person did",
-    "name": "Mention only the apps, platforms and people of the facts or change you reference",
+    "direction": "Use up/down words only when they match the fact's label, or in a cause what was done",
+    "name": "Name no person at all, and only the apps and platforms of the facts or change you reference",
     "link": "Give a cause only in an item whose only ref is the line that change was logged under",
-    "cause": "Keep \"observed\" to what spend did, with no campaign, action or reason; put the person's "
-             "action in cause.action and the why in cause.reason",
+    "cause": "Keep \"observed\" to what spend did, with no campaign, action or reason; put what was "
+             "changed in cause.action and the why in cause.reason",
     "length": "Use fewer words: a cause's action and reason together at most 30 words, a change sentence at "
               "most 25",
     "code": "Describe the campaign in words instead of quoting its code",
@@ -82,19 +82,20 @@ Answer with 1 or 2 items about what stands out. Each item has:
 - "refs": the fact ids that sentence uses.
   It never mentions a campaign, an action or a reason.
 - "cause" (optional): {"change": "c3", "action": "...", "reason": "..."} only when a logged change sits under
-  that same line, i.e. the change's "line_fact" is the item's only ref. "action": what the person did, past
-  tense, starting with their name exactly as logged ("Jishnu paused the brand campaign on Apple"). "reason":
-  why, as a clause that completes the sentence ("because it was catching broad searches"). Plain words a CEO
-  uses. Never quote a campaign code (like "MR - iOS - ASA - BRAND"); describe the campaign instead.
+  that same line, i.e. the change's "line_fact" is the item's only ref. "action": what was changed, past
+  tense, with the campaign as the subject and no person ("The brand campaign on Apple was paused", "A new
+  Pingee campaign went live on Google at {c3.budget}"). "reason": why, as a clause that completes the sentence
+  ("because it was catching broad searches"). Plain words a CEO uses. Never quote a campaign code (like
+  "MR - iOS - ASA - BRAND"); describe the campaign instead.
 Rules for all text:
 - NEVER write a digit and never spell a number out. Use placeholders: {f3.d}, {f3.pct}, {t.d} in "observed"
   (only fields listed for that fact); {c3.budget} in a cause (only when that change lists "budget"); it already
   reads like "$45 a day", so write "at {c3.budget}", never "{c3.budget} daily".
 - A fact's "label" is its truth: do not say up for a down fact or the reverse. In a cause's "action",
-  direction words (raised, cut, ...) must match what the person did.
+  direction words (raised, cut, ...) must match what was done.
 - No advice, no hype, no intensifiers. Never invent a cause that is not logged.
 - Short: "observed" at most 25 words; a cause's action and reason together at most 30 words.
-- Never name a person, app or platform that is not part of the item's own facts or change.
+- Never name a person. Never name an app or platform that is not part of the item's own facts or change.
 Prefer the biggest movers, and give the cause when a logged change explains one.
 Answer with JSON only: {"items":[{"observed":"...","refs":["f3"],"cause":{"change":"c1","action":"...","reason":"..."}}]}
 
@@ -103,12 +104,13 @@ FACTS AND CHANGES:
 
 NARRATE_PROMPT = """You are writing for a CEO who is not an advertising specialist. Below are campaign changes
 the ads team logged, as JSON. For each id write ONE plain-English sentence of at most 25 words, past tense,
-starting with the person's name exactly as given in "author". Say what they did to which campaign and why.
+starting with the verb, like a changelog entry ("Paused the Marine Radar brand campaign on Apple because ...").
+Never name a person: who made the change is implicit. Say what was done to which campaign and why.
 Describe the campaign in words (app, platform, market, goal); never quote the campaign code. Translate ad jargon
 (ROAS, CPA, UAC, tier one, broad match, ad set, creative) into everyday words. Use only what the log says; do not
 guess outcomes. Never write a digit and never spell a number out; for the daily budget write {cN.budget} (only for
 ids whose "fields" list "budget"); it already reads like "$45 a day", so write "at {c1.budget}", never
-"{c1.budget} daily". No advice. Mention no app, platform or person other than that change's own.
+"{c1.budget} daily". No advice. Mention no app or platform other than that change's own.
 Answer with JSON only: {"c1": "...", "c2": "..."}
 
 CHANGES:
@@ -231,7 +233,7 @@ def change_table(changes, model: dict, apps: dict) -> list:
 
 
 def _payload_row(row: dict) -> dict:
-    out = {k: row[k] for k in ("id", "author", "channel", "project", "os", "app", "kind", "campaign",
+    out = {k: row[k] for k in ("id", "channel", "project", "os", "app", "kind", "campaign",
                                "before", "after", "why", "line_fact")}
     if row["show"]:
         out["fields"] = sorted(row["show"])
@@ -289,7 +291,7 @@ def _backed(values) -> set:
 
 
 def backed_names(row: dict) -> set:
-    return _backed((row["project"], row["app"], row["channel"], row["os"], row["author"]))
+    return _backed((row["project"], row["app"], row["channel"], row["os"]))     # never the author: no names
 
 
 # ---- validation
@@ -376,8 +378,6 @@ def _check_template(text, row, names, max_words) -> str:
         raise _Reject("placeholder")
     if re.search(r"\d", probe):
         raise _Reject("digit")
-    if row["author"] and not probe.startswith(row["author"]):
-        raise _Reject("name")
     if not probe.endswith(".") or re.search(r"[.!?]", probe[:-1]):
         raise _Reject("shape")
     if len(probe.split()) > max_words:
@@ -465,8 +465,8 @@ def _salvage(raw: str, facts: dict, table: list, names) -> list:
 
 
 def _check_cause(cause: dict, row: dict, names) -> str:
-    """A cause comes in two fields so that what the person did and why are never confused:
-    `action` ("Jishnu paused the brand campaign") carries the direction and is checked against
+    """A cause comes in two fields so that what was done and why are never confused:
+    `action` ("The brand campaign was paused") carries the direction and is checked against
     the logged change; `reason` ("because it overspent") may say anything true about costs,
     up or down. Joined, the sentence passes every narration rule too."""
     action, reason = cause.get("action"), cause.get("reason")

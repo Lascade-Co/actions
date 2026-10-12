@@ -255,9 +255,9 @@ def _change_bits(c) -> list:
 
 
 def _change_fallback(c) -> str:
-    """The log's own words when there is no plain-English sentence: nothing is lost."""
-    rest = " · ".join(_change_bits(c)[1:])
-    return f"{c.author} · {rest}" if c.author else rest
+    """The log's own words when there is no plain-English sentence. No author: who made the
+    change is implicit."""
+    return " · ".join(_change_bits(c)[1:])
 
 
 def _change_sentence(c, changes) -> str:

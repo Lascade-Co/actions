@@ -806,8 +806,8 @@ def test_render_cause_line_and_no_change_logged():
     changes = {"ok": True, "by_line": {("Travel Animator", "Meta", "iOS"): [cause]}, "orphans": []}
     _s, _p, h, t = _render(model, "A", [], APPS, changes)
     # No plain-English sentence: the log's own words, author first, nothing lost.
-    assert "Jishnu · Paused · TA - WW - IOS - A · 130$ per day" in h and "<em>" not in h and "— Jishnu" not in h
-    assert "Tue 19:14" in h and "Tue 19:14  Jishnu · Paused · TA - WW - IOS - A" in t
+    assert "Paused · TA - WW - IOS - A · 130$ per day" in h and "<em>" not in h and "— Jishnu" not in h
+    assert "Tue 19:14" in h and "Tue 19:14  Paused · TA - WW - IOS - A" in t
     assert "…" in h and long_why.strip() not in h                       # capped
     # iOS moved and has a cause: no phrase. Android started, MR stopped, no cause: phrase.
     assert h.count("no change logged") == 3                             # Android, Unattributed, MR
@@ -949,45 +949,45 @@ def test_validate_reasons_are_one_word():
     ios = table[0]["line_fact"]
     other = next(k for k, v in facts.items() if k not in ("t", ios))
     good = _lead({"observed": f"Travel Animator Meta spend rose to {{{ios}.d}}.", "refs": [ios],
-                  "cause": {"change": "c1", "action": "Jishnu paused the iPhone campaign at {c1.budget}",
+                  "cause": {"change": "c1", "action": "Paused the iPhone campaign at {c1.budget}",
                             "reason": "because it overspent"}})
     out = c._check(good, facts, table, names)
     assert out == [f"Travel Animator Meta spend rose to {facts[ios]['show']['d']}. "
-                   "Jishnu paused the iPhone campaign at $130 a day because it overspent."]
+                   "Paused the iPhone campaign at $130 a day because it overspent."]
     obs = {"observed": f"Spend rose to {{{ios}.d}}.", "refs": [ios]}
     cases = {
         "shape": ["not json", _lead(), _lead({"observed": "x"}),
-                  _lead({**obs, "cause": {"change": "c1", "action": "Jishnu paused it. Then more."}})],
+                  _lead({**obs, "cause": {"change": "c1", "action": "Paused it. Then more."}})],
         "digit": [_lead({"observed": "Spend rose 18%.", "refs": [ios]}),
-                  _lead({**obs, "cause": {"change": "c1", "action": "Jishnu paused campaign 7."}})],
+                  _lead({**obs, "cause": {"change": "c1", "action": "Paused campaign 7."}})],
         "placeholder": [_lead({"observed": "Spend rose to {c1.budget}.", "refs": [ios]}),
-                        _lead({**obs, "cause": {"change": "c1", "action": f"Jishnu paused it at {{{ios}.d}}."}})],
+                        _lead({**obs, "cause": {"change": "c1", "action": f"Paused it at {{{ios}.d}}."}})],
         "advice": [_lead({"observed": f"Spend rose to {{{ios}.d}} against budget.", "refs": [ios]}),
-                   _lead({**obs, "cause": {"change": "c1", "action": "Jishnu paused it, as the team decided."}})],
+                   _lead({**obs, "cause": {"change": "c1", "action": "Paused it, as the team decided."}})],
         "direction": [_lead({"observed": f"Spend fell to {{{ios}.d}}.", "refs": [ios],
-                             "cause": {"change": "c1", "action": "Jishnu paused it."}}),
-                      _lead({**obs, "cause": {"change": "c1", "action": "Jishnu raised the spend cap."}})],
+                             "cause": {"change": "c1", "action": "Paused it."}}),
+                      _lead({**obs, "cause": {"change": "c1", "action": "Raised the spend cap."}})],
         "name": [_lead({"observed": f"Jishnu's spend rose to {{{ios}.d}}.", "refs": [ios]}),
-                 _lead({**obs, "cause": {"change": "c1", "action": "Jishnu paused the Marine Radar campaign."}}),
-                 _lead({**obs, "cause": {"change": "c1", "action": "Rohit paused the iPhone campaign."}}),
-                 _lead({**obs, "cause": {"change": "c1", "action": "Jishnu paused the Google campaign."}})],
-        "link": [_lead({**obs, "cause": {"change": "c2", "action": "Jishnu launched it."}}),         # orphan
+                 _lead({**obs, "cause": {"change": "c1", "action": "Paused the Marine Radar campaign."}}),
+                 _lead({**obs, "cause": {"change": "c1", "action": "Jishnu paused the iPhone campaign."}}),
+                 _lead({**obs, "cause": {"change": "c1", "action": "Paused the Google campaign."}})],
+        "link": [_lead({**obs, "cause": {"change": "c2", "action": "Launched it."}}),         # orphan
                  _lead({"observed": "Total spend was {t.d}.", "refs": ["t"],
-                        "cause": {"change": "c1", "action": "Jishnu paused it."}}),
+                        "cause": {"change": "c1", "action": "Paused it."}}),
                  _lead({"observed": f"Spend rose to {{{ios}.d}} and {{{other}.d}}.", "refs": [ios, other],
-                        "cause": {"change": "c1", "action": "Jishnu paused it."}})],
-        "code": [_lead({**obs, "cause": {"change": "c1", "action": "Jishnu paused TA - WW - IOS - A."}}),
-                 _lead({**obs, "cause": {"change": "c1", "action": "Jishnu paused the ASA - Brand campaign."}})],
-        "length": [_lead({**obs, "cause": {"change": "c1", "action": "Jishnu " + "paused " * 30 + "it."}})],
+                        "cause": {"change": "c1", "action": "Paused it."}})],
+        "code": [_lead({**obs, "cause": {"change": "c1", "action": "Paused TA - WW - IOS - A."}}),
+                 _lead({**obs, "cause": {"change": "c1", "action": "Paused the ASA - Brand campaign."}})],
+        "length": [_lead({**obs, "cause": {"change": "c1", "action": "Paused " + "paused " * 30 + "it."}})],
     }
     for word, raws in cases.items():
         for raw in raws:
             assert _reason(raw, facts, table, names) == word, (word, raw, _reason(raw, facts, table, names))
     # A down cause under an up line is fine: the cause is checked against what the person did.
-    assert c._check(_lead({**obs, "cause": {"change": "c1", "action": "Jishnu cut the iPhone campaign."}}),
+    assert c._check(_lead({**obs, "cause": {"change": "c1", "action": "Cut the iPhone campaign."}}),
                     facts, table, names)
     # "budget" belongs to causes only; "Apple" is a backed alias of Apple Search Ads.
-    assert c._check(_lead({**obs, "cause": {"change": "c1", "action": "Jishnu paused it to protect the budget."}}),
+    assert c._check(_lead({**obs, "cause": {"change": "c1", "action": "Paused it to protect the budget."}}),
                     facts, table, names)
     assert c.validate(js(("Spend rose 18%.", [ios])), facts, names) == []
 
@@ -1031,10 +1031,10 @@ def test_commentary_with_changes_reaches_claude_and_the_cache():
     def ok(prompt, scratch):
         seen.append(prompt)
         return _lead({"observed": f"Travel Animator spend rose to {{{ios}.d}}.", "refs": [ios],
-                      "cause": {"change": "c1", "action": "Jishnu paused the iPhone campaign at {c1.budget}."}})
+                      "cause": {"change": "c1", "action": "Paused the iPhone campaign at {c1.budget}."}})
     d_ = tempfile.mkdtemp()
     out = c.commentary(model, "A", d_, run=ok, table=table, names=names)
-    assert out[0].endswith("Jishnu paused the iPhone campaign at $130 a day.")
+    assert out[0].endswith("Paused the iPhone campaign at $130 a day.")
     assert '"line_fact"' in seen[0] and "Over budget." in seen[0]
     c.commentary(model, "A", d_, run=ok, table=table, names=names)
     assert len(seen) == 1                                     # cached
@@ -1052,48 +1052,48 @@ def test_narrate():
 
     def half(prompt, scratch, max_tokens=None):
         calls.append((prompt, max_tokens))
-        return json.dumps({"c1": "Jishnu paused the iPhone campaign at {c1.budget} because it overspent.",
-                           "c2": "Jishnu launched PTW - ASA - Category."})
+        return json.dumps({"c1": "Paused the iPhone campaign at {c1.budget} because it overspent.",
+                           "c2": "Launched PTW - ASA - Category."})
     d_ = tempfile.mkdtemp()
     out, log = _logged(lambda: c.narrate(table, d_, half, names=names))
-    assert out == {table[0]["key"]: "Jishnu paused the iPhone campaign at $130 a day because it overspent."}
+    assert out == {table[0]["key"]: "Paused the iPhone campaign at $130 a day because it overspent."}
     assert len(calls) == 3 and "c2: code" in calls[1][0] and calls[0][1] == 256 + 120 * 2
     assert "narration: ok 1 of 2" in log and "narration: retry (code)" in log
     assert "Jishnu" not in log and "PTW" not in log and "iPhone" not in log
     cached = json.load(open(os.path.join(d_, "narration.json")))
-    assert cached == {table[0]["key"]: "Jishnu paused the iPhone campaign at {self.budget} because it overspent."}
+    assert cached == {table[0]["key"]: "Paused the iPhone campaign at {self.budget} because it overspent."}
     calls.clear()
     fixed = lambda p, s, max_tokens=None: calls.append(p) or json.dumps(
-        {"c2": "Jishnu launched a Plant the World category campaign on Apple at {c2.budget}."})
+        {"c2": "Launched a Plant the World category campaign on Apple at {c2.budget}."})
     out2, _ = _logged(lambda: c.narrate(table, d_, fixed, names=names))
     assert len(calls) == 1 and '"c1"' not in calls[0].split("CHANGES:")[1]     # c1 came from the cache
     assert out2[table[1]["key"]].endswith("at $25 a day.") and out2[table[0]["key"]].endswith("overspent.")
     row = table[0]
-    for text, word in (("Jishnu paused it. Then resumed it.", "shape"), ("Jishnu paused ads.Jishnu resumed.", "shape"),
-                       ("Jishnu " + "x " * 25 + "done.", "length"), ("Jishnu paused the Marine Radar ads.", "name"),
-                       ("Jishnu paused campaign 7.", "digit"), ("Rohit paused it.", "name"),
-                       ("Jishnu paused it at {c2.budget}.", "placeholder"), ("Jishnu should pause it.", "advice")):
+    for text, word in (("Paused it. Then resumed it.", "shape"), ("Paused ads.Resumed.", "shape"),
+                       ("Did " + "x " * 25 + "done.", "length"), ("Paused the Marine Radar ads.", "name"),
+                       ("Paused campaign 7.", "digit"), ("Jishnu paused it.", "name"),
+                       ("Paused it at {c2.budget}.", "placeholder"), ("Should pause it.", "advice")):
         try:
             c._check_narration(text, row, names)
             raise AssertionError(text)
         except c._Reject as exc:
             assert exc.word == word, (text, exc.word)
-    assert c._check_narration("Jishnu set the budget to {c1.budget}.", row, names) == "Jishnu set the budget to $130 a day."
+    assert c._check_narration("Set the budget to {c1.budget}.", row, names) == "Set the budget to $130 a day."
     # An empty logged app never poisons the name check.
     blank = c.change_table({"ok": True, "by_line": {("Travel Animator", "Meta", "iOS"): [_c("TA - WW - IOS - A", app="")]},
                             "orphans": []}, model, APPS)
-    assert c._check_narration("Jishnu paused the iPhone campaign.", blank[0], c.name_universe(APPS, blank))
+    assert c._check_narration("Paused the iPhone campaign.", blank[0], c.name_universe(APPS, blank))
     # A cached template that no longer validates is regenerated.
-    json.dump({table[0]["key"]: "Jishnu paused it. Twice."}, open(os.path.join(d_, "narration.json"), "w"))
+    json.dump({table[0]["key"]: "Paused it. Twice."}, open(os.path.join(d_, "narration.json"), "w"))
     calls.clear()
     _logged(lambda: c.narrate(table[:1], d_, lambda p, s, max_tokens=None: calls.append(p) or json.dumps(
-        {"c1": "Jishnu paused the iPhone campaign."}), names=names))
+        {"c1": "Paused the iPhone campaign."}), names=names))
     assert len(calls) == 1
     # Batches, transport failure, empty table.
     many = [{**table[0], "id": f"c{i}", "key": f"k{i}"} for i in range(1, 42)]
     sizes = []
     _logged(lambda: c.narrate(many, tempfile.mkdtemp(), lambda p, s, max_tokens=None: sizes.append(max_tokens) or json.dumps(
-        {f"c{i}": "Jishnu paused the iPhone campaign." for i in range(1, 42)}), names=names))
+        {f"c{i}": "Paused the iPhone campaign." for i in range(1, 42)}), names=names))
     assert sizes == [256 + 120 * 40, 256 + 120 * 1]
     from claude_api import ClaudeError
 
@@ -1107,20 +1107,20 @@ def test_narrate():
 def test_render_two_registers():
     model = full_model()
     changes, cause, orphan = _changes_fixture()
-    changes = {**changes, "text": {cause: "Jishnu paused the iPhone campaign because it overspent."}}
+    changes = {**changes, "text": {cause: "Paused the iPhone campaign because it overspent."}}
     _s, _p, h, t = _render(model, "A", [], APPS, changes)
-    assert ('<span style="font-size:14px; color:#222222;" class="text-main">Jishnu paused the iPhone campaign '
+    assert ('<span style="font-size:14px; color:#222222;" class="text-main">Paused the iPhone campaign '
             'because it overspent.</span>') in h
     assert 'class="text-muted">Tue 19:14</span>' in h and "<em>" not in h and "— Jishnu" not in h
-    assert "      Tue 19:14  Jishnu paused the iPhone campaign because it overspent." in t
+    assert "      Tue 19:14  Paused the iPhone campaign because it overspent." in t
     # The orphan has no sentence: the log's words, with its app and channel, still escaped.
     assert ('class="text-muted">Tue 19:14 · Plant the World Apple Search Ads</span>&nbsp;&nbsp;<span style="font-size:14px; '
-            'color:#222222;" class="text-main">Jishnu · Launched · PTW - ASA - Tier1 - Category · 25$ per day') in h
-    assert "  Tue 19:14 · Plant the World Apple Search Ads  Jishnu · Launched" in t
+            'color:#222222;" class="text-main">Launched · PTW - ASA - Tier1 - Category · 25$ per day') in h
+    assert "  Tue 19:14 · Plant the World Apple Search Ads  Launched" in t
     # A narrated orphan keeps its app and channel in the stamp.
-    narrated = {**changes, "text": {**changes["text"], orphan: "Jishnu launched a category campaign."}}
+    narrated = {**changes, "text": {**changes["text"], orphan: "Launched a category campaign."}}
     h4 = _render(model, "A", [], APPS, narrated)[2]
-    assert 'Tue 19:14 · Plant the World Apple Search Ads</span>&nbsp;&nbsp;<span style="font-size:14px; color:#222222;" class="text-main">Jishnu launched a category campaign.' in h4
+    assert 'Tue 19:14 · Plant the World Apple Search Ads</span>&nbsp;&nbsp;<span style="font-size:14px; color:#222222;" class="text-main">Launched a category campaign.' in h4
     assert "Change log &#8599;" in h and "Change log: https://jishnu-ads-taskboard.vercel.app/" in t
     assert "plain-English rendering" in h
     h0, t0 = _render(model, "A", [], APPS)[2:]
@@ -1164,37 +1164,37 @@ def test_codex_round2_findings():
     d_ = tempfile.mkdtemp()
     calls = []
     run = lambda p, s, max_tokens=None: calls.append(p) or json.dumps(
-        {"c1": "Jishnu paused the iPhone campaign at {c1.budget}.", "c2": "Jishnu paused it at {c2.budget}."})
+        {"c1": "Paused the iPhone campaign at {c1.budget}.", "c2": "Paused it at {c2.budget}."})
     out, _ = _logged(lambda: c.narrate(t2, d_, run, names=names))
-    assert out == {t2[0]["key"]: "Jishnu paused the iPhone campaign at $130 a day."} and len(calls) == 1
+    assert out == {t2[0]["key"]: "Paused the iPhone campaign at $130 a day."} and len(calls) == 1
     shifted = {"ok": True, "by_line": {("Travel Animator", "Meta", "iOS"): [_c("TA - WW - IOS - A", kind="Launched", at=cause.at.replace(hour=20)), cause]},
                "orphans": []}
     t3 = c.change_table(shifted, model, APPS)
     assert t3[1]["change"] is cause and t3[1]["id"] == "c2"
     calls.clear()
     out, _ = _logged(lambda: c.narrate(t3, d_, lambda p, s, max_tokens=None: calls.append(p) or json.dumps(
-        {"c1": "Jishnu launched the iPhone campaign."}), names=names))
-    assert out[t3[1]["key"]] == "Jishnu paused the iPhone campaign at $130 a day." and '"c2"' not in calls[0].split("CHANGES:")[1]
+        {"c1": "Launched the iPhone campaign."}), names=names))
+    assert out[t3[1]["key"]] == "Paused the iPhone campaign at $130 a day." and '"c2"' not in calls[0].split("CHANGES:")[1]
     # 3. A short code of another project is a name; lower-case "geo" is not.
-    for text, word in (("Jishnu paused the MR campaign.", "name"),):
+    for text, word in (("Paused the MR campaign.", "name"), ("Jishnu paused the campaign.", "name")):
         try:
             c._check_narration(text, table[0], names); raise AssertionError(text)
         except c._Reject as exc:
             assert exc.word == word
-    assert c._check_narration("Jishnu paused the TA iPhone campaign over geo targeting.", table[0], names)
+    assert c._check_narration("Paused the TA iPhone campaign over geo targeting.", table[0], names)
     # 4. The logged spelling of a backed app is the same name.
     assert c._check(_lead({"observed": f"TravelAnimator Meta spend rose to {{{ios}.d}}.", "refs": [ios]}),
                     facts, table, names)
     # 5. Direction is judged on the action, not on the reason.
     assert c._check(_lead({"observed": f"Spend rose to {{{ios}.d}}.", "refs": [ios],
-                           "cause": {"change": "c1", "action": "Jishnu paused the campaign",
+                           "cause": {"change": "c1", "action": "Paused the campaign",
                                      "reason": "over higher acquisition costs, which had increased."}}),
                     facts, table, names)
     assert _reason(_lead({"observed": f"Spend rose to {{{ios}.d}}.", "refs": [ios],
-                          "cause": {"change": "c1", "action": "Jishnu paused the campaign because costs increased"}}),
+                          "cause": {"change": "c1", "action": "Paused the campaign because costs increased"}}),
                    facts, table, names) == "cause"
     assert _reason(_lead({"observed": f"Spend rose to {{{ios}.d}}.", "refs": [ios],
-                          "cause": {"change": "c1", "action": "Jishnu set the campaign to a higher level"}}),
+                          "cause": {"change": "c1", "action": "Set the campaign to a higher level"}}),
                    facts, table, names) == "direction"
     # Honest factual observations pass.
     for observed in ("Travel Animator Meta spend changed from {%s.d1} to {%s.d}." % (ios, ios),
@@ -1212,10 +1212,10 @@ def test_codex_round2_findings():
     assert c.commentary(model, "A", ro, run=lambda p, s: _lead({"observed": f"Travel Animator spend rose to {{{ios}.d}}.",
                                                                  "refs": [ios]}), table=table, names=names)
     out, _ = _logged(lambda: c.narrate(table[:1], ro, lambda p, s, max_tokens=None: json.dumps(
-        {"c1": "Jishnu paused the iPhone campaign."}), names=names))
+        {"c1": "Paused the iPhone campaign."}), names=names))
     assert out
     assert _reason(_lead({"observed": f"Spend rose to {{{ios}.d}}.", "refs": [ios],
-                          "cause": {"change": "c1", "action": "Jishnu raised the campaign", "reason": "because it worked"}}),
+                          "cause": {"change": "c1", "action": "Raised the campaign", "reason": "because it worked"}}),
                    facts, table, names) == "direction"
     # 6. A cached lead is re-validated: a rule that now fails it forces a fresh answer.
     d_ = tempfile.mkdtemp()
@@ -1240,7 +1240,7 @@ def test_synopsis_salvage_after_three_failures():
     names = c.name_universe(APPS, table)
     ios = table[0]["line_fact"]
     other = next(k for k, v in c.build_facts(model, "A").items() if k not in ("t", ios))
-    long_cause = {"change": "c1", "action": "Jishnu paused the iPhone campaign", "reason": "because " + "it overspent " * 15}
+    long_cause = {"change": "c1", "action": "Paused the iPhone campaign", "reason": "because " + "it overspent " * 15}
     answer = _lead({"observed": f"Travel Animator Meta spend rose to {{{ios}.d}}.", "refs": [ios], "cause": long_cause},
                    {"observed": "Spend rose 18%.", "refs": [other]})
     calls = []
@@ -1273,9 +1273,9 @@ def test_budget_unit_is_never_doubled():
     changes, cause, orphan = _changes_fixture()
     table = c.change_table(changes, model, APPS)
     names = c.name_universe(APPS, table)
-    for text, want in (("Jishnu paused the iPhone campaign, budgeted at {c1.budget} daily.", "budgeted at $130 a day."),
-                       ("Jishnu paused the iPhone campaign at {c1.budget} a day.", "at $130 a day."),
-                       ("Jishnu paused the iPhone campaign on a daily budget of {c1.budget}.", "on a budget of $130 a day.")):
+    for text, want in (("Paused the iPhone campaign, budgeted at {c1.budget} daily.", "budgeted at $130 a day."),
+                       ("Paused the iPhone campaign at {c1.budget} a day.", "at $130 a day."),
+                       ("Paused the iPhone campaign on a daily budget of {c1.budget}.", "on a budget of $130 a day.")):
         assert c._check_narration(text, table[0], names).endswith(want), text
 
 
