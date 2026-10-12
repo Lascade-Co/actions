@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
 # Send one ad-spend variant via Resend. Prints the HTTP status only (public log).
 # 409 = Resend already holds this Idempotency-Key = already sent = success.
-# Usage: send_resend.sh <A|B> <ad_date> ; env: RESEND_API_KEY
+# Usage: send_resend.sh <A|B> <ad_date> ; env: RESEND_API_KEY, MAIL_TO (one or more
+# addresses, comma-separated; "Name <address>" works)
 set -euo pipefail
 V="$1"; AD="$2"
 jq -n --rawfile html "out/email-$V.html" --rawfile text "out/email-$V.txt" \
       --rawfile subject "out/email-$V.subject" \
       --arg to "${MAIL_TO:-cherian@lascade.com}" \
-  '{from:"Lascade Ad Spend <noreply@metrics.lascade.com>", to:[$to],
+  '{from:"Lascade Ad Spend <noreply@metrics.lascade.com>",
+    to:($to | split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(length > 0))),
     subject:$subject, html:$html, text:$text}' > "payload-$V.json"
 # Key includes the recipient: a resend to a different address must not read as "already sent".
 KEY="ad-spend-$V-$AD-$(printf %s "${MAIL_TO:-cherian@lascade.com}" | shasum | cut -c1-8)"
