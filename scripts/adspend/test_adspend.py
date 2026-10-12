@@ -1059,7 +1059,7 @@ def test_narrate():
     d_ = tempfile.mkdtemp()
     out, log = _logged(lambda: c.narrate(table, d_, half, names=names))
     assert out == {table[0]["key"]: "Paused the iPhone campaign at $130 a day because it overspent."}
-    assert len(calls) == 3 and "c2: code" in calls[1][0] and calls[0][1] == 256 + 120 * 2
+    assert len(calls) == 3 and "c2: code" in calls[1][0] and calls[0][1] == 4096 + 120 * 2
     assert "narration: ok 1 of 2" in log and "narration: retry (code)" in log
     assert "Jishnu" not in log and "PTW" not in log and "iPhone" not in log
     cached = json.load(open(os.path.join(d_, "narration.json")))
@@ -1096,7 +1096,7 @@ def test_narrate():
     sizes = []
     _logged(lambda: c.narrate(many, tempfile.mkdtemp(), lambda p, s, max_tokens=None: sizes.append(max_tokens) or json.dumps(
         {f"c{i}": "Paused the iPhone campaign." for i in range(1, 42)}), names=names))
-    assert sizes == [256 + 120 * 40, 256 + 120 * 1]
+    assert sizes == [4096 + 120 * 40, 4096 + 120 * 1]
     from claude_api import ClaudeError
 
     def boom(*a, **k):
@@ -1104,6 +1104,22 @@ def test_narrate():
     out3, log3 = _logged(lambda: c.narrate(table, tempfile.mkdtemp(), boom, names=names))
     assert out3 == {} and "narration: unavailable (auth)" in log3
     assert c.narrate([], d_, boom, names=names) == {}
+
+
+def test_api_runner_leaves_room_for_thinking():
+    import tempfile
+    seen = []
+    real = c.generate_text
+    c.generate_text = lambda prompt, **kw: seen.append(kw) or json.dumps({"c1": "Paused the iPhone campaign."})
+    try:
+        c._run_claude("prompt", "scratch")                     # synopsis: the runner's default
+        model = full_model()
+        changes, _cause, _orphan = _changes_fixture()
+        table = c.change_table(changes, model, APPS)[:1]
+        _logged(lambda: c.narrate(table, tempfile.mkdtemp(), c._run_claude, names=c.name_universe(APPS, table)))
+    finally:
+        c.generate_text = real
+    assert seen == [{"max_tokens": 4096, "timeout": 90}, {"max_tokens": 4096 + 120, "timeout": 90}]
 
 
 def test_render_two_registers():

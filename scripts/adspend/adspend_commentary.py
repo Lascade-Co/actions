@@ -497,8 +497,10 @@ def _check_narration(text, row, names) -> str:
 
 # ---- calling Claude
 
-def _run_claude(prompt: str, scratch: str, max_tokens: int = 1024):
-    return generate_text(prompt, max_tokens=max_tokens, timeout=90 if max_tokens <= 1024 else 180)
+# Sonnet thinks by default and its thinking counts toward max_tokens, so budgets leave it room.
+# The call streams, so the timeout bounds a stall between chunks, not the whole reply.
+def _run_claude(prompt: str, scratch: str, max_tokens: int = 4096):
+    return generate_text(prompt, max_tokens=max_tokens, timeout=90)
 
 
 def _failure_reason(exc: Exception, scratch: str = "") -> str:
@@ -601,7 +603,7 @@ def _for_row(template: str, row: dict) -> str:
 
 def _narrate_batch(batch, scratch, run, names, templates) -> None:
     """Fill `templates` {key: unfilled sentence} for the rows Claude got right within ATTEMPTS calls."""
-    max_tokens = min(8192, 256 + 120 * len(batch))
+    max_tokens = min(16384, 4096 + 120 * len(batch))
     base = NARRATE_PROMPT + json.dumps([_payload_row(r) for r in batch], indent=1)
     pending, ask = list(batch), base
     for n in range(ATTEMPTS):
