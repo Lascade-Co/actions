@@ -88,7 +88,8 @@ Answer with 1 or 2 items about what stands out. Each item has:
   uses. Never quote a campaign code (like "MR - iOS - ASA - BRAND"); describe the campaign instead.
 Rules for all text:
 - NEVER write a digit and never spell a number out. Use placeholders: {f3.d}, {f3.pct}, {t.d} in "observed"
-  (only fields listed for that fact); {c3.budget} in a cause (only when that change lists "budget").
+  (only fields listed for that fact); {c3.budget} in a cause (only when that change lists "budget"); it already
+  reads like "$45 a day", so write "at {c3.budget}", never "{c3.budget} daily".
 - A fact's "label" is its truth: do not say up for a down fact or the reverse. In a cause's "action",
   direction words (raised, cut, ...) must match what the person did.
 - No advice, no hype, no intensifiers. Never invent a cause that is not logged.
@@ -106,7 +107,8 @@ starting with the person's name exactly as given in "author". Say what they did 
 Describe the campaign in words (app, platform, market, goal); never quote the campaign code. Translate ad jargon
 (ROAS, CPA, UAC, tier one, broad match, ad set, creative) into everyday words. Use only what the log says; do not
 guess outcomes. Never write a digit and never spell a number out; for the daily budget write {cN.budget} (only for
-ids whose "fields" list "budget"). No advice. Mention no app, platform or person other than that change's own.
+ids whose "fields" list "budget"); it already reads like "$45 a day", so write "at {c1.budget}", never
+"{c1.budget} daily". No advice. Mention no app, platform or person other than that change's own.
 Answer with JSON only: {"c1": "...", "c2": "..."}
 
 CHANGES:
@@ -386,7 +388,14 @@ def _check_template(text, row, names, max_words) -> str:
     if words & (_ADVICE - {"budget"}):
         raise _Reject("advice")
     _check_names(probe, names, backed_names(row))
-    return _PLACEHOLDER.sub(lambda m: row["show"][m.group(2)], text).strip()
+    return _tidy(_PLACEHOLDER.sub(lambda m: row["show"][m.group(2)], text).strip())
+
+
+def _tidy(text: str) -> str:
+    """'{c1.budget}' already reads '$45 a day'; drop the doubled unit a writer adds around it."""
+    text = re.sub(r"(\$[\d.]+) a day(?: (?:daily|a day|per day|each day))", r"\1 a day", text)
+    return re.sub(r"(daily budget of|budget of) (\$[\d.]+) a day", r"\1 \2 a day", text).replace(
+        "daily budget of $", "budget of $")
 
 
 def _item_observed(it, facts, names) -> str:

@@ -1267,6 +1267,18 @@ def test_synopsis_salvage_after_three_failures():
     assert os.path.exists(os.path.join(d_, "commentary-A.json"))
 
 
+
+def test_budget_unit_is_never_doubled():
+    model = full_model()
+    changes, cause, orphan = _changes_fixture()
+    table = c.change_table(changes, model, APPS)
+    names = c.name_universe(APPS, table)
+    for text, want in (("Jishnu paused the iPhone campaign, budgeted at {c1.budget} daily.", "budgeted at $130 a day."),
+                       ("Jishnu paused the iPhone campaign at {c1.budget} a day.", "at $130 a day."),
+                       ("Jishnu paused the iPhone campaign on a daily budget of {c1.budget}.", "on a budget of $130 a day.")):
+        assert c._check_narration(text, table[0], names).endswith(want), text
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):
