@@ -379,15 +379,28 @@ def subject_of(report, today):
     decisions = report.get("decisions_needed") or []
     if decisions:
         more = f" (+{len(decisions) - 1} more)" if len(decisions) > 1 else ""
-        text = f"Needs you: {_first_sentence(decisions[0])}{more}"
+        text = f"Needs you: {_one_line(decisions[0]).rstrip('.')}{more}"
     else:
         text = _first_sentence(report.get("headline") or "")
     return f"{head} — {text}" if text else head
 
 
+# A sentence ends at . ! or ? (optionally inside a closing quote/bracket) followed by a space,
+# unless the word before it is an abbreviation such as "U.S." or "e.g.".
+_SENTENCE_END = re.compile(r"""[.!?]["'”’)]?\s""")
+_ABBREVIATION = re.compile(r"(?:\b[A-Za-z]\.)+$|\b(?:vs|etc|Mr|Mrs|Ms|Dr|St)\.$")
+
+
+def _one_line(text):
+    return " ".join(str(text).split())
+
+
 def _first_sentence(text):
-    text = " ".join(str(text).split())
-    return re.split(r"(?<=[.!?])\s", text, maxsplit=1)[0].rstrip(".")
+    text = _one_line(text)
+    for m in _SENTENCE_END.finditer(text):
+        if not _ABBREVIATION.search(text[:m.start() + 1]):
+            return text[:m.end() - 1].rstrip(".")
+    return text.rstrip(".")
 
 
 def main():

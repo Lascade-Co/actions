@@ -959,6 +959,21 @@ class SubjectTests(unittest.TestCase):
         rep["decisions_needed"] = ["Only one"]
         self.assertEqual(E.subject_of(rep, "2026-10-11"), "Engineering · Sun 11 Oct — Needs you: Only one")
 
+    def test_decision_kept_whole(self):
+        rep = {"headline": "h", "decisions_needed": ["The release is blocked.\n Approve the rollback today."]}
+        self.assertEqual(E.subject_of(rep, "2026-10-11"),
+                         "Engineering · Sun 11 Oct — Needs you: The release is blocked. Approve the rollback today")
+
+    def test_abbreviations_do_not_end_the_sentence(self):
+        for head, want in (("The U.S. rollout is ready. Billing next.", "The U.S. rollout is ready"),
+                           ("Fixes e.g. Maps and Search landed. More soon.", "Fixes e.g. Maps and Search landed"),
+                           ("Shipped v4.0.40 to iOS. Android next.", "Shipped v4.0.40 to iOS")):
+            self.assertEqual(E.subject_of({"headline": head}, "2026-10-11"), "Engineering · Sun 11 Oct — " + want)
+
+    def test_quoted_sentence_end(self):
+        rep = {"headline": 'Search now says "No results." Billing is in testing.'}
+        self.assertEqual(E.subject_of(rep, "2026-10-11"), 'Engineering · Sun 11 Oct — Search now says "No results."')
+
     def test_fallback_headline_passes_through(self):
         self.assertEqual(E.subject_of({"headline": "Activity in 3 products today"}, "2026-10-11"),
                          "Engineering · Sun 11 Oct — Activity in 3 products today")
