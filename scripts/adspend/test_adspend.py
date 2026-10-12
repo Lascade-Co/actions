@@ -1106,6 +1106,22 @@ def test_narrate():
     assert c.narrate([], d_, boom, names=names) == {}
 
 
+def test_api_runner_leaves_room_for_thinking():
+    import tempfile
+    seen = []
+    real = c.generate_text
+    c.generate_text = lambda prompt, **kw: seen.append(kw) or json.dumps({"c1": "Paused the iPhone campaign."})
+    try:
+        c._run_claude("prompt", "scratch")                     # synopsis: the runner's default
+        model = full_model()
+        changes, _cause, _orphan = _changes_fixture()
+        table = c.change_table(changes, model, APPS)[:1]
+        _logged(lambda: c.narrate(table, tempfile.mkdtemp(), c._run_claude, names=c.name_universe(APPS, table)))
+    finally:
+        c.generate_text = real
+    assert seen == [{"max_tokens": 4096, "timeout": 90}, {"max_tokens": 4096 + 120, "timeout": 90}]
+
+
 def test_render_two_registers():
     model = full_model()
     changes, cause, orphan = _changes_fixture()

@@ -498,8 +498,9 @@ def _check_narration(text, row, names) -> str:
 # ---- calling Claude
 
 # Sonnet thinks by default and its thinking counts toward max_tokens, so budgets leave it room.
+# The call streams, so the timeout bounds a stall between chunks, not the whole reply.
 def _run_claude(prompt: str, scratch: str, max_tokens: int = 4096):
-    return generate_text(prompt, max_tokens=max_tokens, timeout=90 if max_tokens <= 4096 else 180)
+    return generate_text(prompt, max_tokens=max_tokens, timeout=90)
 
 
 def _failure_reason(exc: Exception, scratch: str = "") -> str:
