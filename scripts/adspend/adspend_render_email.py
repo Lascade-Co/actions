@@ -7,6 +7,7 @@ prose is #222, accent blue marks structure only.
 """
 from __future__ import annotations
 
+import re
 from datetime import timedelta
 from decimal import Decimal
 from html import escape as esc
@@ -254,14 +255,26 @@ def _change_bits(c) -> list:
     return bits
 
 
-def _change_fallback(c) -> str:
+def _authors(changes) -> set:
+    every = [c for cs in (changes or {}).get("by_line", {}).values() for c in cs] + list((changes or {}).get("orphans", []))
+    return {c.author for c in every if c.author and c.author.strip()}
+
+
+def _unnamed(text: str, authors) -> str:
+    """The prose names no person: an author named in a logged reason becomes 'the ads team'."""
+    for a in sorted(authors, key=len, reverse=True):
+        text = re.sub(rf"(?<![A-Za-z0-9]){re.escape(a)}(?:'s)?(?![A-Za-z0-9])", "the ads team", text, flags=re.I)
+    return text
+
+
+def _change_fallback(c, authors=()) -> str:
     """The log's own words when there is no plain-English sentence. No author: who made the
     change is implicit."""
-    return " · ".join(_change_bits(c)[1:])
+    return _unnamed(" · ".join(_change_bits(c)[1:]), set(authors) | ({c.author} if c.author else set()))
 
 
 def _change_sentence(c, changes) -> str:
-    return ((changes or {}).get("text") or {}).get(c) or _change_fallback(c)
+    return ((changes or {}).get("text") or {}).get(c) or _change_fallback(c, _authors(changes))
 
 
 def _stamp(c, with_channel=False) -> str:

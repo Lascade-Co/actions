@@ -1279,6 +1279,26 @@ def test_budget_unit_is_never_doubled():
         assert c._check_narration(text, table[0], names).endswith(want), text
 
 
+
+def test_prose_never_names_a_person():
+    model = full_model()
+    named = _c("TA - WW - IOS - A", why="Jishnu asked for this; jishnu's call.", after="130$ per day")
+    changes = {"ok": True, "by_line": {("Travel Animator", "Meta", "iOS"): [named]}, "orphans": []}
+    h, t = _render(model, "A", [], APPS, changes)[2:]
+    h, t = (x.replace(r.CHANGE_LOG_URL, "") for x in (h, t))     # the log's web address is not prose
+    assert "jishnu" not in h.lower() and "jishnu" not in t.lower()
+    assert "the ads team asked for this; the ads team call." in t
+    table = c.change_table(changes, model, APPS)
+    names = c.name_universe(APPS, table)
+    assert "author" not in c._payload_row(table[0])
+    for text in ("Jishnu paused the iPhone campaign.", "Paused the iPhone campaign because Jishnu asked."):
+        try:
+            c._check_narration(text, table[0], names)
+            raise AssertionError(text)
+        except c._Reject as exc:
+            assert exc.word == "name"
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):
