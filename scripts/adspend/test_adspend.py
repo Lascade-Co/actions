@@ -1060,7 +1060,7 @@ def test_narrate():
     assert "narration: ok 1 of 2" in log and "narration: retry (code)" in log
     assert "Jishnu" not in log and "PTW" not in log and "iPhone" not in log
     cached = json.load(open(os.path.join(d_, "narration.json")))
-    assert cached == {table[0]["key"]: "Jishnu paused the iPhone campaign at {c1.budget} because it overspent."}
+    assert cached == {table[0]["key"]: "Jishnu paused the iPhone campaign at {self.budget} because it overspent."}
     calls.clear()
     fixed = lambda p, s, max_tokens=None: calls.append(p) or json.dumps(
         {"c2": "Jishnu launched a Plant the World category campaign on Apple at {c2.budget}."})
@@ -1113,8 +1113,13 @@ def test_render_two_registers():
     assert 'class="text-muted">Tue 19:14</span>' in h and "<em>" not in h and "— Jishnu" not in h
     assert "      Tue 19:14  Jishnu paused the iPhone campaign because it overspent." in t
     # The orphan has no sentence: the log's words, with its app and channel, still escaped.
-    assert "Jishnu · Plant the World Apple Search Ads · Launched · PTW - ASA - Tier1 - Category · 25$ per day" in h
-    assert "  Tue 19:14  Jishnu · Plant the World Apple Search Ads · Launched" in t
+    assert ('class="text-muted">Tue 19:14 · Plant the World Apple Search Ads</span>&nbsp;&nbsp;<span style="font-size:14px; '
+            'color:#222222;" class="text-main">Jishnu · Launched · PTW - ASA - Tier1 - Category · 25$ per day') in h
+    assert "  Tue 19:14 · Plant the World Apple Search Ads  Jishnu · Launched" in t
+    # A narrated orphan keeps its app and channel in the stamp.
+    narrated = {**changes, "text": {**changes["text"], orphan: "Jishnu launched a category campaign."}}
+    h4 = _render(model, "A", [], APPS, narrated)[2]
+    assert 'Tue 19:14 · Plant the World Apple Search Ads</span>&nbsp;&nbsp;<span style="font-size:14px; color:#222222;" class="text-main">Jishnu launched a category campaign.' in h4
     assert "Change log &#8599;" in h and "Change log: https://jishnu-ads-taskboard.vercel.app/" in t
     assert "plain-English rendering" in h
     h0, t0 = _render(model, "A", [], APPS)[2:]
@@ -1133,6 +1138,69 @@ def test_main_picks_runner_and_guards_none():
     model = full_model()
     assert c.change_table(None, model, APPS) == []
     assert c.name_universe(APPS, [])            # no table: still a usable name set
+
+
+
+def test_codex_round2_findings():
+    import tempfile
+    model = full_model()
+    changes, cause, orphan = _changes_fixture()
+    table = c.change_table(changes, model, APPS)
+    names = c.name_universe(APPS, table)
+    facts = c.build_facts(model, "A")
+    ios = table[0]["line_fact"]
+    # 1. An observation carries no cause, no code and one sentence only.
+    for observed, word in (("Total spend was {t.d} after pausing TA - WW - A.", "code"),
+                           ("Total spend was {t.d} because Meta was paused.", "link"),
+                           ("Total spend was {t.d}. It was quiet.", "shape")):
+        assert _reason(_lead({"observed": observed, "refs": ["t"]}), facts, table, names) == word, observed
+    # 2. Identical changes share one sentence; a shifted id still reuses the cached template.
+    twin = {"ok": True, "by_line": {("Travel Animator", "Meta", "iOS"): [cause, cause]}, "orphans": []}
+    t2 = c.change_table(twin, model, APPS)
+    assert t2[0]["key"] == t2[1]["key"] and (t2[0]["id"], t2[1]["id"]) == ("c1", "c2")
+    d_ = tempfile.mkdtemp()
+    calls = []
+    run = lambda p, s, max_tokens=None: calls.append(p) or json.dumps(
+        {"c1": "Jishnu paused the iPhone campaign at {c1.budget}.", "c2": "Jishnu paused it at {c2.budget}."})
+    out, _ = _logged(lambda: c.narrate(t2, d_, run, names=names))
+    assert out == {t2[0]["key"]: "Jishnu paused the iPhone campaign at $130 a day."} and len(calls) == 1
+    shifted = {"ok": True, "by_line": {("Travel Animator", "Meta", "iOS"): [_c("TA - WW - IOS - A", kind="Launched", at=cause.at.replace(hour=20)), cause]},
+               "orphans": []}
+    t3 = c.change_table(shifted, model, APPS)
+    assert t3[1]["change"] is cause and t3[1]["id"] == "c2"
+    calls.clear()
+    out, _ = _logged(lambda: c.narrate(t3, d_, lambda p, s, max_tokens=None: calls.append(p) or json.dumps(
+        {"c1": "Jishnu launched the iPhone campaign."}), names=names))
+    assert out[t3[1]["key"]] == "Jishnu paused the iPhone campaign at $130 a day." and '"c2"' not in calls[0].split("CHANGES:")[1]
+    # 3. A short code of another project is a name; lower-case "geo" is not.
+    for text, word in (("Jishnu paused the MR campaign.", "name"),):
+        try:
+            c._check_narration(text, table[0], names); raise AssertionError(text)
+        except c._Reject as exc:
+            assert exc.word == word
+    assert c._check_narration("Jishnu paused the TA iPhone campaign over geo targeting.", table[0], names)
+    # 4. The logged spelling of a backed app is the same name.
+    assert c._check(_lead({"observed": f"TravelAnimator Meta spend rose to {{{ios}.d}}.", "refs": [ios]}),
+                    facts, table, names)
+    # 5. Direction is judged on the action, not on the reason.
+    assert c._check(_lead({"observed": f"Spend rose to {{{ios}.d}}.", "refs": [ios],
+                           "cause": {"change": "c1", "text": "Jishnu paused the campaign because costs increased."}}),
+                    facts, table, names)
+    assert _reason(_lead({"observed": f"Spend rose to {{{ios}.d}}.", "refs": [ios],
+                          "cause": {"change": "c1", "text": "Jishnu raised the campaign because it worked."}}),
+                   facts, table, names) == "direction"
+    # 6. A cached lead is re-validated: a rule that now fails it forces a fresh answer.
+    d_ = tempfile.mkdtemp()
+    good = lambda p, s: _lead({"observed": f"Travel Animator spend rose to {{{ios}.d}}.", "refs": [ios]})
+    assert c.commentary(model, "A", d_, run=good, table=table, names=names)
+    path = os.path.join(d_, "commentary-A.json")
+    cached = json.load(open(path))
+    assert cached["v"] == c.CACHE_VERSION and cached["raw"]
+    cached["raw"] = _lead({"observed": f"Jishnu's spend rose to {{{ios}.d}}.", "refs": [ios]})
+    json.dump(cached, open(path, "w"))
+    calls = []
+    c.commentary(model, "A", d_, run=lambda p, s: calls.append(p) or good(p, s), table=table, names=names)
+    assert len(calls) == 1
 
 
 if __name__ == "__main__":

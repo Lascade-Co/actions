@@ -35,6 +35,7 @@ MAX_FACTS = 8
 ATTEMPTS = 3                     # Claude calls per task, first try included
 NARRATE_BATCH = 40
 WHY_LIMIT = 400
+CACHE_VERSION = 2
 _PLACEHOLDER = re.compile(r"\{(t|f\d+|c\d+)\.(\w+)\}")
 _UP = {"up", "rose", "increased", "higher", "climbed", "grew", "jumped", "raised"}
 _DOWN = {"down", "fell", "dropped", "lower", "cut", "declined", "decreased", "shrank", "reduced"}
@@ -46,6 +47,11 @@ BUDGET = re.compile(r"^\s*\$?\s*(\d+(?:\.\d{1,2})?)\s*\$?\s*(?:per\s+day|/\s*day
 # can slip past this pattern, so the logged campaign name itself is also checked verbatim.
 _CODE = re.compile(r"\b[A-Z0-9]{2,}(?:\s*-\s*[A-Z0-9][A-Z0-9 ]*){1,}")
 _DOWN_KINDS = ("paused", "stopped", "ended")
+# An observation states spend; a reason or an action belongs in the validated "cause".
+_CAUSAL = {"because", "due", "since", "thanks", "reason", "paused", "pausing", "launched", "launching",
+           "changed", "changing", "added", "adding", "switched", "switching", "turned"}
+# Where a cause's action ends and its reason begins: direction is checked on the action only.
+_REASON_START = re.compile(r"\b(because|to|so|since|as|after|which|while|due|for)\b|[,;:]", re.I)
 _UP_KINDS = ("launched", "started", "new creative", "resumed")
 
 HINTS = {
@@ -223,10 +229,21 @@ def _proper(name: str) -> bool:
     return len(name) > 1 and (" " in name or any(ch.isupper() for ch in name[1:]))
 
 
+class Names(set):
+    """The names a sentence may not use unless its facts or change back them. `shorts` maps a
+    registry short code ("MR", "GEO") to its project; codes match case-sensitively, so the
+    word "geo" in "geo targeting" is not a name but "GEO" is."""
+
+    def __init__(self, items=(), shorts=None):
+        super().__init__(items)
+        self.shorts = dict(shorts or {})
+
+
 def name_universe(apps: dict, table: list) -> set:
     """Every name a sentence could wrongly drop in. Blank values never enter: an empty name
-    would match everywhere. Registry short codes are left out on purpose: 'GEO' would make
-    'geo targeting' a name."""
+    would match everywhere."""
+    shorts = {spec["short"]: project for project, spec in apps.items()
+              if spec.get("short") and spec["short"] != project}
     names = set(apps) | set(CHANNELS) | {"iOS", "Android"}
     for aliases in ALIASES.values():
         names |= aliases
@@ -235,7 +252,7 @@ def name_universe(apps: dict, table: list) -> set:
         if row["app"] in apps or _proper(row["app"]):
             names.add(row["app"])
         names.add(row["project"])
-    return {n.strip() for n in names if n and n.strip()}
+    return Names({n.strip() for n in names if n and n.strip()}, shorts)
 
 
 def _backed(values) -> set:
@@ -257,9 +274,18 @@ def _mentions(text: str, name: str) -> bool:
     return re.search(rf"(?<![a-z0-9]){re.escape(name.lower())}(?![a-z0-9])", text.lower()) is not None
 
 
+def _squash(name: str) -> str:
+    """'TravelAnimator' and 'Travel Animator' are one name."""
+    return re.sub(r"[^a-z0-9]", "", str(name).lower())
+
+
 def _check_names(text: str, names, backed: set) -> None:
+    ok = {_squash(b) for b in backed}
     for name in names:
-        if name and name.strip() and _mentions(text, name) and name.lower() not in backed:
+        if name and name.strip() and _mentions(text, name) and _squash(name) not in ok:
+            raise _Reject("name")
+    for short, project in getattr(names, "shorts", {}).items():
+        if re.search(rf"(?<![A-Za-z0-9]){re.escape(short)}(?![A-Za-z0-9])", text) and _squash(project) not in ok:
             raise _Reject("name")
 
 
@@ -291,9 +317,16 @@ def _check_observed(sentence, refs, facts, names) -> str:
             raise _Reject("placeholder")
     if "{" in bare or "}" in bare:
         raise _Reject("placeholder")
+    probe = _PLACEHOLDER.sub("X", sentence).strip()
+    if not probe.endswith(".") or re.search(r"[.!?]", probe[:-1]):
+        raise _Reject("shape")
+    if _CODE.search(probe):
+        raise _Reject("code")
     words = set(re.findall(r"[a-z]+", bare.lower()))
     if words & _ADVICE:
         raise _Reject("advice")
+    if words & _CAUSAL:
+        raise _Reject("link")
     _direction_ok(words, {facts[r]["label"] for r in refs})
     _check_names(bare, names, _backed(v for r in refs for v in facts[r]["who"].values()))
     return _PLACEHOLDER.sub(lambda m: facts[m.group(1)]["show"][m.group(2)], sentence).strip()
@@ -325,7 +358,8 @@ def _check_template(text, row, names, max_words, direction: bool) -> str:
     if words & (_ADVICE - {"budget"}):
         raise _Reject("advice")
     if direction:
-        _direction_ok(words, {row["dir"]} if row["dir"] else set())
+        action = _REASON_START.split(probe, maxsplit=1)[0]
+        _direction_ok(set(re.findall(r"[a-z]+", action.lower())), {row["dir"]} if row["dir"] else set())
     _check_names(probe, names, backed_names(row))
     return _PLACEHOLDER.sub(lambda m: row["show"][m.group(2)], text).strip()
 
@@ -416,22 +450,30 @@ def commentary(model: dict, variant: str, scratch: str, run=_run_claude, cache: 
                for fid, f in facts.items()}
     sent = {"facts": payload, "changes": [_payload_row(r) for r in table]}
     fingerprint = hashlib.sha256(json.dumps(sent, sort_keys=True, default=str).encode()).hexdigest()
+    extra = set(_names(build_facts(model, "B"))) | set(CHANNELS) | {"iOS", "Android"}
+    for aliases in ALIASES.values():
+        extra |= aliases
+    names = Names(set(names or ()) | extra, getattr(names, "shorts", {}))
     cache_path = os.path.join(scratch, f"commentary-{variant}.json")
     if cache and os.path.exists(cache_path):
         try:
             with open(cache_path) as fh:
                 cached = json.load(fh)
-            if cached.get("facts") == fingerprint and cached["sentences"]:
-                return cached["sentences"]
+            # The answer itself is cached and re-validated, so a stricter rule or a new name
+            # can never be bypassed by yesterday's prose.
+            if cached.get("v") == CACHE_VERSION and cached.get("facts") == fingerprint:
+                return _check(cached["raw"], facts, table, names)
         except Exception:
             pass
-    names = set(names or ()) | _names(build_facts(model, "B")) | set(CHANNELS) | {"iOS", "Android"}
-    for aliases in ALIASES.values():
-        names |= aliases
-    reason = ""
+    reason, raw_ok = "", None
+
+    def check(raw):
+        nonlocal raw_ok
+        out = _check(raw, facts, table, names)
+        raw_ok = raw
+        return out
     try:
-        result, word = _attempt("synopsis", run, scratch, PROMPT + json.dumps(sent, indent=1),
-                                lambda raw: _check(raw, facts, table, names))
+        result, word = _attempt("synopsis", run, scratch, PROMPT + json.dumps(sent, indent=1), check)
         if not result:
             result, reason = [], f"rejected:{word or 'shape'}"
     except Exception as exc:  # auth, timeout, API failure: no commentary, never a failed send
@@ -440,8 +482,20 @@ def commentary(model: dict, variant: str, scratch: str, run=_run_claude, cache: 
         print(f"::warning title=Ad spend synopsis skipped::{reason}")
     elif cache:
         with open(cache_path, "w") as fh:
-            json.dump({"facts": fingerprint, "sentences": result}, fh)
+            json.dump({"v": CACHE_VERSION, "facts": fingerprint, "raw": raw_ok, "sentences": result}, fh)
     return result
+
+
+_SELF = "{self.budget}"
+
+
+def _to_template(text: str) -> str:
+    """Cache form: the row's own placeholder without its position-dependent id."""
+    return re.sub(r"\{c\d+\.budget\}", _SELF, text)
+
+
+def _for_row(template: str, row: dict) -> str:
+    return template.replace(_SELF, "{%s.budget}" % row["id"])
 
 
 def _narrate_batch(batch, scratch, run, names, templates) -> None:
@@ -462,7 +516,7 @@ def _narrate_batch(batch, scratch, run, names, templates) -> None:
             text = doc.get(row["id"])
             try:
                 _check_narration(text, row, names)
-                templates[row["key"]] = text
+                templates[row["key"]] = _to_template(text)
             except _Reject as exc:
                 failed.append((row, exc.word))
         if not failed:
@@ -489,14 +543,17 @@ def narrate(table: list, scratch: str, run=_run_claude, *, names, cache: bool = 
                 cached = json.load(fh)
         except Exception:
             cached = {}
-    templates, todo = {}, []
+    templates, todo, queued = {}, [], set()
     for row in table:
+        if row["key"] in templates or row["key"] in queued:      # an identical change: one sentence
+            continue
         t = cached.get(row["key"]) if isinstance(cached, dict) else None
         try:
-            _check_narration(t, row, names)
+            _check_narration(_for_row(t, row) if isinstance(t, str) else t, row, names)
             templates[row["key"]] = t
         except _Reject:
             todo.append(row)
+            queued.add(row["key"])
     reason = ""
     for i in range(0, len(todo), NARRATE_BATCH):
         try:
@@ -507,6 +564,15 @@ def narrate(table: list, scratch: str, run=_run_claude, *, names, cache: bool = 
     if cache and templates:
         with open(cache_path, "w") as fh:
             json.dump(templates, fh)
-    print(f"narration: unavailable ({reason})" if reason else f"narration: ok {len(templates)} of {len(table)}")
-    by_key = {r["key"]: r for r in table}
-    return {k: _check_narration(t, by_key[k], names) for k, t in templates.items()}
+    out = {}
+    for row in table:
+        t = templates.get(row["key"])
+        if t is None or row["key"] in out:
+            continue
+        try:
+            out[row["key"]] = _check_narration(_for_row(t, row), row, names)
+        except _Reject:                       # never abort the email: the log's own words instead
+            pass
+    done = sum(1 for row in table if row["key"] in out)
+    print(f"narration: unavailable ({reason})" if reason else f"narration: ok {done} of {len(table)}")
+    return out

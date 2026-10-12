@@ -241,11 +241,9 @@ def _why(text: str) -> str:
     return cut + "…"
 
 
-def _change_bits(c, with_channel=False) -> list:
+def _change_bits(c) -> list:
     """Plain-text pieces of one logged change, in reading order."""
     bits = [f"{c.at:%a %H:%M}"]
-    if with_channel:   # an orphan has no ledger line to say whose it is
-        bits.append(" ".join(x for x in (c.app, c.channel) if x))
     bits += [x for x in (c.kind, c.entity) if x]
     if c.before and c.after:
         bits.append(f"{c.before} → {c.after}")
@@ -256,27 +254,34 @@ def _change_bits(c, with_channel=False) -> list:
     return bits
 
 
-def _change_fallback(c, with_channel=False) -> str:
+def _change_fallback(c) -> str:
     """The log's own words when there is no plain-English sentence: nothing is lost."""
-    rest = " · ".join(_change_bits(c, with_channel)[1:])
+    rest = " · ".join(_change_bits(c)[1:])
     return f"{c.author} · {rest}" if c.author else rest
 
 
-def _change_sentence(c, changes, with_channel=False) -> str:
-    return ((changes or {}).get("text") or {}).get(c) or _change_fallback(c, with_channel)
+def _change_sentence(c, changes) -> str:
+    return ((changes or {}).get("text") or {}).get(c) or _change_fallback(c)
+
+
+def _stamp(c, with_channel=False) -> str:
+    """When, and for an orphan (no ledger line above it) whose: always shown, never left to the
+    wording, so a narrated orphan cannot lose its app and channel."""
+    who = " ".join(x for x in (c.app, c.channel) if x) if with_channel else ""
+    return f"{c.at:%a %H:%M}" + (f" · {who}" if who else "")
 
 
 def _change_html(c, changes, with_channel=False) -> str:
-    """Two registers: a small grey time stamp, then the sentence in body text. The sentence is
-    what to read; the statistics above it stay grey."""
+    """Two registers: a small grey stamp, then the sentence in body text. The sentence is what
+    to read; the statistics above it stay grey."""
     return (f'<p style="margin:4px 0 0 0; Margin:4px 0 0 0; padding:0 0 2px 12px; font-family:{FONT_BODY}; '
             f'line-height:1.5;"><span style="font-size:12px; color:#777777; font-variant-numeric:tabular-nums;" '
-            f'class="text-muted">{esc(f"{c.at:%a %H:%M}")}</span>&nbsp;&nbsp;<span style="font-size:14px; '
-            f'color:#222222;" class="text-main">{esc(_change_sentence(c, changes, with_channel))}</span></p>')
+            f'class="text-muted">{esc(_stamp(c, with_channel))}</span>&nbsp;&nbsp;<span style="font-size:14px; '
+            f'color:#222222;" class="text-main">{esc(_change_sentence(c, changes))}</span></p>')
 
 
 def _change_text(c, changes, with_channel=False) -> str:
-    return f"{c.at:%a %H:%M}  {_change_sentence(c, changes, with_channel)}"
+    return f"{_stamp(c, with_channel)}  {_change_sentence(c, changes)}"
 
 
 def _line_detail(ln, d1_name, variant, changes) -> str:
