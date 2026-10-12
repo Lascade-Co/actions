@@ -47,11 +47,16 @@ BUDGET = re.compile(r"^\s*\$?\s*(\d+(?:\.\d{1,2})?)\s*\$?\s*(?:per\s+day|/\s*day
 # can slip past this pattern, so the logged campaign name itself is also checked verbatim.
 _CODE = re.compile(r"\b[A-Z0-9]{2,}(?:\s*-\s*[A-Z0-9][A-Z0-9 ]*){1,}")
 _DOWN_KINDS = ("paused", "stopped", "ended")
-# An observation states spend; a reason or an action belongs in the validated "cause".
-_CAUSAL = {"because", "due", "since", "thanks", "reason", "paused", "pausing", "launched", "launching",
-           "changed", "changing", "added", "adding", "switched", "switching", "turned"}
-# Where a cause's action ends and its reason begins: direction is checked on the action only.
-_REASON_START = re.compile(r"\b(because|to|so|since|as|after|which|while|due|for)\b|[,;:]", re.I)
+# An observation states what a line's spend did. Facts are per line, never per campaign, so it
+# never needs campaign or action vocabulary; any reason belongs in the validated "cause".
+_OBS_WORDS = {"because", "due", "thanks", "owing", "driven", "following", "caused", "causing", "reason",
+              "reasons", "result", "resulting", "change", "changes", "stopping", "turning", "turned",
+              "adding", "added", "removing", "removed", "decision"}
+_OBS_STEMS = ("paus", "launch", "campaign", "creative", "closur", "keyword", "target", "bidding",
+              "switch", "audience", "ad set", "adset")
+# Words that start a reason; they belong in a cause's "reason", never in its "action".
+_REASON_WORDS = {"because", "since", "due", "so", "thanks", "owing"}
+_ABBREV = re.compile(r"\b(vs|approx|incl)\.", re.I)
 _UP_KINDS = ("launched", "started", "new creative", "resumed")
 
 HINTS = {
@@ -63,7 +68,10 @@ HINTS = {
     "direction": "Use up/down words only when they match the fact's label, or in a cause what the person did",
     "name": "Mention only the apps, platforms and people of the facts or change you reference",
     "link": "Give a cause only in an item whose only ref is the line that change was logged under",
-    "length": "Use fewer words",
+    "cause": "Keep \"observed\" to what spend did, with no campaign, action or reason; put the person's "
+             "action in cause.action and the why in cause.reason",
+    "length": "Use fewer words: a cause's action and reason together at most 30 words, a change sentence at "
+              "most 25",
     "code": "Describe the campaign in words instead of quoting its code",
 }
 
@@ -72,18 +80,22 @@ You are given FACTS about yesterday's ad spend and the CHANGES the ads team logg
 Answer with 1 or 2 items about what stands out. Each item has:
 - "observed": one sentence on what spend did. Observed spend only: never why, never a person or team, never advice.
 - "refs": the fact ids that sentence uses.
-- "cause" (optional): {"change": "c3", "text": "..."} only when a logged change sits under that same line,
-  i.e. the change's "line_fact" is the item's only ref. One sentence, past tense, starting with the person's
-  name exactly as logged, saying what they changed and why, in plain words a CEO uses. Never quote a campaign
-  code (like "MR - iOS - ASA - BRAND"); describe the campaign instead.
+  It never mentions a campaign, an action or a reason.
+- "cause" (optional): {"change": "c3", "action": "...", "reason": "..."} only when a logged change sits under
+  that same line, i.e. the change's "line_fact" is the item's only ref. "action": what the person did, past
+  tense, starting with their name exactly as logged ("Jishnu paused the brand campaign on Apple"). "reason":
+  why, as a clause that completes the sentence ("because it was catching broad searches"). Plain words a CEO
+  uses. Never quote a campaign code (like "MR - iOS - ASA - BRAND"); describe the campaign instead.
 Rules for all text:
 - NEVER write a digit and never spell a number out. Use placeholders: {f3.d}, {f3.pct}, {t.d} in "observed"
   (only fields listed for that fact); {c3.budget} in a cause (only when that change lists "budget").
-- A fact's "label" is its truth: do not say up for a down fact or the reverse. In a cause, direction words
-  (raised, cut, ...) must match what the person did.
+- A fact's "label" is its truth: do not say up for a down fact or the reverse. In a cause's "action",
+  direction words (raised, cut, ...) must match what the person did.
 - No advice, no hype, no intensifiers. Never invent a cause that is not logged.
+- Short: "observed" at most 25 words; a cause's action and reason together at most 30 words.
+- Never name a person, app or platform that is not part of the item's own facts or change.
 Prefer the biggest movers, and give the cause when a logged change explains one.
-Answer with JSON only: {"items":[{"observed":"...","refs":["f3"],"cause":{"change":"c1","text":"..."}}]}
+Answer with JSON only: {"items":[{"observed":"...","refs":["f3"],"cause":{"change":"c1","action":"...","reason":"..."}}]}
 
 FACTS AND CHANGES:
 """
@@ -225,8 +237,9 @@ def _payload_row(row: dict) -> dict:
 
 
 def _proper(name: str) -> bool:
-    """A logged app worth guarding as a name: 'MarineRadar', 'Plant the World'; not 'Other'."""
-    return len(name) > 1 and (" " in name or any(ch.isupper() for ch in name[1:]))
+    """A name worth guarding case-insensitively: 'MarineRadar', 'Plant the World'; not 'Other',
+    and not an all-caps code like 'TA' or 'GEO' (those are matched case-sensitively)."""
+    return len(name) > 1 and not name.isupper() and (" " in name or any(ch.isupper() for ch in name[1:]))
 
 
 class Names(set):
@@ -234,9 +247,10 @@ class Names(set):
     registry short code ("MR", "GEO") to its project; codes match case-sensitively, so the
     word "geo" in "geo targeting" is not a name but "GEO" is."""
 
-    def __init__(self, items=(), shorts=None):
+    def __init__(self, items=(), shorts=None, canon=None):
         super().__init__(items)
         self.shorts = dict(shorts or {})
+        self.canon = dict(canon or {})     # squashed alias -> project ("geoanimator" -> "GeoAnimator")
 
 
 def name_universe(apps: dict, table: list) -> set:
@@ -244,7 +258,15 @@ def name_universe(apps: dict, table: list) -> set:
     would match everywhere."""
     shorts = {spec["short"]: project for project, spec in apps.items()
               if spec.get("short") and spec["short"] != project}
-    names = set(apps) | set(CHANNELS) | {"iOS", "Android"}
+    canon = {}
+    for project, spec in apps.items():
+        for alias in [project, *spec.get("prefixes", [])]:
+            if alias == project or _proper(alias):     # "Geo Animator", not "TA" (a short code)
+                canon[_squash(alias)] = project
+            elif alias.isupper() and alias not in shorts:
+                shorts[alias] = project                # "MT", "AR": case-sensitive like the short codes
+    names = set(apps) | set(CHANNELS) | {"iOS", "Android"} | {a for p, sp in apps.items()
+                                                              for a in sp.get("prefixes", []) if _proper(a)}
     for aliases in ALIASES.values():
         names |= aliases
     for row in table:
@@ -252,7 +274,7 @@ def name_universe(apps: dict, table: list) -> set:
         if row["app"] in apps or _proper(row["app"]):
             names.add(row["app"])
         names.add(row["project"])
-    return Names({n.strip() for n in names if n and n.strip()}, shorts)
+    return Names({n.strip() for n in names if n and n.strip()}, shorts, canon)
 
 
 def _backed(values) -> set:
@@ -280,12 +302,17 @@ def _squash(name: str) -> str:
 
 
 def _check_names(text: str, names, backed: set) -> None:
-    ok = {_squash(b) for b in backed}
+    canon = getattr(names, "canon", {})
+
+    def key(n):
+        k = _squash(n)
+        return _squash(canon.get(k, k))
+    ok = {key(b) for b in backed}
     for name in names:
-        if name and name.strip() and _mentions(text, name) and _squash(name) not in ok:
+        if name and name.strip() and _mentions(text, name) and key(name) not in ok:
             raise _Reject("name")
     for short, project in getattr(names, "shorts", {}).items():
-        if re.search(rf"(?<![A-Za-z0-9]){re.escape(short)}(?![A-Za-z0-9])", text) and _squash(project) not in ok:
+        if re.search(rf"(?<![A-Za-z0-9]){re.escape(short)}(?![A-Za-z0-9])", text) and key(project) not in ok:
             raise _Reject("name")
 
 
@@ -317,7 +344,7 @@ def _check_observed(sentence, refs, facts, names) -> str:
             raise _Reject("placeholder")
     if "{" in bare or "}" in bare:
         raise _Reject("placeholder")
-    probe = _PLACEHOLDER.sub("X", sentence).strip()
+    probe = _ABBREV.sub(r"\1", _PLACEHOLDER.sub("X", sentence).strip())
     if not probe.endswith(".") or re.search(r"[.!?]", probe[:-1]):
         raise _Reject("shape")
     if _CODE.search(probe):
@@ -325,14 +352,15 @@ def _check_observed(sentence, refs, facts, names) -> str:
     words = set(re.findall(r"[a-z]+", bare.lower()))
     if words & _ADVICE:
         raise _Reject("advice")
-    if words & _CAUSAL:
-        raise _Reject("link")
+    low = bare.lower()
+    if words & _OBS_WORDS or any(re.search(rf"\b{re.escape(st)}", low) for st in _OBS_STEMS):
+        raise _Reject("cause")
     _direction_ok(words, {facts[r]["label"] for r in refs})
     _check_names(bare, names, _backed(v for r in refs for v in facts[r]["who"].values()))
     return _PLACEHOLDER.sub(lambda m: facts[m.group(1)]["show"][m.group(2)], sentence).strip()
 
 
-def _check_template(text, row, names, max_words, direction: bool) -> str:
+def _check_template(text, row, names, max_words) -> str:
     """One sentence about one logged change, checked as a template, returned filled.
     Placeholders are validated first and replaced by a neutral 'X' for the remaining checks,
     so '{c1.budget}.' cannot look like two sentences and '$45.50' cannot look like a digit."""
@@ -341,7 +369,7 @@ def _check_template(text, row, names, max_words, direction: bool) -> str:
     for cid, field in _PLACEHOLDER.findall(text):
         if cid != row["id"] or field not in row["show"]:
             raise _Reject("placeholder")
-    probe = _PLACEHOLDER.sub("X", text).strip()
+    probe = _ABBREV.sub(r"\1", _PLACEHOLDER.sub("X", text).strip())
     if "{" in probe or "}" in probe:
         raise _Reject("placeholder")
     if re.search(r"\d", probe):
@@ -357,11 +385,27 @@ def _check_template(text, row, names, max_words, direction: bool) -> str:
     words = set(re.findall(r"[a-z]+", probe.lower()))
     if words & (_ADVICE - {"budget"}):
         raise _Reject("advice")
-    if direction:
-        action = _REASON_START.split(probe, maxsplit=1)[0]
-        _direction_ok(set(re.findall(r"[a-z]+", action.lower())), {row["dir"]} if row["dir"] else set())
     _check_names(probe, names, backed_names(row))
     return _PLACEHOLDER.sub(lambda m: row["show"][m.group(2)], text).strip()
+
+
+def _item_observed(it, facts, names) -> str:
+    if not isinstance(it, dict):
+        raise _Reject("shape")
+    refs = it.get("refs")
+    if not isinstance(refs, list) or not refs or not all(isinstance(r, str) and r in facts for r in refs):
+        raise _Reject("shape")
+    return _check_observed(it.get("observed"), refs, facts, names)
+
+
+def _item_cause(it, rows, names) -> str:
+    cause = it.get("cause")
+    if not isinstance(cause, dict):
+        raise _Reject("shape")
+    row = rows.get(cause.get("change"))
+    if row is None or not row["line_fact"] or it.get("refs") != [row["line_fact"]]:
+        raise _Reject("link")
+    return _check_cause(cause, row, names)
 
 
 def _check(raw: str, facts: dict, table: list, names) -> list:
@@ -374,20 +418,9 @@ def _check(raw: str, facts: dict, table: list, names) -> list:
         rows = {r["id"]: r for r in table}
         out = []
         for it in items:
-            if not isinstance(it, dict):
-                raise _Reject("shape")
-            refs = it.get("refs")
-            if not isinstance(refs, list) or not refs or not all(isinstance(r, str) and r in facts for r in refs):
-                raise _Reject("shape")
-            sentence = _check_observed(it.get("observed"), refs, facts, names)
-            cause = it.get("cause")
-            if cause is not None:
-                if not isinstance(cause, dict):
-                    raise _Reject("shape")
-                row = rows.get(cause.get("change"))
-                if row is None or not row["line_fact"] or refs != [row["line_fact"]]:
-                    raise _Reject("link")
-                sentence += " " + _check_template(cause.get("text"), row, names, 30, direction=True)
+            sentence = _item_observed(it, facts, names)
+            if it.get("cause") is not None:
+                sentence += " " + _item_cause(it, rows, names)
             out.append(sentence)
         return out
     except _Reject:
@@ -396,16 +429,59 @@ def _check(raw: str, facts: dict, table: list, names) -> list:
         raise _Reject("shape") from None
 
 
+def _salvage(raw: str, facts: dict, table: list, names) -> list:
+    """The last resort after every attempt failed: keep each item that passes on its own,
+    without its cause if only the cause fails. Every kept sentence passed the same rules."""
+    try:
+        doc = _parse(raw)
+        items = doc.get("items") if isinstance(doc, dict) else None
+        if not isinstance(items, list):
+            return []
+        rows = {r["id"]: r for r in table}
+        out = []
+        for it in items[:2]:
+            try:
+                sentence = _item_observed(it, facts, names)
+            except _Reject:
+                continue
+            if it.get("cause") is not None:
+                try:
+                    sentence += " " + _item_cause(it, rows, names)
+                except _Reject:
+                    pass
+            out.append(sentence)
+        return out
+    except Exception:
+        return []
+
+
+def _check_cause(cause: dict, row: dict, names) -> str:
+    """A cause comes in two fields so that what the person did and why are never confused:
+    `action` ("Jishnu paused the brand campaign") carries the direction and is checked against
+    the logged change; `reason` ("because it overspent") may say anything true about costs,
+    up or down. Joined, the sentence passes every narration rule too."""
+    action, reason = cause.get("action"), cause.get("reason")
+    if not isinstance(action, str) or not action.strip() or (reason is not None and not isinstance(reason, str)):
+        raise _Reject("shape")
+    act = action.strip().rstrip(".").strip()
+    words = set(re.findall(r"[a-z]+", _PLACEHOLDER.sub("X", act).lower()))
+    if words & _REASON_WORDS:
+        raise _Reject("cause")
+    _direction_ok(words, {row["dir"]} if row["dir"] else set())
+    why = (reason or "").strip().rstrip(".").strip()
+    return _check_template(f"{act} {why}.".replace(" .", ".") if why else f"{act}.", row, names, 30)
+
+
 def validate(raw: str, facts: dict, all_names=(), table=()) -> list:
     """Return the filled sentences, or [] if anything is off."""
     try:
-        return _check(raw, facts, list(table), set(all_names))
+        return _check(raw, facts, list(table), all_names if isinstance(all_names, Names) else set(all_names))
     except _Reject:
         return []
 
 
 def _check_narration(text, row, names) -> str:
-    return _check_template(text, row, names, 25, direction=False)
+    return _check_template(text, row, names, 25)
 
 
 # ---- calling Claude
@@ -453,7 +529,7 @@ def commentary(model: dict, variant: str, scratch: str, run=_run_claude, cache: 
     extra = set(_names(build_facts(model, "B"))) | set(CHANNELS) | {"iOS", "Android"}
     for aliases in ALIASES.values():
         extra |= aliases
-    names = Names(set(names or ()) | extra, getattr(names, "shorts", {}))
+    names = Names(set(names or ()) | extra, getattr(names, "shorts", {}), getattr(names, "canon", {}))
     cache_path = os.path.join(scratch, f"commentary-{variant}.json")
     if cache and os.path.exists(cache_path):
         try:
@@ -465,24 +541,35 @@ def commentary(model: dict, variant: str, scratch: str, run=_run_claude, cache: 
                 return _check(cached["raw"], facts, table, names)
         except Exception:
             pass
-    reason, raw_ok = "", None
+    reason, raw_ok, raws = "", None, []
 
     def check(raw):
         nonlocal raw_ok
+        raws.append(raw)
         out = _check(raw, facts, table, names)
         raw_ok = raw
         return out
     try:
         result, word = _attempt("synopsis", run, scratch, PROMPT + json.dumps(sent, indent=1), check)
         if not result:
+            for raw in reversed(raws):
+                result = _salvage(raw, facts, table, names)
+                if result:
+                    print(f"synopsis: partial ({word or 'shape'})")
+                    raw_ok = None                         # never cache a salvage: a rerun may get a whole lead
+                    break
+        if not result:
             result, reason = [], f"rejected:{word or 'shape'}"
     except Exception as exc:  # auth, timeout, API failure: no commentary, never a failed send
         result, reason = [], _failure_reason(exc, scratch)
     if reason:
         print(f"::warning title=Ad spend synopsis skipped::{reason}")
-    elif cache:
-        with open(cache_path, "w") as fh:
-            json.dump({"v": CACHE_VERSION, "facts": fingerprint, "raw": raw_ok, "sentences": result}, fh)
+    elif cache and raw_ok:
+        try:
+            with open(cache_path, "w") as fh:
+                json.dump({"v": CACHE_VERSION, "facts": fingerprint, "raw": raw_ok, "sentences": result}, fh)
+        except OSError:
+            pass                  # a cache is a convenience; the prose is already good
     return result
 
 
@@ -562,8 +649,11 @@ def narrate(table: list, scratch: str, run=_run_claude, *, names, cache: bool = 
             reason = _failure_reason(exc, scratch)
             break
     if cache and templates:
-        with open(cache_path, "w") as fh:
-            json.dump(templates, fh)
+        try:
+            with open(cache_path, "w") as fh:
+                json.dump(templates, fh)
+        except OSError:
+            pass
     out = {}
     for row in table:
         t = templates.get(row["key"])

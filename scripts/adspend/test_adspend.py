@@ -949,44 +949,45 @@ def test_validate_reasons_are_one_word():
     ios = table[0]["line_fact"]
     other = next(k for k, v in facts.items() if k not in ("t", ios))
     good = _lead({"observed": f"Travel Animator Meta spend rose to {{{ios}.d}}.", "refs": [ios],
-                  "cause": {"change": "c1", "text": "Jishnu paused the iPhone campaign at {c1.budget} because it overspent."}})
+                  "cause": {"change": "c1", "action": "Jishnu paused the iPhone campaign at {c1.budget}",
+                            "reason": "because it overspent"}})
     out = c._check(good, facts, table, names)
     assert out == [f"Travel Animator Meta spend rose to {facts[ios]['show']['d']}. "
                    "Jishnu paused the iPhone campaign at $130 a day because it overspent."]
     obs = {"observed": f"Spend rose to {{{ios}.d}}.", "refs": [ios]}
     cases = {
         "shape": ["not json", _lead(), _lead({"observed": "x"}),
-                  _lead({**obs, "cause": {"change": "c1", "text": "Jishnu paused it. Then more."}})],
+                  _lead({**obs, "cause": {"change": "c1", "action": "Jishnu paused it. Then more."}})],
         "digit": [_lead({"observed": "Spend rose 18%.", "refs": [ios]}),
-                  _lead({**obs, "cause": {"change": "c1", "text": "Jishnu paused campaign 7."}})],
+                  _lead({**obs, "cause": {"change": "c1", "action": "Jishnu paused campaign 7."}})],
         "placeholder": [_lead({"observed": "Spend rose to {c1.budget}.", "refs": [ios]}),
-                        _lead({**obs, "cause": {"change": "c1", "text": f"Jishnu paused it at {{{ios}.d}}."}})],
+                        _lead({**obs, "cause": {"change": "c1", "action": f"Jishnu paused it at {{{ios}.d}}."}})],
         "advice": [_lead({"observed": f"Spend rose to {{{ios}.d}} against budget.", "refs": [ios]}),
-                   _lead({**obs, "cause": {"change": "c1", "text": "Jishnu paused it, as the team decided."}})],
+                   _lead({**obs, "cause": {"change": "c1", "action": "Jishnu paused it, as the team decided."}})],
         "direction": [_lead({"observed": f"Spend fell to {{{ios}.d}}.", "refs": [ios],
-                             "cause": {"change": "c1", "text": "Jishnu paused it."}}),
-                      _lead({**obs, "cause": {"change": "c1", "text": "Jishnu raised the spend cap."}})],
+                             "cause": {"change": "c1", "action": "Jishnu paused it."}}),
+                      _lead({**obs, "cause": {"change": "c1", "action": "Jishnu raised the spend cap."}})],
         "name": [_lead({"observed": f"Jishnu's spend rose to {{{ios}.d}}.", "refs": [ios]}),
-                 _lead({**obs, "cause": {"change": "c1", "text": "Jishnu paused the Marine Radar campaign."}}),
-                 _lead({**obs, "cause": {"change": "c1", "text": "Rohit paused the iPhone campaign."}}),
-                 _lead({**obs, "cause": {"change": "c1", "text": "Jishnu paused the Google campaign."}})],
-        "link": [_lead({**obs, "cause": {"change": "c2", "text": "Jishnu launched it."}}),         # orphan
+                 _lead({**obs, "cause": {"change": "c1", "action": "Jishnu paused the Marine Radar campaign."}}),
+                 _lead({**obs, "cause": {"change": "c1", "action": "Rohit paused the iPhone campaign."}}),
+                 _lead({**obs, "cause": {"change": "c1", "action": "Jishnu paused the Google campaign."}})],
+        "link": [_lead({**obs, "cause": {"change": "c2", "action": "Jishnu launched it."}}),         # orphan
                  _lead({"observed": "Total spend was {t.d}.", "refs": ["t"],
-                        "cause": {"change": "c1", "text": "Jishnu paused it."}}),
+                        "cause": {"change": "c1", "action": "Jishnu paused it."}}),
                  _lead({"observed": f"Spend rose to {{{ios}.d}} and {{{other}.d}}.", "refs": [ios, other],
-                        "cause": {"change": "c1", "text": "Jishnu paused it."}})],
-        "code": [_lead({**obs, "cause": {"change": "c1", "text": "Jishnu paused TA - WW - IOS - A."}}),
-                 _lead({**obs, "cause": {"change": "c1", "text": "Jishnu paused the ASA - Brand campaign."}})],
-        "length": [_lead({**obs, "cause": {"change": "c1", "text": "Jishnu " + "paused " * 30 + "it."}})],
+                        "cause": {"change": "c1", "action": "Jishnu paused it."}})],
+        "code": [_lead({**obs, "cause": {"change": "c1", "action": "Jishnu paused TA - WW - IOS - A."}}),
+                 _lead({**obs, "cause": {"change": "c1", "action": "Jishnu paused the ASA - Brand campaign."}})],
+        "length": [_lead({**obs, "cause": {"change": "c1", "action": "Jishnu " + "paused " * 30 + "it."}})],
     }
     for word, raws in cases.items():
         for raw in raws:
             assert _reason(raw, facts, table, names) == word, (word, raw, _reason(raw, facts, table, names))
     # A down cause under an up line is fine: the cause is checked against what the person did.
-    assert c._check(_lead({**obs, "cause": {"change": "c1", "text": "Jishnu cut the iPhone campaign."}}),
+    assert c._check(_lead({**obs, "cause": {"change": "c1", "action": "Jishnu cut the iPhone campaign."}}),
                     facts, table, names)
     # "budget" belongs to causes only; "Apple" is a backed alias of Apple Search Ads.
-    assert c._check(_lead({**obs, "cause": {"change": "c1", "text": "Jishnu paused it to protect the budget."}}),
+    assert c._check(_lead({**obs, "cause": {"change": "c1", "action": "Jishnu paused it to protect the budget."}}),
                     facts, table, names)
     assert c.validate(js(("Spend rose 18%.", [ios])), facts, names) == []
 
@@ -1030,7 +1031,7 @@ def test_commentary_with_changes_reaches_claude_and_the_cache():
     def ok(prompt, scratch):
         seen.append(prompt)
         return _lead({"observed": f"Travel Animator spend rose to {{{ios}.d}}.", "refs": [ios],
-                      "cause": {"change": "c1", "text": "Jishnu paused the iPhone campaign at {c1.budget}."}})
+                      "cause": {"change": "c1", "action": "Jishnu paused the iPhone campaign at {c1.budget}."}})
     d_ = tempfile.mkdtemp()
     out = c.commentary(model, "A", d_, run=ok, table=table, names=names)
     assert out[0].endswith("Jishnu paused the iPhone campaign at $130 a day.")
@@ -1151,7 +1152,9 @@ def test_codex_round2_findings():
     ios = table[0]["line_fact"]
     # 1. An observation carries no cause, no code and one sentence only.
     for observed, word in (("Total spend was {t.d} after pausing TA - WW - A.", "code"),
-                           ("Total spend was {t.d} because Meta was paused.", "link"),
+                           ("Total spend was {t.d} because Meta was paused.", "cause"),
+                           ("Total spend was {t.d} after stopping the campaign.", "cause"),
+                           ("Spend fell to {t.d} following campaign pauses.", "cause"),
                            ("Total spend was {t.d}. It was quiet.", "shape")):
         assert _reason(_lead({"observed": observed, "refs": ["t"]}), facts, table, names) == word, observed
     # 2. Identical changes share one sentence; a shifted id still reuses the cached template.
@@ -1184,10 +1187,35 @@ def test_codex_round2_findings():
                     facts, table, names)
     # 5. Direction is judged on the action, not on the reason.
     assert c._check(_lead({"observed": f"Spend rose to {{{ios}.d}}.", "refs": [ios],
-                           "cause": {"change": "c1", "text": "Jishnu paused the campaign because costs increased."}}),
+                           "cause": {"change": "c1", "action": "Jishnu paused the campaign",
+                                     "reason": "over higher acquisition costs, which had increased."}}),
                     facts, table, names)
     assert _reason(_lead({"observed": f"Spend rose to {{{ios}.d}}.", "refs": [ios],
-                          "cause": {"change": "c1", "text": "Jishnu raised the campaign because it worked."}}),
+                          "cause": {"change": "c1", "action": "Jishnu paused the campaign because costs increased"}}),
+                   facts, table, names) == "cause"
+    assert _reason(_lead({"observed": f"Spend rose to {{{ios}.d}}.", "refs": [ios],
+                          "cause": {"change": "c1", "action": "Jishnu set the campaign to a higher level"}}),
+                   facts, table, names) == "direction"
+    # Honest factual observations pass.
+    for observed in ("Travel Animator Meta spend changed from {%s.d1} to {%s.d}." % (ios, ios),
+                     "Travel Animator Meta spend rose since yesterday to {%s.d}." % ios,
+                     "Travel Animator Meta spend was {%s.d} vs. {%s.d1} the day before." % (ios, ios)):
+        assert c._check(_lead({"observed": observed, "refs": [ios]}), facts, table, names), observed
+    # A registered alias of another project is still that project; validate() keeps the short codes.
+    assert _reason(_lead({"observed": f"Geo Animator Meta spend rose to {{{ios}.d}}.", "refs": [ios]}),
+                   facts, table, names) == "name"
+    assert c.validate(_lead({"observed": f"MR spend rose to {{{ios}.d}}.", "refs": [ios]}), facts, names) == []
+    # An unwritable cache never stops the email.
+    ro = tempfile.mkdtemp()
+    os.makedirs(os.path.join(ro, "commentary-A.json"))          # a directory where the file should go
+    os.makedirs(os.path.join(ro, "narration.json"))
+    assert c.commentary(model, "A", ro, run=lambda p, s: _lead({"observed": f"Travel Animator spend rose to {{{ios}.d}}.",
+                                                                 "refs": [ios]}), table=table, names=names)
+    out, _ = _logged(lambda: c.narrate(table[:1], ro, lambda p, s, max_tokens=None: json.dumps(
+        {"c1": "Jishnu paused the iPhone campaign."}), names=names))
+    assert out
+    assert _reason(_lead({"observed": f"Spend rose to {{{ios}.d}}.", "refs": [ios],
+                          "cause": {"change": "c1", "action": "Jishnu raised the campaign", "reason": "because it worked"}}),
                    facts, table, names) == "direction"
     # 6. A cached lead is re-validated: a rule that now fails it forces a fresh answer.
     d_ = tempfile.mkdtemp()
@@ -1201,6 +1229,31 @@ def test_codex_round2_findings():
     calls = []
     c.commentary(model, "A", d_, run=lambda p, s: calls.append(p) or good(p, s), table=table, names=names)
     assert len(calls) == 1
+
+
+
+def test_synopsis_salvage_after_three_failures():
+    import tempfile
+    model = full_model()
+    changes, cause, orphan = _changes_fixture()
+    table = c.change_table(changes, model, APPS)
+    names = c.name_universe(APPS, table)
+    ios = table[0]["line_fact"]
+    other = next(k for k, v in c.build_facts(model, "A").items() if k not in ("t", ios))
+    long_cause = {"change": "c1", "action": "Jishnu paused the iPhone campaign", "reason": "because " + "it overspent " * 15}
+    answer = _lead({"observed": f"Travel Animator Meta spend rose to {{{ios}.d}}.", "refs": [ios], "cause": long_cause},
+                   {"observed": "Spend rose 18%.", "refs": [other]})
+    calls = []
+    d_ = tempfile.mkdtemp()
+    out, log = _logged(lambda: c.commentary(model, "A", d_, run=lambda p, s: calls.append(p) or answer,
+                                            table=table, names=names))
+    facts = c.build_facts(model, "A")
+    assert out == [f"Travel Animator Meta spend rose to {facts[ios]['show']['d']}."]     # cause and bad item dropped
+    assert len(calls) == 3 and "synopsis: partial (length)" in log and "warning" not in log
+    assert not os.path.exists(os.path.join(d_, "commentary-A.json"))                   # a salvage is never cached
+    fenced = "```json\n" + _lead({"observed": f"Travel Animator Meta spend rose to {{{ios}.d}}.", "refs": [ios]}) + "\n```"
+    assert c.commentary(model, "A", d_, run=lambda p, s: fenced, table=table, names=names)
+    assert os.path.exists(os.path.join(d_, "commentary-A.json"))
 
 
 if __name__ == "__main__":
