@@ -11,7 +11,7 @@ on:
         description: Variants to build and send (B, with installs and CPI, is retired)
         default: 'A'
       to:
-        description: Recipient override (default cherian@lascade.com)
+        description: Recipients, comma-separated (manual runs default to cherian@lascade.com; scheduled sends also go to Jishnu)
         default: cherian@lascade.com
       reconcile:
         description: Compare channel totals with marketing-net (prints match or MISMATCH only)
@@ -79,7 +79,8 @@ jobs:
     timeout-minutes: 30
     env:
       VARIANTS: ${{ inputs.variants || 'A' }}
-      MAIL_TO: ${{ inputs.to || 'cherian@lascade.com' }}
+      # Scheduled sends go to everyone below; a manual run goes to the `to` input (Cherian by default).
+      MAIL_TO: ${{ inputs.to || 'cherian@lascade.com, Jishnu M M <jishnu@lascade.com>' }}
     steps:
       - name: Work out the ad date
         id: dates
