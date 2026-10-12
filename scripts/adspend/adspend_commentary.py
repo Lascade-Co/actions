@@ -206,15 +206,16 @@ def _direction(kind: str, before: str, after: str):
 
 
 def change_table(changes, model: dict, apps: dict) -> list:
-    """The day's logged changes, ids c1..cN in reading order: ledger order, then the orphans."""
+    """The day's logged changes, ids c1..cN: placed changes by line key (project, channel, os),
+    newest first within a line, then the orphans. The order never follows the page's layout, so
+    a new display order cannot renumber what Claude is told."""
     if not changes or not changes.get("ok"):
         return []
     fact_of = {f["key"]: fid for fid, f in build_facts(model, "A").items() if "key" in f}
+    keys = {(ln["project"], ln["channel"], ln["os"]) for p in model["projects"] for ln in p["lines"]}
     ordered = []
-    for p in model["projects"]:
-        for ln in p["lines"]:
-            k = (ln["project"], ln["channel"], ln["os"])
-            ordered += [(c, k) for c in changes["by_line"].get(k, [])]
+    for k in sorted(keys):
+        ordered += [(c, k) for c in changes["by_line"].get(k, [])]
     ordered += [(c, None) for c in changes["orphans"]]
     table = []
     for i, (c, k) in enumerate(ordered, 1):

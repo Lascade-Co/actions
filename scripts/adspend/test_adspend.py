@@ -1341,15 +1341,26 @@ def test_dark_lines_fold():
 
 
 def test_facts_independent_of_display_order():
-    rows = [row(f"{app} - {n} - IOS", d(3), 10, cid=f"{app}{n}") for app in ("TA", "MR") for n in range(5)]
-    rows += [row(f"{app} - {n} - IOS", d(3), 10, ch="Google", cid=f"g{app}{n}") for app in ("TA", "MR") for n in range(5)]
-    model = m.build_model({"Meta": [r_ for r_ in rows if r_.channel == "Meta"],
-                           "Google": [r_ for r_ in rows if r_.channel == "Google"], "Apple Search Ads": []},
-                          TABLE, AD, NOW, APPS)
-    flipped = {**model, "projects": list(reversed(model["projects"]))}
+    # Twelve tied dark lines (six projects x two channels): more than MAX_FACTS, all tied at zero.
+    camps = ["TA", "MR", "AR", "GEO", "PINGEE", "Mail AI"]
+    meta = [row(f"{p} - IOS", d(3), 10) for p in camps]
+    google = [row(f"{p} - IOS", d(3), 10, ch="Google") for p in camps]
+    model = m.build_model({"Meta": meta, "Google": google, "Apple Search Ads": []}, TABLE, AD, NOW, APPS)
+    lines = [ln for p in model["projects"] for ln in p["lines"]]
+    assert len(lines) == 12 > c.MAX_FACTS
+    flipped = {**model, "projects": [{**p, "lines": list(reversed(p["lines"]))} for p in reversed(model["projects"])]}
     for v in ("A", "B"):
-        assert c.build_facts(model, v) == c.build_facts(flipped, v)
-
+        facts = c.build_facts(model, v)
+        assert facts == c.build_facts(flipped, v)
+        assert [f["key"] for k, f in facts.items() if k != "t"] == sorted(
+            (ln["project"], ln["channel"], ln["os"]) for ln in lines)[:c.MAX_FACTS]
+    # Change ids follow line keys, not the page: reordering projects renumbers nothing.
+    ta, mr = _c("TA - IOS"), _c("MR - IOS")
+    changes = {"ok": True, "by_line": {("Travel Animator", "Meta", "iOS"): [ta], ("Marine Radar", "Meta", "iOS"): [mr]},
+               "orphans": []}
+    a = [(r_["id"], r_["change"]) for r_ in c.change_table(changes, model, APPS)]
+    b = [(r_["id"], r_["change"]) for r_ in c.change_table(changes, flipped, APPS)]
+    assert a == b and a[0][1] is mr                                           # "Marine Radar" < "Travel Animator"
 
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
