@@ -108,7 +108,13 @@ def test_timeout_has_a_safe_reason(transport):
 @pytest.mark.parametrize("stop", ["max_tokens", "refusal", "tool_use"])
 def test_incomplete_or_refused_output_is_rejected(transport, stop):
     transport[2][:] = [response('{"partial":', stop)]
-    with pytest.raises(api.ClaudeError, match="incomplete-response"):
+    with pytest.raises(api.ClaudeError, match=f"^Claude API: incomplete-response:{stop}$"):
+        api.generate_text("prompt")
+
+
+def test_unknown_stop_reason_is_not_logged_verbatim(transport):
+    transport[2][:] = [response('{"partial":', "PRIVATE_PROSE")]
+    with pytest.raises(api.ClaudeError, match="^Claude API: incomplete-response:other$"):
         api.generate_text("prompt")
 
 

@@ -18,6 +18,10 @@ class ClaudeError(RuntimeError):
         super().__init__(f"Claude API: {reason}")
 
 
+# Logged verbatim in public Actions logs, so only these documented codes pass through.
+STOP_REASONS = {"max_tokens", "refusal", "tool_use", "pause_turn", "stop_sequence", "model_context_window_exceeded"}
+
+
 def generate_text(prompt: str, *, max_tokens: int = 8192, timeout: int = 300) -> str:
     key = os.environ.get("CLAUDE_API_KEY", "")
     if not key.strip():
@@ -54,7 +58,8 @@ def generate_text(prompt: str, *, max_tokens: int = 8192, timeout: int = 300) ->
         raise ClaudeError(reason) from None
 
     if message.stop_reason != "end_turn":
-        raise ClaudeError(f"incomplete-response:{message.stop_reason}")
+        stop = message.stop_reason if message.stop_reason in STOP_REASONS else "other"
+        raise ClaudeError(f"incomplete-response:{stop}")
     text = "".join(block.text for block in message.content if block.type == "text").strip()
     if not text:
         raise ClaudeError("empty-response")
