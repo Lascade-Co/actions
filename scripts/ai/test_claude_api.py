@@ -129,3 +129,45 @@ def test_bad_json_and_wrong_shapes_are_rejected(transport, text):
     transport[2][:] = [response(text)]
     with pytest.raises(api.ClaudeError, match="invalid-json"):
         api.generate_json("prompt")
+
+
+
+def test_cli_runner_sends_the_prompt_on_stdin_and_hides_stderr(monkeypatch, capsys):
+    import subprocess
+    seen = {}
+
+    class Done:
+        returncode, stdout, stderr = 0, " answer \n", "private stderr"
+
+    def fake_run(argv, **kw):
+        seen.update(argv=argv, **kw)
+        return Done()
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    assert api.generate_text_cli("the prompt", timeout=7) == "answer"
+    assert seen["input"] == "the prompt" and seen["timeout"] == 7 and seen["capture_output"]
+    argv = seen["argv"]
+    assert argv[:2] == ["claude", "-p"] and "--safe-mode" in argv and "--bare" not in argv
+    assert argv[argv.index("--tools") + 1] == "" and "--strict-mcp-config" in argv
+    assert capsys.readouterr() == ("", "")
+
+
+@pytest.mark.parametrize("outcome,reason", [("exit", "cli-failed"), ("timeout", "timeout"),
+                                            ("missing", "cli-failed"), ("blank", "empty-response")])
+def test_cli_runner_failures_have_safe_reasons(monkeypatch, outcome, reason):
+    import subprocess
+
+    class Done:
+        returncode = 1 if outcome == "exit" else 0
+        stdout = "  " if outcome == "blank" else "x"
+        stderr = "private"
+
+    def fake_run(argv, **kw):
+        if outcome == "timeout":
+            raise subprocess.TimeoutExpired(argv, 1, output="private")
+        if outcome == "missing":
+            raise FileNotFoundError("private")
+        return Done()
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    with pytest.raises(api.ClaudeError) as error:
+        api.generate_text_cli("prompt")
+    assert error.value.reason == reason and "private" not in str(error.value)

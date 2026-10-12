@@ -3,5 +3,6 @@
   "Marine Radar": {"short": "MR", "prefixes": ["Marine Radar", "MR", "MT"]},
   "Smart Ruler": {"short": "SR", "prefixes": ["Smart Ruler", "SR", "AR", "Measure"]},
   "Mail AI": {"short": "Mail AI", "prefixes": ["Mail AI"]},
-  "Pingee": {"short": "Pingee", "prefixes": ["Pingee"]}
+  "Pingee": {"short": "Pingee", "prefixes": ["Pingee"]},
+  "GeoAnimator": {"short": "GEO", "prefixes": ["GeoAnimator", "Geo Animator", "GEO"], "tokens": ["geoanimator"]}
 }

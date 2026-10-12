@@ -21,7 +21,9 @@ WORKFLOW_URL = "https://github.com/Lascade-Co/actions/actions/workflows/daily-ad
 SUMMARY_MISSING = "Summary unavailable today."
 CHANGES_MISSING = "Change log unavailable today."
 CHANGES_NOTE = ("Changes are from the ad-account day and the day before, as logged by the ads team. "
-                "An evening change shows in the next day's figures.")
+                "An evening change shows in the next day's figures. "
+                "Wording is a plain-English rendering of the log.")
+CHANGE_LOG_URL = "https://jishnu-ads-taskboard.vercel.app/"
 WHY_CAP = 160
 MOVED = ("up", "down", "started", "stopped")
 
@@ -254,17 +256,27 @@ def _change_bits(c, with_channel=False) -> list:
     return bits
 
 
-def _change_html(c, with_channel=False) -> str:
-    bits = _change_bits(c, with_channel)
-    out = [f'<strong style="font-weight:600;">{esc(bits[0])}</strong>']
-    for b in bits[1:]:
-        out.append(f"<em>{esc(b)}</em>" if b == c.entity else esc(b))
-    tail = f" — {esc(c.author)}" if c.author else ""
-    return " · ".join(out) + tail
+def _change_fallback(c, with_channel=False) -> str:
+    """The log's own words when there is no plain-English sentence: nothing is lost."""
+    rest = " · ".join(_change_bits(c, with_channel)[1:])
+    return f"{c.author} · {rest}" if c.author else rest
 
 
-def _change_text(c, with_channel=False) -> str:
-    return " · ".join(_change_bits(c, with_channel)) + (f" — {c.author}" if c.author else "")
+def _change_sentence(c, changes, with_channel=False) -> str:
+    return ((changes or {}).get("text") or {}).get(c) or _change_fallback(c, with_channel)
+
+
+def _change_html(c, changes, with_channel=False) -> str:
+    """Two registers: a small grey time stamp, then the sentence in body text. The sentence is
+    what to read; the statistics above it stay grey."""
+    return (f'<p style="margin:4px 0 0 0; Margin:4px 0 0 0; padding:0 0 2px 12px; font-family:{FONT_BODY}; '
+            f'line-height:1.5;"><span style="font-size:12px; color:#777777; font-variant-numeric:tabular-nums;" '
+            f'class="text-muted">{esc(f"{c.at:%a %H:%M}")}</span>&nbsp;&nbsp;<span style="font-size:14px; '
+            f'color:#222222;" class="text-main">{esc(_change_sentence(c, changes, with_channel))}</span></p>')
+
+
+def _change_text(c, changes, with_channel=False) -> str:
+    return f"{c.at:%a %H:%M}  {_change_sentence(c, changes, with_channel)}"
 
 
 def _line_detail(ln, d1_name, variant, changes) -> str:
@@ -295,7 +307,7 @@ def _ledger_line(ln, d1_name, variant, changes=None) -> str:
         f'<td align="right" style="font-family:{FONT_HEADING}; font-size:16px; font-weight:700; color:#222222; '
         f'padding:0 0 2px 8px; font-variant-numeric:tabular-nums;" class="heading-dm">{esc(_usd(ln["d"]))}</td>'
         '</tr></table>' + _muted(esc(_line_detail(ln, d1_name, variant, changes)), 12, 0, "padding-bottom:2px;")
-        + "".join(_muted(_change_html(c), 12, 2, "padding:0 0 2px 12px;") for c in _line_changes(ln, changes))
+        + "".join(_change_html(c, changes) for c in _line_changes(ln, changes))
     )
 
 
@@ -312,7 +324,7 @@ def _also_changed(changes) -> str:
     unknown prefix). Absent on most days."""
     if not changes or not changes["orphans"]:
         return ""
-    body = "".join(_muted(_change_html(c, with_channel=True), 12, 4) for c in changes["orphans"])
+    body = "".join(_change_html(c, changes, with_channel=True) for c in changes["orphans"])
     return _row(f'<p style="margin:0 0 2px 0; Margin:0 0 2px 0;">{_small_caps("Also changed")}</p>' + body, 30)
 
 
@@ -370,9 +382,11 @@ def _footnotes(model, variant, summary_missing=False, changes=None) -> str:
         lines.append("Installs are as attributed by each platform. iOS installs for the latest day are delayed "
                      "and modelled, so they are usually undercounted.")
     body = "".join(_muted(esc(l), 11, 0 if i == 0 else 6, "text-align:center;") for i, l in enumerate(lines))
+    log_link = (f' &nbsp;·&nbsp; <a href="{esc(CHANGE_LOG_URL)}" style="color:#888888; text-decoration:underline;" '
+                f'class="email-link">Change log &#8599;</a>') if changes is not None else ""
     link = (f'<p style="margin:10px 0 0 0; Margin:10px 0 0 0; font-family:{FONT_BODY}; font-size:11px; text-align:center;" '
             f'class="text-muted"><a href="{esc(WORKFLOW_URL)}" style="color:#888888; text-decoration:underline;" '
-            f'class="email-link">Workflow &#8599;</a></p>')
+            f'class="email-link">Workflow &#8599;</a>{log_link}</p>')
     return _section_open() + f'<tr><td style="padding:32px 40px 40px 40px;" class="body-cell">{body}{link}</td></tr></table>'
 
 
@@ -420,9 +434,9 @@ def render(model: dict, variant: str, sentences: list, apps: dict, changes=None)
         for ln in p["lines"]:
             os_ = "" if ln["os"] == UNASSIGNED else f" {ln['os']}"
             text.append(f"  {ln['channel']}{os_}: {_usd(ln['d'])} - {_line_detail(ln, d1_name, variant, changes)}")
-            text += [f"      {_change_text(c)}" for c in _line_changes(ln, changes)]
+            text += [f"      {_change_text(c, changes)}" for c in _line_changes(ln, changes)]
     if changes and changes["orphans"]:
-        text += ["", "Also changed:"] + [f"  {_change_text(c, with_channel=True)}" for c in changes["orphans"]]
+        text += ["", "Also changed:"] + [f"  {_change_text(c, changes, with_channel=True)}" for c in changes["orphans"]]
     text += ["", "Last 14 days: " + ", ".join(_compact(p["total"]) for p in model["chart"][-14:])]
     if not sentences:
         text += ["", SUMMARY_MISSING]
@@ -430,5 +444,7 @@ def render(model: dict, variant: str, sentences: list, apps: dict, changes=None)
         text += ["", CHANGES_MISSING]
     elif changes:
         text += ["", CHANGES_NOTE]
+    if changes is not None:
+        text += ["", "Change log: " + CHANGE_LOG_URL]
     text += ["", "Meta, Google and Apple Search Ads. Each channel's own ad-account day. Workflow: " + WORKFLOW_URL]
     return subject, preheader, html, "\n".join(text)

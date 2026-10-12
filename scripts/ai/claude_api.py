@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import subprocess
 
 DEFAULT_MODEL = "claude-sonnet-5-5"
 
@@ -55,6 +56,29 @@ def generate_text(prompt: str, *, max_tokens: int = 8192, timeout: int = 300) ->
     if message.stop_reason != "end_turn":
         raise ClaudeError("incomplete-response")
     text = "".join(block.text for block in message.content if block.type == "text").strip()
+    if not text:
+        raise ClaudeError("empty-response")
+    return text
+
+
+# --safe-mode, not --bare: --bare only accepts an API key and never reads the subscription login.
+# Safe mode keeps the login but drops hooks, plugins, CLAUDE.md, skills and MCP servers.
+CLI_ARGS = ["claude", "-p", "--safe-mode", "--tools", "", "--strict-mcp-config", "--no-session-persistence",
+            "--model", "sonnet"]
+
+
+def generate_text_cli(prompt: str, *, timeout: int = 180) -> str:
+    """The same task through the local `claude` CLI, i.e. the user's Claude subscription. For
+    local previews only: no tools, no session, prompt on stdin; stderr is never echoed."""
+    try:
+        done = subprocess.run(CLI_ARGS, input=prompt, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        raise ClaudeError("timeout") from None
+    except OSError:
+        raise ClaudeError("cli-failed") from None
+    if done.returncode != 0:
+        raise ClaudeError("cli-failed")
+    text = (done.stdout or "").strip()
     if not text:
         raise ClaudeError("empty-response")
     return text

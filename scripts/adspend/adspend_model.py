@@ -24,7 +24,9 @@ UNATTRIBUTED = "Unattributed"
 
 
 def app_of(name: str, apps: dict) -> str:
-    """Longest matching prefix wins; the prefix must end at a non-alphanumeric."""
+    """Longest matching prefix wins; the prefix must end at a non-alphanumeric. Only when no
+    prefix matches, a project's optional `tokens` are tried as whole words anywhere in the name
+    (registry order), so a prefix can never be stolen by a word later in the name."""
     lowered = (name or "").strip().lower()
     best, best_len = UNATTRIBUTED, 0
     for project, spec in apps.items():
@@ -34,6 +36,11 @@ def app_of(name: str, apps: dict) -> str:
                 nxt = lowered[len(p):len(p) + 1]
                 if nxt == "" or not nxt.isalnum():
                     best, best_len = project, len(p)
+    if best == UNATTRIBUTED:
+        toks = set(re.split(r"[^a-z0-9]+", lowered))
+        for project, spec in apps.items():
+            if toks & {t.lower() for t in spec.get("tokens", [])}:
+                return project
     return best
 
 

@@ -13,12 +13,14 @@ import argparse
 import base64
 import json
 import os
+import shutil
 import sys
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 
 import adspend_changes
-from adspend_commentary import commentary
+from adspend_commentary import _run_claude, change_table, commentary, name_universe, narrate
+from claude_api import generate_text_cli
 from adspend_fetch import fetch_apple, fetch_google, fetch_meta
 from adspend_model import WINDOW_DAYS, build_model
 from adspend_render_email import render
@@ -101,6 +103,23 @@ def load_changes(ads, model, ad_date, apps, fetch=None):
     return {"ok": True, "by_line": by_line, "orphans": orphans}
 
 
+def _run_cli(prompt, scratch, max_tokens=1024):
+    return generate_text_cli(prompt)
+
+
+def pick_runner(env=os.environ, which=shutil.which):
+    """The API key wherever it is set (CI). Locally, without a key, the `claude` CLI, i.e. the
+    Claude subscription. Never the CLI on Actions."""
+    if env.get("CLAUDE_API_KEY", "").strip():
+        print("claude: api")
+        return _run_claude
+    if env.get("GITHUB_ACTIONS") != "true" and which("claude"):
+        print("claude: cli")
+        return _run_cli
+    print("claude: none")
+    return _run_claude          # fails with "auth": no synopsis, the email still sends
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--ad-date", required=True)
@@ -137,13 +156,21 @@ def main(argv=None):
             print(line)
     model = build_model(rows, table, ad_date, datetime.now(timezone.utc), apps)
     changes = load_changes(ads, model, ad_date, apps)
+    table = change_table(changes, model, apps)            # [] unless the log was read
+    names = name_universe(apps, table)
 
     def broken(*_a, **_k):
         raise RuntimeError("commentary disabled for test")
 
+    run = broken if a.break_commentary else pick_runner()
+    if table and not a.break_commentary:                  # break: the rule-based wording everywhere
+        text = narrate(table, a.scratch, run, names=names)
+        change_of = {row["key"]: row["change"] for row in table}
+        changes["text"] = {change_of[k]: t for k, t in text.items()}
+
     for variant in [v.strip() for v in a.variants.split(",") if v.strip()]:
-        sentences = commentary(model, variant, a.scratch, run=broken, cache=False) if a.break_commentary \
-            else commentary(model, variant, a.scratch)
+        sentences = commentary(model, variant, a.scratch, run=broken, cache=False, table=table, names=names) \
+            if a.break_commentary else commentary(model, variant, a.scratch, run=run, table=table, names=names)
         subject, _pre, html, text = render(model, variant, sentences, apps, changes)
         for ext, body in (("html", html), ("txt", text), ("subject", subject)):
             with open(os.path.join(a.out, f"email-{variant}.{ext}"), "w") as fh:
