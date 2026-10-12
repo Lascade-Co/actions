@@ -7,7 +7,7 @@ V="$1"; AD="$2"
 jq -n --rawfile html "out/email-$V.html" --rawfile text "out/email-$V.txt" \
       --rawfile subject "out/email-$V.subject" \
       --arg to "${MAIL_TO:-cherian@lascade.com}" \
-  '{from:"noreply@metrics.lascade.com", to:[$to],
+  '{from:"Lascade Ad Spend <noreply@metrics.lascade.com>", to:[$to],
     subject:$subject, html:$html, text:$text}' > "payload-$V.json"
 # Key includes the recipient: a resend to a different address must not read as "already sent".
 KEY="ad-spend-$V-$AD-$(printf %s "${MAIL_TO:-cherian@lascade.com}" | shasum | cut -c1-8)"

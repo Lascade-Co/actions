@@ -943,5 +943,59 @@ class ScaleTests(unittest.TestCase):
         self.assertIn("Also (technical detail)", h)
 
 
+class SubjectTests(unittest.TestCase):
+    def test_headline_day(self):
+        self.assertEqual(E.subject_of({"headline": "Search got faster.", "decisions_needed": []}, "2026-10-11"),
+                         "Engineering · Sun 11 Oct — Search got faster")
+
+    def test_only_first_sentence(self):
+        rep = {"headline": "Search got faster on v4.0.40. Billing work is in testing."}
+        self.assertEqual(E.subject_of(rep, "2026-10-11"), "Engineering · Sun 11 Oct — Search got faster on v4.0.40")
+
+    def test_decisions_lead(self):
+        rep = {"headline": "h.", "decisions_needed": ["Approve the revert on Example iOS.", "b", "c"]}
+        self.assertEqual(E.subject_of(rep, "2026-10-11"),
+                         "Engineering · Sun 11 Oct — Needs you: Approve the revert on Example iOS (+2 more)")
+        rep["decisions_needed"] = ["Only one"]
+        self.assertEqual(E.subject_of(rep, "2026-10-11"), "Engineering · Sun 11 Oct — Needs you: Only one")
+
+    def test_fallback_headline_passes_through(self):
+        self.assertEqual(E.subject_of({"headline": "Activity in 3 products today"}, "2026-10-11"),
+                         "Engineering · Sun 11 Oct — Activity in 3 products today")
+
+    def test_date_format(self):
+        self.assertEqual(E.subject_of({"headline": "x"}, "2026-10-01"), "Engineering · Thu 1 Oct — x")
+
+    def test_whitespace_collapses(self):
+        self.assertEqual(E.subject_of({"headline": "  Search\n  got\tfaster  "}, "2026-10-11"),
+                         "Engineering · Sun 11 Oct — Search got faster")
+
+    def test_empty_headline(self):
+        self.assertEqual(E.subject_of({}, "2026-10-11"), "Engineering · Sun 11 Oct")
+
+    def test_cli_writes_one_line_subject(self):
+        with tempfile.TemporaryDirectory() as d:
+            rep, out, subj = (os.path.join(d, n) for n in ("report.json", "email.html", "email.subject"))
+            with open(rep, "w") as fh:
+                json.dump({"date": "2026-10-10", "headline": "Search\ngot faster. More.", "assessed": True,
+                           "repos": []}, fh)
+            argv = ["x", "--report", rep, "--out", out, "--today", "2026-10-11", "--subject-out", subj]
+            with mock.patch.object(sys, "argv", argv), contextlib.redirect_stdout(open(os.devnull, "w")):
+                E.main()
+            with open(subj, encoding="utf-8") as fh:
+                self.assertEqual(fh.read(), "Engineering · Sun 11 Oct — Search got faster")
+
+    def test_cli_today_defaults_to_report_date(self):
+        with tempfile.TemporaryDirectory() as d:
+            rep, out, subj = (os.path.join(d, n) for n in ("report.json", "email.html", "email.subject"))
+            with open(rep, "w") as fh:
+                json.dump({"date": "2026-10-10", "headline": "h", "assessed": True, "repos": []}, fh)
+            with mock.patch.object(sys, "argv", ["x", "--report", rep, "--out", out, "--subject-out", subj]), \
+                    contextlib.redirect_stdout(open(os.devnull, "w")):
+                E.main()
+            with open(subj, encoding="utf-8") as fh:
+                self.assertEqual(fh.read(), "Engineering · Sat 10 Oct — h")
+
+
 if __name__ == "__main__":
     unittest.main()

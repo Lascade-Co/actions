@@ -15,6 +15,7 @@ import argparse
 import json
 import re
 import sys
+from datetime import date
 from html import escape
 
 FONT = "'Inter', system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', sans-serif"
@@ -370,6 +371,25 @@ def render(report, org_label="Daily", hours=None, pins=None):
     )
 
 
+def subject_of(report, today):
+    """Pure. The one-line email subject: 'Engineering · Sun 11 Oct — <first headline sentence>',
+    or 'Needs you: <first decision> (+N more)' when the report has decisions."""
+    d = date.fromisoformat(today)
+    head = f"Engineering · {d:%a} {d.day} {d:%b}"
+    decisions = report.get("decisions_needed") or []
+    if decisions:
+        more = f" (+{len(decisions) - 1} more)" if len(decisions) > 1 else ""
+        text = f"Needs you: {_first_sentence(decisions[0])}{more}"
+    else:
+        text = _first_sentence(report.get("headline") or "")
+    return f"{head} — {text}" if text else head
+
+
+def _first_sentence(text):
+    text = " ".join(str(text).split())
+    return re.split(r"(?<=[.!?])\s", text, maxsplit=1)[0].rstrip(".")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--report", required=True, help="report.json input")
@@ -382,6 +402,8 @@ def main():
     parser.add_argument("--people", help="people file whose `colour` fields pin each "
                                          "regular's tag colour (data/catchup_people.json)")
     parser.add_argument("--out", required=True, help="email.html output")
+    parser.add_argument("--subject-out", help="also write the one-line subject here (no trailing newline)")
+    parser.add_argument("--today", help="YYYY-MM-DD date for the subject; defaults to the report's date")
     args = parser.parse_args()
 
     with open(args.report) as fh:
@@ -390,6 +412,9 @@ def main():
                   pins=load_pins(args.people))
     with open(args.out, "w") as fh:
         fh.write(html)
+    if args.subject_out:
+        with open(args.subject_out, "w", encoding="utf-8") as fh:
+            fh.write(subject_of(report, args.today or report["date"]))
     size = len(html.encode("utf-8"))
     print(f"Wrote {args.out} ({size} bytes).")
     for n in oversized_style_blocks(html):
