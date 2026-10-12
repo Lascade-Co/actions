@@ -1059,7 +1059,7 @@ def test_narrate():
     d_ = tempfile.mkdtemp()
     out, log = _logged(lambda: c.narrate(table, d_, half, names=names))
     assert out == {table[0]["key"]: "Paused the iPhone campaign at $130 a day because it overspent."}
-    assert len(calls) == 3 and "c2: code" in calls[1][0] and calls[0][1] == 256 + 120 * 2
+    assert len(calls) == 3 and "c2: code" in calls[1][0] and calls[0][1] == 1024 + 120 * 2
     assert "narration: ok 1 of 2" in log and "narration: retry (code)" in log
     assert "Jishnu" not in log and "PTW" not in log and "iPhone" not in log
     cached = json.load(open(os.path.join(d_, "narration.json")))
@@ -1096,7 +1096,7 @@ def test_narrate():
     sizes = []
     _logged(lambda: c.narrate(many, tempfile.mkdtemp(), lambda p, s, max_tokens=None: sizes.append(max_tokens) or json.dumps(
         {f"c{i}": "Paused the iPhone campaign." for i in range(1, 42)}), names=names))
-    assert sizes == [256 + 120 * 40, 256 + 120 * 1]
+    assert sizes == [1024 + 120 * 40, 1024 + 120 * 1]
     from claude_api import ClaudeError
 
     def boom(*a, **k):

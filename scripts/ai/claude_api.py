@@ -54,7 +54,7 @@ def generate_text(prompt: str, *, max_tokens: int = 8192, timeout: int = 300) ->
         raise ClaudeError(reason) from None
 
     if message.stop_reason != "end_turn":
-        raise ClaudeError("incomplete-response")
+        raise ClaudeError(f"incomplete-response:{message.stop_reason}")
     text = "".join(block.text for block in message.content if block.type == "text").strip()
     if not text:
         raise ClaudeError("empty-response")
