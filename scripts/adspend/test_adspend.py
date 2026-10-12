@@ -1251,6 +1251,17 @@ def test_synopsis_salvage_after_three_failures():
     assert out == [f"Travel Animator Meta spend rose to {facts[ios]['show']['d']}."]     # cause and bad item dropped
     assert len(calls) == 3 and "synopsis: partial (length)" in log and "warning" not in log
     assert not os.path.exists(os.path.join(d_, "commentary-A.json"))                   # a salvage is never cached
+    # A later call failing in transport still leaves the first answer's good item.
+    from claude_api import ClaudeError
+    seq = [answer]
+
+    def then_timeout(p, s):
+        if seq:
+            return seq.pop()
+        raise ClaudeError("timeout")
+    out, log = _logged(lambda: c.commentary(model, "A", tempfile.mkdtemp(), run=then_timeout, table=table, names=names))
+    assert out == [f"Travel Animator Meta spend rose to {facts[ios]['show']['d']}."] and "synopsis: partial" in log
+    assert "warning" not in log
     fenced = "```json\n" + _lead({"observed": f"Travel Animator Meta spend rose to {{{ios}.d}}.", "refs": [ios]}) + "\n```"
     assert c.commentary(model, "A", d_, run=lambda p, s: fenced, table=table, names=names)
     assert os.path.exists(os.path.join(d_, "commentary-A.json"))

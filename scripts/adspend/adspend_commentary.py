@@ -551,17 +551,20 @@ def commentary(model: dict, variant: str, scratch: str, run=_run_claude, cache: 
         return out
     try:
         result, word = _attempt("synopsis", run, scratch, PROMPT + json.dumps(sent, indent=1), check)
-        if not result:
-            for raw in reversed(raws):
-                result = _salvage(raw, facts, table, names)
-                if result:
-                    print(f"synopsis: partial ({word or 'shape'})")
-                    raw_ok = None                         # never cache a salvage: a rerun may get a whole lead
-                    break
-        if not result:
-            result, reason = [], f"rejected:{word or 'shape'}"
-    except Exception as exc:  # auth, timeout, API failure: no commentary, never a failed send
-        result, reason = [], _failure_reason(exc, scratch)
+        failure = "" if result else f"rejected:{word or 'shape'}"
+    except Exception as exc:  # auth, timeout, API failure: never a failed send
+        result, word, failure = None, "", _failure_reason(exc, scratch)
+    if not result:
+        # Whatever ended the attempts (rejections, or a later call failing in transport), an
+        # earlier answer may still hold items that pass on their own.
+        for raw in reversed(raws):
+            result = _salvage(raw, facts, table, names)
+            if result:
+                print(f"synopsis: partial ({word or failure})")
+                raw_ok = None                         # never cache a salvage: a rerun may get a whole lead
+                break
+    if not result:
+        result, reason = [], failure
     if reason:
         print(f"::warning title=Ad spend synopsis skipped::{reason}")
     elif cache and raw_ok:
