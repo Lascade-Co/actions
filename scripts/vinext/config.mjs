@@ -24,7 +24,7 @@ export function inside(root, path) {
 const variable = /^[A-Z][A-Z0-9_]*$/;
 const reserved = /^(?:NODE_|NPM_|PNPM_|YARN_|GITHUB_|GH_|ACTIONS_|RUNNER_|CLOUDFLARE_|WRANGLER_|INFISICAL_|CI$|PATH$|HOME$|BASH_ENV$|ENV$)/;
 const script = /^[a-zA-Z0-9][a-zA-Z0-9:_-]*$/;
-export const bindingKeys = ['kv_namespaces', 'r2_buckets', 'd1_databases', 'services', 'durable_objects', 'images', 'ai', 'version_metadata', 'analytics_engine_datasets', 'hyperdrive', 'vectorize', 'queues', 'workflows', 'secrets_store_secrets'];
+export const bindingKeys = ['kv_namespaces', 'r2_buckets', 'd1_databases', 'services', 'vpc_services', 'durable_objects', 'images', 'ai', 'version_metadata', 'analytics_engine_datasets', 'hyperdrive', 'vectorize', 'queues', 'workflows', 'secrets_store_secrets'];
 
 function resourceBindingNames(bindings) {
   const names = new Set();

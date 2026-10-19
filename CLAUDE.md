@@ -33,7 +33,9 @@ Keep this public runner free of project-specific registries and examples. `dev`
 uses native Preview `stg` when source Wrangler declares `previews`, otherwise
 uploads legacy alias `dev`; `main` deploys production. Native Preview bundles
 keep production bindings at the top level and staging bindings under `previews`;
-repeated validation must preserve that split. Runtime secret names are derived
+repeated validation must preserve that split. VPC Service bindings use
+source-owned `vpc_services` identities; keep staging-only services under
+`previews` and `env.staging`, out of production. Runtime secret names are derived
 from Infisical into top-level `secrets.required`; values come
 only from Infisical via `--secrets-file`. Do not add `previews.secrets`:
 Wrangler 4.135 warns on and ignores it. Reject plaintext Wrangler `vars` for native

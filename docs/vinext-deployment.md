@@ -53,6 +53,17 @@ A main-only project omits `staging` in `wrangler.jsonc` and triggers only on
   `project_slug` input is optional. It passes `CENTRAL_DISPATCH_TOKEN` as the
   reusable workflow secret.
 
+## VPC Services
+
+Existing private services can be declared with Wrangler `vpc_services` bindings.
+The source owns each binding name and `service_id`; generated configuration must
+match them exactly. For a staging-only native Preview binding, declare it under
+`previews.vpc_services` and `env.staging.vpc_services`, and omit it from the top
+level and `env.production`. Sanitization keeps the staging binding under
+`previews` on both deployment targets and does not add it to production.
+VPC Service binding names cannot also be Infisical runtime secret names. The
+runner does not create services or change their network connectivity.
+
 ## D1 migrations
 
 D1 migrations are explicit and source-owned. A target opts in by setting
