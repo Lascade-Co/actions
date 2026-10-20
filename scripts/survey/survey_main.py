@@ -17,7 +17,7 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from functools import partial
 
-from survey_fetch import fetch_sheet_tab, list_sheet_tabs, translate_text, FetchError
+from survey_fetch import fetch_sheet_tab, translate_text, FetchError
 from survey_model import build_model
 from survey_render import render
 
@@ -63,8 +63,6 @@ def main():
     cutoff_dt = now_utc - timedelta(hours=24)
 
     sheet_id = config["sheet_id"]
-    actual_tabs = list_sheet_tabs(sa_info, sheet_id)
-    print(f"sheet tabs: {actual_tabs}")
     fetched_tabs = {}
     for survey in config["surveys"]:
         tab = survey["sheet_name"]
@@ -75,19 +73,6 @@ def main():
             print(f"  rows: {len(rows)}")
         except FetchError as e:
             print(f"  failed: {e}")
-
-    print(f"cutoff: {cutoff_dt.isoformat()}")
-    print(f"sheet timezone: {config.get('timezone', 'UTC')}")
-    from survey_model import filter_new_responses, _TZ_MAP
-    sheet_tz = _TZ_MAP.get(config.get("timezone", "UTC"), timezone.utc)
-    for survey in config["surveys"]:
-        tab = survey["sheet_name"]
-        rows = fetched_tabs.get(tab, [])
-        if rows:
-            filtered = filter_new_responses(rows, cutoff_dt, sheet_tz)
-            first_ts = rows[0][0] if rows[0] else "?"
-            last_ts = rows[-1][0] if rows[-1] else "?"
-            print(f"  {tab}: {len(rows)} total, {len(filtered)} in 24h (oldest={first_ts}, newest={last_ts})")
 
     translate_fn = partial(translate_text, sa_info)
     model = build_model(config, fetched_tabs, cutoff_dt, now_utc, translate_fn)
