@@ -31,7 +31,8 @@ def fetch_sheet_tab(sa_info, sheet_id, tab_name):
     url = f"{_SHEETS_BASE}/{sheet_id}/values/{quote(tab_name, safe='')}"
     resp = requests.get(url, headers={"Authorization": f"Bearer {creds.token}"}, timeout=30)
     if resp.status_code != 200:
-        print(f"sheets {resp.status_code} for {tab_name}", file=sys.stderr)
+        err_body = resp.text[:200] if resp.text else "(empty)"
+        print(f"sheets {resp.status_code} for {tab_name}: {err_body}", file=sys.stderr)
         raise FetchError(f"sheets-{resp.status_code}")
     values = resp.json().get("values", [])
     return values[1:] if len(values) > 1 else []

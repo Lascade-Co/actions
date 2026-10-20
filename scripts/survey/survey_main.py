@@ -74,11 +74,24 @@ def main():
         except FetchError as e:
             print(f"  failed: {e}")
 
+    print(f"cutoff: {cutoff_dt.isoformat()}")
+    from survey_model import filter_new_responses
+    for survey in config["surveys"]:
+        tab = survey["sheet_name"]
+        rows = fetched_tabs.get(tab, [])
+        if rows:
+            filtered = filter_new_responses(rows, cutoff_dt)
+            first_ts = rows[0][0] if rows[0] else "?"
+            last_ts = rows[-1][0] if rows[-1] else "?"
+            print(f"  {tab}: {len(rows)} total, {len(filtered)} in 24h (oldest={first_ts}, newest={last_ts})")
+
     translate_fn = partial(translate_text, sa_info)
     model = build_model(config, fetched_tabs, cutoff_dt, now_utc, translate_fn)
     subject, html = render(model)
 
     print(f"total new responses: {model['total']}")
+    for sec in model["sections"]:
+        print(f"  {sec['label']}: {sec['count']}")
 
     if a.dry_run:
         print(f"subject: {subject}")
