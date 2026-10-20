@@ -17,7 +17,7 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from functools import partial
 
-from survey_fetch import fetch_sheet_tab, translate_text, FetchError
+from survey_fetch import fetch_sheet_tab, list_sheet_tabs, translate_text, FetchError
 from survey_model import build_model
 from survey_render import render
 
@@ -63,6 +63,8 @@ def main():
     cutoff_dt = now_utc - timedelta(hours=24)
 
     sheet_id = config["sheet_id"]
+    actual_tabs = list_sheet_tabs(sa_info, sheet_id)
+    print(f"sheet tabs: {actual_tabs}")
     fetched_tabs = {}
     for survey in config["surveys"]:
         tab = survey["sheet_name"]

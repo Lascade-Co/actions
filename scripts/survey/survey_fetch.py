@@ -19,6 +19,17 @@ class FetchError(Exception):
     pass
 
 
+def list_sheet_tabs(sa_info, sheet_id):
+    """Return a list of all tab names in the spreadsheet."""
+    creds = _get_credentials(sa_info, [_SHEETS_SCOPE])
+    url = f"{_SHEETS_BASE}/{sheet_id}?fields=sheets.properties.title"
+    resp = requests.get(url, headers={"Authorization": f"Bearer {creds.token}"}, timeout=30)
+    if resp.status_code != 200:
+        return []
+    sheets = resp.json().get("sheets", [])
+    return [s.get("properties", {}).get("title", "") for s in sheets]
+
+
 def _get_credentials(sa_info, scopes):
     creds = service_account.Credentials.from_service_account_info(sa_info, scopes=scopes)
     creds.refresh(Request())
