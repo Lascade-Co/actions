@@ -1,0 +1,74 @@
+{
+  "sheet_id": "1vyXrxUP_m5NjZ-sbfACOJmr4ij6Y-bPvDsWczAGZXO4",
+  "sheet_url": "https://docs.google.com/spreadsheets/d/1vyXrxUP_m5NjZ-sbfACOJmr4ij6Y-bPvDsWczAGZXO4/edit",
+  "product_name": "Smart Ruler",
+  "email_title": "Smart Ruler Survey Responses",
+  "timezone": "Asia/Kolkata",
+  "has_pro_free": true,
+  "status_col": 2,
+  "surveys": [
+    {
+      "sheet_name": "D2",
+      "label": "Day 2",
+      "subtitle": "First measurement experience",
+      "columns": [
+        {
+          "col": 3,
+          "header": "Got measurement?",
+          "color_map": {
+            "Yes, first try": "#2a8c4a",
+            "Yes, after a few tries": "#c9922a",
+            "Not yet": "#c0392b",
+            "I haven't tried measuring yet": "#888888"
+          }
+        },
+        {
+          "col": 4,
+          "header": "Blocker",
+          "empty_text": "—",
+          "empty_color": "#aaa"
+        }
+      ]
+    },
+    {
+      "sheet_name": "D15",
+      "label": "Day 15",
+      "subtitle": "Usage & workflows",
+      "columns": [
+        {"col": 3, "header": "Measures most"},
+        {
+          "col": 4,
+          "header": "Saves as",
+          "color_map": {
+            "I take screenshots instead": "#c9922a",
+            "I didn't know I could save them": "#c9922a"
+          }
+        },
+        {"col": 5, "header": "Export pref"}
+      ]
+    },
+    {
+      "sheet_name": "D30",
+      "label": "Day 30",
+      "subtitle": "Issues & retention",
+      "columns": [
+        {"col": 3, "header": "Issues"},
+        {
+          "col": 4,
+          "header": "Feature request",
+          "empty_text": "n/a",
+          "empty_color": "#aaa"
+        },
+        {
+          "col": 5,
+          "header": "Frequency",
+          "color_map": {
+            "Every day": "#2a8c4a",
+            "A few times a week": "#2a8c4a"
+          },
+          "bold": ["Every day", "A few times a week"]
+        }
+      ]
+    }
+  ]
+}
