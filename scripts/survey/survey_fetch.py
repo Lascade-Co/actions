@@ -2,6 +2,7 @@
 """Network layer: Google Sheets reads and Cloud Translation calls."""
 import json
 import sys
+from urllib.parse import quote
 
 import requests
 from google.auth.transport.requests import Request
@@ -27,7 +28,7 @@ def _get_credentials(sa_info, scopes):
 def fetch_sheet_tab(sa_info, sheet_id, tab_name):
     """Return rows (list of lists) for *tab_name*, header row excluded."""
     creds = _get_credentials(sa_info, [_SHEETS_SCOPE])
-    url = f"{_SHEETS_BASE}/{sheet_id}/values/{tab_name}"
+    url = f"{_SHEETS_BASE}/{sheet_id}/values/{quote(tab_name, safe='')}"
     resp = requests.get(url, headers={"Authorization": f"Bearer {creds.token}"}, timeout=30)
     if resp.status_code != 200:
         print(f"sheets {resp.status_code} for {tab_name}", file=sys.stderr)
