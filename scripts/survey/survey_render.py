@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""Pure HTML renderer for the Smart Ruler Survey Digest email.
+"""Pure HTML renderer for the Survey Digest email.
 
-Faithfully ports the HTML from SmartRulerDigest.gs — same structure, same inline
+Product-agnostic: reads product_name / email_title from the model.
+Faithfully ports the HTML from the GS scripts — same structure, same inline
 styles, same Outlook conditionals. No I/O, no clock, no network.
 """
 from html import escape as _esc
@@ -17,8 +18,10 @@ def render(model):
     date_str = model["date_str"]
     cutoff_str = model["cutoff_str"]
     sheet_url = model["sheet_url"]
+    product_name = model["product_name"]
+    email_title = model["email_title"]
 
-    subject = f"Smart Ruler Surveys — {total} new response{'s' if total != 1 else ''}"
+    subject = f"{product_name} Surveys — {total} new response{'s' if total != 1 else ''}"
     preheader = f"{total} new survey response{'s' if total != 1 else ''}"
 
     h = ""
@@ -31,7 +34,7 @@ def render(model):
     h += '<meta http-equiv="X-UA-Compatible" content="IE=edge"/>'
     h += '<meta name="color-scheme" content="light"/><meta name="supported-color-schemes" content="light"/>'
     h += '<meta name="format-detection" content="telephone=no,date=no,address=no,email=no"/>'
-    h += '<title>Smart Ruler Survey Responses</title>'
+    h += f'<title>{_esc(email_title)}</title>'
     h += '<!--[if mso]><noscript><xml><o:OfficeDocumentSettings><o:AllowPNG/>'
     h += '<o:PixelsPerInch>96</o:PixelsPerInch></o:OfficeDocumentSettings></xml></noscript><![endif]-->'
     h += '<!--[if !mso]><!--><style>@import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap");</style><!--<![endif]-->'
@@ -72,7 +75,7 @@ def render(model):
     h += 'text-transform:uppercase;color:#888;">Daily Survey Digest</p></td></tr>'
     h += f'<tr><td style="padding:10px 40px 0 40px;" class="body-cell">'
     h += f'<h1 class="email-h1" style="margin:0;font-family:{FH};font-size:28px;font-weight:700;'
-    h += 'line-height:1.15;letter-spacing:-0.02em;color:#222;">Smart Ruler Survey Responses</h1></td></tr>'
+    h += f'line-height:1.15;letter-spacing:-0.02em;color:#222;">{_esc(email_title)}</h1></td></tr>'
     h += f'<tr><td style="padding:8px 40px 0 40px;" class="body-cell">'
     h += f'<p style="margin:0;font-family:{F};font-size:14px;line-height:1.5;color:#888;">'
     h += _esc(date_str) + " &nbsp;&middot;&nbsp; "
@@ -90,6 +93,8 @@ def render(model):
     # ── Section tables ──
     for si, sec in enumerate(sections):
         pad_top = "24" if si == 0 else "28"
+        has_status = sec["has_status"]
+
         h += '<table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" style="background-color:#f5f3f1;">'
         h += f'<tr><td style="padding:{pad_top}px 40px 0 40px;" class="body-cell">'
         h += '<table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%"><tr>'
@@ -109,7 +114,8 @@ def render(model):
 
         # Header row
         h += "<tr>"
-        h += _th_cell("Pro/Free")
+        if has_status:
+            h += _th_cell("Status")
         for col_header in sec["columns"]:
             h += _th_cell(col_header)
         h += "</tr>"
@@ -121,20 +127,23 @@ def render(model):
             is_last = ri == len(rows) - 1
             h += f'<tr{f" style={chr(34)}{stripe}{chr(34)}" if stripe else ""}>'
 
-            # Pro/Free cell
-            status_label = "Pro" if row["is_pro"] else "Free"
-            status_color = "#5a5aad" if row["is_pro"] else "#888"
-            bl_radius = "border-radius:0 0 0 6px;" if is_last else ""
-            h += f'<td style="padding:8px 14px;font-size:12px;font-weight:600;color:{status_color};{bl_radius}">'
-            h += f"{status_label}</td>"
+            # Status cell (conditional)
+            if has_status:
+                sl = row.get("status_label") or "Free"
+                sc = row.get("status_color") or "#888"
+                bl_radius = "border-radius:0 0 0 6px;" if is_last else ""
+                h += f'<td style="padding:8px 14px;font-size:12px;font-weight:600;color:{sc};{bl_radius}">'
+                h += f"{_esc(sl)}</td>"
 
             # Data cells
             cells = row["cells"]
             for ci, cell in enumerate(cells):
                 last_col = ci == len(cells) - 1
-                corner = "border-radius:0 0 6px 0;" if is_last and last_col else ""
+                first_col = ci == 0 and not has_status
+                bl = "border-radius:0 0 0 6px;" if is_last and first_col else ""
+                br = "border-radius:0 0 6px 0;" if is_last and last_col else ""
                 weight = "font-weight:600;" if cell["bold"] else ""
-                h += f'<td style="padding:8px 14px;color:{cell["color"]};{weight}{corner}">'
+                h += f'<td style="padding:8px 14px;color:{cell["color"]};{weight}{bl}{br}">'
                 h += _esc(cell["value"]) + "</td>"
 
             h += "</tr>"
@@ -154,7 +163,7 @@ def render(model):
     h += 'letter-spacing:0.01em;">View all in Sheets &#8599;</a></td></tr></table></td></tr>'
     h += '<tr><td style="padding:8px 40px 40px 40px;text-align:center;" class="body-cell">'
     h += f'<p style="margin:0;font-family:{F};font-size:12px;line-height:1.5;color:#aaa;">'
-    h += "Sent automatically by Lascade &middot; Smart Ruler Survey Digest</p></td></tr></table>"
+    h += f"Sent automatically by Lascade &middot; {_esc(product_name)} Survey Digest</p></td></tr></table>"
 
     # ── Close ──
     h += "</div>"

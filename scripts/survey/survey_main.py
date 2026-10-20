@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Orchestrator for the daily survey digest. Fetch, model, render, send.
 
-  python3 survey_main.py --report-date 2026-10-20 [--dry-run] [--to angel@…]
+  python3 survey_main.py --report-date 2026-10-20 --config survey_marine.json [--dry-run] [--to angel@…]
 
+Each product gets its own config file and its own email.
 Public repo — never log response text, only counts and statuses.
 """
 import argparse
@@ -30,7 +31,7 @@ def _mask(value):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--report-date", required=True, help="YYYY-MM-DD")
-    ap.add_argument("--config", default="survey_config.json")
+    ap.add_argument("--config", required=True, help="Path to product survey config JSON")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--to", default="")
     a = ap.parse_args()
@@ -54,6 +55,9 @@ def main():
 
     with open(a.config) as f:
         config = json.load(f)
+
+    product_name = config.get("product_name", "Survey")
+    print(f"product: {product_name}")
 
     now_utc = datetime.now(timezone.utc)
     cutoff_dt = now_utc - timedelta(hours=24)
@@ -79,9 +83,11 @@ def main():
     if a.dry_run:
         print(f"subject: {subject}")
         print(f"html length: {len(html)}")
-        with open("survey-email.html", "w") as f:
+        slug = product_name.lower().replace(" ", "-")
+        fname = f"survey-{slug}-email.html"
+        with open(fname, "w") as f:
             f.write(html)
-        print("wrote survey-email.html")
+        print(f"wrote {fname}")
         return
 
     if model["total"] == 0:
@@ -109,7 +115,7 @@ def main():
         server.starttls()
         server.login(gmail_user, gmail_password)
         server.sendmail(gmail_user, recipients, msg.as_string())
-    print("sent")
+    print(f"sent ({product_name})")
 
 
 if __name__ == "__main__":

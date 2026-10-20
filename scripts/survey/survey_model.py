@@ -71,13 +71,17 @@ def _cell_value(row, col_index):
 def build_model(config, fetched_tabs, cutoff_dt, now_dt, translate_fn=None):
     """Build the template model from config + raw sheet data.
 
-    *fetched_tabs* is a dict mapping sheet_name → list of rows (header excluded).
-    *translate_fn* is called as translate_fn(text) → translated_text. May be None.
+    Supports two status patterns:
+    - Global: config has "has_pro_free": true + "status_col" (Smart Ruler)
+    - Per-survey: survey has "has_status": true + "status_col" (Marine Radar Map Survey)
     """
     sections = []
     total = 0
     free_count = 0
     pro_count = 0
+
+    global_status = config.get("has_pro_free", False)
+    global_status_col = config.get("status_col", 2)
 
     for survey in config["surveys"]:
         rows = fetched_tabs.get(survey["sheet_name"], [])
@@ -85,15 +89,26 @@ def build_model(config, fetched_tabs, cutoff_dt, now_dt, translate_fn=None):
         if not filtered:
             continue
 
+        has_status = survey.get("has_status", global_status)
+        status_col = survey.get("status_col", global_status_col)
+        status_values = survey.get("status_values", {"pro": "Pro", "free": "Free"})
+
         rendered_rows = []
         for row in filtered:
             total += 1
-            status_raw = _cell_value(row, 2).lower()
-            is_pro = status_raw == "pro"
-            if is_pro:
-                pro_count += 1
-            else:
-                free_count += 1
+
+            status_label = None
+            status_color = None
+            if has_status:
+                status_raw = _cell_value(row, status_col).lower()
+                is_pro = status_raw in ("pro", "premium")
+                if is_pro:
+                    pro_count += 1
+                    status_label = status_values.get(status_raw, "Pro")
+                else:
+                    free_count += 1
+                    status_label = status_values.get(status_raw, "Free")
+                status_color = "#5a5aad" if is_pro else "#888"
 
             cells = []
             for col_def in survey["columns"]:
@@ -108,6 +123,8 @@ def build_model(config, fetched_tabs, cutoff_dt, now_dt, translate_fn=None):
                 empty_color = col_def.get("empty_color", "#aaa")
                 color_map = col_def.get("color_map", {})
                 bold_list = col_def.get("bold", [])
+                bold_all = col_def.get("bold_all", False)
+                is_score = col_def.get("is_score", False)
 
                 if not val and empty_text:
                     val = empty_text
@@ -116,9 +133,25 @@ def build_model(config, fetched_tabs, cutoff_dt, now_dt, translate_fn=None):
                     val = "—"
                     color = "#aaa"
 
+                if is_score and val:
+                    try:
+                        score = int(val)
+                        val = f"{score}/5"
+                        if score >= 4:
+                            color = "#2a8c4a"
+                        elif score == 3:
+                            color = "#c9922a"
+                        else:
+                            color = "#c0392b"
+                        bold = True
+                    except ValueError:
+                        pass
+
                 if val in color_map:
                     color = color_map[val]
-                if val in bold_list:
+                if bold_all:
+                    bold = True
+                elif isinstance(bold_list, list) and val in bold_list:
                     bold = True
 
                 cells.append({
@@ -128,7 +161,11 @@ def build_model(config, fetched_tabs, cutoff_dt, now_dt, translate_fn=None):
                     "translated": was_translated,
                 })
 
-            rendered_rows.append({"is_pro": is_pro, "cells": cells})
+            rendered_rows.append({
+                "cells": cells,
+                "status_label": status_label,
+                "status_color": status_color,
+            })
 
         sections.append({
             "label": survey["label"],
@@ -136,6 +173,7 @@ def build_model(config, fetched_tabs, cutoff_dt, now_dt, translate_fn=None):
             "columns": [c["header"] for c in survey["columns"]],
             "rows": rendered_rows,
             "count": len(rendered_rows),
+            "has_status": has_status,
         })
 
     weekdays = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
@@ -153,6 +191,8 @@ def build_model(config, fetched_tabs, cutoff_dt, now_dt, translate_fn=None):
     cutoff_str = f"{cutoff_dt.day} {short_months[cutoff_dt.month - 1]} {cutoff_h}:{cutoff_dt.minute:02d} {cutoff_ampm}"
 
     return {
+        "product_name": config.get("product_name", "Survey"),
+        "email_title": config.get("email_title", "Survey Responses"),
         "sections": sections,
         "total": total,
         "free_count": free_count,

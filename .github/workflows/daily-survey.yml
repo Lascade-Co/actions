@@ -83,9 +83,10 @@ jobs:
           for m in survey_fetch survey_model survey_render survey_main; do
             curl -fsSL --retry 3 --retry-delay 2 -o "$m.py" "$RAW/scripts/survey/$m.py"
           done
-          curl -fsSL --retry 3 --retry-delay 2 -o survey_config.json "$RAW/data/survey_config.json"
+          curl -fsSL --retry 3 --retry-delay 2 -o survey_marine.json "$RAW/data/survey_marine.json"
+          curl -fsSL --retry 3 --retry-delay 2 -o survey_measure.json "$RAW/data/survey_measure.json"
 
-      - name: Build and send
+      - name: Send Marine Radar survey digest
         env:
           GOOGLE_SA_KEY: ${{ secrets.GOOGLE_SA_KEY }}
           GMAIL_USER: ${{ secrets.GMAIL_USER }}
@@ -94,6 +95,19 @@ jobs:
         run: |
           python3 survey_main.py \
             --report-date "$REPORT_DATE" \
-            --config survey_config.json \
+            --config survey_marine.json \
+            ${{ inputs.dry_run && '--dry-run' || '' }} \
+            ${{ inputs.to && format('--to "{0}"', inputs.to) || '' }}
+
+      - name: Send Smart Ruler survey digest
+        env:
+          GOOGLE_SA_KEY: ${{ secrets.GOOGLE_SA_KEY }}
+          GMAIL_USER: ${{ secrets.GMAIL_USER }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          REPORT_DATE: ${{ needs.gate2.outputs.report_date }}
+        run: |
+          python3 survey_main.py \
+            --report-date "$REPORT_DATE" \
+            --config survey_measure.json \
             ${{ inputs.dry_run && '--dry-run' || '' }} \
             ${{ inputs.to && format('--to "{0}"', inputs.to) || '' }}
