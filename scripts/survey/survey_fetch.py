@@ -39,8 +39,7 @@ def _get_credentials(sa_info, scopes):
 def fetch_sheet_tab(sa_info, sheet_id, tab_name):
     """Return rows (list of lists) for *tab_name*, header row excluded."""
     creds = _get_credentials(sa_info, [_SHEETS_SCOPE])
-    range_str = f"'{tab_name}'"
-    url = f"{_SHEETS_BASE}/{sheet_id}/values/{quote(range_str, safe='')}"
+    url = f"{_SHEETS_BASE}/{sheet_id}/values/{quote(tab_name, safe='')}"
     resp = requests.get(url, headers={"Authorization": f"Bearer {creds.token}"}, timeout=30)
     if resp.status_code != 200:
         err_body = resp.text[:200] if resp.text else "(empty)"

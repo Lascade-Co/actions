@@ -62,7 +62,7 @@
       ]
     },
     {
-      "sheet_name": "Route planner",
+      "sheet_name": "Route planner ",
       "label": "Route Planner",
       "subtitle": "Feedback",
       "columns": [
@@ -70,7 +70,7 @@
       ]
     },
     {
-      "sheet_name": "Add your ship",
+      "sheet_name": "Add your ship ",
       "label": "Add Your Ship",
       "subtitle": "Submissions",
       "columns": [
