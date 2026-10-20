@@ -18,7 +18,7 @@ from email.mime.text import MIMEText
 from functools import partial
 
 from survey_fetch import fetch_sheet_tab, translate_text, FetchError
-from survey_model import build_model, filter_new_responses, _parse_ts, _TZ_MAP
+from survey_model import build_model
 from survey_render import render
 
 
@@ -73,28 +73,6 @@ def main():
             print(f"  rows: {len(rows)}")
         except FetchError as e:
             print(f"  failed: {e}")
-
-    # Debug: per-tab filtering details (safe — only counts and raw col-0 samples)
-    sheet_tz = _TZ_MAP.get(config.get("timezone", "UTC"), timezone.utc)
-    for survey in config["surveys"]:
-        tab = survey["sheet_name"]
-        rows = fetched_tabs.get(tab, [])
-        filtered = filter_new_responses(rows, cutoff_dt, sheet_tz, now_utc=now_utc)
-        print(f"  [{tab}] total={len(rows)} in_window={len(filtered)}")
-        if rows:
-            raw_first = str(rows[0][0]).strip() if rows[0] else "?"
-            raw_last = str(rows[-1][0]).strip() if rows[-1] else "?"
-            parsed_first = _parse_ts(rows[0][0], sheet_tz, now_utc=now_utc) if rows[0] else None
-            parsed_last = _parse_ts(rows[-1][0], sheet_tz, now_utc=now_utc) if rows[-1] else None
-            print(f"    first: raw={raw_first!r} parsed={parsed_first}")
-            print(f"    last:  raw={raw_last!r} parsed={parsed_last}")
-        if filtered:
-            raw_oldest = str(filtered[0][0]).strip()
-            raw_newest = str(filtered[-1][0]).strip()
-            parsed_oldest = _parse_ts(filtered[0][0], sheet_tz, now_utc=now_utc)
-            parsed_newest = _parse_ts(filtered[-1][0], sheet_tz, now_utc=now_utc)
-            print(f"    window oldest: raw={raw_oldest!r} parsed={parsed_oldest}")
-            print(f"    window newest: raw={raw_newest!r} parsed={parsed_newest}")
 
     translate_fn = partial(translate_text, sa_info)
     model = build_model(config, fetched_tabs, cutoff_dt, now_utc, translate_fn)
