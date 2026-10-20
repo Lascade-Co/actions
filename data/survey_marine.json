@@ -3,6 +3,7 @@
   "sheet_url": "https://docs.google.com/spreadsheets/d/1kQoqq40xr1uNRUm5aYGT9KgFx8X4Vn6WZ3-CH65AfXM/edit",
   "product_name": "MarineRadar",
   "email_title": "MarineRadar Survey Responses",
+  "timezone": "Asia/Kolkata",
   "surveys": [
     {
       "sheet_name": "D2 Survey",

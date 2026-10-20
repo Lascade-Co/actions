@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Pure data layer: filter, detect language, build the email model. No I/O."""
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 try:
     from langdetect import detect as _detect
@@ -16,28 +16,41 @@ _TIMESTAMP_FMTS = [
 ]
 
 
-def _parse_ts(raw):
-    """Parse a Google Sheets timestamp string into a UTC-aware datetime."""
+_IST = timezone(timedelta(hours=5, minutes=30))
+
+_TZ_MAP = {
+    "Asia/Kolkata": _IST,
+    "UTC": timezone.utc,
+}
+
+
+def _parse_ts(raw, tz=None):
+    """Parse a Google Sheets timestamp string into a tz-aware datetime.
+
+    *tz* is the timezone the sheet timestamps are in (default: UTC).
+    """
     raw = str(raw).strip()
+    if tz is None:
+        tz = timezone.utc
     for fmt in _TIMESTAMP_FMTS:
         try:
             dt = datetime.strptime(raw, fmt)
-            return dt.replace(tzinfo=timezone.utc)
+            return dt.replace(tzinfo=tz)
         except ValueError:
             continue
     try:
-        return datetime.fromisoformat(raw).replace(tzinfo=timezone.utc)
+        return datetime.fromisoformat(raw).replace(tzinfo=tz)
     except Exception:
         return None
 
 
-def filter_new_responses(rows, cutoff_dt):
+def filter_new_responses(rows, cutoff_dt, tz=None):
     """Return rows whose timestamp (col 0) is after *cutoff_dt*."""
     out = []
     for row in rows:
         if not row:
             continue
-        ts = _parse_ts(row[0])
+        ts = _parse_ts(row[0], tz)
         if ts and ts > cutoff_dt:
             out.append(row)
     return out
@@ -80,12 +93,13 @@ def build_model(config, fetched_tabs, cutoff_dt, now_dt, translate_fn=None):
     free_count = 0
     pro_count = 0
 
+    sheet_tz = _TZ_MAP.get(config.get("timezone", "UTC"), timezone.utc)
     global_status = config.get("has_pro_free", False)
     global_status_col = config.get("status_col", 2)
 
     for survey in config["surveys"]:
         rows = fetched_tabs.get(survey["sheet_name"], [])
-        filtered = filter_new_responses(rows, cutoff_dt)
+        filtered = filter_new_responses(rows, cutoff_dt, sheet_tz)
         if not filtered:
             continue
 

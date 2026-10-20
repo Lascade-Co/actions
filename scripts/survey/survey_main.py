@@ -75,12 +75,14 @@ def main():
             print(f"  failed: {e}")
 
     print(f"cutoff: {cutoff_dt.isoformat()}")
-    from survey_model import filter_new_responses
+    print(f"sheet timezone: {config.get('timezone', 'UTC')}")
+    from survey_model import filter_new_responses, _TZ_MAP
+    sheet_tz = _TZ_MAP.get(config.get("timezone", "UTC"), timezone.utc)
     for survey in config["surveys"]:
         tab = survey["sheet_name"]
         rows = fetched_tabs.get(tab, [])
         if rows:
-            filtered = filter_new_responses(rows, cutoff_dt)
+            filtered = filter_new_responses(rows, cutoff_dt, sheet_tz)
             first_ts = rows[0][0] if rows[0] else "?"
             last_ts = rows[-1][0] if rows[-1] else "?"
             print(f"  {tab}: {len(rows)} total, {len(filtered)} in 24h (oldest={first_ts}, newest={last_ts})")
