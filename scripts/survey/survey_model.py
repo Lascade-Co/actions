@@ -24,14 +24,27 @@ _TZ_MAP = {
 }
 
 
-def _parse_ts(raw, tz=None):
-    """Parse a Google Sheets timestamp string into a tz-aware datetime.
+_SHEETS_EPOCH = datetime(1899, 12, 30)
 
-    *tz* is the timezone the sheet timestamps are in (default: UTC).
+
+def _parse_ts(raw, tz=None):
+    """Parse a Google Sheets timestamp into a tz-aware datetime.
+
+    Handles serial date numbers (from dateTimeRenderOption=SERIAL_NUMBER)
+    as well as formatted date strings.  *tz* is the timezone the sheet
+    timestamps are in (default: UTC).
     """
     raw = str(raw).strip()
     if tz is None:
         tz = timezone.utc
+    # Serial date number (days since 1899-12-30)
+    try:
+        serial = float(raw)
+        if 1 < serial < 200000:
+            dt = _SHEETS_EPOCH + timedelta(days=serial)
+            return dt.replace(tzinfo=tz)
+    except (ValueError, OverflowError):
+        pass
     for fmt in _TIMESTAMP_FMTS:
         try:
             dt = datetime.strptime(raw, fmt)
