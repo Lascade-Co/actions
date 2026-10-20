@@ -1,0 +1,98 @@
+name: Daily Survey Digest
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Build the email without sending
+        type: boolean
+        default: false
+      to:
+        description: "Send a [TEST] email only to this address"
+        type: string
+        default: ""
+  schedule:
+    # Target 13:00 UTC (6:30 PM IST). Three crons; gate holds until target.
+    - cron: '29 10 * * *'
+    - cron: '29 11 * * *'
+    - cron: '29 12 * * *'
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: daily-survey-${{ github.event_name }}
+  cancel-in-progress: false
+
+env:
+  RAW: https://raw.githubusercontent.com/Lascade-Co/actions/${{ github.sha }}
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    outputs:
+      proceed: ${{ steps.gate.outputs.proceed }}
+      report_date: ${{ steps.gate.outputs.report_date }}
+    steps:
+      - id: gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          curl -fsSL -o catchup_gate.py "$RAW/scripts/catchup/catchup_gate.py"
+          python3 catchup_gate.py --phase 1 --event "${{ github.event_name }}" \
+            --workflow daily-survey.yml \
+            --target-tz UTC --target-hour 13 --target-minute 0 --cutoff-hour 23
+
+  gate2:
+    needs: gate
+    if: needs.gate.outputs.proceed == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    outputs:
+      proceed: ${{ steps.gate.outputs.proceed }}
+      report_date: ${{ steps.gate.outputs.report_date }}
+    steps:
+      - id: gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          curl -fsSL -o catchup_gate.py "$RAW/scripts/catchup/catchup_gate.py"
+          python3 catchup_gate.py --phase 2 --event "${{ github.event_name }}" \
+            --workflow daily-survey.yml \
+            --report-date "${{ needs.gate.outputs.report_date }}" \
+            --target-tz UTC --target-hour 13 --target-minute 0 --cutoff-hour 23
+
+  email:
+    needs: gate2
+    if: needs.gate2.outputs.proceed == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+
+      - name: Install dependencies
+        run: pip install --quiet requests==2.34.2 google-auth==2.56.3 langdetect==1.0.9
+
+      - name: Download scripts
+        run: |
+          for m in survey_fetch survey_model survey_render survey_main; do
+            curl -fsSL --retry 3 --retry-delay 2 -o "$m.py" "$RAW/scripts/survey/$m.py"
+          done
+          curl -fsSL --retry 3 --retry-delay 2 -o survey_config.json "$RAW/data/survey_config.json"
+
+      - name: Build and send
+        env:
+          GOOGLE_SA_KEY: ${{ secrets.GOOGLE_SA_KEY }}
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+          REPORT_DATE: ${{ needs.gate2.outputs.report_date }}
+        run: |
+          python3 survey_main.py \
+            --report-date "$REPORT_DATE" \
+            --config survey_config.json \
+            ${{ inputs.dry_run && '--dry-run' || '' }} \
+            ${{ inputs.to && format('--to "{0}"', inputs.to) || '' }}
