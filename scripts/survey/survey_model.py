@@ -26,44 +26,63 @@ _TZ_MAP = {
 
 _SHEETS_EPOCH = datetime(1899, 12, 30)
 
+_FUTURE_SLACK = timedelta(hours=2)
 
-def _parse_ts(raw, tz=None):
+
+def _parse_ts(raw, tz=None, now_utc=None):
     """Parse a Google Sheets timestamp into a tz-aware datetime.
 
     Handles serial date numbers (from dateTimeRenderOption=SERIAL_NUMBER)
     as well as formatted date strings.  *tz* is the timezone the sheet
     timestamps are in (default: UTC).
+
+    When *now_utc* is provided, any candidate that falls in the future
+    (beyond a small slack) is rejected and the next format is tried.
+    This guards against dd/mm ↔ mm/dd misparses that produce future dates.
     """
     raw = str(raw).strip()
     if tz is None:
         tz = timezone.utc
+    ceiling = (now_utc + _FUTURE_SLACK) if now_utc else None
+
+    def _accept(dt):
+        if ceiling and dt > ceiling:
+            return None
+        return dt
+
     # Serial date number (days since 1899-12-30)
     try:
         serial = float(raw)
         if 1 < serial < 200000:
             dt = _SHEETS_EPOCH + timedelta(days=serial)
-            return dt.replace(tzinfo=tz)
+            result = _accept(dt.replace(tzinfo=tz))
+            if result:
+                return result
     except (ValueError, OverflowError):
         pass
     for fmt in _TIMESTAMP_FMTS:
         try:
-            dt = datetime.strptime(raw, fmt)
-            return dt.replace(tzinfo=tz)
+            dt = datetime.strptime(raw, fmt).replace(tzinfo=tz)
+            result = _accept(dt)
+            if result:
+                return result
         except ValueError:
             continue
     try:
-        return datetime.fromisoformat(raw).replace(tzinfo=tz)
+        dt = datetime.fromisoformat(raw).replace(tzinfo=tz)
+        return _accept(dt)
     except Exception:
-        return None
+        pass
+    return None
 
 
-def filter_new_responses(rows, cutoff_dt, tz=None):
+def filter_new_responses(rows, cutoff_dt, tz=None, now_utc=None):
     """Return rows whose timestamp (col 0) is after *cutoff_dt*."""
     out = []
     for row in rows:
         if not row:
             continue
-        ts = _parse_ts(row[0], tz)
+        ts = _parse_ts(row[0], tz, now_utc=now_utc)
         if ts and ts > cutoff_dt:
             out.append(row)
     return out
@@ -112,7 +131,7 @@ def build_model(config, fetched_tabs, cutoff_dt, now_dt, translate_fn=None):
 
     for survey in config["surveys"]:
         rows = fetched_tabs.get(survey["sheet_name"], [])
-        filtered = filter_new_responses(rows, cutoff_dt, sheet_tz)
+        filtered = filter_new_responses(rows, cutoff_dt, sheet_tz, now_utc=now_dt)
         if not filtered:
             continue
 
