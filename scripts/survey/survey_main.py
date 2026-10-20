@@ -9,15 +9,16 @@ import argparse
 import base64
 import json
 import os
+import smtplib
 import sys
 from datetime import datetime, timedelta, timezone
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
 from functools import partial
 
 from survey_fetch import fetch_sheet_tab, translate_text, FetchError
 from survey_model import build_model
 from survey_render import render
-
-import requests
 
 
 def _mask(value):
@@ -35,12 +36,13 @@ def main():
     a = ap.parse_args()
 
     google_sa_b64 = os.environ.get("GOOGLE_SA_KEY", "")
-    resend_key = os.environ.get("RESEND_API_KEY", "")
+    gmail_user = os.environ.get("GMAIL_USER", "")
+    gmail_password = os.environ.get("GMAIL_APP_PASSWORD", "")
 
     if google_sa_b64:
         _mask(google_sa_b64)
-    if resend_key:
-        _mask(resend_key)
+    if gmail_password:
+        _mask(gmail_password)
 
     if not google_sa_b64:
         sys.exit("GOOGLE_SA_KEY not set")
@@ -86,41 +88,27 @@ def main():
         print("no new responses, skipping email")
         return
 
-    if not resend_key:
-        sys.exit("RESEND_API_KEY not set")
+    if not gmail_user or not gmail_password:
+        sys.exit("GMAIL_USER / GMAIL_APP_PASSWORD not set")
 
     is_test = bool(a.to)
     if is_test:
         recipients = [a.to]
         prefix = "[TEST] "
-        run_id = os.environ.get("GITHUB_RUN_ID", "local")
-        run_attempt = os.environ.get("GITHUB_RUN_ATTEMPT", "1")
-        idem_key = f"survey-digest-test-{run_id}-{run_attempt}"
     else:
         recipients = ["angelrose@lascade.com", "cherian@lascade.com"]
         prefix = ""
-        idem_key = f"survey-digest-{a.report_date}"
 
-    payload = {
-        "from": "Lascade Surveys <noreply@metrics.lascade.com>",
-        "to": recipients,
-        "subject": f"{prefix}{subject}",
-        "html": html,
-    }
+    msg = MIMEMultipart("alternative")
+    msg["From"] = f"Lascade Surveys <{gmail_user}>"
+    msg["To"] = ", ".join(recipients)
+    msg["Subject"] = f"{prefix}{subject}"
+    msg.attach(MIMEText(html, "html"))
 
-    resp = requests.post(
-        "https://api.resend.com/emails",
-        headers={
-            "Authorization": f"Bearer {resend_key}",
-            "Idempotency-Key": idem_key,
-            "Content-Type": "application/json",
-        },
-        json=payload,
-        timeout=30,
-    )
-    print(f"resend: {resp.status_code}")
-    if resp.status_code not in (200, 201):
-        sys.exit(f"resend failed: {resp.status_code}")
+    with smtplib.SMTP("smtp.gmail.com", 587) as server:
+        server.starttls()
+        server.login(gmail_user, gmail_password)
+        server.sendmail(gmail_user, recipients, msg.as_string())
     print("sent")
 
 

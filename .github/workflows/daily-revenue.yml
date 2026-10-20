@@ -87,7 +87,8 @@ jobs:
       - name: Build and send
         env:
           STRIPE_API_KEY: ${{ secrets.STRIPE_API_KEY }}
-          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+          GMAIL_USER: ${{ secrets.GMAIL_USER }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
           REPORT_DATE: ${{ needs.gate2.outputs.report_date }}
         run: |
           python3 revenue_main.py \
