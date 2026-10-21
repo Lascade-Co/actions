@@ -46,5 +46,5 @@ jobs:
         run: |
           curl -fsS --max-time 30 -o /dev/null "https://api.telegram.org/bot$TOKEN/sendMessage" \
             --data-urlencode chat_id="$CHAT" \
-            --data-urlencode text="Install→paid email for $DAY has not gone out. Rerun Daily Install to Paid manually: $URL"
+            --data-urlencode text="Install→paid email for $DAY has not gone out. To send it: open $URL, press Run workflow, tick recovery, press Run workflow."
           echo "alert sent"

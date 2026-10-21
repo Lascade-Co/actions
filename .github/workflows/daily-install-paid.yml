@@ -10,6 +10,10 @@ on:
       report_date:
         description: Report date (YYYY-MM-DD); blank = the newest date whose 05:00 PT cutoff has passed
         default: ''
+      recovery:
+        description: Use when the morning email did not go out, send it as the real email (normal subject, counts as sent)
+        type: boolean
+        default: false
       test_alert:
         description: Test only, fail the run on purpose to exercise the Telegram alert
         type: boolean
@@ -46,7 +50,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           curl -fsSL -o catchup_gate.py "$RAW/scripts/catchup/catchup_gate.py"
-          python3 catchup_gate.py --phase 1 --event "${{ github.event_name }}" --workflow daily-install-paid.yml --sent-step "Send for "
+          python3 catchup_gate.py --phase 1 --event "${{ github.event_name }}" --workflow daily-install-paid.yml --sent-step "Deliver for "
 
   gate2:
     needs: gate
@@ -62,7 +66,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           curl -fsSL -o catchup_gate.py "$RAW/scripts/catchup/catchup_gate.py"
-          python3 catchup_gate.py --phase 2 --event "${{ github.event_name }}" --workflow daily-install-paid.yml --sent-step "Send for " \
+          python3 catchup_gate.py --phase 2 --event "${{ github.event_name }}" --workflow daily-install-paid.yml --sent-step "Deliver for " \
             --report-date "${{ needs.gate.outputs.report_date }}"
 
   # The job must be named `email`: the dedupe check and the watchdog look for a
@@ -72,11 +76,17 @@ jobs:
     if: needs.gate2.outputs.proceed == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    # One email job at a time across scheduled, recovery and test runs (the sleeping gates
+    # stay outside this lock), and real sends re-check "already sent" inside it.
+    concurrency:
+      group: daily-install-paid-email
+      cancel-in-progress: false
     steps:
       - uses: actions/checkout@v6
         with:
           sparse-checkout: |
             scripts/installpaid
+            scripts/catchup/catchup_gate.py
             data/installpaid_google_ipranges.json
           sparse-checkout-cone-mode: false
 
@@ -98,8 +108,20 @@ jobs:
           INPUT_DATE: ${{ inputs.report_date }}
         run: |
           RD=$([ "$EVENT" = schedule ] && echo "$GATE_DATE" || echo "$INPUT_DATE")
-          if [ -n "$RD" ] && ! [[ "$RD" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then echo "bad report date"; exit 1; fi
+          [ -n "$RD" ] || RD=$(cd scripts/installpaid && python3 -c "import ip_main; print(ip_main.latest_ready_date())")
+          if ! [[ "$RD" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then echo "bad report date"; exit 1; fi
           echo "report_date=$RD" >> "$GITHUB_OUTPUT"
+
+      - name: Check it has not gone out already
+        id: dedupe
+        if: ${{ github.event_name == 'schedule' || inputs.recovery }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RD: ${{ steps.dates.outputs.report_date }}
+        run: |
+          SENT=$(PYTHONPATH=scripts/catchup python3 -c "import datetime as d, os, catchup_gate as G; print(G.already_sent(d.date.fromisoformat(os.environ['RD']), G.now_utc(), workflow='daily-install-paid.yml', sent_step='Deliver for '))")
+          echo "sent=$SENT" >> "$GITHUB_OUTPUT"
+          [ "$SENT" = True ] && echo "already sent for $RD; skipping" || true
 
       - name: Fail on purpose (alert test)
         if: ${{ inputs.test_alert }}
@@ -108,24 +130,29 @@ jobs:
           exit 1
 
       - name: Build the email
+        if: ${{ steps.dedupe.outputs.sent != 'True' }}
         working-directory: scripts/installpaid
         env:
           POSTHOG_PERSONAL_API_KEY: ${{ secrets.POSTHOG_QUERY_API_KEY }}
           INSTALLPAID_BENCHMARKS_JSON_B64: ${{ secrets.INSTALLPAID_BENCHMARKS_JSON_B64 }}
           REPORT_DATE: ${{ steps.dates.outputs.report_date }}
-        run: python3 ip_main.py --variant A --out out ${REPORT_DATE:+--report-date "$REPORT_DATE"}
+        run: python3 ip_main.py --variant A --out out --report-date "$REPORT_DATE"
 
-      # The gates and the watchdog look for this exact step name with the report date.
-      - name: Send for ${{ steps.dates.outputs.report_date || 'latest' }}
-        if: ${{ !inputs.dry_run }}
+      # The gates and the watchdog look for "Deliver for <date>": scheduled and recovery
+      # sends carry it, plain tests are named "Test send for <date>" and never count.
+      # (Early test runs used "Send for <date>", hence the different word.)
+      - name: ${{ (github.event_name == 'schedule' || inputs.recovery) && 'Deliver for' || 'Test send for' }} ${{ steps.dates.outputs.report_date }}
+        if: ${{ !inputs.dry_run && steps.dedupe.outputs.sent != 'True' }}
         working-directory: scripts/installpaid
         env:
           RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
         run: |
           RD=$(cat out/report-date.txt)
+          # Recovery gets its own key: the failed run may have left a different payload under
+          # the scheduled key. A late cron then stops at the gate, which sees "Deliver for <date>".
           SUFFIX=${{ github.event_name == 'schedule' && 'scheduled' || format('manual-{0}', github.run_id) }}
-          # Manual runs get a unique subject tag so Gmail never folds a test into an earlier thread.
-          if [ "${{ github.event_name }}" != schedule ]; then
+          # Plain tests get a unique subject tag so Gmail never folds a test into an earlier thread.
+          if [ "${{ github.event_name }}" != schedule ] && [ "${{ inputs.recovery }}" != true ]; then
             printf '[Test %s] %s' "${{ github.run_number }}" "$(cat out/subject-A.txt)" > out/subject-A.txt
           fi
           bash send_resend_ip.sh "$RD" "$SUFFIX"
@@ -143,9 +170,10 @@ jobs:
           TOKEN: ${{ secrets.INSTALLPAID_TELEGRAM_TOKEN }}
           CHAT: ${{ secrets.INSTALLPAID_TELEGRAM_CHAT }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          WF_URL: ${{ github.server_url }}/${{ github.repository }}/actions/workflows/daily-install-paid.yml
           KIND: ${{ github.event_name == 'schedule' && 'Scheduled run' || 'Manual run' }}
         run: |
           curl -fsS --max-time 30 -o /dev/null "https://api.telegram.org/bot$TOKEN/sendMessage" \
             --data-urlencode chat_id="$CHAT" \
-            --data-urlencode text="Install→paid email failed ($KIND). Rerun: $RUN_URL"
+            --data-urlencode text="Install→paid email failed ($KIND). To send it: open $WF_URL, press Run workflow, tick recovery, press Run workflow. Failed run: $RUN_URL"
           echo "alert sent"

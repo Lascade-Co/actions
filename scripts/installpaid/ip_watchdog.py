@@ -16,7 +16,7 @@ import sys
 import catchup_gate as G
 
 START, END = dt.time(6, 15), dt.time(12, 0)
-SENT_STEP, ALERT_STEP = "Send for ", "Alert for "
+SENT_STEP, ALERT_STEP = "Deliver for ", "Alert for "
 
 
 def alerted_today(today, fetch=G.gh_json):

@@ -64,14 +64,15 @@ def gh_json(path):
 def already_sent(report_date, now, fetch=gh_json, workflow="daily-catchup.yml", sent_step=None):
     """True if a scheduled run's `email` job succeeded for this report_date. Fails open.
     With sent_step, the job must also hold a successful step named f"{sent_step}{report_date}",
-    so a late finish for one date cannot read as the next date's send."""
+    so a late finish for one date cannot read as the next date's send. That step name is
+    specific enough that runs of any event count (a manual recovery send included)."""
     repo = os.environ.get("GITHUB_REPOSITORY", "Lascade-Co/actions")
     current = os.environ.get("GITHUB_RUN_ID", "")
     cutoff = sent_cutoff(report_date).astimezone(timezone.utc)
     since = (now - timedelta(hours=30)).strftime("%Y-%m-%dT%H:%M:%SZ")
     try:
         runs = fetch(f"repos/{repo}/actions/workflows/{workflow}/runs"
-                     f"?event=schedule&per_page=50&created=>={since}")["workflow_runs"]
+                     f"?{'' if sent_step is not None else 'event=schedule&'}per_page=50&created=>={since}")["workflow_runs"]
         for r in runs:
             if str(r["id"]) == current:
                 continue

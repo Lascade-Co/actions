@@ -389,7 +389,7 @@ def _decide(monkeypatch, now, sent=False, alerted=False):
                         else (lambda *a, **k: (_ for _ in ()).throw(alerted)))
     with redirect_stderr(io.StringIO()):
         out = W.decide(_utc(now))
-    assert not seen or seen["sent_step"] == "Send for "
+    assert not seen or seen["sent_step"] == "Deliver for "
     return out[0]
 
 
@@ -437,3 +437,19 @@ def test_subject_carries_the_report_date():
     m = model({"ios": [row("4.1.0", 1, 900, paid=45)], "android": []})
     s = R.subject_of(m)
     assert s.startswith(f"TA install→paid · {m['report_date']:%a} {m['report_date'].day} {m['report_date']:%b} — iOS ")
+
+
+def test_dated_dedupe_counts_recovery_runs_of_any_event():
+    import catchup_gate as G
+    seen = []
+    def f(path):
+        seen.append(path)
+        return {"jobs": [{"name": "email", "conclusion": "success", "completed_at": "2026-10-21T13:00:00Z",
+                          "steps": [{"name": "Deliver for 2026-10-21", "conclusion": "success"}]}]} \
+            if "/jobs" in path else {"workflow_runs": [{"id": 5}]}
+    assert G.already_sent(dt.date(2026, 10, 21), _utc("2026-10-21T14:00:00"), f, workflow="w", sent_step="Deliver for ")
+    assert not G.already_sent(dt.date(2026, 10, 21), _utc("2026-10-21T14:00:00"), f, workflow="w", sent_step="Send for ")
+    assert "event=schedule" not in seen[0]
+    seen.clear()
+    G.already_sent(dt.date(2026, 10, 21), _utc("2026-10-21T14:00:00"), f, workflow="w")   # legacy callers
+    assert "event=schedule" in seen[0]
