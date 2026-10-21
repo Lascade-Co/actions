@@ -6,7 +6,7 @@ evening before and each run waits here until the target. Two chained jobs are us
 because a single job is capped at 6h.
 
   phase 1: compute report_date, dedupe, sleep min(wait, MAX_SLEEP), emit remaining
-  phase 2: sleep remaining, dedupe again
+  phase 2: sleep until the absolute target again (recomputed, not `remaining`), dedupe again
 
 Outputs (GITHUB_OUTPUT): proceed, report_date, remaining (seconds).
 Env NOW (ISO, UTC) overrides the clock for tests.

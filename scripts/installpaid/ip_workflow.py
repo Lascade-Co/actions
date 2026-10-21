@@ -60,11 +60,11 @@ def main(argv=None):
                   f"Run workflow → edition={edition.name}, report_date={date}, recovery ✓. "
                   f"Workflow: {os.environ.get('WF_URL', '')} Failed run: {os.environ.get('RUN_URL', '')}")
         elif args.command == "dedupe":
-            # A forced send ignores known acceptance, but still requires readable
-            # history: manual sends use fresh keys with no scheduled-key backstop.
-            accepted = mode in ("real", "forced") and G.already_sent(
+            # Only real (scheduled or recovery) sends consult history. An explicit
+            # manual forced send skips dedupe entirely, as the plan's override.
+            accepted = mode == "real" and G.already_sent(
                 date, G.now_utc(), workflow="daily-install-paid.yml", sent_step=edition.sent_step)
-            G.emit(sent=str(mode == "real" and accepted))
+            G.emit(sent=str(accepted))
         else:
             if offset and (mode != "test" or edition.name != "pt" or offset < 2):
                 raise ValueError("invalid test scheduling inputs")

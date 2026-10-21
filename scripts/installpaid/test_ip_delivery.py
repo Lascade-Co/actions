@@ -301,7 +301,7 @@ class TestEditionDelivery:
         assert fetched[0][4] == (dt.datetime.fromisoformat(want_deadline) if want_deadline else None)
 
     @pytest.mark.parametrize("edition", ["pt", "ist"])
-    @pytest.mark.parametrize("flag", ["RECOVERY", "FORCE_RESEND"])
+    @pytest.mark.parametrize("flag", ["RECOVERY"])   # forced sends skip history (see below)
     def test_manual_dedupe_uncertainty_fails_closed(self, monkeypatch, capsys, edition, flag):
         import ip_workflow as workflow
         monkeypatch.setenv("EVENT", "workflow_dispatch")
@@ -332,19 +332,22 @@ class TestEditionDelivery:
         assert out.err.strip() == "delivery history unavailable; proceeding on scheduled key"
 
     @pytest.mark.parametrize("edition", ["pt", "ist"])
-    def test_forced_send_checks_history_but_overrides_known_acceptance(self, monkeypatch, capsys, edition):
+    @pytest.mark.parametrize("history", ["accepted", "unavailable"])
+    def test_forced_send_skips_history_entirely(self, monkeypatch, capsys, edition, history):
         import ip_workflow as workflow
         monkeypatch.setenv("EVENT", "workflow_dispatch")
         monkeypatch.setenv("INPUT_EDITION", edition)
         monkeypatch.setenv("FORCE_RESEND", "true")
         monkeypatch.setenv("REPORT_DATE", "2030-01-12")
         checked = []
-        def accepted(*args, **kwargs):
+        def lookup(*args, **kwargs):
             checked.append(kwargs["sent_step"])
+            if history == "unavailable":
+                raise workflow.G.DedupeUnavailable("private response must not be logged")
             return True
-        monkeypatch.setattr(workflow.G, "already_sent", accepted)
+        monkeypatch.setattr(workflow.G, "already_sent", lookup)
         assert workflow.main(["dedupe"]) == 0
-        assert checked == ["Deliver for " if edition == "pt" else "Deliver IST for "]
+        assert checked == []
         assert capsys.readouterr().out == "sent=False\n"
 
     def test_one_minute_test_is_rejected_before_build_or_payload(self, monkeypatch, tmp_path, capsys):
