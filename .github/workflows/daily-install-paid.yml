@@ -1,0 +1,147 @@
+name: Daily Install to Paid
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Build the email without sending
+        type: boolean
+        default: false
+      report_date:
+        description: Report date (YYYY-MM-DD); blank = the newest date whose 05:00 PT cutoff has passed
+        default: ''
+      test_alert:
+        description: Test only, fail the run on purpose to exercise the Telegram alert
+        type: boolean
+        default: false
+  schedule:
+    # GitHub delays scheduled runs by hours, so fire three times the evening before;
+    # the gates hold each run until 05:45 America/Los_Angeles (DST-aware) and later runs
+    # exit at dedupe once the email is out. The send key also stops a second send.
+    - cron: '41 3 * * *'
+    - cron: '41 6 * * *'
+    - cron: '41 9 * * *'
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: daily-install-paid-${{ github.event_name }}
+  cancel-in-progress: false
+
+env:
+  RAW: https://raw.githubusercontent.com/Lascade-Co/actions/${{ github.sha }}
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    outputs:
+      proceed: ${{ steps.gate.outputs.proceed }}
+      report_date: ${{ steps.gate.outputs.report_date }}
+    steps:
+      - id: gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          curl -fsSL -o catchup_gate.py "$RAW/scripts/catchup/catchup_gate.py"
+          python3 catchup_gate.py --phase 1 --event "${{ github.event_name }}" --workflow daily-install-paid.yml --sent-step "Send for "
+
+  gate2:
+    needs: gate
+    if: needs.gate.outputs.proceed == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    outputs:
+      proceed: ${{ steps.gate.outputs.proceed }}
+      report_date: ${{ steps.gate.outputs.report_date }}
+    steps:
+      - id: gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          curl -fsSL -o catchup_gate.py "$RAW/scripts/catchup/catchup_gate.py"
+          python3 catchup_gate.py --phase 2 --event "${{ github.event_name }}" --workflow daily-install-paid.yml --sent-step "Send for " \
+            --report-date "${{ needs.gate.outputs.report_date }}"
+
+  # The job must be named `email`: the dedupe check and the watchdog look for a
+  # successful job of that name. Logs carry no figures: the repository is public.
+  email:
+    needs: gate2
+    if: needs.gate2.outputs.proceed == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          sparse-checkout: |
+            scripts/installpaid
+            data/installpaid_google_ipranges.json
+          sparse-checkout-cone-mode: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+
+      - name: Install dependencies
+        run: pip install --quiet requests==2.34.2
+
+      - name: Work out the report date
+        id: dates
+        # A scheduled run reports the gate's date. A manual run uses the input, or the
+        # newest date that is ready (the gate's date can still be in the future then).
+        env:
+          EVENT: ${{ github.event_name }}
+          GATE_DATE: ${{ needs.gate2.outputs.report_date }}
+          INPUT_DATE: ${{ inputs.report_date }}
+        run: |
+          RD=$([ "$EVENT" = schedule ] && echo "$GATE_DATE" || echo "$INPUT_DATE")
+          if [ -n "$RD" ] && ! [[ "$RD" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then echo "bad report date"; exit 1; fi
+          echo "report_date=$RD" >> "$GITHUB_OUTPUT"
+
+      - name: Fail on purpose (alert test)
+        if: ${{ inputs.test_alert }}
+        run: |
+          echo "test_alert is set: failing so the Telegram alert fires"
+          exit 1
+
+      - name: Build the email
+        working-directory: scripts/installpaid
+        env:
+          POSTHOG_PERSONAL_API_KEY: ${{ secrets.POSTHOG_QUERY_API_KEY }}
+          INSTALLPAID_BENCHMARKS_JSON_B64: ${{ secrets.INSTALLPAID_BENCHMARKS_JSON_B64 }}
+          REPORT_DATE: ${{ steps.dates.outputs.report_date }}
+        run: python3 ip_main.py --variant A --out out ${REPORT_DATE:+--report-date "$REPORT_DATE"}
+
+      # The gates and the watchdog look for this exact step name with the report date.
+      - name: Send for ${{ steps.dates.outputs.report_date || 'latest' }}
+        if: ${{ !inputs.dry_run }}
+        working-directory: scripts/installpaid
+        env:
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+        run: |
+          RD=$(cat out/report-date.txt)
+          SUFFIX=${{ github.event_name == 'schedule' && 'scheduled' || format('manual-{0}', github.run_id) }}
+          bash send_resend_ip.sh "$RD" "$SUFFIX"
+
+  # Separate job so a failure in either gate, a timeout or the email job all alert.
+  # Cancellations and dropped crons are left to the watchdog.
+  notify:
+    needs: [gate, gate2, email]
+    if: ${{ failure() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Alert on Telegram
+        env:
+          TOKEN: ${{ secrets.INSTALLPAID_TELEGRAM_TOKEN }}
+          CHAT: ${{ secrets.INSTALLPAID_TELEGRAM_CHAT }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          KIND: ${{ github.event_name == 'schedule' && 'Scheduled run' || 'Manual run' }}
+        run: |
+          curl -fsS --max-time 30 -o /dev/null "https://api.telegram.org/bot$TOKEN/sendMessage" \
+            --data-urlencode chat_id="$CHAT" \
+            --data-urlencode text="Install→paid email failed ($KIND). Rerun: $RUN_URL"
+          echo "alert sent"

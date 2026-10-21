@@ -1,0 +1,50 @@
+name: Install to Paid Watchdog
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Hourly through the morning so a dropped or late cron is covered: 13:20 UTC is
+    # 06:20 PDT, 14:20 UTC is 06:20 PST. The script acts only between 06:15 and 12:00 PT,
+    # and a day counts as alerted once an "Alert for <date>" step has succeeded.
+    - cron: '20 13-19 * * *'
+
+permissions:
+  contents: read
+  actions: read
+
+# One at a time, so two late crons cannot both decide to alert.
+concurrency:
+  group: install-paid-watchdog
+  cancel-in-progress: false
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          sparse-checkout: |
+            scripts/catchup/catchup_gate.py
+            scripts/installpaid/ip_watchdog.py
+          sparse-checkout-cone-mode: false
+
+      - name: Check today's email went out
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: PYTHONPATH=scripts/catchup python3 scripts/installpaid/ip_watchdog.py
+
+      # The name carries the date: the watchdog's own dedupe looks for it.
+      - name: Alert for ${{ steps.check.outputs.date }}
+        if: steps.check.outputs.alert == 'true'
+        env:
+          TOKEN: ${{ secrets.INSTALLPAID_TELEGRAM_TOKEN }}
+          CHAT: ${{ secrets.INSTALLPAID_TELEGRAM_CHAT }}
+          DAY: ${{ steps.check.outputs.date }}
+          URL: ${{ github.server_url }}/${{ github.repository }}/actions/workflows/daily-install-paid.yml
+        run: |
+          curl -fsS --max-time 30 -o /dev/null "https://api.telegram.org/bot$TOKEN/sendMessage" \
+            --data-urlencode chat_id="$CHAT" \
+            --data-urlencode text="Install→paid email for $DAY has not gone out. Rerun Daily Install to Paid manually: $URL"
+          echo "alert sent"

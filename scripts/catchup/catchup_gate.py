@@ -61,8 +61,10 @@ def gh_json(path):
     return json.loads(out)
 
 
-def already_sent(report_date, now, fetch=gh_json, workflow="daily-catchup.yml"):
-    """True if a scheduled run's `email` job succeeded for this report_date. Fails open."""
+def already_sent(report_date, now, fetch=gh_json, workflow="daily-catchup.yml", sent_step=None):
+    """True if a scheduled run's `email` job succeeded for this report_date. Fails open.
+    With sent_step, the job must also hold a successful step named f"{sent_step}{report_date}",
+    so a late finish for one date cannot read as the next date's send."""
     repo = os.environ.get("GITHUB_REPOSITORY", "Lascade-Co/actions")
     current = os.environ.get("GITHUB_RUN_ID", "")
     cutoff = sent_cutoff(report_date).astimezone(timezone.utc)
@@ -76,6 +78,11 @@ def already_sent(report_date, now, fetch=gh_json, workflow="daily-catchup.yml"):
             jobs = fetch(f"repos/{repo}/actions/runs/{r['id']}/jobs?per_page=100")["jobs"]
             for j in jobs:
                 if j["name"] == "email" and j["conclusion"] == "success" and j.get("completed_at"):
+                    if sent_step is not None:
+                        if any(st.get("name") == f"{sent_step}{report_date}" and st.get("conclusion") == "success"
+                               for st in j.get("steps") or []):
+                            return True
+                        continue
                     done = datetime.fromisoformat(j["completed_at"].replace("Z", "+00:00"))
                     if done >= cutoff:
                         return True
@@ -100,6 +107,7 @@ def main():
     ap.add_argument("--report-date")
     ap.add_argument("--remaining", type=float, default=0)  # unused; kept so callers keep working
     ap.add_argument("--workflow", default="daily-catchup.yml")
+    ap.add_argument("--sent-step", default=None, help="dedupe on a successful step named <prefix><report_date>")
     a = ap.parse_args()
     manual = a.event == "workflow_dispatch"
     now = now_utc()
@@ -111,7 +119,7 @@ def main():
         if not ok:
             print(f"wait {wait/60:.0f}m exceeds cap; a later cron handles it")
             return emit(proceed="false", report_date=report_date, remaining=0)
-        if not manual and already_sent(report_date, now, workflow=a.workflow):
+        if not manual and already_sent(report_date, now, workflow=a.workflow, sent_step=a.sent_step):
             print("already sent for", report_date)
             return emit(proceed="false", report_date=report_date, remaining=0)
         nap = min(wait, MAX_SLEEP)
@@ -123,7 +131,7 @@ def main():
     report_date = date.fromisoformat(a.report_date)
     if not manual:
         time.sleep(phase2_wait(report_date, now_utc()))
-    if not manual and already_sent(report_date, now_utc(), workflow=a.workflow):
+    if not manual and already_sent(report_date, now_utc(), workflow=a.workflow, sent_step=a.sent_step):
         print("already sent for", report_date)
         return emit(proceed="false", report_date=report_date)
     emit(proceed="true", report_date=report_date)
