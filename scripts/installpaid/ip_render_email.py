@@ -367,39 +367,31 @@ def _client_note(t):
 
 
 def _trend_a(t, model):
-    """Paid within a day, per recent build: vertical table bars, Mar 2026 as a label."""
+    """Paid within a day, per recent build, newest first: one horizontal bar per row
+    (same grammar as the funnel, so it holds at phone width), Mar 2026 as a tick."""
     pts_ = t["trend"]
     if len(pts_) < 2:
         return ""
-    vals = [p["rate"][0] for p in pts_]
     mar = model["bench"]["mar26"][M.plat_of(t["key"])]["rates"]["paid"][0]
-    vmax = max(vals + [mar]) * 1.15 or 1
-    MAX_PX = 64
-    cells = []
-    for p, v in zip(pts_, vals):
-        h = max(2, round(v / vmax * MAX_PX)) if v else 0
+    scale = _scale_for([p["rate"][0] for p in pts_] + [mar])
+    rows = []
+    for p in reversed(pts_):
+        v = p["rate"][0]
         pooled = any(b["v"] == p["v"] for b in t["builds"])
         col = ACCENT if pooled else "#b9c9d6"
-        cells.append(
-            f'<td valign="bottom" align="center" style="padding:0 3px;">'
-            f'<p style="margin:0 0 2px 0; font-family:{FONT_HEADING}; font-size:10px; font-weight:700; color:#444444;" '
-            f'class="text-main">{pct(v)}</p>'
-            f'<table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%"><tr><td valign="bottom" '
-            f'style="height:{MAX_PX}px;">' +
-            (f'<table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%"><tr>'
-             f'<td bgcolor="{col}" style="background-color:{col}; height:{h}px; font-size:0; line-height:0;">&nbsp;</td>'
-             f'</tr></table>' if h else '') +
-            '</td></tr></table>'
-            f'<table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%"><tr><td bgcolor="#dddddd" '
-            f'style="background-color:#dddddd; height:1px; font-size:0; line-height:0;" class="divider-line">&nbsp;</td></tr></table>'
-            f'<p style="margin:3px 0 0 0; font-family:{FONT_HEADING}; font-size:10px; color:#777777;" class="text-muted">'
-            f'{esc(p["v"])}</p>'
-            f'<p style="margin:0; font-family:{FONT_BODY}; font-size:9px; color:#999999;" class="text-muted">'
-            f'n={num(p["n"])}</p></td>')
-    title = f"Paid within a day, by build · Mar 2026 was {pct(mar)}"
-    return (f'<p style="margin:22px 0 10px 0;">{_caps(title)}</p>'
-            f'{TABLE} class="tfix"><tr>{"".join(cells)}</tr></table>'
-            + _muted("Dark bars are in today's pool. Single builds are small: read the pool, not one bar.", 11, 6))
+        rows.append(
+            f'<tr><td class="bar-label-cell" width="128" valign="top" style="width:128px; padding:2px 10px 8px 0; '
+            f'font-family:{FONT_BODY}; font-size:12px; font-weight:600; color:#444444; line-height:1.3; white-space:nowrap;">'
+            f'<span class="text-main">{esc(p["v"])}</span> '
+            f'<span style="font-size:10px; font-weight:400; color:#999999;" class="text-muted">n={num(p["n"])}</span></td>'
+            f'<td valign="top" style="padding:4px 0 8px 0;">{_bar(v, scale, col, [(mar, C_MAR, "tick-mar-dm")])}</td>'
+            f'<td class="bar-val-cell" width="84" align="right" valign="top" style="width:84px; padding:2px 0 8px 8px; '
+            f'font-family:{FONT_HEADING}; font-size:13px; font-weight:700; color:#222222; '
+            f'font-variant-numeric:tabular-nums; white-space:nowrap;" class="heading-dm">{pct(v)}</td></tr>')
+    return (f'<p style="margin:22px 0 10px 0;">{_caps("Paid within a day, by build")}</p>'
+            f'{TABLE} class="tfix">{"".join(rows)}</table>'
+            + _muted(f"Scale 0–{int(scale * 100)}%. Dark tick = Mar 2026 ({pct(mar)}). Blue bars are in today's pool. "
+                     "Single builds are small: read the pool, not one bar.", 11, 2))
 
 
 # ------------------------------------------------------ variant B charts ----
