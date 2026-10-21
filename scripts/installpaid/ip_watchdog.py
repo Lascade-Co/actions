@@ -27,6 +27,10 @@ def alerted_today(today, fetch=G.gh_json):
     # Every attempt of every run, this one included: a rerun of a run that already
     # alerted must stay quiet. The running attempt has no finished alert step yet.
     for r in runs:
+        # Public repo: never trust a fork's or another branch's copy of this workflow.
+        if not (r.get("event") in ("schedule", "workflow_dispatch") and r.get("head_branch") == "main"
+                and (r.get("head_repository") or {}).get("full_name") == repo):
+            continue
         for j in fetch(f"repos/{repo}/actions/runs/{r['id']}/jobs?filter=all&per_page=50")["jobs"]:
             if any(s.get("name") == f"{ALERT_STEP}{today}" and s.get("conclusion") == "success"
                    for s in j.get("steps") or []):

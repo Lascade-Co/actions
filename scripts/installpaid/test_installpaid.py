@@ -416,10 +416,13 @@ def test_watchdog_counts_only_a_successful_alert_step_for_today(monkeypatch):
             return {"workflow_runs": runs}
         return f
     ok = {"name": "Alert for 2026-10-20", "conclusion": "success"}
-    assert W.alerted_today(today, fetch([{"id": 7}], {7: [ok]}))
-    assert W.alerted_today(today, fetch([{"id": 9}], {9: [ok]}))                               # earlier attempt of this run
-    assert not W.alerted_today(today, fetch([{"id": 7}], {7: [dict(ok, conclusion="failure")]}))  # send failed
-    assert not W.alerted_today(today, fetch([{"id": 7}], {7: [dict(ok, name="Alert for 2026-10-19")]}))
+    tr = {"event": "schedule", "head_branch": "main", "head_repository": {"full_name": "Lascade-Co/actions"}}
+    assert W.alerted_today(today, fetch([dict(tr, id=7)], {7: [ok]}))
+    assert W.alerted_today(today, fetch([dict(tr, id=9)], {9: [ok]}))                               # earlier attempt of this run
+    assert not W.alerted_today(today, fetch([dict(tr, id=7)], {7: [dict(ok, conclusion="failure")]}))  # send failed
+    assert not W.alerted_today(today, fetch([dict(tr, id=7)], {7: [dict(ok, name="Alert for 2026-10-19")]}))
+    assert not W.alerted_today(today, fetch([dict(tr, id=7, event="pull_request")], {7: [ok]}))     # fork copy
+    assert not W.alerted_today(today, fetch([dict(tr, id=7, head_repository={"full_name": "x/actions"})], {7: [ok]}))
 
 
 def test_gate_dedupe_matches_the_report_date_step():
@@ -427,7 +430,8 @@ def test_gate_dedupe_matches_the_report_date_step():
     rd, now = dt.date(2026, 10, 21), _utc("2026-10-21T12:50:00")
     job = lambda name: {"name": "email", "conclusion": "success", "completed_at": "2026-10-20T23:10:00Z",
                         "steps": [{"name": name, "conclusion": "success"}]}
-    f = lambda j: (lambda path: {"jobs": [j]} if "/jobs" in path else {"workflow_runs": [{"id": 5}]})
+    f = lambda j: (lambda path: {"jobs": [j]} if "/jobs" in path else {"workflow_runs": [
+        {"id": 5, "event": "schedule", "head_branch": "main", "head_repository": {"full_name": "Lascade-Co/actions"}}]})
     # finished after 16:00 PT the day before, but for the previous date: not today's send
     assert not G.already_sent(rd, now, f(job("Send for 2026-10-20")), workflow="w", sent_step="Send for ")
     assert G.already_sent(rd, now, f(job("Send for 2026-10-21")), workflow="w", sent_step="Send for ")
@@ -446,8 +450,17 @@ def test_dated_dedupe_counts_recovery_runs_of_any_event():
         seen.append(path)
         return {"jobs": [{"name": "email", "conclusion": "success", "completed_at": "2026-10-21T13:00:00Z",
                           "steps": [{"name": "Deliver for 2026-10-21", "conclusion": "success"}]}]} \
-            if "/jobs" in path else {"workflow_runs": [{"id": 5}]}
+            if "/jobs" in path else {"workflow_runs": [dict(run)]}
+    run = {"id": 5, "event": "workflow_dispatch", "head_branch": "main",
+           "head_repository": {"full_name": "Lascade-Co/actions"}}
     assert G.already_sent(dt.date(2026, 10, 21), _utc("2026-10-21T14:00:00"), f, workflow="w", sent_step="Deliver for ")
+    for bad in ({"event": "pull_request"}, {"head_branch": "evil"},
+                {"head_repository": {"full_name": "someone/actions"}}):
+        run = {"id": 5, "event": "workflow_dispatch", "head_branch": "main",
+               "head_repository": {"full_name": "Lascade-Co/actions"}, **bad}
+        assert not G.already_sent(dt.date(2026, 10, 21), _utc("2026-10-21T14:00:00"), f, workflow="w",
+                                  sent_step="Deliver for "), bad
+    run = {"id": 5, "event": "schedule", "head_branch": "main", "head_repository": {"full_name": "Lascade-Co/actions"}}
     assert not G.already_sent(dt.date(2026, 10, 21), _utc("2026-10-21T14:00:00"), f, workflow="w", sent_step="Send for ")
     assert "event=schedule" not in seen[0]
     seen.clear()

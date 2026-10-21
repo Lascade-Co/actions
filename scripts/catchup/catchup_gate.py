@@ -76,6 +76,12 @@ def already_sent(report_date, now, fetch=gh_json, workflow="daily-catchup.yml", 
         for r in runs:
             if str(r["id"]) == current:
                 continue
+            # Public repo: with sent_step any event is read, so only trust runs this repo
+            # started from main (cron or a maintainer's dispatch), never a fork or branch copy.
+            if sent_step is not None and not (
+                    r.get("event") in ("schedule", "workflow_dispatch") and r.get("head_branch") == "main"
+                    and (r.get("head_repository") or {}).get("full_name") == repo):
+                continue
             jobs = fetch(f"repos/{repo}/actions/runs/{r['id']}/jobs?per_page=100")["jobs"]
             for j in jobs:
                 if j["name"] == "email" and j["conclusion"] == "success" and j.get("completed_at"):
