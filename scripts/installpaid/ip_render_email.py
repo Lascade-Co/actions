@@ -545,7 +545,8 @@ def subject_of(model):
         if t["empty"]:
             continue
         bits.append(f"{t['label']} {pct(t['rates']['paid'][0])}" + (" (thin)" if t["thin"] else ""))
-    return "TA install→paid, day one: " + " · ".join(bits)
+    rd = model["report_date"]   # dated, like the ad-spend email, so Gmail never threads two days together
+    return f"TA install→paid · {rd:%a} {day(rd)} — " + " · ".join(bits)
 
 
 def render(model, variant, out_dir):

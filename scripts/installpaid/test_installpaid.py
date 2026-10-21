@@ -431,3 +431,9 @@ def test_gate_dedupe_matches_the_report_date_step():
     # finished after 16:00 PT the day before, but for the previous date: not today's send
     assert not G.already_sent(rd, now, f(job("Send for 2026-10-20")), workflow="w", sent_step="Send for ")
     assert G.already_sent(rd, now, f(job("Send for 2026-10-21")), workflow="w", sent_step="Send for ")
+
+
+def test_subject_carries_the_report_date():
+    m = model({"ios": [row("4.1.0", 1, 900, paid=45)], "android": []})
+    s = R.subject_of(m)
+    assert s.startswith(f"TA install→paid · {m['report_date']:%a} {m['report_date'].day} {m['report_date']:%b} — iOS ")
