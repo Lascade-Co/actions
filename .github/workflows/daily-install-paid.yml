@@ -10,9 +10,6 @@ on:
       report_date:
         description: Report date (YYYY-MM-DD); blank = the newest date whose 05:00 PT cutoff has passed
         default: ''
-      share_to:
-        description: TEMPORARY one-off, send this run only to this @lascade.com address (normal subject)
-        default: ''
       test_alert:
         description: Test only, fail the run on purpose to exercise the Telegram alert
         type: boolean
@@ -124,13 +121,11 @@ jobs:
         working-directory: scripts/installpaid
         env:
           RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
-          SHARE_TO: ${{ inputs.share_to }}
         run: |
-          if [ -n "$SHARE_TO" ] && ! [[ "$SHARE_TO" =~ ^[a-z0-9._-]+@lascade\.com$ ]]; then echo "share_to must be one @lascade.com address"; exit 1; fi
           RD=$(cat out/report-date.txt)
           SUFFIX=${{ github.event_name == 'schedule' && 'scheduled' || format('manual-{0}', github.run_id) }}
           # Manual runs get a unique subject tag so Gmail never folds a test into an earlier thread.
-          if [ "${{ github.event_name }}" != schedule ] && [ -z "$SHARE_TO" ]; then
+          if [ "${{ github.event_name }}" != schedule ]; then
             printf '[Test %s] %s' "${{ github.run_number }}" "$(cat out/subject-A.txt)" > out/subject-A.txt
           fi
           bash send_resend_ip.sh "$RD" "$SUFFIX"

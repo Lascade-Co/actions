@@ -7,7 +7,7 @@
 # The payload is written once before the first attempt; retries reuse it unchanged.
 set -euo pipefail
 RD="$1"; SUFFIX="$2"
-TO="${SHARE_TO:-cherian@lascade.com}"   # SHARE_TO: temporary one-off share, manual runs only
+TO="cherian@lascade.com"
 KEY="install-paid-$RD-$SUFFIX"
 [ -f payload.json ] || jq -n --rawfile html out/email-A.html --rawfile text out/email-A.txt \
       --rawfile subject out/subject-A.txt --arg to "$TO" \
