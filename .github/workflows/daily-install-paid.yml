@@ -124,6 +124,10 @@ jobs:
         run: |
           RD=$(cat out/report-date.txt)
           SUFFIX=${{ github.event_name == 'schedule' && 'scheduled' || format('manual-{0}', github.run_id) }}
+          # Manual runs get a unique subject tag so Gmail never folds a test into an earlier thread.
+          if [ "${{ github.event_name }}" != schedule ]; then
+            printf '[Test %s] %s' "${{ github.run_number }}" "$(cat out/subject-A.txt)" > out/subject-A.txt
+          fi
           bash send_resend_ip.sh "$RD" "$SUFFIX"
 
   # Separate job so a failure in either gate, a timeout or the email job all alert.
