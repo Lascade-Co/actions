@@ -16,6 +16,11 @@ sys.path.insert(0, HERE)
 import ip_fetch as F  # noqa: E402
 import ip_model as M  # noqa: E402
 import ip_render_email as R  # noqa: E402
+from test_ip_delivery import TestEditionDelivery  # noqa: E402,F401
+from test_ip_crosscheck import TestMuscatCrosscheck  # noqa: E402,F401
+from test_ip_sender import TestSender  # noqa: E402,F401
+from test_ip_deadline import TestAbsoluteDeadline  # noqa: E402,F401
+from test_ip_workflow import TestDailyWorkflow  # noqa: E402,F401
 
 D0 = dt.date(2026, 10, 1)
 CIDRS = ["70.32.128.0/19", "2001:4860::/32"]
@@ -410,17 +415,17 @@ def test_watchdog_counts_only_a_successful_alert_step_for_today(monkeypatch):
 
     def fetch(runs, steps):
         def f(path):
-            if "/jobs?filter=all" in path:
+            if "/jobs" in path:
                 rid = int(path.split("/runs/")[1].split("/")[0])
                 return {"jobs": [{"steps": steps.get(rid, [])}]}
             return {"workflow_runs": runs}
         return f
-    ok = {"name": "Alert for 2026-10-20", "conclusion": "success"}
+    ok = {"name": "Alert PT for 2026-10-20", "conclusion": "success"}
     tr = {"event": "schedule", "head_branch": "main", "head_repository": {"full_name": "Lascade-Co/actions"}}
     assert W.alerted_today(today, fetch([dict(tr, id=7)], {7: [ok]}))
     assert W.alerted_today(today, fetch([dict(tr, id=9)], {9: [ok]}))                               # earlier attempt of this run
     assert not W.alerted_today(today, fetch([dict(tr, id=7)], {7: [dict(ok, conclusion="failure")]}))  # send failed
-    assert not W.alerted_today(today, fetch([dict(tr, id=7)], {7: [dict(ok, name="Alert for 2026-10-19")]}))
+    assert not W.alerted_today(today, fetch([dict(tr, id=7)], {7: [dict(ok, name="Alert PT for 2026-10-19")]}))
     assert not W.alerted_today(today, fetch([dict(tr, id=7, event="pull_request")], {7: [ok]}))     # fork copy
     assert not W.alerted_today(today, fetch([dict(tr, id=7, head_repository={"full_name": "x/actions"})], {7: [ok]}))
 
@@ -466,3 +471,7 @@ def test_dated_dedupe_counts_recovery_runs_of_any_event():
     seen.clear()
     G.already_sent(dt.date(2026, 10, 21), _utc("2026-10-21T14:00:00"), f, workflow="w")   # legacy callers
     assert "event=schedule" in seen[0]
+
+
+# Include edition and phase cases in the required verification entrypoint.
+from test_ip_watchdog import TestWatchdogEditions  # noqa: E402, F401

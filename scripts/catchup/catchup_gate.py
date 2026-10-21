@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Timing gate for daily-catchup: hold the run until 05:45 Pacific, then release.
+"""Timing gate: hold until the local target, defaulting to 05:45 Pacific.
 
 GitHub's cron scheduler fires late, so the workflow is scheduled several times the
 evening before and each run waits here until the target. Two chained jobs are used
@@ -18,7 +18,7 @@ import subprocess
 import sys
 import time
 from datetime import datetime, timedelta, timezone
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 PT = ZoneInfo("America/Los_Angeles")
 TARGET_HHMM = (5, 45)          # 15 min lead for the pipeline
@@ -27,28 +27,58 @@ MAX_WAIT = 2 * MAX_SLEEP       # two chained sleep jobs
 SENT_CUTOFF_HOUR = 16          # a run finishing after 16:00 PT day D-1 belongs to report D
 
 
+class DedupeUnavailable(RuntimeError):
+    """Delivery history could not be verified; a fresh send key is unsafe."""
+
+
 def now_utc():
     v = os.environ.get("NOW")
     return datetime.fromisoformat(v).astimezone(timezone.utc) if v else datetime.now(timezone.utc)
 
 
-def target_for(report_date):
+def parse_zone(value):
+    try:
+        return ZoneInfo(value)
+    except (ZoneInfoNotFoundError, ValueError) as exc:
+        raise argparse.ArgumentTypeError("timezone must be a valid IANA name") from exc
+
+
+def parse_target(value):
+    try:
+        if (len(value) != 5 or value[2] != ":"
+                or not value[:2].isascii() or not value[3:].isascii()
+                or not value[:2].isdigit() or not value[3:].isdigit()):
+            raise ValueError
+        hour, minute = map(int, value.split(":"))
+        if not 0 <= hour <= 23 or not 0 <= minute <= 59:
+            raise ValueError
+        return hour, minute
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("target must be HH:MM in 24-hour time") from exc
+
+
+def target_for(report_date, tz=PT, target=TARGET_HHMM):
+    tz = parse_zone(tz) if isinstance(tz, str) else tz
+    target = parse_target(target) if isinstance(target, str) else target
     return datetime(report_date.year, report_date.month, report_date.day,
-                    *TARGET_HHMM, tzinfo=PT)
+                    *target, tzinfo=tz)
 
 
-def plan(now):
+def plan(now, tz=PT, target=TARGET_HHMM):
     """Return (report_date, wait_seconds, proceed)."""
-    local = now.astimezone(PT)
+    tz = parse_zone(tz) if isinstance(tz, str) else tz
+    local = now.astimezone(tz)
     report_date = (local + timedelta(hours=8)).date()
-    wait = max(0.0, (target_for(report_date) - now).total_seconds())
+    wait = max(0.0, (target_for(report_date, tz, target).astimezone(timezone.utc)
+                     - now.astimezone(timezone.utc)).total_seconds())
     return report_date, wait, wait <= MAX_WAIT
 
 
-def phase2_wait(report_date, now):
+def phase2_wait(report_date, now, tz=PT, target=TARGET_HHMM):
     """Seconds phase 2 should sleep, from the absolute target rather than the
     `remaining` phase 1 computed: gate2 can queue behind gate for an hour."""
-    return min(MAX_SLEEP, max(0.0, (target_for(report_date) - now).total_seconds()))
+    return min(MAX_SLEEP, max(0.0, (target_for(report_date, tz, target).astimezone(timezone.utc)
+                                   - now.astimezone(timezone.utc)).total_seconds()))
 
 
 def sent_cutoff(report_date):
@@ -61,35 +91,71 @@ def gh_json(path):
     return json.loads(out)
 
 
+def paginated(fetch, path, key):
+    """Yield each API page without limiting dedupe to the newest runs or jobs."""
+    page = 1
+    while True:
+        result = fetch(f"{path}?per_page=100&page={page}")
+        rows = result[key]
+        yield from rows
+        if len(rows) < 100 or page * 100 >= result.get("total_count", float("inf")):
+            return
+        page += 1
+
+
+def trusted_run(run, repo):
+    """Only main's cron and maintainer dispatch runs can record a delivery."""
+    return (run.get("event") in ("schedule", "workflow_dispatch")
+            and run.get("head_branch") == "main"
+            and (run.get("head_repository") or {}).get("full_name") == repo)
+
+
+def sent_step_succeeded(report_date, fetch, repo, workflow, sent_step):
+    """A successful delivery step is acceptance, even if another step failed.
+
+    Query the complete retained run history so an older report's manual recovery
+    also sees previous acceptance. Include earlier attempts of the current run.
+    """
+    runs = paginated(fetch, f"repos/{repo}/actions/workflows/{workflow}/runs", "workflow_runs")
+    for run in runs:
+        if not trusted_run(run, repo):
+            continue
+        for attempt in range(1, int(run.get("run_attempt", 1)) + 1):
+            path = f"repos/{repo}/actions/runs/{run['id']}/attempts/{attempt}/jobs"
+            for job in paginated(fetch, path, "jobs"):
+                if job.get("name") == "email" and any(
+                        step.get("name") == f"{sent_step}{report_date}" and step.get("conclusion") == "success"
+                        for step in job.get("steps") or []):
+                    return True
+    return False
+
+
 def already_sent(report_date, now, fetch=gh_json, workflow="daily-catchup.yml", sent_step=None):
-    """True if a scheduled run's `email` job succeeded for this report_date. Fails open.
-    With sent_step, the job must also hold a successful step named f"{sent_step}{report_date}",
-    so a late finish for one date cannot read as the next date's send. That step name is
-    specific enough that runs of any event count (a manual recovery send included)."""
+    """Dedupe by accepted dated step, or the legacy scheduled-job cutoff.
+
+    Dated-step checks fail closed because recovery uses a fresh send key.
+    The legacy scheduled-job check retains its fail-open behavior.
+    """
     repo = os.environ.get("GITHUB_REPOSITORY", "Lascade-Co/actions")
+    if sent_step is not None:
+        try:
+            return sent_step_succeeded(report_date, fetch, repo, workflow, sent_step)
+        except Exception:
+            raise DedupeUnavailable("delivery history unavailable") from None
+
+    # Legacy catchup/ad-spend behavior: latest jobs, schedule only, 16:00 PT cutoff.
     current = os.environ.get("GITHUB_RUN_ID", "")
     cutoff = sent_cutoff(report_date).astimezone(timezone.utc)
     since = (now - timedelta(hours=30)).strftime("%Y-%m-%dT%H:%M:%SZ")
     try:
         runs = fetch(f"repos/{repo}/actions/workflows/{workflow}/runs"
-                     f"?{'' if sent_step is not None else 'event=schedule&'}per_page=50&created=>={since}")["workflow_runs"]
+                     f"?event=schedule&per_page=50&created=>={since}")["workflow_runs"]
         for r in runs:
             if str(r["id"]) == current:
-                continue
-            # Public repo: with sent_step any event is read, so only trust runs this repo
-            # started from main (cron or a maintainer's dispatch), never a fork or branch copy.
-            if sent_step is not None and not (
-                    r.get("event") in ("schedule", "workflow_dispatch") and r.get("head_branch") == "main"
-                    and (r.get("head_repository") or {}).get("full_name") == repo):
                 continue
             jobs = fetch(f"repos/{repo}/actions/runs/{r['id']}/jobs?per_page=100")["jobs"]
             for j in jobs:
                 if j["name"] == "email" and j["conclusion"] == "success" and j.get("completed_at"):
-                    if sent_step is not None:
-                        if any(st.get("name") == f"{sent_step}{report_date}" and st.get("conclusion") == "success"
-                               for st in j.get("steps") or []):
-                            return True
-                        continue
                     done = datetime.fromisoformat(j["completed_at"].replace("Z", "+00:00"))
                     if done >= cutoff:
                         return True
@@ -113,6 +179,8 @@ def main():
     ap.add_argument("--event", default="schedule")
     ap.add_argument("--report-date")
     ap.add_argument("--remaining", type=float, default=0)  # unused; kept so callers keep working
+    ap.add_argument("--tz", type=parse_zone, default=PT, help="IANA timezone (default America/Los_Angeles)")
+    ap.add_argument("--target", type=parse_target, default=TARGET_HHMM, help="local HH:MM target (default 05:45)")
     ap.add_argument("--workflow", default="daily-catchup.yml")
     ap.add_argument("--sent-step", default=None, help="dedupe on a successful step named <prefix><report_date>")
     a = ap.parse_args()
@@ -120,7 +188,7 @@ def main():
     now = now_utc()
 
     if a.phase == 1:
-        report_date, wait, ok = plan(now)
+        report_date, wait, ok = plan(now, a.tz, a.target)
         if manual:
             wait, ok = 0.0, True
         if not ok:
@@ -137,7 +205,7 @@ def main():
     from datetime import date
     report_date = date.fromisoformat(a.report_date)
     if not manual:
-        time.sleep(phase2_wait(report_date, now_utc()))
+        time.sleep(phase2_wait(report_date, now_utc(), a.tz, a.target))
     if not manual and already_sent(report_date, now_utc(), workflow=a.workflow, sent_step=a.sent_step):
         print("already sent for", report_date)
         return emit(proceed="false", report_date=report_date)

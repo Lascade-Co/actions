@@ -16,6 +16,7 @@ import datetime as dt
 from html import escape as esc
 
 import ip_model as M
+from ip_editions import get_edition
 
 FONT_HEADING = "'Inter', system-ui, -apple-system, 'Segoe UI', sans-serif"
 FONT_BODY = "'Inter', system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', sans-serif"
@@ -512,9 +513,10 @@ def _audit_line(model):
 
 
 def footnote_lines(model):
+    edition = get_edition(model.get("edition", "pt"))
     return [
         "Every rate is reach within 24 hours of a person's first install (a reinstall within 180 days does "
-        "not restart the clock). Installs from the last 60 days that are at least a day old; data to 05:00 Pacific.",
+        f"not restart the clock). Installs from the last 60 days that are at least a day old; data to 05:00 {edition.label}.",
         "Builds marked soft launch never reached 10 real installs in a day; old binaries outside Android 4.0.x and "
         "5.x are left out. Each track pools its newest builds until it has enough installs to expect 40 payers at its March 2026 rate, "
         "so the pool never depends on today's results. Under 20 actual payers, or out of builds: no verdict.",
@@ -549,6 +551,15 @@ def subject_of(model):
     return f"TA install→paid · {rd:%a} {day(rd)} — " + " · ".join(bits)
 
 
+def maturity_label(model):
+    cutoff = model["cutoff_utc"]
+    if cutoff.tzinfo is None:
+        cutoff = cutoff.replace(tzinfo=dt.timezone.utc)
+    endpoint = (cutoff.astimezone(dt.timezone.utc) - dt.timedelta(hours=24)).astimezone(
+        get_edition(model.get("edition", "pt")).zone)
+    return f"{day(endpoint)}, {endpoint:%H:%M %Z}"
+
+
 def render(model, variant, out_dir):
     """-> (subject, html, text, images). images: [{"name", "path"}] for variant B; the html
     references images by bare file name (the sender swaps in cid: URLs)."""
@@ -558,7 +569,7 @@ def render(model, variant, out_dir):
     preheader = verdict_line(model["tracks"][0], model)[1] if model["tracks"] else subject
     parts = [
         _masthead("Lascade · TravelAnimator", "Install → paid, day one",
-                  f"{rd:%a %-d %b} · installs to {day(rd - dt.timedelta(days=1))}, 05:00 PT · App Store and Play Store"),
+                  f"{rd:%a %-d %b} · installs to {maturity_label(model)} · App Store and Play Store"),
         _stat_grid(model), _lead(model), _row(_legend(), 14),
         "".join(_track(t, model, variant, out_dir, images) for t in model["tracks"]),
         _footnotes(model),
@@ -571,7 +582,8 @@ def render(model, variant, out_dir):
             '<table role="presentation" cellspacing="0" cellpadding="0" border="0" width="600" align="center" '
             'style="width:100%; max-width:600px;" class="email-container"><tr><td>' + "".join(parts) +
             '</td></tr></table></td></tr></table></body></html>')
-    text = ["LASCADE · TRAVELANIMATOR", "Install → paid, day one", f"{rd:%A %-d %B}", ""]
+    text = ["LASCADE · TRAVELANIMATOR", "Install → paid, day one", f"{rd:%A %-d %B}",
+            f"Installs to {maturity_label(model)}", ""]
     for t in model["tracks"]:
         name, line = verdict_line(t, model)
         text += [f"{name}: {line}"]

@@ -12,8 +12,11 @@ Logs from this module never carry figures: the repository is public.
 from __future__ import annotations
 
 import datetime as dt
+from contextlib import contextmanager
 import json
 import os
+import signal
+import threading
 import time
 from pathlib import Path
 
@@ -21,7 +24,7 @@ import requests
 
 HOST = os.environ.get("POSTHOG_HOST", "https://us.posthog.com").rstrip("/")
 PROJECT = os.environ.get("POSTHOG_PROJECT_ID", "107752")
-LOOKBACK_DAYS = 180       # 730-day check on 13 Oct 2026 found 0 returning users beyond 180 days
+LOOKBACK_DAYS = 180
 CHUNK_DAYS = 14           # whole-month cohorts time out (HTTP 504) as one query
 QUERY_LIMIT = 50000       # the HogQL API silently returns 100 rows without an explicit LIMIT
 H = 24                    # every rate in the email is reach within 24 hours of install
@@ -123,16 +126,75 @@ LIMIT {QUERY_LIMIT}
 """.strip()
 
 
-def make_runner(key: str, retries: int = 4, poll_s: int = 4, max_wait_s: int = 900):
+def utcnow():
+    return dt.datetime.now(dt.timezone.utc)
+
+
+def check_deadline(deadline):
+    if deadline is None:
+        return float("inf")
+    remaining = (deadline - utcnow()).total_seconds()
+    if remaining <= 0:
+        raise Unavailable("absolute build deadline reached")
+    return remaining
+
+
+@contextmanager
+def absolute_deadline(deadline):
+    """Interrupt blocking HTTP reads at the shared deadline, including trickles.
+
+    Requests' timeout limits inactivity between reads, so it cannot enforce the
+    overall budget. This CLI owns one Unix alarm while a query runs. A caller
+    with another active alarm, or outside the main thread, must fail closed.
+    """
+    if deadline is None:
+        yield
+        return
+    check_deadline(deadline)
+    if (threading.current_thread() is not threading.main_thread()
+            or not all(hasattr(signal, name) for name in (
+                "SIGALRM", "ITIMER_REAL", "setitimer", "getitimer", "pthread_sigmask", "SIG_BLOCK"))):
+        raise Unavailable("absolute build deadline cannot be enforced")
+    previous_handler = signal.getsignal(signal.SIGALRM)
+    if (previous_handler is None or signal.getitimer(signal.ITIMER_REAL)[0] > 0
+            or signal.SIGALRM in signal.pthread_sigmask(signal.SIG_BLOCK, set())):
+        raise Unavailable("absolute build deadline cannot be enforced")
+
+    def expired(_signum, _frame):
+        raise Unavailable("absolute build deadline reached") from None
+
+    try:
+        signal.signal(signal.SIGALRM, expired)
+    except (OSError, ValueError):
+        raise Unavailable("absolute build deadline cannot be enforced") from None
+    try:
+        try:
+            signal.setitimer(signal.ITIMER_REAL, check_deadline(deadline))
+        except (OSError, ValueError):
+            raise Unavailable("absolute build deadline cannot be enforced") from None
+        yield
+    finally:
+        try:
+            signal.setitimer(signal.ITIMER_REAL, 0)
+        finally:
+            signal.signal(signal.SIGALRM, previous_handler)
+
+
+def make_runner(key: str, retries: int = 4, poll_s: int = 4, max_wait_s: int = 900, deadline=None):
     """run(sql) -> [row dicts]. Async query + polling: the synchronous endpoint's gateway
     returns HTTP 504 after ~16 s on these cohorts (seen 20 Oct 2026), while the same query
     finishes in seconds asynchronously. Retries submit/poll failures; raises Unavailable."""
     url = f"{HOST}/api/projects/{PROJECT}/query/"
     hdr = {"Authorization": f"Bearer {key}"}
 
+    def pause(seconds):
+        time.sleep(min(seconds, check_deadline(deadline)))
+        check_deadline(deadline)
+
     def once(sql: str):
         r = requests.post(url, json={"query": {"kind": "HogQLQuery", "query": sql}, "refresh": "force_async"},
-                          headers=hdr, timeout=60)
+                          headers=hdr, timeout=min(60, check_deadline(deadline)))
+        check_deadline(deadline)
         if r.status_code >= 500 or r.status_code == 429:
             raise requests.RequestException(f"HTTP {r.status_code}")      # retried
         if r.status_code not in (200, 202):
@@ -145,29 +207,38 @@ def make_runner(key: str, retries: int = 4, poll_s: int = 4, max_wait_s: int = 9
                 raise requests.RequestException("no query id")
             if time.monotonic() - t0 > max_wait_s:
                 raise requests.RequestException("poll timeout")
-            time.sleep(poll_s)
-            p = requests.get(f"{url}{st['id']}/", headers=hdr, timeout=60)
+            pause(poll_s)
+            p = requests.get(f"{url}{st['id']}/", headers=hdr, timeout=min(60, check_deadline(deadline)))
+            check_deadline(deadline)
             if p.status_code not in (200, 202):     # 202 = still running
                 raise requests.RequestException(f"poll HTTP {p.status_code}")
             st = p.json().get("query_status") or {}
             if st.get("complete"):
                 if st.get("error"):
-                    raise Unavailable(f"PostHog query error ({st.get('error_code') or 'unknown'})")
+                    raise Unavailable("PostHog query error")
                 res = st.get("results") or {}
         rows = [dict(zip(res["columns"], x)) for x in res.get("results") or []]
         if len(rows) >= QUERY_LIMIT or res.get("hasMore"):
             raise Unavailable("query hit the row limit; result would be truncated")
         return rows
 
-    def run(sql: str):
-        last = "no attempt"
+    def attempts(sql: str):
         for i in range(retries):
+            check_deadline(deadline)
             try:
                 return once(sql)
-            except requests.RequestException as e:
-                last = str(e)[:40] or type(e).__name__
-            time.sleep(min(60, 5 * 2 ** i))
-        raise Unavailable(f"PostHog query failed after {retries} attempts ({last})")
+            except requests.RequestException:
+                pass  # exception text may contain a private response body or URL
+            except (ValueError, KeyError, TypeError):
+                raise Unavailable("PostHog returned an invalid response") from None
+            if i + 1 < retries:
+                pause(min(60, 5 * 2 ** i))
+        raise Unavailable("PostHog query failed after retries")
+
+    def run(sql: str):
+        with absolute_deadline(deadline):
+            return attempts(sql)
+
     return run
 
 
@@ -189,13 +260,15 @@ def chunks(start: dt.datetime, end: dt.datetime, days: int = CHUNK_DAYS):
         a = b
 
 
-def fetch_cohort(run, start, end, cutoff, cidrs, log=print):
+def fetch_cohort(run, start, end, cutoff, cidrs, log=print, deadline=None):
     """{plat: [rows]} for installs in [start, end), queried in <= 14-day chunks."""
     out = {}
     for plat in PLAT_OS:
         rows = []
         for a, b in chunks(start, end):
+            check_deadline(deadline)
             rows += run(cohort_sql(a, b, cutoff, plat, cidrs))
+            check_deadline(deadline)
             log(f"fetched {plat} {a:%Y-%m-%d}..{b:%Y-%m-%d}")
         out[plat] = rows
     return out

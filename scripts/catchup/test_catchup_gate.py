@@ -1,6 +1,10 @@
 import os
 import sys
+import traceback
 from datetime import datetime, timezone, date, timedelta
+from urllib.parse import parse_qs, urlsplit
+
+import pytest
 sys.path.insert(0, os.path.dirname(__file__))
 import catchup_gate as g
 
@@ -94,6 +98,246 @@ def test_workflow_routes_dedupe():
     seen.clear()
     g.already_sent(date(2026, 9, 24), now, f)
     assert "workflows/daily-catchup.yml/runs" in seen[0]
+
+
+@pytest.mark.parametrize("hour,wait_minutes", [(13, 628), (16, 448), (19, 268)])
+def test_ist_crons_wait_until_next_local_report_day(hour, wait_minutes):
+    now = U(f"2026-10-20T{hour}:07:00+00:00")
+    rd, wait, proceed = g.plan(now, tz="Asia/Kolkata", target="05:05")
+    assert (rd, wait, proceed) == (date(2026, 10, 21), wait_minutes * 60, True)
+    assert g.target_for(rd, tz="Asia/Kolkata", target="05:05").astimezone(timezone.utc) == U(
+        "2026-10-20T23:35:00+00:00")
+    assert wait <= g.MAX_WAIT
+
+
+@pytest.mark.parametrize("report_day,now,target,wait_minutes", [
+    ("2026-03-08", "2026-03-08T09:17:00+00:00", "2026-03-08T12:05:00+00:00", 168),
+    ("2026-11-01", "2026-11-01T08:17:00+00:00", "2026-11-01T13:05:00+00:00", 288),
+])
+def test_pt_installpaid_target_across_dst(report_day, now, target, wait_minutes):
+    rd = date.fromisoformat(report_day)
+    assert g.target_for(rd, tz=g.PT, target=(5, 5)).astimezone(timezone.utc) == U(target)
+    assert g.plan(U(now), tz=g.PT, target=(5, 5)) == (rd, wait_minutes * 60, True)
+    assert g.phase2_wait(rd, U(now), tz=g.PT, target=(5, 5)) == wait_minutes * 60
+    # A caller with an already-local clock must still get elapsed, not wall-clock, time.
+    assert g.plan(U(now).astimezone(g.PT), tz=g.PT, target=(5, 5)) == (rd, wait_minutes * 60, True)
+
+
+def test_phase2_ist_target_is_absolute_and_clamped():
+    rd = date(2026, 10, 21)
+    assert g.phase2_wait(rd, U("2026-10-20T23:05:00+00:00"), "Asia/Kolkata", "05:05") == 1800
+    assert g.phase2_wait(rd, U("2026-10-20T23:40:00+00:00"), "Asia/Kolkata", "05:05") == 0
+    assert g.phase2_wait(rd, U("2026-10-20T13:07:00+00:00"), "Asia/Kolkata", "05:05") == g.MAX_SLEEP
+
+
+def _trusted_run(run_id, **changes):
+    return dict(id=run_id, event="schedule", head_branch="main", run_attempt=1,
+                head_repository={"full_name": "Lascade-Co/actions"}, **changes)
+
+
+def _sent_job(step="Deliver for 2026-10-21", **changes):
+    return dict(name="email", conclusion="success", completed_at="2026-10-21T12:20:00Z",
+                steps=[{"name": step, "conclusion": "success"}], **changes)
+
+
+def _attempt_fetcher(runs, jobs_by_attempt):
+    def f(path):
+        if "/jobs" in path:
+            run_id = int(path.split("/runs/")[1].split("/")[0])
+            # The default jobs endpoint returns only the latest attempt.
+            attempt = int(path.split("/attempts/")[1].split("/")[0]) if "/attempts/" in path else "latest"
+            return {"jobs": jobs_by_attempt.get((run_id, attempt), [])}
+        return {"workflow_runs": runs}
+    return f
+
+
+def test_dated_dedupe_counts_successful_step_despite_job_failure(monkeypatch):
+    monkeypatch.setenv("GITHUB_REPOSITORY", "Lascade-Co/actions")
+    rd, now = date(2026, 10, 21), U("2026-10-21T14:00:00+00:00")
+    job = dict(_sent_job(), conclusion="failure", completed_at=None)
+    fetch = _attempt_fetcher([_trusted_run(2)], {(2, 1): [job], (2, "latest"): [job]})
+    assert g.already_sent(rd, now, fetch, workflow="daily-install-paid.yml", sent_step="Deliver for ")
+
+
+def test_dated_dedupe_checks_earlier_attempt_of_current_run(monkeypatch):
+    monkeypatch.setenv("GITHUB_RUN_ID", "2")
+    monkeypatch.setenv("GITHUB_RUN_ATTEMPT", "3")
+    rd, now = date(2026, 10, 21), U("2026-10-21T14:00:00+00:00")
+    runs = [dict(_trusted_run(2), run_attempt=3)]
+    fetch = _attempt_fetcher(runs, {(2, 1): [_sent_job()], (2, 2): [], (2, 3): []})
+    assert g.already_sent(rd, now, fetch, workflow="daily-install-paid.yml", sent_step="Deliver for ")
+
+
+def test_dated_dedupe_paginates_runs_and_attempt_jobs(monkeypatch):
+    monkeypatch.setenv("GITHUB_RUN_ID", "1")
+    rd, now = date(2026, 10, 21), U("2026-10-21T14:00:00+00:00")
+
+    def fetch(path):
+        query = parse_qs(urlsplit(path).query)
+        page = int(query.get("page", [1])[0])
+        per_page = int(query["per_page"][0])
+        if "/jobs" in path:
+            assert "/runs/800/attempts/2/jobs" in path or "/runs/800/attempts/1/jobs" in path
+            if "/attempts/1/" in path:
+                return {"jobs": []}
+            jobs = ([{"name": "other", "conclusion": "success"}] * per_page) if page == 1 else [_sent_job()]
+            return {"jobs": jobs, "total_count": per_page + 1}
+        runs = ([dict(_trusted_run(99), head_branch="untrusted")] * per_page) if page == 1 else [dict(_trusted_run(800), run_attempt=2)]
+        return {"workflow_runs": runs, "total_count": per_page + 1}
+
+    assert g.already_sent(rd, now, fetch, workflow="daily-install-paid.yml", sent_step="Deliver for ")
+
+
+def test_dated_dedupe_does_not_exclude_old_report_runs(monkeypatch):
+    monkeypatch.setenv("GITHUB_RUN_ID", "1")
+    rd, now = date(2026, 10, 21), U("2026-11-21T14:00:00+00:00")
+
+    def fetch(path):
+        if "/jobs" in path:
+            return {"jobs": [_sent_job()]}
+        if "created=" in path:
+            return {"workflow_runs": []}
+        return {"workflow_runs": [_trusted_run(2)]}
+
+    assert g.already_sent(rd, now, fetch, workflow="daily-install-paid.yml", sent_step="Deliver for ")
+
+
+@pytest.mark.parametrize("change", [
+    {"event": "pull_request"}, {"head_branch": "feature"},
+    {"head_repository": {"full_name": "fork/actions"}}, {"head_repository": None},
+])
+def test_dated_dedupe_rejects_untrusted_runs(monkeypatch, change):
+    monkeypatch.setenv("GITHUB_RUN_ID", "1")
+    run = dict(_trusted_run(2), **change)
+    fetch = _attempt_fetcher([run], {(2, 1): [_sent_job()], (2, "latest"): [_sent_job()]})
+    assert not g.already_sent(date(2026, 10, 21), U("2026-10-21T14:00:00+00:00"), fetch,
+                              workflow="daily-install-paid.yml", sent_step="Deliver for ")
+
+
+@pytest.mark.parametrize("prefix,other_step", [
+    ("Deliver for ", "Deliver IST for 2026-10-21"),
+    ("Deliver IST for ", "Deliver for 2026-10-21"),
+    ("Deliver for ", "Forced send for 2026-10-21"),
+    ("Deliver IST for ", "Forced send for 2026-10-21"),
+    ("Deliver for ", "Deliver for 2026-10-20"),
+])
+def test_dated_dedupe_isolates_edition_date_and_forced_steps(monkeypatch, prefix, other_step):
+    monkeypatch.setenv("GITHUB_RUN_ID", "1")
+    fetch = _attempt_fetcher([_trusted_run(2)], {(2, 1): [_sent_job(other_step)]})
+    assert not g.already_sent(date(2026, 10, 21), U("2026-10-21T14:00:00+00:00"), fetch,
+                              workflow="daily-install-paid.yml", sent_step=prefix)
+
+
+def test_legacy_dedupe_keeps_schedule_query_latest_jobs_and_16_hour_cutoff(monkeypatch):
+    monkeypatch.setenv("GITHUB_RUN_ID", "1")
+    rd, now = date(2026, 10, 21), U("2026-10-21T14:00:00+00:00")
+    before_cutoff = dict(_sent_job(), completed_at="2026-10-20T22:59:59Z")
+    at_cutoff = dict(_sent_job(), completed_at="2026-10-20T23:00:00Z")
+    seen = []
+
+    def fetch(path):
+        seen.append(path)
+        if "/jobs" in path:
+            return {"jobs": [current_job]}
+        return {"workflow_runs": [{"id": 2}]}
+
+    for current_job, expected in ((before_cutoff, False), (at_cutoff, True)):
+        assert g.already_sent(rd, now, fetch) is expected
+    assert all("event=schedule&per_page=50&created=>=" in p for p in seen if "/jobs" not in p)
+    assert all("/runs/2/jobs?per_page=100" in p and "/attempts/" not in p for p in seen if "/jobs" in p)
+
+
+def test_cli_routes_zone_and_target_and_preserves_remaining(monkeypatch, capsys):
+    monkeypatch.setenv("NOW", "2026-10-20T23:20:00+00:00")
+    monkeypatch.delenv("GITHUB_OUTPUT", raising=False)
+    monkeypatch.setattr(sys, "argv", ["catchup_gate.py", "--phase", "2", "--report-date", "2026-10-21",
+                                     "--remaining", "999999", "--tz", "Asia/Kolkata", "--target", "05:05"])
+    sleeps = []
+    monkeypatch.setattr(g.time, "sleep", sleeps.append)
+    monkeypatch.setattr(g, "already_sent", lambda *a, **k: False)
+    g.main()
+    assert sleeps == [900]
+    assert "proceed=true\nreport_date=2026-10-21\n" in capsys.readouterr().out
+
+
+def test_cli_legacy_defaults_and_manual_remaining(monkeypatch, capsys):
+    monkeypatch.setenv("NOW", "2026-10-21T12:20:00+00:00")
+    monkeypatch.delenv("GITHUB_OUTPUT", raising=False)
+    monkeypatch.setattr(sys, "argv", ["catchup_gate.py", "--phase", "2", "--report-date", "2026-10-21",
+                                     "--remaining", "999999"])
+    sleeps = []
+    monkeypatch.setattr(g.time, "sleep", sleeps.append)
+    monkeypatch.setattr(g, "already_sent", lambda *a, **k: False)
+    g.main()
+    assert sleeps == [1500]
+    sleeps.clear()
+    monkeypatch.setattr(sys, "argv", sys.argv + ["--event", "workflow_dispatch"])
+    g.main()
+    assert sleeps == []
+    assert capsys.readouterr().out.count("proceed=true") == 2
+
+
+def test_cli_phase1_uses_ist_report_date_and_sleep_cap(monkeypatch, capsys):
+    monkeypatch.setenv("NOW", "2026-10-20T13:07:00+00:00")
+    monkeypatch.delenv("GITHUB_OUTPUT", raising=False)
+    monkeypatch.setattr(sys, "argv", ["catchup_gate.py", "--phase", "1", "--tz", "Asia/Kolkata", "--target", "05:05"])
+    sleeps = []
+    monkeypatch.setattr(g.time, "sleep", sleeps.append)
+    monkeypatch.setattr(g, "already_sent", lambda *a, **k: False)
+    g.main()
+    assert sleeps == [20400]
+    assert "proceed=true\nreport_date=2026-10-21\nremaining=17280\n" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("argument,value", [
+    ("--tz", "Unknown/Timezone"), ("--target", "25:05"), ("--target", "05:60"),
+    ("--target", "5:05"), ("--target", " 5:05"), ("--target", "aa:bb"),
+])
+def test_cli_rejects_invalid_timezone_or_target(monkeypatch, argument, value):
+    monkeypatch.setattr(sys, "argv", ["catchup_gate.py", "--phase", "1", argument, value])
+    monkeypatch.setenv("NOW", "2026-10-21T12:05:00+00:00")
+    monkeypatch.delenv("GITHUB_OUTPUT", raising=False)
+    monkeypatch.setattr(g.time, "sleep", lambda _: None)
+    monkeypatch.setattr(g, "already_sent", lambda *a, **k: False)
+    with pytest.raises(SystemExit) as exc:
+        g.main()
+    assert exc.value.code == 2
+
+
+@pytest.mark.parametrize("fail_at", ["runs", "jobs"])
+def test_dated_dedupe_failure_stops_sending_without_logging_api_body(capsys, fail_at):
+    def fetch(path):
+        if fail_at == "jobs" and "/jobs" not in path:
+            return {"workflow_runs": [_trusted_run(2)]}
+        raise RuntimeError("private response body")
+
+    with pytest.raises(RuntimeError) as exc:
+        g.already_sent(date(2026, 10, 21), U("2026-10-21T14:00:00+00:00"), fetch,
+                       workflow="daily-install-paid.yml", sent_step="Deliver for ")
+    assert type(exc.value) is g.DedupeUnavailable
+    assert str(exc.value) == "delivery history unavailable"
+    captured = capsys.readouterr()
+    trace = "".join(traceback.format_exception(exc.value))
+    assert "private response body" not in captured.out + captured.err + trace
+
+
+@pytest.mark.parametrize("phase", ["1", "2"])
+def test_cli_propagates_dated_dedupe_failure_without_proceeding(monkeypatch, capsys, phase):
+    def unavailable(*args, **kwargs):
+        raise RuntimeError("private response body")
+
+    monkeypatch.setenv("NOW", "2026-10-21T14:00:00+00:00")
+    monkeypatch.delenv("GITHUB_OUTPUT", raising=False)
+    monkeypatch.setattr(sys, "argv", ["catchup_gate.py", "--phase", phase, "--report-date", "2026-10-21",
+                                     "--workflow", "daily-install-paid.yml", "--sent-step", "Deliver for "])
+    monkeypatch.setattr(g, "sent_step_succeeded", unavailable)
+    monkeypatch.setattr(g.time, "sleep", lambda _: None)
+    with pytest.raises(RuntimeError) as exc:
+        g.main()
+    assert type(exc.value) is g.DedupeUnavailable
+    captured = capsys.readouterr()
+    assert "proceed=true" not in captured.out
+    assert "private response body" not in captured.out + captured.err
 
 
 if __name__ == "__main__":

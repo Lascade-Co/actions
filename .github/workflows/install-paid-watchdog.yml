@@ -2,17 +2,29 @@ name: Install to Paid Watchdog
 
 on:
   workflow_dispatch:
+    inputs:
+      edition:
+        description: Edition to check
+        type: choice
+        options: [pt, ist]
+        default: pt
+      phase:
+        description: Warning phase to check (local time guard still applies)
+        type: choice
+        options: [prep, deliver]
+        default: deliver
   schedule:
-    # Hourly through the morning so a dropped or late cron is covered: 13:20 UTC is
-    # 06:20 PDT, 14:20 UTC is 06:20 PST. The script acts only between 06:15 and 12:00 PT,
-    # and a day counts as alerted once an "Alert for <date>" step has succeeded.
-    - cron: '20 13-19 * * *'
+    # The script guards each edition's local window, including PT's DST season.
+    - cron: '30 12,13 * * *'
+    - cron: '15 13-19 * * *'
+    - cron: '0 0 * * *'
+    - cron: '45 0-5 * * *'
 
 permissions:
   contents: read
   actions: read
 
-# One at a time, so two late crons cannot both decide to alert.
+# Serialize history checks so two late crons cannot alert simultaneously.
 concurrency:
   group: install-paid-watchdog
   cancel-in-progress: false
@@ -27,24 +39,47 @@ jobs:
           sparse-checkout: |
             scripts/catchup/catchup_gate.py
             scripts/installpaid/ip_watchdog.py
+            scripts/installpaid/ip_editions.py
           sparse-checkout-cone-mode: false
 
-      - name: Check today's email went out
+      - name: Resolve edition and phase
+        id: edition
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          SCHEDULE: ${{ github.event.schedule }}
+          INPUT_EDITION: ${{ inputs.edition || 'pt' }}
+          INPUT_PHASE: ${{ inputs.phase || 'deliver' }}
+        run: |
+          PYTHONPATH=scripts/installpaid:scripts/catchup python3 - <<'PY'
+          import os
+          from catchup_gate import emit
+          from ip_editions import get_edition, resolve_watchdog_schedule
+          edition, phase = (resolve_watchdog_schedule(os.environ['SCHEDULE']) if os.environ['EVENT_NAME'] == 'schedule'
+                            else (os.environ['INPUT_EDITION'], os.environ['INPUT_PHASE']))
+          get_edition(edition)
+          if phase not in ('prep', 'deliver'):
+              raise ValueError('invalid watchdog phase')
+          emit(edition=edition, phase=phase)
+          PY
+
+      - name: Check edition acceptance
         id: check
         env:
           GH_TOKEN: ${{ github.token }}
-        run: PYTHONPATH=scripts/catchup python3 scripts/installpaid/ip_watchdog.py
+          EDITION: ${{ steps.edition.outputs.edition }}
+          PHASE: ${{ steps.edition.outputs.phase }}
+        run: PYTHONPATH=scripts/catchup python3 scripts/installpaid/ip_watchdog.py --edition "$EDITION" --phase "$PHASE"
 
-      # The name carries the date: the watchdog's own dedupe looks for it.
-      - name: Alert for ${{ steps.check.outputs.date }}
+      # The successful dated step is the acceptance marker for this warning phase.
+      - name: ${{ steps.check.outputs.alert_step }}
         if: steps.check.outputs.alert == 'true'
         env:
           TOKEN: ${{ secrets.INSTALLPAID_TELEGRAM_TOKEN }}
           CHAT: ${{ secrets.INSTALLPAID_TELEGRAM_CHAT }}
-          DAY: ${{ steps.check.outputs.date }}
+          MESSAGE: ${{ steps.check.outputs.message }}
           URL: ${{ github.server_url }}/${{ github.repository }}/actions/workflows/daily-install-paid.yml
         run: |
           curl -fsS --max-time 30 -o /dev/null "https://api.telegram.org/bot$TOKEN/sendMessage" \
             --data-urlencode chat_id="$CHAT" \
-            --data-urlencode text="Install→paid email for $DAY has not gone out. To send it: open $URL, press Run workflow, tick recovery, press Run workflow."
+            --data-urlencode text="$MESSAGE. $URL"
           echo "alert sent"
