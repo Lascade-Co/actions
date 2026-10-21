@@ -25,6 +25,8 @@ TARGET_HHMM = (5, 45)          # 15 min lead for the pipeline
 MAX_SLEEP = 340 * 60           # per-job cap is 6h; leave headroom
 MAX_WAIT = 2 * MAX_SLEEP       # two chained sleep jobs
 SENT_CUTOFF_HOUR = 16          # a run finishing after 16:00 PT day D-1 belongs to report D
+HISTORY_MAX_PAGES = 5
+HISTORY_MAX_REQUESTS = 100
 
 
 class DedupeUnavailable(RuntimeError):
@@ -91,16 +93,37 @@ def gh_json(path):
     return json.loads(out)
 
 
+def budgeted_fetch(fetch):
+    """Share one request allowance across a scan's run pages and attempt jobs."""
+    used = 0
+
+    def bounded(path):
+        nonlocal used
+        if used >= HISTORY_MAX_REQUESTS:
+            raise DedupeUnavailable("delivery history unavailable")
+        used += 1
+        return fetch(path)
+
+    return bounded
+
+
 def paginated(fetch, path, key):
-    """Yield each API page without limiting dedupe to the newest runs or jobs."""
-    page = 1
-    while True:
-        result = fetch(f"{path}?per_page=100&page={page}")
+    """Yield bounded API pages; incomplete history must never look like no send."""
+    separator = "" if path.endswith(("?", "&")) else ("&" if "?" in path else "?")
+    received = 0
+    for page in range(1, HISTORY_MAX_PAGES + 1):
+        result = fetch(f"{path}{separator}per_page=100&page={page}")
         rows = result[key]
+        received += len(rows)
         yield from rows
-        if len(rows) < 100 or page * 100 >= result.get("total_count", float("inf")):
+        total = result.get("total_count")
+        if total is not None and received >= total:
             return
-        page += 1
+        if len(rows) < 100:
+            if total is not None:
+                raise DedupeUnavailable("delivery history unavailable")
+            return
+    raise DedupeUnavailable("delivery history unavailable")
 
 
 def trusted_run(run, repo):
@@ -113,10 +136,13 @@ def trusted_run(run, repo):
 def sent_step_succeeded(report_date, fetch, repo, workflow, sent_step):
     """A successful delivery step is acceptance, even if another step failed.
 
-    Query the complete retained run history so an older report's manual recovery
-    also sees previous acceptance. Include earlier attempts of the current run.
+    Search runs created since report_date minus three days at midnight UTC, with
+    a shared request budget. Earlier attempts of matching runs remain included.
+    Accepted reruns of runs created before this window are intentionally invisible.
     """
-    runs = paginated(fetch, f"repos/{repo}/actions/workflows/{workflow}/runs", "workflow_runs")
+    fetch = budgeted_fetch(fetch)
+    since = f"{report_date - timedelta(days=3)}T00:00:00Z"
+    runs = paginated(fetch, f"repos/{repo}/actions/workflows/{workflow}/runs?created=>={since}", "workflow_runs")
     for run in runs:
         if not trusted_run(run, repo):
             continue
@@ -187,6 +213,15 @@ def main():
     manual = a.event == "workflow_dispatch"
     now = now_utc()
 
+    def delivered(report_date, checked_at):
+        try:
+            return already_sent(report_date, checked_at, workflow=a.workflow, sent_step=a.sent_step)
+        except DedupeUnavailable:
+            if a.event != "schedule" or a.sent_step is None:
+                raise
+            print("delivery history unavailable; proceeding on scheduled key", file=sys.stderr)
+            return False
+
     if a.phase == 1:
         report_date, wait, ok = plan(now, a.tz, a.target)
         if manual:
@@ -194,7 +229,7 @@ def main():
         if not ok:
             print(f"wait {wait/60:.0f}m exceeds cap; a later cron handles it")
             return emit(proceed="false", report_date=report_date, remaining=0)
-        if not manual and already_sent(report_date, now, workflow=a.workflow, sent_step=a.sent_step):
+        if not manual and delivered(report_date, now):
             print("already sent for", report_date)
             return emit(proceed="false", report_date=report_date, remaining=0)
         nap = min(wait, MAX_SLEEP)
@@ -206,7 +241,7 @@ def main():
     report_date = date.fromisoformat(a.report_date)
     if not manual:
         time.sleep(phase2_wait(report_date, now_utc(), a.tz, a.target))
-    if not manual and already_sent(report_date, now_utc(), workflow=a.workflow, sent_step=a.sent_step):
+    if not manual and delivered(report_date, now_utc()):
         print("already sent for", report_date)
         return emit(proceed="false", report_date=report_date)
     emit(proceed="true", report_date=report_date)

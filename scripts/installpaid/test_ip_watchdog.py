@@ -198,7 +198,7 @@ class TestWatchdogEditions:
         assert (checked["edition"], checked["phase"]) == want
         assert checked["alert"] == "true"
 
-    def test_alert_from_an_old_run_rerun_today_is_found(self):
+    def test_alert_from_run_created_before_window_is_not_visible(self):
         today = dt.date(2026, 7, 1)
         def fetch(path):
             if "/jobs" in path:
@@ -206,7 +206,7 @@ class TestWatchdogEditions:
             # GitHub filters by original creation time, not the rerun's start.
             runs = [] if "created=" in path else [trusted_run(created_at="2026-01-01T00:00:00Z", run_attempt=2)]
             return {"workflow_runs": runs}
-        assert W.alerted_today(today, fetch, edition="ist", phase="prep")
+        assert not W.alerted_today(today, fetch, edition="ist", phase="prep")
 
     def test_alert_in_later_run_and_job_pages_is_found(self):
         today = dt.date(2026, 7, 1)
@@ -234,3 +234,72 @@ class TestWatchdogEditions:
         monkeypatch.setattr(W.G, "already_sent", unavailable)
         monkeypatch.setattr(W, "alerted_today", lambda *a, **k: True)
         assert not W.decide(utc("2026-07-01T00:00:00"), edition="ist", phase="prep")[0]
+
+
+    @pytest.mark.parametrize("edition", ["pt", "ist"])
+    def test_history_window_starts_two_days_before_report_at_utc_midnight(self, edition):
+        calls = []
+        def fetch(path):
+            calls.append(path)
+            return {"workflow_runs": []}
+        assert not W.alerted_today(dt.date(2026, 7, 1), fetch, edition=edition)
+        from urllib.parse import parse_qs, urlsplit
+        query = parse_qs(urlsplit(calls[0]).query)
+        assert query["created"] == [">=2026-06-29T00:00:00Z"]
+        assert query["page"] == ["1"] and query["per_page"] == ["100"]
+
+    def test_endless_run_pages_stop_after_five_requests_as_unknown(self):
+        calls = []
+        def fetch(path):
+            calls.append(path)
+            assert len(calls) <= 5, "scan exceeded run page cap"
+            return {"workflow_runs": [trusted_run(event="pull_request")] * 100}
+        with pytest.raises(W.G.DedupeUnavailable):
+            W.alerted_today(dt.date(2026, 7, 1), fetch)
+        assert len(calls) == 5
+
+    def test_endless_job_pages_stop_after_five_job_requests_as_unknown(self):
+        jobs = []
+        def fetch(path):
+            if "/jobs" not in path:
+                return {"workflow_runs": [trusted_run()]}
+            jobs.append(path)
+            assert len(jobs) <= 5, "scan exceeded job page cap"
+            return {"jobs": [{"steps": []}] * 100}
+        with pytest.raises(W.G.DedupeUnavailable):
+            W.alerted_today(dt.date(2026, 7, 1), fetch)
+        assert len(jobs) == 5
+
+    @pytest.mark.parametrize("many_attempts", [True, False])
+    def test_attempt_and_run_fanout_share_one_request_budget(self, many_attempts):
+        calls = []
+        def fetch(path):
+            calls.append(path)
+            assert len(calls) <= 100, "fanout exceeded the complete scan request cap"
+            if "/jobs" in path:
+                return {"jobs": []}
+            runs = ([trusted_run(run_attempt=137)] if many_attempts else
+                    [trusted_run(run_id=index) for index in range(100)])
+            return {"workflow_runs": runs}
+        with pytest.raises(W.G.DedupeUnavailable):
+            W.alerted_today(dt.date(2026, 7, 1), fetch)
+        assert len(calls) == 100
+
+    @pytest.mark.parametrize("edition,phase,stamp,word", [
+        ("pt", "prep", "2026-07-01T12:30:00", "at risk"),
+        ("pt", "deliver", "2026-07-01T13:15:00", "missed"),
+        ("ist", "prep", "2026-07-01T00:00:00", "at risk"),
+        ("ist", "deliver", "2026-07-01T00:45:00", "missed"),
+    ])
+    def test_capped_alert_history_is_unknown_and_warns_for_each_phase(self, monkeypatch, edition, phase, stamp, word):
+        calls = []
+        def fetch(path):
+            calls.append(path)
+            assert len(calls) <= 5, "scan exceeded page cap"
+            return {"workflow_runs": [trusted_run(event="pull_request")] * 100}
+        check = W.alerted_today
+        monkeypatch.setattr(W.G, "already_sent", lambda *a, **k: False)
+        monkeypatch.setattr(W, "alerted_today", lambda today, **kw: check(today, fetch, **kw))
+        alert, day, why = W.decide(utc(stamp), edition=edition, phase=phase)
+        assert alert and day == dt.date(2026, 7, 1) and word in why
+        assert len(calls) == 5

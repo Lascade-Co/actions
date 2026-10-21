@@ -300,11 +300,15 @@ class TestEditionDelivery:
         assert fetched[0][3] == "pt"
         assert fetched[0][4] == (dt.datetime.fromisoformat(want_deadline) if want_deadline else None)
 
-    def test_recovery_dedupe_uncertainty_fails_closed(self, monkeypatch, capsys):
+    @pytest.mark.parametrize("edition", ["pt", "ist"])
+    @pytest.mark.parametrize("flag", ["RECOVERY", "FORCE_RESEND"])
+    def test_manual_dedupe_uncertainty_fails_closed(self, monkeypatch, capsys, edition, flag):
         import ip_workflow as workflow
         monkeypatch.setenv("EVENT", "workflow_dispatch")
-        monkeypatch.setenv("INPUT_EDITION", "pt")
-        monkeypatch.setenv("RECOVERY", "true")
+        monkeypatch.setenv("INPUT_EDITION", edition)
+        monkeypatch.setenv("RECOVERY", "false")
+        monkeypatch.setenv("FORCE_RESEND", "false")
+        monkeypatch.setenv(flag, "true")
         monkeypatch.setenv("REPORT_DATE", "2030-01-12")
         def unavailable(*args, **kwargs):
             raise workflow.G.DedupeUnavailable("private response must not be logged")
@@ -312,6 +316,36 @@ class TestEditionDelivery:
         assert workflow.main(["dedupe"]) == 3
         out = capsys.readouterr()
         assert "sent=False" not in out.out and "private" not in out.err
+
+    @pytest.mark.parametrize("edition,schedule", [("pt", "41 3 * * *"), ("ist", "7 13 * * *")])
+    def test_scheduled_dedupe_uncertainty_proceeds_on_the_scheduled_key(self, monkeypatch, capsys, edition, schedule):
+        import ip_workflow as workflow
+        monkeypatch.setenv("EVENT", "schedule")
+        monkeypatch.setenv("SCHEDULE", schedule)
+        monkeypatch.setenv("REPORT_DATE", "2030-01-12")
+        def unavailable(*args, **kwargs):
+            raise workflow.G.DedupeUnavailable("private response must not be logged")
+        monkeypatch.setattr(workflow.G, "already_sent", unavailable)
+        assert workflow.main(["dedupe"]) == 0
+        out = capsys.readouterr()
+        assert out.out == "sent=False\n"
+        assert out.err.strip() == "delivery history unavailable; proceeding on scheduled key"
+
+    @pytest.mark.parametrize("edition", ["pt", "ist"])
+    def test_forced_send_checks_history_but_overrides_known_acceptance(self, monkeypatch, capsys, edition):
+        import ip_workflow as workflow
+        monkeypatch.setenv("EVENT", "workflow_dispatch")
+        monkeypatch.setenv("INPUT_EDITION", edition)
+        monkeypatch.setenv("FORCE_RESEND", "true")
+        monkeypatch.setenv("REPORT_DATE", "2030-01-12")
+        checked = []
+        def accepted(*args, **kwargs):
+            checked.append(kwargs["sent_step"])
+            return True
+        monkeypatch.setattr(workflow.G, "already_sent", accepted)
+        assert workflow.main(["dedupe"]) == 0
+        assert checked == ["Deliver for " if edition == "pt" else "Deliver IST for "]
+        assert capsys.readouterr().out == "sent=False\n"
 
     def test_one_minute_test_is_rejected_before_build_or_payload(self, monkeypatch, tmp_path, capsys):
         import ip_workflow as workflow

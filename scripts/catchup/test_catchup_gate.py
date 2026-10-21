@@ -188,18 +188,97 @@ def test_dated_dedupe_paginates_runs_and_attempt_jobs(monkeypatch):
     assert g.already_sent(rd, now, fetch, workflow="daily-install-paid.yml", sent_step="Deliver for ")
 
 
-def test_dated_dedupe_does_not_exclude_old_report_runs(monkeypatch):
+def test_dated_dedupe_created_window_is_anchored_to_report_date(monkeypatch):
     monkeypatch.setenv("GITHUB_RUN_ID", "1")
     rd, now = date(2026, 10, 21), U("2026-11-21T14:00:00+00:00")
+    seen = []
 
     def fetch(path):
+        seen.append(path)
         if "/jobs" in path:
             return {"jobs": [_sent_job()]}
-        if "created=" in path:
+        if parse_qs(urlsplit(path).query).get("created") != [">=2026-10-18T00:00:00Z"]:
             return {"workflow_runs": []}
         return {"workflow_runs": [_trusted_run(2)]}
 
     assert g.already_sent(rd, now, fetch, workflow="daily-install-paid.yml", sent_step="Deliver for ")
+    query = parse_qs(urlsplit(seen[0]).query)
+    assert query == {"created": [">=2026-10-18T00:00:00Z"], "per_page": ["100"], "page": ["1"]}
+
+
+@pytest.mark.parametrize("kind", ["runs", "jobs"])
+def test_dated_dedupe_rejects_endless_run_or_job_pages_after_five(kind):
+    seen = []
+
+    def fetch(path):
+        seen.append(path)
+        # Bound the pre-fix test itself if production pagination never stops.
+        if len(seen) > 7:
+            raise RuntimeError("synthetic pagination guard")
+        if "/jobs" in path:
+            return {"jobs": [{"name": "other", "conclusion": "success"}] * 100}
+        if kind == "runs":
+            return {"workflow_runs": [dict(_trusted_run(2), event="push")] * 100}
+        return {"workflow_runs": [_trusted_run(2)]}
+
+    with pytest.raises(g.DedupeUnavailable):
+        g.already_sent(date(2026, 10, 21), U("2026-10-21T14:00:00+00:00"), fetch,
+                       workflow="daily-install-paid.yml", sent_step="Deliver for ")
+    assert len(seen) == (5 if kind == "runs" else 6)
+
+
+@pytest.mark.parametrize("acceptance", [False, True])
+def test_dated_dedupe_global_budget_covers_trusted_run_attempts(acceptance):
+    seen = []
+
+    def fetch(path):
+        seen.append(path)
+        if "/jobs" in path:
+            if acceptance and "/runs/33/attempts/3/jobs" in path:
+                return {"jobs": [_sent_job()]}
+            return {"jobs": []}
+        return {"workflow_runs": [dict(_trusted_run(i), run_attempt=3) for i in range(1, 51)]}
+
+    args = (date(2026, 10, 21), U("2026-10-21T14:00:00+00:00"), fetch)
+    if acceptance:
+        assert g.already_sent(*args, workflow="daily-install-paid.yml", sent_step="Deliver for ")
+    else:
+        with pytest.raises(g.DedupeUnavailable):
+            g.already_sent(*args, workflow="daily-install-paid.yml", sent_step="Deliver for ")
+    assert len(seen) == 100
+
+
+def test_dated_dedupe_success_on_fifth_job_page_is_within_limits():
+    seen = []
+
+    def fetch(path):
+        seen.append(path)
+        if "/jobs" not in path:
+            return {"workflow_runs": [_trusted_run(2)]}
+        page = int(parse_qs(urlsplit(path).query)["page"][0])
+        if page == 5:
+            return {"jobs": [_sent_job()]}
+        return {"jobs": [{"name": "other", "conclusion": "success"}] * 100}
+
+    assert g.already_sent(date(2026, 10, 21), U("2026-10-21T14:00:00+00:00"), fetch,
+                          workflow="daily-install-paid.yml", sent_step="Deliver for ")
+    assert len(seen) == 6
+
+
+def test_pagination_rejects_a_short_page_when_total_shows_missing_history():
+    with pytest.raises(g.DedupeUnavailable):
+        list(g.paginated(lambda _: {"jobs": [], "total_count": 1}, "synthetic/jobs", "jobs"))
+
+
+def test_pagination_accepts_a_complete_full_fifth_page():
+    seen = []
+
+    def fetch(path):
+        seen.append(path)
+        return {"jobs": [{"name": "other"}] * 100, "total_count": 500}
+
+    assert len(list(g.paginated(fetch, "synthetic/jobs", "jobs"))) == 500
+    assert len(seen) == 5
 
 
 @pytest.mark.parametrize("change", [
@@ -322,13 +401,32 @@ def test_dated_dedupe_failure_stops_sending_without_logging_api_body(capsys, fai
 
 
 @pytest.mark.parametrize("phase", ["1", "2"])
-def test_cli_propagates_dated_dedupe_failure_without_proceeding(monkeypatch, capsys, phase):
+def test_cli_schedule_continues_on_shared_key_when_dated_dedupe_is_unavailable(monkeypatch, capsys, phase):
     def unavailable(*args, **kwargs):
         raise RuntimeError("private response body")
 
     monkeypatch.setenv("NOW", "2026-10-21T14:00:00+00:00")
     monkeypatch.delenv("GITHUB_OUTPUT", raising=False)
     monkeypatch.setattr(sys, "argv", ["catchup_gate.py", "--phase", phase, "--report-date", "2026-10-21",
+                                     "--workflow", "daily-install-paid.yml", "--sent-step", "Deliver for "])
+    monkeypatch.setattr(g, "sent_step_succeeded", unavailable)
+    monkeypatch.setattr(g.time, "sleep", lambda _: None)
+    g.main()
+    captured = capsys.readouterr()
+    assert "proceed=true" in captured.out
+    assert captured.err == "delivery history unavailable; proceeding on scheduled key\n"
+    assert "private response body" not in captured.out + captured.err
+
+
+@pytest.mark.parametrize("phase", ["1", "2"])
+def test_cli_non_schedule_propagates_dated_dedupe_failure(monkeypatch, capsys, phase):
+    def unavailable(*args, **kwargs):
+        raise RuntimeError("private response body")
+
+    monkeypatch.setenv("NOW", "2026-10-21T14:00:00+00:00")
+    monkeypatch.delenv("GITHUB_OUTPUT", raising=False)
+    monkeypatch.setattr(sys, "argv", ["catchup_gate.py", "--phase", phase, "--report-date", "2026-10-21",
+                                     "--event", "repository_dispatch",
                                      "--workflow", "daily-install-paid.yml", "--sent-step", "Deliver for "])
     monkeypatch.setattr(g, "sent_step_succeeded", unavailable)
     monkeypatch.setattr(g.time, "sleep", lambda _: None)

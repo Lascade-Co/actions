@@ -4,6 +4,9 @@
 The prep phase acts at 05:30–06:00 local; deliver acts at 06:15–12:00.
 Each phase has its own dated successful-step marker. A failed Telegram request
 leaves the next check free to alert, and a prep warning cannot hide a missed send.
+History starts at UTC midnight two days before the report date. A run created
+before that window is invisible even when rerun today, so it can cause another DM.
+Incomplete scans are unknown and preserve the alert-on-unknown behavior.
 
 Env: GH_TOKEN. NOW (ISO, UTC) overrides the clock for tests.
 """
@@ -18,30 +21,21 @@ from ip_editions import EDITIONS, get_edition
 WINDOWS = {"prep": (dt.time(5, 30), dt.time(6)), "deliver": (dt.time(6, 15), dt.time(12))}
 
 
-def _pages(fetch, path, field):
-    page = 1
-    while True:
-        separator = "&" if "?" in path else "?"
-        rows = fetch(f"{path}{separator}per_page=100&page={page}")[field]
-        yield from rows
-        if len(rows) < 100:
-            return
-        page += 1
-
-
 def alerted_today(today, fetch=G.gh_json, *, edition="pt", phase="deliver"):
     setting = get_edition(edition)
     repo = os.environ.get("GITHUB_REPOSITORY", "Lascade-Co/actions")
     wanted = setting.alert_step(today, phase)
-    # An old workflow run can be rerun today: creation time cannot bound this scan.
-    runs = _pages(fetch, f"repos/{repo}/actions/workflows/install-paid-watchdog.yml/runs", "workflow_runs")
+    since = dt.datetime.combine(today - dt.timedelta(days=2), dt.time(), dt.timezone.utc)
+    # One budget spans run pages and every trusted run's attempt/job pages.
+    fetch = G.budgeted_fetch(fetch)
+    runs = G.paginated(fetch, f"repos/{repo}/actions/workflows/install-paid-watchdog.yml/runs"
+                       f"?created=>={since:%Y-%m-%dT%H:%M:%SZ}", "workflow_runs")
     for run in runs:
-        if not (run.get("event") in ("schedule", "workflow_dispatch") and run.get("head_branch") == "main"
-                and (run.get("head_repository") or {}).get("full_name") == repo):
+        if not G.trusted_run(run, repo):
             continue
         # Include earlier attempts of this run and successful steps in failed jobs.
         for attempt in range(1, int(run.get("run_attempt", 1)) + 1):
-            jobs = _pages(fetch, f"repos/{repo}/actions/runs/{run['id']}/attempts/{attempt}/jobs", "jobs")
+            jobs = G.paginated(fetch, f"repos/{repo}/actions/runs/{run['id']}/attempts/{attempt}/jobs", "jobs")
             for job in jobs:
                 if any(step.get("name") == wanted and step.get("conclusion") == "success"
                        for step in job.get("steps") or []):
