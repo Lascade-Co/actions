@@ -105,76 +105,130 @@ def test_tracks_and_builds():
     assert not M.is_real_build("5.0.8-billing-test") and not M.is_real_build("4.1-debug") and not M.is_real_build("")
 
 
-def test_release_day_ignores_test_installs():
-    raw = {"ios": [], "android": [row("4.0.9", 0, 13, gip=True), row("4.0.9", 0, 1), row("4.0.9", 3, 40)]}
+# Report date 20 Oct, cutoff 05:00 PDT -> latest full day Sun 18 Oct (D0 + 17), week 12-18 Oct (D0 + 11 .. 17).
+LAST, FIRST = 17, 11
+
+
+def test_test_installs_are_audited_and_dropped():
+    raw = {"ios": [], "android": [row("4.0.9", LAST, 13, gip=True), row("4.0.9", LAST, 40)]}
     kept, audit = M.split(raw)
-    assert audit["android4"]["test"] == 13
-    assert M.release_days(kept["android4"])["4.0.9"] == (D0 + dt.timedelta(days=3), False)
+    assert audit["android4"]["test"] == 13 and sum(r["n"] for r in kept["android4"]) == 40
 
 
-def test_pool_is_outcome_blind():
-    """Same installs, different conversions -> the same builds in the pool."""
-    def raw(paid_new):
-        return {"ios": [row("4.2.0", 10, 400, paid=paid_new), row("4.1.0", 5, 400, paid=20), row("4.0.0", 0, 900, paid=45)],
-                "android": []}
-    a = [b["v"] for b in track(model(raw(0)), "ios")["builds"]]
-    b = [b["v"] for b in track(model(raw(40)), "ios")["builds"]]
-    assert a == b == ["4.2.0", "4.1.0"]          # target = ceil(40 / 0.05) = 800 installs
+def test_latest_full_day_for_both_editions_across_dst():
+    import ip_main
+    cases = [("pt", "2026-10-20", "2026-10-18"), ("ist", "2026-10-20", "2026-10-17"),
+             ("pt", "2026-03-09", "2026-03-07"), ("pt", "2026-11-02", "2026-10-31"),
+             ("ist", "2026-03-09", "2026-03-06"), ("ist", "2026-11-02", "2026-10-30")]
+    for edition, rd, want in cases:
+        got = M.latest_full_day(ip_main.cutoff_for(dt.date.fromisoformat(rd), edition))
+        assert got == dt.date.fromisoformat(want), (edition, rd, got)
 
 
-def test_pool_orders_by_version_and_skips_pre_release_installs():
-    rows = [row("4.0.10", 5, 30), row("4.0.10", 2, 3),     # 3 testers before release day: left out
-            row("4.0.3", 9, 1), row("4.0.11", 9, 2)]        # straggler old binary today; genuine soft launch
-    p = M.pool([dict(r, d=M._day(r["d"])) for r in rows], 10_000)
-    assert [b["v"] for b in p["builds"]] == ["4.0.11", "4.0.10", "4.0.3"]   # newest version first
-    assert p["counts"]["n"] == 33 and p["builds"][0]["soft"] and p["capped"]
-    p2 = M.pool([dict(r, d=M._day(r["d"])) for r in rows], 20)
-    assert [b["v"] for b in p2["builds"]] == ["4.0.11", "4.0.10"]          # straggler not needed
+def test_week_is_fixed_and_covers_every_build():
+    raw = {"ios": [row("4.2.0", LAST, 400, paid=20, cc="DE"), row("4.1.0", FIRST, 300, paid=15, cc="FR"),
+                   row("4.1.0", FIRST + 2, 100, paid=1, cc="DE"),
+                   row("4.0.0", FIRST - 1, 900, paid=45, cc="JP"),      # the day before the week: left out
+                   row("4.2.0", LAST + 1, 700, paid=35, cc="BR")],      # the partial day after: left out
+           "android": []}
+    m = model(raw)
+    t = track(m, "ios")
+    assert (m["first_day"], m["last_day"]) == (D0 + dt.timedelta(days=FIRST), D0 + dt.timedelta(days=LAST))
+    assert t["counts"]["n"] == 800 and t["counts"]["paid"] == 36
+    assert [b["v"] for b in t["builds"]] == ["4.2.0", "4.1.0"]            # newest version first
+    assert t["day"]["n"] == 400 and t["day"]["paid"] == 20
+    assert [(p["v"], p["n"], p["paid"]) for p in t["trend"]] == [("4.1.0", 400, 16), ("4.2.0", 400, 20)]
+    assert [(x["cc"], x["now"]) for x in t["mix"]] == [("DE", 500 / 800), ("FR", 300 / 800)]
 
 
-def test_soft_launch_and_small_builds_are_shown():
-    m = model({"ios": [], "android": [row("5.0.9", 3, 3), row("5.0.8", 1, 300, paid=2)]})
-    txt = R.builds_txt(track(m, "android5"))
-    assert "5.0.8" in txt and "1 build with under 5 installs (3 in all)" in txt
-    m = model({"ios": [], "android": [row("5.0.9", 3, 8), row("5.0.8", 1, 300, paid=2)]})
-    assert "5.0.9 (soft launch)" in R.builds_txt(track(m, "android5"))
+def test_by_build_needs_30_installs_and_keeps_the_newest_8():
+    rows = [row(f"4.1.{i}", LAST, 40) for i in range(10)] + [row("4.2.0", LAST, 29)]
+    t = track(model({"ios": rows, "android": []}), "ios")
+    assert [p["v"] for p in t["trend"]] == [f"4.1.{i}" for i in range(2, 10)]     # 4.2.0 has under 30
 
 
-def test_zero_march_rate_is_not_an_empty_track():
+def test_verdicts_are_given_with_few_payers():
+    t = track(model({"ios": [], "android": [row("5.0.8", LAST, 300, paid=2)]}), "android5")
+    assert t["cmp"]["mar26"]["paid"]["verdict"] in ("better", "worse", "same", "unclear")
+    assert all(t["cmp"]["mar26"][s]["verdict"] is not None for s in ("pw", "pv", "ex"))
+
+
+def test_zero_march_rate_still_compares():
     b = bench()
     b["mar26"]["android"]["counts"].update(paid=0, paid_pv=0)
-    t = track(model({"ios": [], "android": [row("5.0.8", 1, 300, paid=2)]}, b), "android5")
-    assert not t["empty"] and t["no_target"] and t["thin"]
-    assert t["cmp"]["mar26"]["paid"] is not None                     # zero numerator still compares
-    assert "no March 2026 rate" in R.verdict_line(t, model({"ios": [], "android": [row("5.0.8", 1, 300, paid=2)]}, b))[1]
+    t = track(model({"ios": [], "android": [row("5.0.8", LAST, 300, paid=2)]}, b), "android5")
+    assert not t["empty"] and t["cmp"]["mar26"]["paid"] is not None
 
 
-def test_thin_pool_has_no_verdicts():
-    m = model({"ios": [], "android": [row("5.0.8", 1, 300, paid=2)]})
-    t = track(m, "android5")
-    assert t["thin"] and t["capped"]
-    assert all(t["cmp"][bk][s] is None or t["cmp"][bk][s]["verdict"] is None
-               for bk in ("aug25", "mar26") for s in ("pw", "pv", "ex", "pv_ex", "paid"))
-    assert "Too few to call" in R.verdict_line(t, m)[1]
+def test_small_builds_are_counted_not_hidden():
+    m = model({"ios": [], "android": [row("5.0.9", LAST, 3), row("5.0.8", LAST, 300, paid=2)]})
+    html, text = R.builds_txt(track(m, "android5"))
+    assert text == "5.0.8 +1 small build (3 installs)"
+    m = model({"ios": [row(f"4.1.{i}", LAST, 50) for i in range(5)] + [row("4.0.1", LAST, 1), row("4.0.2", LAST, 2)],
+               "android": []})
+    assert R.builds_txt(track(m, "ios"))[1] == "4.1.4 · 4.1.3 · 4.1.2 +2 more +2 small builds (3 installs)"
 
 
-def test_empty_track():
-    t = track(model({"ios": [row("4.1.0", 1, 900, paid=45)], "android": []}), "android4")
-    assert t["empty"]
+def test_empty_tracks_render(tmp_path):
+    outside = row("4.1.0", FIRST - 3, 900, paid=45)
+    for raw in ({"ios": [], "android": [row("4.0.150", LAST, 900, paid=9)]},       # empty iOS
+                {"ios": [row("4.1.0", LAST, 900, paid=45)], "android": []},       # empty Android
+                {"ios": [], "android": []},                                       # all empty
+                {"ios": [outside], "android": []}):                               # rows only outside the week
+        m = model(raw)
+        subj, html, text, _ = R.render(m, "A", tmp_path)
+        empty = [t for t in m["tracks"] if t["empty"]]
+        assert empty and all(f"{t['label']} —" in subj for t in empty)
+        assert "No installs on 12–18 Oct." in html and "no installs on 12–18 Oct" in text
 
 
-def test_android_aug25_compares_client_with_client():
-    m = model({"ios": [], "android": [row("4.0.150", 1, 9000, paid=90, pc=120)]},     # server and client diverge
+def test_zero_install_last_day_shows_a_dash(tmp_path):
+    m = model({"ios": [row("4.1.0", FIRST, 900, paid=45)], "android": []})
+    t = track(m, "ios")
+    assert not t["empty"] and R.day_rate(t) == "—"
+    subj, html, _, _ = R.render(m, "A", tmp_path)
+    assert "iOS —" in subj and "Sun 18 Oct ·" in html
+
+
+def test_android_aug25_compares_client_with_client(tmp_path):
+    m = model({"ios": [], "android": [row("4.0.150", LAST, 9000, paid=90, pc=120)]},     # server and client diverge
               bench(and_rate=0.01, aug_android_paid=0))
     t = track(m, "android4")
-    line = R.verdict_line(t, m)[1]
-    assert "1.33%" in line and "in-app purchase event" in line           # today's client figure is named
     assert t["cmp"]["aug25"]["client_basis"] and not t["cmp"]["mar26"]["client_basis"]
     aug = t["cmp"]["aug25"]["paid"]
     assert aug["verdict"] is None                                      # directional only
     assert abs(aug["diff"] - (120 / 9000 - 0.01)) < 1e-9               # client vs client
     assert t["cmp"]["mar26"]["paid"]["verdict"] is not None
-    assert "directional only" in R.verdict_line(t, m)[1] and "†" in R.verdict_line(t, m)[1]
+    _, html, text, _ = R.render(m, "A", tmp_path)
+    assert "Aug: see †" in R.step_verdict(t, "paid")[1]
+    assert "Paid: 1.00% · Mar ±0.00 pts · Aug —†" in text               # server row: no Aug figure
+    assert "Paid, in-app event †: 1.33% · Mar +0.33 pts · Aug +0.33 pts" in text
+    row_html = html.split("Paid, in-app event †")[1].split("</tr>")[0]
+    assert f'bgcolor="{R.C_THIN}"' in row_html                          # the directional bar itself is grey
+
+
+def test_read_block_combines_or_splits_benchmarks():
+    m = model({"ios": [row("4.1.0", LAST, 20000, paid=1000, pw=19000, pv=18000, ex=9000)], "android": []})
+    t = track(m, "ios")
+    t["cmp"]["mar26"]["pv"]["verdict"], t["cmp"]["aug25"]["pv"]["verdict"] = "better", "better"
+    assert R.step_verdict(t, "pv")[1] == "better vs both"
+    t["cmp"]["aug25"]["pv"]["verdict"] = "same"
+    assert R.step_verdict(t, "pv")[1] == "better vs Mar, same vs Aug"
+    t["cmp"]["mar26"]["pv"]["verdict"] = "unclear"
+    assert R.step_verdict(t, "pv")[1] == "can't tell yet vs Mar, same vs Aug"
+
+
+def test_check_line_flags_a_step_under_half_of_march(tmp_path):
+    m = model({"ios": [row("4.1.0", LAST, 1000, paid=50, pw=300)], "android": []})   # Mar paywall 90%
+    _, html, text, _ = R.render(m, "A", tmp_path)
+    assert "Check: saw the paywall 30.0% vs Mar 90.0%. Investigate." in text and "Check:" in html
+
+
+def test_week_formatting_crosses_months_and_years():
+    d = dt.date
+    assert R.week_txt(d(2030, 10, 12), d(2030, 10, 18)) == "12–18 Oct"
+    assert R.week_txt(d(2030, 10, 26), d(2030, 11, 1)) == "26 Oct–1 Nov"
+    assert R.week_txt(d(2026, 12, 29), d(2027, 1, 4)) == "29 Dec 2026–4 Jan 2027"
 
 
 def test_conditionals_use_person_level_counts():
@@ -192,20 +246,29 @@ def test_verdict_rules():
 # --------------------------------------------------------------- render ----
 
 def test_render_variant_a(tmp_path):
-    raw = {"ios": [row("4.1.1", 10, 500, paid=30), row("4.1.0", 5, 500, paid=22)],
-           "android": [row("4.0.155", 3, 6000, paid=70), row("5.0.8", 2, 200, paid=1)]}
+    raw = {"ios": [row("4.1.1", LAST, 500, paid=30), row("4.1.0", FIRST, 500, paid=22)],
+           "android": [row("4.0.155", LAST, 6000, paid=70), row("5.0.8", LAST, 200, paid=1)]}
     m = model(raw)
     subj, html, text, imgs = R.render(m, "A", tmp_path)
-    assert subj.startswith("TA install→paid") and "<img" not in html and not imgs
+    assert subj == "TA install→paid · Sun 18 Oct: iOS 6.0% · Android 5.x 0.50% · Android 4.0.x 1.17%"
+    assert "<img" not in html and not imgs
     assert "App Store · iOS" in html and "Play Store · Android 5.x" in text
-    assert "Pool:" in text and "† Android August 2025" in text
+    assert "latest full day Sun 18 Oct · last 7 days 12–18 Oct" in html and "7-day verdicts vs Mar 2026 / Aug 2025" in text
+    assert "† Android Aug 2025" in text and "data to 05:00 PT" in text
+    assert "pool" not in (html + text).lower() and "today" not in (html + text).lower()
+    # one class attribute per tag (a duplicate drops the dark-mode class), and every role colour has a dark override
+    assert not re.search(r'<[^>]*\bclass="[^"]*"[^>]*\bclass="', html)
+    dark = " ".join(re.findall(r"@media \(prefers-color-scheme: dark\) \{(.*?)\n    \}", html, re.S))
+    used = set(re.findall(r'class="[^"]*?\b(hl-[a-z]+|tick-[a-z]+-dm)\b', html))
+    assert {"hl-num", "hl-ctx", "hl-lvl", "tick-aug-dm"} <= used
+    for cls in used:
+        assert f".{cls} {{" in dark, cls                                # inside the dark media query
+        assert f"[data-ogsc] .{cls} {{" in html, cls                    # and the Outlook dark override
 
 
 def test_render_variant_b(tmp_path):
-    import pytest
-    pytest.importorskip("matplotlib")
-    raw = {"ios": [row("4.1.1", 10, 500, paid=30), row("4.1.0", 5, 500, paid=22)],
-           "android": [row("4.0.155", 3, 6000, paid=70), row("5.0.8", 2, 200, paid=1)]}
+    raw = {"ios": [row("4.1.1", LAST, 500, paid=30), row("4.1.0", FIRST, 500, paid=22)],
+           "android": [row("4.0.155", LAST, 6000, paid=70), row("5.0.8", LAST, 200, paid=1)]}
     _, html_b, _, imgs_b = R.render(model(raw), "B", tmp_path)
     # funnel for every track; a by-build trend only where >= 2 builds (iOS here)
     assert len(imgs_b) == 4 and all(os.path.exists(i["path"]) for i in imgs_b)
@@ -213,10 +276,20 @@ def test_render_variant_b(tmp_path):
     assert "Previewed a trip</td>" in html_b                            # values as text, not only in the PNG
 
 
+def test_ist_edition_labels_its_cutoff(tmp_path):
+    import ip_main
+    m = M.build_model({"ios": [row("4.1.0", 16, 900, paid=45)], "android": []}, bench(), dt.date(2026, 10, 20),
+                      ip_main.cutoff_for(dt.date(2026, 10, 20), "ist"), "2026-10-19", "test")
+    m["edition"] = "ist"
+    subj, html, text, _ = R.render(m, "A", tmp_path)
+    assert subj.startswith("TA install→paid · Sat 17 Oct:") and "data to 05:00 IST" in text
+    assert "last 7 days 11–17 Oct" in html
+
+
 def test_logs_carry_no_figures(tmp_path, monkeypatch):
     """ip_main prints step names only: no counts or rates reach the public run log."""
     import ip_main
-    raw = {"ios": [row("4.1.1", 10, 987, paid=61)], "android": [row("4.0.155", 3, 6543, paid=77)]}
+    raw = {"ios": [row("4.1.1", LAST, 987, paid=61)], "android": [row("4.0.155", LAST, 6543, paid=77)]}
     b = bench()
     cidrs, cidr_date = F.load_cidrs()
     b["definition"] = F.definition_hash(cidrs, cidr_date, M.RULES)
@@ -227,7 +300,8 @@ def test_logs_carry_no_figures(tmp_path, monkeypatch):
         assert ip_main.main(["--report-date", "2026-10-20", "--out", str(tmp_path), "--variant", "A"]) == 0
     logged = out.getvalue() + err.getvalue()
     assert not re.search(r"\d", logged), logged
-    assert (tmp_path / "email-A.html").exists()
+    html = (tmp_path / "email-A.html").read_text()
+    assert "987" in html and "6,543" in html                            # tracks rendered with data, not empty
 
 
 def test_stale_benchmarks_are_refused(tmp_path, monkeypatch):
@@ -319,21 +393,15 @@ def test_incomplete_benchmarks_are_refused(tmp_path, monkeypatch):
 
 def test_android_rows_are_like_for_like(tmp_path):
     """The server Paid row carries no Aug 2025 mark; the in-app event row carries both."""
-    m = model({"ios": [], "android": [row("4.0.150", 1, 9000, paid=45, pc=180)]}, bench(aug_android_paid=0))
+    m = model({"ios": [], "android": [row("4.0.150", LAST, 9000, paid=45, pc=180)]}, bench(aug_android_paid=0))
     t = track(m, "android4")
     assert R.steps_for(t) == ["pw", "pv", "ex", "paid", "pc"]
     assert R.bench_for(t, m, "aug25", "paid") is None and R.bench_for(t, m, "aug25", "pc") is not None
-    assert R.steps_for(track(model({"ios": [row("4.1.0", 1, 900, paid=45)], "android": []}), "ios")) == \
+    assert R.steps_for(track(model({"ios": [row("4.1.0", LAST, 900, paid=45)], "android": []}), "ios")) == \
         ["pw", "pv", "ex", "paid"]
-    _, _, text, _ = R.render(m, "A", tmp_path)
-    assert "Paid: 0.50% (Mar 2026 1.00%, Aug 2025 —)" in text
-    assert "Paid, in-app event †: 2.0%" in text
-
-
-def test_thin_android_still_states_client_comparison(tmp_path):
-    m = model({"ios": [], "android": [row("5.0.8", 1, 400, paid=2, pc=1)]}, bench(aug_android_paid=0))
-    _, _, text, _ = R.render(m, "A", tmp_path)
-    assert "Paid, in-app event †: 0.25%" in text
+    _, html, text, _ = R.render(m, "A", tmp_path)
+    assert "Paid: 0.50% · Mar −0.50 pts (worse) · Aug —†" in text
+    assert "Paid, in-app event †: 2.0%" in text and "Aug —†" in html
 
 
 def test_crosscheck_compares_every_field():
@@ -442,10 +510,9 @@ def test_gate_dedupe_matches_the_report_date_step():
     assert G.already_sent(rd, now, f(job("Send for 2026-10-21")), workflow="w", sent_step="Send for ")
 
 
-def test_subject_carries_the_report_date():
-    m = model({"ios": [row("4.1.0", 1, 900, paid=45)], "android": []})
-    s = R.subject_of(m)
-    assert s.startswith(f"TA install→paid · {m['report_date']:%a} {m['report_date'].day} {m['report_date']:%b} — iOS ")
+def test_subject_carries_the_latest_full_day():
+    m = model({"ios": [row("4.1.0", LAST, 900, paid=45)], "android": []})
+    assert R.subject_of(m) == "TA install→paid · Sun 18 Oct: iOS 5.0% · Android 5.x — · Android 4.0.x —"
 
 
 def test_dated_dedupe_counts_recovery_runs_of_any_event():

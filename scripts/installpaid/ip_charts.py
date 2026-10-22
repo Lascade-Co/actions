@@ -43,7 +43,7 @@ def _save(fig, out_dir, name):
 
 
 def funnel_png(t, model, out_dir):
-    """Dot plot per step: today's rate with its 95% interval, coloured by the verdict vs
+    """Dot plot per step: the 7-day rate with its 95% interval, coloured by the verdict vs
     Mar 2026, and the two benchmarks as markers. Paid gets its own panel and scale."""
     low = [s for s in R.steps_for(t) if s in ("paid", "pc")]
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(W_IN, 2.1 + 0.4 * len(low)),
@@ -52,7 +52,7 @@ def funnel_png(t, model, out_dir):
         ys = list(range(len(steps)))[::-1]
         for y, s in zip(ys, steps):
             p, lo, hi = t["rates"][s]
-            col = R.verdict_color(t["cmp"]["mar26"][s], t["thin"])
+            col = R.verdict_color(t["cmp"]["mar26"][s])
             ax.plot([lo, hi], [y, y], color=col, lw=2.2, alpha=0.35, solid_capstyle="round", zorder=2)
             ax.scatter([p], [y], s=46, color=col, zorder=4)
             for bk, colr in (("aug25", R.C_AUG), ("mar26", R.C_MAR)):
@@ -75,7 +75,7 @@ def funnel_png(t, model, out_dir):
     ax2.xaxis.set_major_formatter(matplotlib.ticker.PercentFormatter(1, decimals=0 if (step * 100) % 1 == 0 else 1))
     ax2.set_title("Paid has its own scale" + (" · † in-app event, like for like with Aug 2025, directional"
                                               if "pc" in low else ""), fontsize=7.5, color=MUTED, loc="left", pad=3)
-    fig.text(0.0, 0.97, "dot = today, line = its 95% range", fontsize=7.5, color=MUTED, transform=fig.transFigure)
+    fig.text(0.0, 0.97, "dot = 7 days, line = its 95% range", fontsize=7.5, color=MUTED, transform=fig.transFigure)
     fig.text(0.42, 0.97, "| Aug 2025", fontsize=7.5, color=R.C_AUG, fontweight="bold", transform=fig.transFigure)
     fig.text(0.56, 0.97, "| Mar 2026", fontsize=7.5, color=R.C_MAR, fontweight="bold", transform=fig.transFigure)
     return _save(fig, out_dir, f"ip-{t['key']}-funnel.png")
@@ -85,13 +85,11 @@ def trend_png(t, model, out_dir):
     plat = M.plat_of(t["key"])
     pts = t["trend"]
     mar = model["bench"]["mar26"][plat]["rates"]["paid"][0]
-    pooled = {b["v"] for b in t["builds"]}
     fig, ax = plt.subplots(figsize=(W_IN, 1.7))
     xs = list(range(len(pts)))
     for x, p in zip(xs, pts):
         r, lo, hi = p["rate"]
-        col = R.ACCENT if p["v"] in pooled else "#b9c9d6"
-        ax.bar([x], [r], width=0.6, color=col, zorder=2)
+        ax.bar([x], [r], width=0.6, color=R.ACCENT, zorder=2)
         ax.plot([x, x], [lo, hi], color=MUTED, lw=0.8, zorder=3)
         ax.annotate(R.pct(r), (x, hi), xytext=(0, 3), textcoords="offset points", ha="center", fontsize=7.5, color=INK)
     ax.axhline(mar, color=R.C_MAR, lw=1, ls=(0, (3, 2)), zorder=1)
@@ -102,6 +100,6 @@ def trend_png(t, model, out_dir):
     ax.tick_params(axis="y", labelsize=7, colors=MUTED)
     for s in ("top", "right"):
         ax.spines[s].set_visible(False)
-    ax.set_title(f"Paid within a day, by build · dark = in today's pool · dashed = Mar 2026 ({R.pct(mar)})",
+    ax.set_title(f"Paid within a day, by build · {R.week_of(model)} · dashed = Mar 2026 ({R.pct(mar)})",
                  fontsize=8, color=MUTED, loc="left")
     return _save(fig, out_dir, f"ip-{t['key']}-trend.png")

@@ -69,11 +69,11 @@ class TestEditionDelivery:
         assert got == (local(want) if want else None)
 
     @pytest.mark.parametrize("edition,day,want", [
-        ("pt", "2026-03-08", "7 Mar, 04:00 PST"),
-        ("pt", "2026-11-01", "31 Oct, 06:00 PDT"),
-        ("ist", "2030-01-12", "11 Jan, 05:00 IST"),
+        ("pt", "2026-03-09", ("Sat 7 Mar", "1–7 Mar", "PT")),
+        ("pt", "2026-11-02", ("Sat 31 Oct", "25–31 Oct", "PT")),
+        ("ist", "2030-01-12", ("Wed 9 Jan", "3–9 Jan", "IST")),
     ])
-    def test_maturity_label_uses_elapsed_day_across_dst(self, edition, day, want, tmp_path):
+    def test_week_window_and_cutoff_label_across_dst(self, edition, day, want, tmp_path):
         import ip_main as main
         import ip_model as model
         import ip_render_email as render
@@ -82,8 +82,10 @@ class TestEditionDelivery:
                            for platform in ("ios", "android")} for key in ("mar26", "aug25")}
         m = model.build_model({"ios": [], "android": []}, benchmark, date, main.cutoff_for(date, edition), "synthetic", "synthetic")
         m["edition"] = edition
-        _, html, text, _ = render.render(m, "A", tmp_path)
-        assert want in html and want in text
+        subject, html, text, _ = render.render(m, "A", tmp_path)
+        last, week, label = want
+        assert subject.startswith(f"TA install→paid · {last}:")
+        assert f"latest full day {last} · last 7 days {week}" in html and f"data to 05:00 {label}" in text
 
     def test_payload_is_immutable_and_edition_bound(self, tmp_path):
         import ip_send as send

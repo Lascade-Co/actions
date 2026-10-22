@@ -3,9 +3,10 @@
 Input rows come from ip_fetch.cohort_sql(): one row per (build, country, test flags,
 install day) with per-person counts. Every rate is reach within 24 h of first install.
 
-Pooling (outcome-blind, so the intervals stay honest): per track, take builds newest
-first and stop once the pool has enough installs to EXPECT 40 payers at the track's
-Mar 2026 one-day rate. Today's conversions never decide which builds are in the pool.
+Window: every track covers the same fixed 7 Pacific days, ending on the latest full day
+(the newest PT date every installer of which has had 24 hours by the cutoff), across all
+real builds, like the benchmarks. The single latest day is reported too, but verdicts
+are judged on the 7 days only.
 """
 from __future__ import annotations
 
@@ -13,13 +14,13 @@ import datetime as dt
 import math
 import re
 from collections import Counter, defaultdict
+from zoneinfo import ZoneInfo
 
 Z = 1.959964
 EQUIV_REL = 0.10            # "no meaningful change": CI inside +-10% of the benchmark rate
-TARGET_PAYERS = 40          # pool until 40 payers are EXPECTED at the Mar 2026 rate
-THIN_PAYERS = 20            # fewer actual payers than this -> no verdicts
-RELEASE_MIN_INSTALLS = 10   # release day = first day with >= 10 real first installs
+WEEK_DAYS = 7               # every verdict is judged on this many full days
 WINDOW_DAYS = 60
+PT = ZoneInfo("America/Los_Angeles")   # install days are Pacific dates (ip_fetch cohort_sql)
 # The filter rules applied after the fetch; part of the benchmark fingerprint, so a rule
 # change makes the stored benchmarks refuse to load until they are rebuilt.
 RULES = "real=dotted-numeric|test=gip,emu|families=ios,android4.0,android5|bench=all-real-builds"
@@ -80,7 +81,7 @@ def plat_of(track):
 
 def track_of(plat, v):
     """iOS: every build. Android: the 4.0.x and 5.x families only; anything else (old
-    3.x binaries, a future 6.x) returns None and is left out of every pool."""
+    3.x binaries, a future 6.x) returns None and is left out."""
     if plat == "ios":
         return "ios"
     k = vkey(v)
@@ -132,50 +133,25 @@ def split(raw):
     return kept, audit
 
 
-def release_days(rows):
-    """{build: (release_day, soft)}. Release = first PT day with >= 10 real first
-    installers; a build that never gets there is a soft launch from its first install."""
-    per = defaultdict(Counter)
+def latest_full_day(cutoff_utc):
+    """Newest Pacific install day whose every installer has had 24 h by the cutoff.
+    cutoff_utc is naive UTC (ip_main.cutoff_for); 24 elapsed hours, then Pacific."""
+    if cutoff_utc.tzinfo is None:
+        cutoff_utc = cutoff_utc.replace(tzinfo=dt.timezone.utc)
+    end = (cutoff_utc - dt.timedelta(hours=24)).astimezone(PT)
+    return end.date() - dt.timedelta(days=1)
+
+
+def window(rows, first, last):
+    """Every kept row installed on first..last (inclusive), all builds, newest build first."""
+    acc, per, cc = {}, defaultdict(dict), Counter()
     for r in rows:
-        per[r["v"]][r["d"]] += r["n"]
-    out = {}
-    for v, days in per.items():
-        hit = sorted(d for d, c in days.items() if c >= RELEASE_MIN_INSTALLS)
-        out[v] = (hit[0], False) if hit else (min(days), True)
-    return out
-
-
-def pool(rows, target_n):
-    """Newest builds first until installs >= target_n. Installs before a build's
-    release day (testers, pre-release) are left out."""
-    rel = release_days(rows)
-    # Newest = highest version number, never the release day: a straggler old binary
-    # installed by one person today must not jump ahead of the current release.
-    order = sorted(rel, key=vkey, reverse=True)
-    per_build = defaultdict(dict)
-    for r in rows:
-        if r["d"] >= rel[r["v"]][0]:
-            add(per_build[r["v"]], r)
-    acc, builds = {}, []
-    for v in order:
-        if not per_build[v]:
-            continue
-        add(acc, per_build[v])
-        builds.append({"v": v, "released": rel[v][0], "soft": rel[v][1], **per_build[v]})
-        if acc["n"] >= target_n:
-            break
-    days = [r["d"] for r in rows if r["v"] in {b["v"] for b in builds} and r["d"] >= rel[r["v"]][0]]
-    return {"counts": acc, "builds": builds, "capped": acc.get("n", 0) < target_n,
-            "first_day": min(days) if days else None, "last_day": max(days) if days else None,
-            "countries": _countries(rows, {b["v"]: b["released"] for b in builds})}
-
-
-def _countries(rows, rel):
-    c = Counter()
-    for r in rows:
-        if r["v"] in rel and r["d"] >= rel[r["v"]]:
-            c[r.get("cc") or "??"] += r["n"]
-    return c
+        if first <= r["d"] <= last:
+            add(acc, r)
+            add(per[r["v"]], r)
+            cc[r.get("cc") or "??"] += r["n"]
+    builds = [{"v": v, **per[v]} for v in sorted(per, key=vkey, reverse=True)]
+    return {"counts": acc, "builds": builds, "countries": cc}
 
 
 def bench_aggregate(raw):
@@ -220,9 +196,8 @@ def _num(c, key):
     return c.get(key, 0)
 
 
-def compare(now, base, step, thin):
-    """Difference vs one benchmark for one step. `directional` when the bases differ in
-    kind (no verdict then); verdict suppressed for thin pools."""
+def compare(now, base, step):
+    """Difference vs one benchmark for one step; None when either side has no denominator."""
     k, d = _FRAC[step]
     r = newcombe(_num(now, k), _num(now, d), _num(base, k), _num(base, d))
     if r is None:                     # either side has no denominator
@@ -230,52 +205,50 @@ def compare(now, base, step, thin):
     diff, lo, hi = r
     b0 = _num(base, k) / _num(base, d)
     return {"diff": diff, "lo": lo, "hi": hi, "base": b0,
-            "verdict": None if thin else verdict(diff, lo, hi, b0)}
+            "verdict": verdict(diff, lo, hi, b0)}
 
 
 def build_model(raw, bench, report_date, cutoff_utc, cidr_date, bench_def):
     """raw: {plat: rows} for the 60-day window; bench: {"aug25": {plat: agg}, "mar26": ...}."""
     kept, audit = split(raw)
+    last = latest_full_day(cutoff_utc)
+    first = last - dt.timedelta(days=WEEK_DAYS - 1)
     tracks = []
     for tk, store, label in TRACKS:
         plat = plat_of(tk)
-        b_mar = bench["mar26"][plat]["counts"]
-        base_rate = b_mar["paid"] / b_mar["n"] if b_mar.get("n") and b_mar.get("paid") else None
-        # No March rate (zero payers then) -> no way to size the pool: take every build,
-        # and the pool is capped by definition, so no verdict.
-        target = math.ceil(TARGET_PAYERS / base_rate) if base_rate else math.inf
         rows = kept.get(tk, [])
-        if not rows:
-            tracks.append({"key": tk, "store": store, "label": label, "empty": True,
-                           "audit": dict(audit.get(tk, {})), "target": target})
+        day = {}
+        for r in rows:
+            if r["d"] == last:
+                add(day, r)
+        w = window(rows, first, last)
+        c = w["counts"]
+        if not c.get("n"):
+            tracks.append({"key": tk, "store": store, "label": label, "empty": True, "day": day,
+                           "audit": dict(audit.get(tk, {}))})
             continue
-        p = pool(rows, target)
-        c = p["counts"]
-        thin = c.get("paid", 0) < THIN_PAYERS or p["capped"]
         cmp = {}
         for bk, _ in BENCH:
             bc = bench[bk][plat]["counts"]
             client = (plat, bk) in SERVER_UNAVAILABLE
             cmp[bk] = {"client_basis": client}
-            for step in ("pw", "pv", "ex", "pv_ex"):
-                cmp[bk][step] = compare(c, bc, step, thin)
+            for step in ("pw", "pv", "ex"):
+                cmp[bk][step] = compare(c, bc, step)
             # Client (in-app purchase event) vs client: always directional, the Android
             # event changed definition in Aug 2026. Server vs server only where both exist.
-            x = compare(c, bc, "pc", thin)
+            x = compare(c, bc, "pc")
             if x:
                 x["verdict"] = None
             cmp[bk]["pc"] = x
-            cmp[bk]["paid"] = x if client else compare(c, bc, "paid", thin)
+            cmp[bk]["paid"] = x if client else compare(c, bc, "paid")
         tracks.append({
-            "key": tk, "store": store, "label": label, "empty": False, "target": target,
-            "no_target": base_rate is None,
-            "counts": c, "rates": rates(c), "thin": thin, "capped": p["capped"],
-            "builds": p["builds"], "first_day": p["first_day"], "last_day": p["last_day"],
-            "cmp": cmp, "mix": mix(p["countries"], bench["mar26"][plat]["countries"]),
-            "audit": dict(audit.get(tk, {})), "trend": trend(rows),
+            "key": tk, "store": store, "label": label, "empty": False, "day": day,
+            "counts": c, "rates": rates(c), "builds": w["builds"],
+            "cmp": cmp, "mix": mix(w["countries"], bench["mar26"][plat]["countries"]),
+            "audit": dict(audit.get(tk, {})), "trend": trend(rows, first, last),
         })
     return {"report_date": report_date, "cutoff_utc": cutoff_utc, "cidr_date": cidr_date,
-            "bench_def": bench_def, "tracks": tracks,
+            "bench_def": bench_def, "first_day": first, "last_day": last, "tracks": tracks,
             "bench": {bk: {pl: {"counts": bench[bk][pl]["counts"], "rates": rates(bench[bk][pl]["counts"])}
                            for pl in ("ios", "android")} for bk, _ in BENCH}}
 
@@ -288,13 +261,12 @@ def mix(now_cc, base_cc, top=3):
             for cc, n in now_cc.most_common(top)]
 
 
-def trend(rows, last=8, min_n=30):
-    """Descriptive: one-day paid rate per build (installs since release), newest last."""
-    rel = release_days(rows)
+def trend(rows, first, last, keep=8, min_n=30):
+    """Descriptive: paid-within-a-day rate per build over the same 7 days, newest last."""
     per = defaultdict(dict)
     for r in rows:
-        if r["d"] >= rel[r["v"]][0]:
+        if first <= r["d"] <= last:
             add(per[r["v"]], r)
-    bs = [v for v in sorted(rel, key=vkey) if per[v].get("n", 0) >= min_n]
-    return [{"v": v, "released": rel[v][0], "n": per[v]["n"], "paid": per[v]["paid"],
-             "rate": wilson(per[v]["paid"], per[v]["n"])} for v in bs[-last:]]
+    bs = [v for v in sorted(per, key=vkey) if per[v].get("n", 0) >= min_n]
+    return [{"v": v, "n": per[v]["n"], "paid": per[v]["paid"],
+             "rate": wilson(per[v]["paid"], per[v]["n"])} for v in bs[-keep:]]
