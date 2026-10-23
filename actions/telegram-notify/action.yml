@@ -1,5 +1,8 @@
 name: Telegram notification
-description: Send one plain-text build notification from Linux or macOS; fail visibly on transport or Telegram errors.
+description: >-
+  Send one build notification from Linux or macOS; fail visibly on transport or Telegram errors.
+  Structured inputs (kind/status) send escaped HTML with the run link and a failing job/step/error
+  pointer only on failure; a bare message sends plain text.
 inputs:
   token:
     description: Telegram bot token.
@@ -8,8 +11,53 @@ inputs:
     description: Destination chat ID.
     required: true
   message:
-    description: Plain-text message.
-    required: true
+    description: Plain-text message (legacy mode, used only when kind is empty).
+    required: false
+    default: ''
+  kind:
+    description: android or testflight.
+    required: false
+    default: ''
+  status:
+    description: success, failure or withheld (lint auto-fix pushed).
+    required: false
+    default: ''
+  repo:
+    description: Source repository (owner/name).
+    required: false
+    default: ''
+  branch:
+    description: Source branch.
+    required: false
+    default: ''
+  title:
+    description: PR or manual build title.
+    required: false
+    default: ''
+  pr-url:
+    description: PR URL; the title links to it when present.
+    required: false
+    default: ''
+  link:
+    description: Artifact link for a successful Android publish.
+    required: false
+    default: ''
+  build-number:
+    description: TestFlight build number.
+    required: false
+    default: ''
+  results:
+    description: One-line job results shown on failure.
+    required: false
+    default: ''
+  run-url:
+    description: Workflow run URL, shown only on failure.
+    required: false
+    default: ''
+  github-token:
+    description: Token with actions:read and checks:read, used only on failure to point at the failing job, step and error.
+    required: false
+    default: ''
 runs:
   using: composite
   steps:
@@ -19,6 +67,17 @@ runs:
         TELEGRAM_TOKEN: ${{ inputs.token }}
         TELEGRAM_CHAT: ${{ inputs.chat-id }}
         TELEGRAM_MESSAGE: ${{ inputs.message }}
+        TELEGRAM_KIND: ${{ inputs.kind }}
+        TELEGRAM_STATUS: ${{ inputs.status }}
+        TELEGRAM_REPO: ${{ inputs.repo }}
+        TELEGRAM_BRANCH: ${{ inputs.branch }}
+        TELEGRAM_TITLE: ${{ inputs.title }}
+        TELEGRAM_PR_URL: ${{ inputs.pr-url }}
+        TELEGRAM_LINK: ${{ inputs.link }}
+        TELEGRAM_BUILD_NUMBER: ${{ inputs.build-number }}
+        TELEGRAM_RESULTS: ${{ inputs.results }}
+        TELEGRAM_RUN_URL: ${{ inputs.run-url }}
+        TELEGRAM_GITHUB_TOKEN: ${{ inputs.github-token }}
         CONTROL_SHA: ${{ github.sha }}
       run: |
         script=$(mktemp "$RUNNER_TEMP/telegram-notify.XXXXXX")

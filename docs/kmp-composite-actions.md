@@ -81,12 +81,17 @@ GitHub API failures fail the step visibly.
 
 ## `telegram-notify`
 
-Required inputs are `token`, `chat-id` and plain-text `message`. No markup parsing
-is enabled, so branch names and PR titles remain literal text. The Telegram API
-response is checked; transport failures and Telegram rejections fail the step.
-Error messages omit the token-bearing API URL. The Python standard-library
-implementation works on both Linux and macOS. The researched
-`appleboy/telegram-action@v1` is Docker-only, which cannot serve the macOS runner.
+Required inputs are `token` and `chat-id`. With `kind` (`android` or `testflight`) and `status`
+(`success`, `failure` or `withheld`) the script composes an HTML message (`parse_mode=HTML`) and
+escapes every untrusted field (repo, branch, PR title, error text) once. Successes carry only the
+artifact (APK link, or the TestFlight build number); the workflow run link appears only on failures,
+together with a pointer: each failed job, its failed step and its first non-generic error annotation,
+shortened to 160 characters, read through `github-token` (`actions: read`, `checks: read`; best effort,
+never fails the notification). A bare `message` without `kind` still sends plain text. The Telegram
+API response is checked; transport failures and Telegram rejections fail the step. Error messages
+omit the token-bearing API URL. The Python standard-library implementation works on both Linux and
+macOS. The researched `appleboy/telegram-action@v1` is Docker-only, which cannot serve the macOS runner.
+`TELEGRAM_CHAT_ID` comes from Infisical staging `/Build`; the bot token is a GitHub secret.
 
 ## Offline validation
 

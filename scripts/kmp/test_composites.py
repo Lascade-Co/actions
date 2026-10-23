@@ -249,6 +249,64 @@ class TelegramTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, '400'):
             telegram_notify.send('private-token', '-123', '<literal> & [text]', opener)
 
+    FIELDS = {'repo': 'Lascade-Co/app', 'branch': 'feat/<x>', 'title': 'Fix & ship', 'pr_url': 'https://github.com/Lascade-Co/app/pull/7',
+              'link': 'https://github.com/Lascade-Co/app/releases/tag/debug-pr-7', 'build_number': '410.12',
+              'results': 'Check: success · Build: failure · Publish: skipped', 'run_url': 'https://github.com/Lascade-Co/actions/actions/runs/9'}
+
+    def test_success_links_the_artifact_and_never_the_workflow_run(self):
+        android = telegram_notify.compose('android', 'success', self.FIELDS)
+        self.assertIn('✅ <b>Android debug APK ready</b>', android)
+        self.assertIn('<code>feat/&lt;x&gt;</code>', android)
+        self.assertIn('>Fix &amp; ship</a>', android)
+        self.assertIn('href="https://github.com/Lascade-Co/app/releases/tag/debug-pr-7"', android)
+        self.assertNotIn('actions/runs', android)
+        testflight = telegram_notify.compose('testflight', 'success', self.FIELDS)
+        self.assertIn('<b>TestFlight 410.12 ready</b>', testflight)
+        self.assertNotIn('actions/runs', testflight)
+
+    def test_failure_points_at_job_step_and_first_error_with_the_run_link(self):
+        details = [{'job': 'ios-publish', 'steps': ['Upload <IPA>'], 'errors': ['Invalid bundle & more']}]
+        message = telegram_notify.compose('testflight', 'failure', self.FIELDS, details)
+        self.assertIn('❌ <b>TestFlight 410.12 failed</b>', message)
+        self.assertIn('Check: success · Build: failure · Publish: skipped', message)
+        self.assertIn('• <b>ios-publish</b> › Upload &lt;IPA&gt;', message)
+        self.assertIn('<code>Invalid bundle &amp; more</code>', message)
+        self.assertIn('href="https://github.com/Lascade-Co/actions/actions/runs/9"', message)
+        withheld = telegram_notify.compose('android', 'withheld', self.FIELDS)
+        self.assertIn('🔧', withheld)
+        self.assertNotIn('actions/runs', withheld)
+
+    def test_failure_details_keep_one_short_pointer_and_skip_generic_exits(self):
+        jobs = {'jobs': [
+            {'id': 1, 'name': 'ios-publish', 'conclusion': 'failure',
+             'steps': [{'name': 'Checkout', 'conclusion': 'success'}, {'name': 'Upload', 'conclusion': 'failure'}]},
+            {'id': 2, 'name': 'android', 'conclusion': 'failure', 'steps': []},
+            {'id': 3, 'name': 'ios-build', 'conclusion': 'success', 'steps': []}]}
+        notes = [{'annotation_level': 'failure', 'message': 'Process completed with exit code 1.'},
+                 {'annotation_level': 'warning', 'message': 'ignored'},
+                 {'annotation_level': 'failure', 'message': 'Invalid bundle. ' + 'x' * 400},
+                 {'annotation_level': 'failure', 'message': 'second error'}]
+        def opener(request, timeout):
+            self.assertEqual('Bearer gh-token', request.get_header('Authorization'))
+            body = jobs if '/jobs' in request.full_url else notes
+            return contextlib.closing(io.BytesIO(json.dumps(body).encode()))
+        details = telegram_notify.failure_details('https://api.github.com', 'Lascade-Co/actions', '9', 'gh-token',
+                                                  telegram_notify.KINDS['testflight']['jobs'], opener)
+        self.assertEqual(1, len(details))
+        self.assertEqual(['Upload'], details[0]['steps'])
+        self.assertEqual(1, len(details[0]['errors']))
+        self.assertTrue(details[0]['errors'][0].startswith('Invalid bundle.'))
+        self.assertLessEqual(len(details[0]['errors'][0]), telegram_notify.MAX_ERROR_CHARS)
+        def broken(request, timeout):
+            raise telegram_notify.urllib.error.URLError('down')
+        self.assertEqual([], telegram_notify.failure_details('https://api.github.com', 'o/r', '9', 't', ('ios-build',), broken))
+
+    def test_html_mode_sets_the_parse_mode(self):
+        def opener(request, timeout):
+            self.assertEqual('HTML', json.loads(request.data)['parse_mode'])
+            return contextlib.closing(io.BytesIO(b'{"ok": true}'))
+        telegram_notify.send('private-token', '-123', '<b>x</b>', opener, html_mode=True)
+
     def test_transport_error_never_discloses_token(self):
         def opener(request, timeout):
             raise telegram_notify.urllib.error.URLError(request.full_url)
