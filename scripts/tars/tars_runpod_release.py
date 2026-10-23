@@ -1514,6 +1514,23 @@ def _stable_inventory_resources(
     return endpoint, template, auth
 
 
+def _stable_workers_max(endpoint: Mapping[str, Any], description: str) -> int:
+    """The stable endpoint's worker ceiling at rest: WORKERS_MAX, or zero.
+
+    Runpod sets an idle endpoint's workersMax to zero, and TARS's dispatcher
+    restores WORKERS_MAX before every render (EnsureEnabled in TARS's
+    internal/runpod/client.go), so both are the endpoint TARS owns. Any other
+    ceiling is drift.
+    """
+
+    workers_max = endpoint.get("workersMax")
+    if type(workers_max) is not int or workers_max not in (0, WORKERS_MAX):
+        raise RunpodReleaseError(
+            f"existing Runpod {description} workersMax does not match this release"
+        )
+    return workers_max
+
+
 def _verify_stable_topology_once(
     client: ReleaseAPI,
     *,
@@ -1548,6 +1565,7 @@ def _verify_stable_topology_once(
         endpoint,
         expected_name=STABLE_ENDPOINT_NAME,
         template_id=ids.template_id,
+        workers_max=_stable_workers_max(endpoint, "endpoint"),
         gpu_pool_selector=gpu_pool_selector,
     )
     verify_stable_template_rest(
@@ -1562,6 +1580,7 @@ def _verify_stable_topology_once(
         endpoint_id=ids.endpoint_id,
         expected_name=STABLE_ENDPOINT_NAME,
         template_id=ids.template_id,
+        workers_max=_stable_workers_max(rest_endpoint, "REST endpoint"),
     )
     _verify_endpoint_template(rest_endpoint, ids=ids, image=image)
     version = _endpoint_version(rest_endpoint)
@@ -1686,6 +1705,7 @@ def _stable_observation_once(
         endpoint_id=ids.endpoint_id,
         expected_name=STABLE_ENDPOINT_NAME,
         template_id=ids.template_id,
+        workers_max=_stable_workers_max(rest_endpoint, "REST endpoint"),
     )
     _endpoint_version(rest_endpoint)
     _workers(rest_endpoint)
