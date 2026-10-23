@@ -1,0 +1,36 @@
+# Copy into the KMP app repository only after the central workflow is live.
+# Replace YOUR_INFISICAL_PROJECT with the staging Infisical project slug.
+name: Central KMP Debug CI
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: Source branch to build
+        required: true
+        default: main
+        type: string
+permissions:
+  contents: read
+concurrency:
+  group: kmp-debug-trigger-${{ github.repository }}-${{ github.event.pull_request.number || inputs.branch }}
+  cancel-in-progress: true
+jobs:
+  dispatch:
+    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    steps:
+      # Never check out PR code in this privileged trigger.
+      - name: Dispatch Android debug and iOS Staging builds
+        uses: peter-evans/repository-dispatch@v4.0.1
+        with:
+          token: ${{ secrets.CENTRAL_DISPATCH_TOKEN }}
+          repository: Lascade-Co/actions
+          event-type: kmp-debug
+          client-payload: >-
+            {"repo":${{ toJSON(github.repository) }},
+             "pr":${{ toJSON(github.event.pull_request.number || '') }},
+             "branch":${{ toJSON(github.event.pull_request.head.ref || inputs.branch) }},
+             "title":${{ toJSON(github.event.pull_request.title || format('Manual build: {0}', inputs.branch)) }},
+             "project_slug":"YOUR_INFISICAL_PROJECT"}

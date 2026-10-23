@@ -1,0 +1,865 @@
+# Source owns build details; see docs/kmp-debug-ci.md.
+name: Central KMP Debug APK and Staging TestFlight
+run-name: "${{ format('{0} \xB7 {1}', github.event.client_payload.repo, github.event.client_payload.branch) }}"
+'on':
+  repository_dispatch:
+    types:
+    - kmp-debug
+permissions:
+  contents: read
+  packages: write
+concurrency:
+  group: ${{ format('kmp-debug-{0}-{1}', github.event.client_payload.repo, github.event.client_payload.pr || github.event.client_payload.branch)
+    }}
+  cancel-in-progress: true
+defaults:
+  run:
+    shell: bash
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      repo: ${{ steps.source.outputs.repo }}
+      owner: ${{ steps.source.outputs.owner }}
+      name: ${{ steps.source.outputs.name }}
+      pr: ${{ steps.source.outputs.pr }}
+      branch: ${{ steps.source.outputs.branch }}
+      sha: ${{ steps.source.outputs.sha }}
+      project_slug: ${{ steps.source.outputs.project_slug }}
+      tag: ${{ steps.source.outputs.tag }}
+      title: ${{ steps.source.outputs.title }}
+      pr_url: ${{ steps.source.outputs.pr_url }}
+      version: ${{ steps.version.outputs.version }}
+      build_number: ${{ steps.version.outputs.build_number }}
+      kotlin_version: ${{ steps.version.outputs.kotlin_version }}
+      angle_revision: ${{ steps.version.outputs.angle_revision }}
+    steps:
+    - name: Checkout trusted central controls
+      uses: actions/checkout@v7
+      with:
+        repository: ${{ github.repository }}
+        ref: ${{ github.sha }}
+        path: control
+        persist-credentials: false
+    - name: Fetch trusted orchestration helper
+      run: |-
+        curl -fsSL --retry 3 --retry-delay 2 --retry-all-errors --connect-timeout 10 --max-time 60 \
+          "$CONTROL_URL" -o "$RUNNER_TEMP/kmp-control.py.tmp"
+        test -s "$RUNNER_TEMP/kmp-control.py.tmp"
+        mv "$RUNNER_TEMP/kmp-control.py.tmp" "$RUNNER_TEMP/kmp-control.py"
+      working-directory: .
+      env:
+        CONTROL_URL: ${{ format('https://raw.githubusercontent.com/{0}/{1}/scripts/kmp/control.py', github.repository, github.sha) }}
+    - name: Validate dispatch scope before minting credentials
+      run: python3 "$RUNNER_TEMP/kmp-control.py" validate
+      id: payload
+    - name: Mint source-scoped GitHub App token
+      uses: actions/create-github-app-token@v3.3.0
+      with:
+        client-id: ${{ secrets.CI_APP_CLIENT_ID }}
+        private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
+        owner: ${{ steps.payload.outputs.owner }}
+        repositories: ${{ steps.payload.outputs.name }}
+      id: app-token
+    - name: Reject fork PRs and pin source HEAD
+      run: python3 "$RUNNER_TEMP/kmp-control.py" resolve
+      id: source
+      env:
+        GH_TOKEN: ${{ steps.app-token.outputs.token }}
+    - name: Checkout pinned source commit
+      uses: actions/checkout@v7
+      with:
+        repository: ${{ steps.source.outputs.repo }}
+        ref: ${{ steps.source.outputs.sha }}
+        token: ${{ steps.app-token.outputs.token }}
+        path: source
+        persist-credentials: false
+    - name: Read source version and CI build number
+      run: python3 "$RUNNER_TEMP/kmp-control.py" metadata --suffix "$RUN_NUMBER"
+      id: version
+      working-directory: source
+      env:
+        RUN_NUMBER: ${{ github.run_number }}
+    - name: Update Android PR status
+      uses: ./control/actions/pr-status-comment
+      with:
+        token: ${{ steps.app-token.outputs.token }}
+        app-slug: ${{ steps.app-token.outputs.app-slug }}
+        repository: ${{ steps.source.outputs.repo }}
+        pr: ${{ steps.source.outputs.pr }}
+        marker: <!-- central-build-debug -->
+        mode: replace
+        body: |-
+          Android checks and build started.
+          [Workflow run](${{ format('{0}/{1}/actions/runs/{2}', github.server_url, github.repository, github.run_id) }})
+    - name: Update TestFlight PR status
+      uses: ./control/actions/pr-status-comment
+      with:
+        token: ${{ steps.app-token.outputs.token }}
+        app-slug: ${{ steps.app-token.outputs.app-slug }}
+        repository: ${{ steps.source.outputs.repo }}
+        pr: ${{ steps.source.outputs.pr }}
+        marker: <!-- central-ios-testflight -->
+        mode: replace
+        body: |-
+          Staging TestFlight build ${{ steps.version.outputs.build_number }} started.
+          [Workflow run](${{ format('{0}/{1}/actions/runs/{2}', github.server_url, github.repository, github.run_id) }})
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults: &id001
+      run:
+        shell: bash
+        working-directory: source
+    env: &id002
+      CI: 'true'
+    needs:
+    - prepare
+    outputs:
+      publish: ${{ steps.gate.outputs.publish }}
+      pushed: ${{ steps.push.outputs.pushed }}
+    steps:
+    - name: Checkout trusted central controls
+      uses: actions/checkout@v7
+      with:
+        repository: ${{ github.repository }}
+        ref: ${{ github.sha }}
+        path: control
+        persist-credentials: false
+    - name: Fetch trusted orchestration helper
+      run: |-
+        curl -fsSL --retry 3 --retry-delay 2 --retry-all-errors --connect-timeout 10 --max-time 60 \
+          "$CONTROL_URL" -o "$RUNNER_TEMP/kmp-control.py.tmp"
+        test -s "$RUNNER_TEMP/kmp-control.py.tmp"
+        mv "$RUNNER_TEMP/kmp-control.py.tmp" "$RUNNER_TEMP/kmp-control.py"
+      working-directory: .
+      env:
+        CONTROL_URL: ${{ format('https://raw.githubusercontent.com/{0}/{1}/scripts/kmp/control.py', github.repository, github.sha) }}
+    - name: Mint source-scoped GitHub App token
+      uses: actions/create-github-app-token@v3.3.0
+      with:
+        client-id: ${{ secrets.CI_APP_CLIENT_ID }}
+        private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
+        owner: ${{ needs.prepare.outputs.owner }}
+        repositories: ${{ needs.prepare.outputs.name }}
+      id: app-token
+    - name: Checkout pinned source commit
+      uses: actions/checkout@v7
+      with:
+        repository: ${{ needs.prepare.outputs.repo }}
+        ref: ${{ needs.prepare.outputs.sha }}
+        token: ${{ steps.app-token.outputs.token }}
+        path: source
+        persist-credentials: true
+    - name: Read /Local-Properties from Infisical staging
+      uses: Infisical/secrets-action@v1.0.18
+      with:
+        method: universal
+        client-id: ${{ secrets.INFISICAL_CLIENT_ID }}
+        client-secret: ${{ secrets.INFISICAL_CLIENT_SECRET }}
+        project-slug: ${{ needs.prepare.outputs.project_slug }}
+        env-slug: staging
+        domain: ${{ secrets.INFISICAL_DOMAIN }}
+        secret-path: /Local-Properties
+        export-type: file
+        file-output-path: /source/.ci-local.env
+    - name: Render local.properties without shell evaluation
+      run: python3 "$RUNNER_TEMP/kmp-control.py" local-properties --input .ci-local.env --output local.properties
+    - name: Read /Build from Infisical staging
+      uses: Infisical/secrets-action@v1.0.18
+      with:
+        method: universal
+        client-id: ${{ secrets.INFISICAL_CLIENT_ID }}
+        client-secret: ${{ secrets.INFISICAL_CLIENT_SECRET }}
+        project-slug: ${{ needs.prepare.outputs.project_slug }}
+        env-slug: staging
+        domain: ${{ secrets.INFISICAL_DOMAIN }}
+        secret-path: /Build
+        export-type: env
+    - name: Install existing debug signing and Firebase files
+      run: python3 "$RUNNER_TEMP/kmp-control.py" android-inputs
+    - name: Set up JDK 25
+      uses: actions/setup-java@v6
+      with:
+        distribution: temurin
+        java-version: '25'
+    - name: Set up small Gradle configuration and build caches
+      uses: gradle/actions/setup-gradle@v6
+      with:
+        cache-read-only: false
+        cache-encryption-key: ${{ secrets.GRADLE_ENCRYPTION_KEY }}
+        cache-cleanup: never
+        gradle-home-cache-includes: |-
+          caches/build-cache-1
+          notifications
+        gradle-home-cache-excludes: |-
+          wrapper
+          caches/modules-2
+          caches/transforms-*
+          caches/*/transforms
+    - name: Restore gradle OCI bundle
+      uses: ./control/actions/gh-bundle-cache
+      with:
+        mode: restore
+        name: ${{ format('{0}-{1}-{2}', needs.prepare.outputs.name, runner.os, 'gradle') }}
+        key: ${{ format('deps-{0}-{1}', runner.arch, hashFiles('source/gradle/libs.versions.toml', 'source/gradle/wrapper/gradle-wrapper.properties',
+          'source/**/*.gradle.kts', 'source/gradle.properties')) }}
+        fallback-key: latest
+        paths: |-
+          ~/.gradle/caches/modules-2
+          ~/.gradle/wrapper
+        token: ${{ github.token }}
+      id: gradle-cache
+    - name: Run unit tests and both Android lint tasks
+      run: bash scripts/ci/android-debug.sh check
+      env:
+        GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        KEYSTORE_PASSWORD_DEBUG: ${{ env.KEYSTORE_PASSWORD }}
+        KEY_ALIAS_DEBUG: ${{ env.KEY_ALIAS }}
+        KEY_PASSWORD_DEBUG: ${{ env.KEY_PASSWORD }}
+      id: checks
+      continue-on-error: true
+    - name: Read machine-readable check results
+      run: python3 "$RUNNER_TEMP/kmp-control.py" lint-state build/ci/lint-result.json
+      id: lint
+      if: ${{ !cancelled() && steps.checks.outcome != 'skipped' }}
+    - name: Build lint-only Claude prompt
+      run: |-
+        curl -fsSL --retry 3 --retry-delay 2 --retry-all-errors --connect-timeout 10 --max-time 60 \
+          "$PROMPT_URL" -o claude-prompt.md.tmp
+        test -s claude-prompt.md.tmp
+        mv claude-prompt.md.tmp claude-prompt.md
+        cat build/ci/lint-output.txt >> claude-prompt.md
+      env:
+        PROMPT_URL: ${{ format('https://raw.githubusercontent.com/{0}/{1}/data/LINT.md', github.repository, github.sha) }}
+      if: ${{ steps.lint.outputs.autofix_allowed == 'true' }}
+    - name: Apply the existing Claude lint auto-fix
+      uses: anthropics/claude-code-action@v1
+      with:
+        anthropic_api_key: ${{ secrets.CLAUDE_API_KEY }}
+        github_token: ${{ github.token }}
+        allowed_bots: ${{ github.actor }}
+        prompt: Read source/claude-prompt.md. The app repository is source/. Apply only minimal lint fixes there and write source/claude-report.md.
+          Do not commit, push or comment.
+        claude_args: --model claude-sonnet-5-5 --tools Read,Edit,Write,Glob,Grep --allowedTools Read,Edit,Write,Glob,Grep
+      id: claude
+      if: ${{ steps.lint.outputs.autofix_allowed == 'true' }}
+      continue-on-error: true
+    - name: Push tracked lint fixes with a source-HEAD lease
+      run: python3 "$RUNNER_TEMP/kmp-control.py" push-fix
+      id: push
+      env:
+        HEAD_BRANCH: ${{ needs.prepare.outputs.branch }}
+        SOURCE_SHA: ${{ needs.prepare.outputs.sha }}
+      if: ${{ steps.lint.outputs.autofix_allowed == 'true' && steps.claude.outcome == 'success' }}
+    - name: Update Android PR status
+      uses: ./control/actions/pr-status-comment
+      with:
+        token: ${{ steps.app-token.outputs.token }}
+        app-slug: ${{ steps.app-token.outputs.app-slug }}
+        repository: ${{ needs.prepare.outputs.repo }}
+        pr: ${{ needs.prepare.outputs.pr }}
+        marker: <!-- central-build-debug -->
+        mode: upsert
+        body: |-
+          Claude pushed an auto-fix for Android Lint. CI will retrigger on the new commit.
+          [Workflow run](${{ format('{0}/{1}/actions/runs/{2}', github.server_url, github.repository, github.run_id) }})
+      if: ${{ steps.push.outputs.pushed == 'true' }}
+    - name: Enforce publishing gate
+      run: |-
+        if [ "$CHECK_OUTCOME" != success ] && [ "$PUSHED" != true ]; then
+          echo '::error::Unit tests or lint failed and no lint fix was pushed.'
+          exit 1
+        fi
+        if [ "$CHECK_OUTCOME" = success ]; then echo 'publish=true' >> "$GITHUB_OUTPUT"; fi
+      id: gate
+      env:
+        CHECK_OUTCOME: ${{ steps.checks.outcome }}
+        PUSHED: ${{ steps.push.outputs.pushed }}
+    - name: Publish gradle OCI bundle
+      uses: ./control/actions/gh-bundle-cache
+      with:
+        mode: publish
+        name: ${{ format('{0}-{1}-{2}', needs.prepare.outputs.name, runner.os, 'gradle') }}
+        key: ${{ format('deps-{0}-{1}', runner.arch, hashFiles('source/gradle/libs.versions.toml', 'source/gradle/wrapper/gradle-wrapper.properties',
+          'source/**/*.gradle.kts', 'source/gradle.properties')) }}
+        fallback-key: latest
+        paths: |-
+          ~/.gradle/caches/modules-2
+          ~/.gradle/wrapper
+        token: ${{ github.token }}
+      continue-on-error: true
+    - name: Retain check diagnostics
+      uses: actions/upload-artifact@v7
+      with:
+        name: check-diagnostics
+        path: |-
+          source/build/ci/*.json
+          source/build/ci/*.txt
+          source/build/ci/ios/*.json
+          source/build/ci/ios/*.txt
+          source/build/ci/ios/*.log
+          source/**/build/reports/lint-results*.xml
+        if-no-files-found: warn
+        retention-days: 7
+      if: ${{ always() }}
+  android:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults: *id001
+    env: *id002
+    needs:
+    - prepare
+    steps:
+    - name: Checkout trusted central controls
+      uses: actions/checkout@v7
+      with:
+        repository: ${{ github.repository }}
+        ref: ${{ github.sha }}
+        path: control
+        persist-credentials: false
+    - name: Fetch trusted orchestration helper
+      run: |-
+        curl -fsSL --retry 3 --retry-delay 2 --retry-all-errors --connect-timeout 10 --max-time 60 \
+          "$CONTROL_URL" -o "$RUNNER_TEMP/kmp-control.py.tmp"
+        test -s "$RUNNER_TEMP/kmp-control.py.tmp"
+        mv "$RUNNER_TEMP/kmp-control.py.tmp" "$RUNNER_TEMP/kmp-control.py"
+      working-directory: .
+      env:
+        CONTROL_URL: ${{ format('https://raw.githubusercontent.com/{0}/{1}/scripts/kmp/control.py', github.repository, github.sha) }}
+    - name: Mint source-scoped GitHub App token
+      uses: actions/create-github-app-token@v3.3.0
+      with:
+        client-id: ${{ secrets.CI_APP_CLIENT_ID }}
+        private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
+        owner: ${{ needs.prepare.outputs.owner }}
+        repositories: ${{ needs.prepare.outputs.name }}
+      id: app-token
+    - name: Checkout pinned source commit
+      uses: actions/checkout@v7
+      with:
+        repository: ${{ needs.prepare.outputs.repo }}
+        ref: ${{ needs.prepare.outputs.sha }}
+        token: ${{ steps.app-token.outputs.token }}
+        path: source
+        persist-credentials: false
+    - name: Read /Local-Properties from Infisical staging
+      uses: Infisical/secrets-action@v1.0.18
+      with:
+        method: universal
+        client-id: ${{ secrets.INFISICAL_CLIENT_ID }}
+        client-secret: ${{ secrets.INFISICAL_CLIENT_SECRET }}
+        project-slug: ${{ needs.prepare.outputs.project_slug }}
+        env-slug: staging
+        domain: ${{ secrets.INFISICAL_DOMAIN }}
+        secret-path: /Local-Properties
+        export-type: file
+        file-output-path: /source/.ci-local.env
+    - name: Render local.properties without shell evaluation
+      run: python3 "$RUNNER_TEMP/kmp-control.py" local-properties --input .ci-local.env --output local.properties
+    - name: Read /Build from Infisical staging
+      uses: Infisical/secrets-action@v1.0.18
+      with:
+        method: universal
+        client-id: ${{ secrets.INFISICAL_CLIENT_ID }}
+        client-secret: ${{ secrets.INFISICAL_CLIENT_SECRET }}
+        project-slug: ${{ needs.prepare.outputs.project_slug }}
+        env-slug: staging
+        domain: ${{ secrets.INFISICAL_DOMAIN }}
+        secret-path: /Build
+        export-type: env
+    - name: Install existing debug signing and Firebase files
+      run: python3 "$RUNNER_TEMP/kmp-control.py" android-inputs
+    - name: Set up JDK 25
+      uses: actions/setup-java@v6
+      with:
+        distribution: temurin
+        java-version: '25'
+    - name: Set up small Gradle configuration and build caches
+      uses: gradle/actions/setup-gradle@v6
+      with:
+        cache-read-only: false
+        cache-encryption-key: ${{ secrets.GRADLE_ENCRYPTION_KEY }}
+        cache-cleanup: never
+        gradle-home-cache-includes: |-
+          caches/build-cache-1
+          notifications
+        gradle-home-cache-excludes: |-
+          wrapper
+          caches/modules-2
+          caches/transforms-*
+          caches/*/transforms
+    - name: Restore gradle OCI bundle
+      uses: ./control/actions/gh-bundle-cache
+      with:
+        mode: restore
+        name: ${{ format('{0}-{1}-{2}', needs.prepare.outputs.name, runner.os, 'gradle') }}
+        key: ${{ format('deps-{0}-{1}', runner.arch, hashFiles('source/gradle/libs.versions.toml', 'source/gradle/wrapper/gradle-wrapper.properties',
+          'source/**/*.gradle.kts', 'source/gradle.properties')) }}
+        fallback-key: latest
+        paths: |-
+          ~/.gradle/caches/modules-2
+          ~/.gradle/wrapper
+        token: ${{ github.token }}
+      id: gradle-cache
+    - name: Build Android debug APK
+      run: bash scripts/ci/android-debug.sh build
+      env:
+        GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        KEYSTORE_PASSWORD_DEBUG: ${{ env.KEYSTORE_PASSWORD }}
+        KEY_ALIAS_DEBUG: ${{ env.KEY_ALIAS }}
+        KEY_PASSWORD_DEBUG: ${{ env.KEY_PASSWORD }}
+      id: build
+    - name: Retain APK for gated publishing
+      uses: actions/upload-artifact@v7
+      with:
+        name: android-debug-apk
+        path: ${{ format('source/{0}', steps.build.outputs.apk_path) }}
+        if-no-files-found: error
+        retention-days: 3
+    - name: Publish gradle OCI bundle
+      uses: ./control/actions/gh-bundle-cache
+      with:
+        mode: publish
+        name: ${{ format('{0}-{1}-{2}', needs.prepare.outputs.name, runner.os, 'gradle') }}
+        key: ${{ format('deps-{0}-{1}', runner.arch, hashFiles('source/gradle/libs.versions.toml', 'source/gradle/wrapper/gradle-wrapper.properties',
+          'source/**/*.gradle.kts', 'source/gradle.properties')) }}
+        fallback-key: latest
+        paths: |-
+          ~/.gradle/caches/modules-2
+          ~/.gradle/wrapper
+        token: ${{ github.token }}
+      continue-on-error: true
+    - name: Retain android diagnostics
+      uses: actions/upload-artifact@v7
+      with:
+        name: android-diagnostics
+        path: |-
+          source/build/ci/*.json
+          source/build/ci/*.txt
+          source/build/ci/ios/*.json
+          source/build/ci/ios/*.txt
+          source/build/ci/ios/*.log
+          source/**/build/reports/lint-results*.xml
+        if-no-files-found: warn
+        retention-days: 7
+      if: ${{ always() }}
+  ios-build:
+    runs-on: macos-26
+    timeout-minutes: 35
+    defaults: *id001
+    env: *id002
+    needs:
+    - prepare
+    steps:
+    - name: Checkout trusted central controls
+      uses: actions/checkout@v7
+      with:
+        repository: ${{ github.repository }}
+        ref: ${{ github.sha }}
+        path: control
+        persist-credentials: false
+    - name: Fetch trusted orchestration helper
+      run: |-
+        curl -fsSL --retry 3 --retry-delay 2 --retry-all-errors --connect-timeout 10 --max-time 60 \
+          "$CONTROL_URL" -o "$RUNNER_TEMP/kmp-control.py.tmp"
+        test -s "$RUNNER_TEMP/kmp-control.py.tmp"
+        mv "$RUNNER_TEMP/kmp-control.py.tmp" "$RUNNER_TEMP/kmp-control.py"
+      working-directory: .
+      env:
+        CONTROL_URL: ${{ format('https://raw.githubusercontent.com/{0}/{1}/scripts/kmp/control.py', github.repository, github.sha) }}
+    - name: Mint source-scoped GitHub App token
+      uses: actions/create-github-app-token@v3.3.0
+      with:
+        client-id: ${{ secrets.CI_APP_CLIENT_ID }}
+        private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
+        owner: ${{ needs.prepare.outputs.owner }}
+        repositories: ${{ needs.prepare.outputs.name }}
+      id: app-token
+    - name: Checkout pinned source commit
+      uses: actions/checkout@v7
+      with:
+        repository: ${{ needs.prepare.outputs.repo }}
+        ref: ${{ needs.prepare.outputs.sha }}
+        token: ${{ steps.app-token.outputs.token }}
+        path: source
+        persist-credentials: false
+    - name: Read /Local-Properties from Infisical staging
+      uses: Infisical/secrets-action@v1.0.18
+      with:
+        method: universal
+        client-id: ${{ secrets.INFISICAL_CLIENT_ID }}
+        client-secret: ${{ secrets.INFISICAL_CLIENT_SECRET }}
+        project-slug: ${{ needs.prepare.outputs.project_slug }}
+        env-slug: staging
+        domain: ${{ secrets.INFISICAL_DOMAIN }}
+        secret-path: /Local-Properties
+        export-type: file
+        file-output-path: /source/.ci-local.env
+    - name: Render local.properties without shell evaluation
+      run: python3 "$RUNNER_TEMP/kmp-control.py" local-properties --input .ci-local.env --output local.properties
+    - name: Read /Build from Infisical staging
+      uses: Infisical/secrets-action@v1.0.18
+      with:
+        method: universal
+        client-id: ${{ secrets.INFISICAL_CLIENT_ID }}
+        client-secret: ${{ secrets.INFISICAL_CLIENT_SECRET }}
+        project-slug: ${{ needs.prepare.outputs.project_slug }}
+        env-slug: staging
+        domain: ${{ secrets.INFISICAL_DOMAIN }}
+        secret-path: /Build
+        export-type: env
+    - name: Pin Xcode 26.6
+      uses: maxim-lobanov/setup-xcode@v1
+      with:
+        xcode-version: '26.6'
+    - name: Set up JDK 25
+      uses: actions/setup-java@v6
+      with:
+        distribution: temurin
+        java-version: '25'
+    - name: Set up small Gradle configuration and build caches
+      uses: gradle/actions/setup-gradle@v6
+      with:
+        cache-read-only: false
+        cache-encryption-key: ${{ secrets.GRADLE_ENCRYPTION_KEY }}
+        cache-cleanup: never
+        gradle-home-cache-includes: |-
+          caches/build-cache-1
+          notifications
+        gradle-home-cache-excludes: |-
+          wrapper
+          caches/modules-2
+          caches/transforms-*
+          caches/*/transforms
+    - name: Restore gradle OCI bundle
+      uses: ./control/actions/gh-bundle-cache
+      with:
+        mode: restore
+        name: ${{ format('{0}-{1}-{2}', needs.prepare.outputs.name, runner.os, 'gradle') }}
+        key: ${{ format('deps-{0}-{1}', runner.arch, hashFiles('source/gradle/libs.versions.toml', 'source/gradle/wrapper/gradle-wrapper.properties',
+          'source/**/*.gradle.kts', 'source/gradle.properties')) }}
+        fallback-key: latest
+        paths: |-
+          ~/.gradle/caches/modules-2
+          ~/.gradle/wrapper
+        token: ${{ github.token }}
+      id: gradle-cache
+    - name: Restore konan OCI bundle
+      uses: ./control/actions/gh-bundle-cache
+      with:
+        mode: restore
+        name: ${{ format('{0}-{1}-{2}', needs.prepare.outputs.name, runner.os, 'konan') }}
+        key: ${{ format('konan-{0}-{1}', runner.arch, needs.prepare.outputs.kotlin_version) }}
+        fallback-key: latest
+        paths: ~/.konan
+        token: ${{ github.token }}
+      id: konan-cache
+    - name: Restore swiftpm OCI bundle
+      uses: ./control/actions/gh-bundle-cache
+      with:
+        mode: restore
+        name: ${{ format('{0}-{1}-{2}', needs.prepare.outputs.name, runner.os, 'swiftpm') }}
+        key: ${{ format('xcode-26-6-{0}', hashFiles('source/**/Package.resolved')) }}
+        fallback-key: latest
+        paths: |-
+          ~/Library/Caches/org.swift.swiftpm
+          source/build/ci/ios/SourcePackages
+        token: ${{ github.token }}
+      id: spm-cache
+    - name: Restore angle OCI bundle
+      uses: ./control/actions/gh-bundle-cache
+      with:
+        mode: restore
+        name: ${{ format('{0}-{1}-{2}', needs.prepare.outputs.name, runner.os, 'angle') }}
+        key: ${{ format('angle-{0}', needs.prepare.outputs.angle_revision) }}
+        fallback-key: latest
+        paths: source/shared/build/angle
+        token: ${{ github.token }}
+      id: angle-cache
+    - name: Resolve pinned Swift packages
+      run: bash scripts/ci/ios-testflight.sh --build-suffix "$BUILD_SUFFIX" --resolve-only
+      env:
+        GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        KEYSTORE_PASSWORD_DEBUG: ${{ env.KEYSTORE_PASSWORD }}
+        KEY_ALIAS_DEBUG: ${{ env.KEY_ALIAS }}
+        KEY_PASSWORD_DEBUG: ${{ env.KEY_PASSWORD }}
+        BUILD_SUFFIX: ${{ github.run_number }}
+      id: resolve
+    - name: Publish swiftpm OCI bundle
+      uses: ./control/actions/gh-bundle-cache
+      with:
+        mode: publish
+        name: ${{ format('{0}-{1}-{2}', needs.prepare.outputs.name, runner.os, 'swiftpm') }}
+        key: ${{ format('xcode-26-6-{0}', hashFiles('source/**/Package.resolved')) }}
+        fallback-key: latest
+        paths: |-
+          ~/Library/Caches/org.swift.swiftpm
+          source/build/ci/ios/SourcePackages
+        token: ${{ github.token }}
+      continue-on-error: true
+    - name: Install temporary Apple distribution signing
+      uses: ./control/actions/apple-signing
+      with:
+        profiles: |-
+          IOS_STAGING_PROFILE_APP_BASE64
+          IOS_STAGING_PROFILE_SHARE_BASE64
+          IOS_STAGING_PROFILE_NSE_BASE64
+          IOS_STAGING_PROFILE_WIDGET_BASE64
+    - name: Archive and export optimized Staging IPA
+      run: bash scripts/ci/ios-testflight.sh --build-suffix "$BUILD_SUFFIX" --skip-resolve
+      env:
+        GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        KEYSTORE_PASSWORD_DEBUG: ${{ env.KEYSTORE_PASSWORD }}
+        KEY_ALIAS_DEBUG: ${{ env.KEY_ALIAS }}
+        KEY_PASSWORD_DEBUG: ${{ env.KEY_PASSWORD }}
+        BUILD_SUFFIX: ${{ github.run_number }}
+      id: build
+    - name: Upload Staging dSYMs to Crashlytics
+      run: |-
+        test -x build/ci/ios/SourcePackages/checkouts/firebase-ios-sdk/Crashlytics/upload-symbols
+        build/ci/ios/SourcePackages/checkouts/firebase-ios-sdk/Crashlytics/upload-symbols \
+          -gsp iosApp/iosApp/Config/Staging/GoogleService-Info.plist -p ios "$DSYM_PATH"
+      env:
+        DSYM_PATH: ${{ steps.build.outputs.dsym_path }}
+    - name: Retain IPA for gated publishing
+      uses: actions/upload-artifact@v7
+      with:
+        name: ios-staging-ipa
+        path: ${{ format('source/{0}', steps.build.outputs.ipa_path) }}
+        if-no-files-found: error
+        retention-days: 3
+    - name: Publish konan OCI bundle
+      uses: ./control/actions/gh-bundle-cache
+      with:
+        mode: publish
+        name: ${{ format('{0}-{1}-{2}', needs.prepare.outputs.name, runner.os, 'konan') }}
+        key: ${{ format('konan-{0}-{1}', runner.arch, needs.prepare.outputs.kotlin_version) }}
+        fallback-key: latest
+        paths: ~/.konan
+        token: ${{ github.token }}
+      continue-on-error: true
+      if: ${{ !cancelled() && steps.build.outcome != 'skipped' }}
+    - name: Publish angle OCI bundle
+      uses: ./control/actions/gh-bundle-cache
+      with:
+        mode: publish
+        name: ${{ format('{0}-{1}-{2}', needs.prepare.outputs.name, runner.os, 'angle') }}
+        key: ${{ format('angle-{0}', needs.prepare.outputs.angle_revision) }}
+        fallback-key: latest
+        paths: source/shared/build/angle
+        token: ${{ github.token }}
+      continue-on-error: true
+      if: ${{ !cancelled() && steps.build.outcome != 'skipped' }}
+    - name: Publish gradle OCI bundle
+      uses: ./control/actions/gh-bundle-cache
+      with:
+        mode: publish
+        name: ${{ format('{0}-{1}-{2}', needs.prepare.outputs.name, runner.os, 'gradle') }}
+        key: ${{ format('deps-{0}-{1}', runner.arch, hashFiles('source/gradle/libs.versions.toml', 'source/gradle/wrapper/gradle-wrapper.properties',
+          'source/**/*.gradle.kts', 'source/gradle.properties')) }}
+        fallback-key: latest
+        paths: |-
+          ~/.gradle/caches/modules-2
+          ~/.gradle/wrapper
+        token: ${{ github.token }}
+      continue-on-error: true
+      if: ${{ !cancelled() && steps.build.outcome != 'skipped' }}
+    - name: Remove temporary provisioning profiles
+      uses: ./control/actions/apple-signing
+      with:
+        mode: cleanup
+      if: ${{ always() }}
+    - name: Retain ios diagnostics
+      uses: actions/upload-artifact@v7
+      with:
+        name: ios-diagnostics
+        path: |-
+          source/build/ci/*.json
+          source/build/ci/*.txt
+          source/build/ci/ios/*.json
+          source/build/ci/ios/*.txt
+          source/build/ci/ios/*.log
+          source/**/build/reports/lint-results*.xml
+        if-no-files-found: warn
+        retention-days: 7
+      if: ${{ always() }}
+  publish-android:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs:
+    - prepare
+    - check
+    - android
+    if: ${{ needs.check.outputs.publish == 'true' }}
+    outputs:
+      url: ${{ steps.release.outputs.url }}
+    steps:
+    - name: Checkout trusted central controls
+      uses: actions/checkout@v7
+      with:
+        repository: ${{ github.repository }}
+        ref: ${{ github.sha }}
+        path: control
+        persist-credentials: false
+    - name: Mint source-scoped GitHub App token
+      uses: actions/create-github-app-token@v3.3.0
+      with:
+        client-id: ${{ secrets.CI_APP_CLIENT_ID }}
+        private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
+        owner: ${{ needs.prepare.outputs.owner }}
+        repositories: ${{ needs.prepare.outputs.name }}
+      id: app-token
+    - name: Download checked Android APK
+      uses: actions/download-artifact@v8
+      with:
+        name: android-debug-apk
+        path: artifacts/android
+    - name: Publish debug prerelease in source repository
+      uses: softprops/action-gh-release@v3
+      with:
+        repository: ${{ needs.prepare.outputs.repo }}
+        token: ${{ steps.app-token.outputs.token }}
+        tag_name: ${{ needs.prepare.outputs.tag }}
+        target_commitish: ${{ needs.prepare.outputs.sha }}
+        name: ${{ needs.prepare.outputs.title }}
+        prerelease: true
+        files: artifacts/android/*.apk
+        fail_on_unmatched_files: true
+        body: |-
+          ${{ needs.prepare.outputs.title }}
+          ${{ needs.prepare.outputs.pr_url }}
+          Source commit: ${{ needs.prepare.outputs.sha }}
+          [Workflow run](${{ format('{0}/{1}/actions/runs/{2}', github.server_url, github.repository, github.run_id) }})
+      id: release
+  ios-publish:
+    runs-on: macos-26
+    timeout-minutes: 15
+    needs:
+    - prepare
+    - check
+    - ios-build
+    if: ${{ needs.check.outputs.publish == 'true' }}
+    steps:
+    - name: Checkout trusted central controls
+      uses: actions/checkout@v7
+      with:
+        repository: ${{ github.repository }}
+        ref: ${{ github.sha }}
+        path: control
+        persist-credentials: false
+    - name: Fetch trusted orchestration helper
+      run: |-
+        curl -fsSL --retry 3 --retry-delay 2 --retry-all-errors --connect-timeout 10 --max-time 60 \
+          "$CONTROL_URL" -o "$RUNNER_TEMP/kmp-control.py.tmp"
+        test -s "$RUNNER_TEMP/kmp-control.py.tmp"
+        mv "$RUNNER_TEMP/kmp-control.py.tmp" "$RUNNER_TEMP/kmp-control.py"
+      working-directory: .
+      env:
+        CONTROL_URL: ${{ format('https://raw.githubusercontent.com/{0}/{1}/scripts/kmp/control.py', github.repository, github.sha) }}
+    - name: Mint source-scoped GitHub App token
+      uses: actions/create-github-app-token@v3.3.0
+      with:
+        client-id: ${{ secrets.CI_APP_CLIENT_ID }}
+        private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
+        owner: ${{ needs.prepare.outputs.owner }}
+        repositories: ${{ needs.prepare.outputs.name }}
+      id: app-token
+    - name: Pin Xcode 26.6
+      uses: maxim-lobanov/setup-xcode@v1
+      with:
+        xcode-version: '26.6'
+    - name: Download checked Staging IPA
+      uses: actions/download-artifact@v8
+      with:
+        name: ios-staging-ipa
+        path: artifacts/ios
+    - name: Upload package to TestFlight without processing poll
+      run: |-
+        shopt -s nullglob
+        ipas=(artifacts/ios/*.ipa)
+        test "${#ipas[@]}" -eq 1
+        python3 "$RUNNER_TEMP/kmp-control.py" upload-ipa "${ipas[0]}"
+      env:
+        APPSTORE_API_KEY_ID: ${{ secrets.APPSTORE_API_KEY_ID }}
+        APPSTORE_ISSUER_ID: ${{ secrets.APPSTORE_ISSUER_ID }}
+        APPSTORE_API_PRIVATE_KEY: ${{ secrets.APPSTORE_API_PRIVATE_KEY }}
+  notify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs:
+    - prepare
+    - check
+    - android
+    - ios-build
+    - publish-android
+    - ios-publish
+    if: ${{ always() }}
+    steps:
+    - name: Checkout trusted central controls
+      uses: actions/checkout@v7
+      with:
+        repository: ${{ github.repository }}
+        ref: ${{ github.sha }}
+        path: control
+        persist-credentials: false
+    - name: Mint source-scoped GitHub App token
+      uses: actions/create-github-app-token@v3.3.0
+      with:
+        client-id: ${{ secrets.CI_APP_CLIENT_ID }}
+        private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
+        owner: ${{ needs.prepare.outputs.owner }}
+        repositories: ${{ needs.prepare.outputs.name }}
+      id: app-token
+      if: ${{ needs.prepare.outputs.repo != '' }}
+    - name: Update Android PR status
+      uses: ./control/actions/pr-status-comment
+      with:
+        token: ${{ steps.app-token.outputs.token }}
+        app-slug: ${{ steps.app-token.outputs.app-slug }}
+        repository: ${{ needs.prepare.outputs.repo }}
+        pr: ${{ needs.prepare.outputs.pr }}
+        marker: <!-- central-build-debug -->
+        mode: upsert
+        body: |-
+          ${{ needs.check.outputs.pushed == 'true' && 'Claude pushed an auto-fix for Android Lint. CI will retrigger on the new commit.' || (needs['publish-android'].result == 'success' && format('Debug APK is ready: {0}', needs['publish-android'].outputs.url) || format('Android failed or publishing was blocked. Check: {0}; build: {1}; publish: {2}.', needs.check.result, needs.android.result, needs['publish-android'].result)) }}
+          [Workflow run](${{ format('{0}/{1}/actions/runs/{2}', github.server_url, github.repository, github.run_id) }})
+      if: ${{ always() && needs.prepare.outputs.repo != '' }}
+    - name: Notify Telegram of Android result
+      uses: ./control/actions/telegram-notify
+      with:
+        token: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+        chat-id: ${{ secrets.TELEGRAM_CHAT_ID }}
+        message: "${{ needs.prepare.outputs.repo }} \xB7 Android\n${{ needs.check.outputs.pushed == 'true' && 'Claude pushed an auto-fix\
+          \ for Android Lint. CI will retrigger on the new commit.' || (needs['publish-android'].result == 'success' && format('Debug\
+          \ APK is ready: {0}', needs['publish-android'].outputs.url) || format('Android failed or publishing was blocked. Check: {0};\
+          \ build: {1}; publish: {2}.', needs.check.result, needs.android.result, needs['publish-android'].result)) }}\n${{ format('{0}/{1}/actions/runs/{2}',\
+          \ github.server_url, github.repository, github.run_id) }}"
+      if: ${{ always() }}
+    - name: Update TestFlight PR status
+      uses: ./control/actions/pr-status-comment
+      with:
+        token: ${{ steps.app-token.outputs.token }}
+        app-slug: ${{ steps.app-token.outputs.app-slug }}
+        repository: ${{ needs.prepare.outputs.repo }}
+        pr: ${{ needs.prepare.outputs.pr }}
+        marker: <!-- central-ios-testflight -->
+        mode: upsert
+        body: |-
+          ${{ needs.check.outputs.pushed == 'true' && format('TestFlight {0} withheld: Claude pushed an Android lint auto-fix; CI will retrigger.', needs.prepare.outputs.build_number) || (needs['ios-publish'].result == 'success' && format('TestFlight {0} uploaded; Apple processing is pending. Internal testers receive it automatically when processing completes.', needs.prepare.outputs.build_number) || format('TestFlight {0} failed or publishing was blocked. Check: {1}; build: {2}; publish: {3}.', needs.prepare.outputs.build_number, needs.check.result, needs['ios-build'].result, needs['ios-publish'].result)) }}
+          [Workflow run](${{ format('{0}/{1}/actions/runs/{2}', github.server_url, github.repository, github.run_id) }})
+      if: ${{ always() && needs.prepare.outputs.repo != '' }}
+    - name: Notify Telegram of TestFlight result
+      uses: ./control/actions/telegram-notify
+      with:
+        token: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+        chat-id: ${{ secrets.TELEGRAM_CHAT_ID }}
+        message: "${{ needs.prepare.outputs.repo }} \xB7 TestFlight\n${{ needs.check.outputs.pushed == 'true' && format('TestFlight\
+          \ {0} withheld: Claude pushed an Android lint auto-fix; CI will retrigger.', needs.prepare.outputs.build_number) || (needs['ios-publish'].result\
+          \ == 'success' && format('TestFlight {0} uploaded; Apple processing is pending. Internal testers receive it automatically\
+          \ when processing completes.', needs.prepare.outputs.build_number) || format('TestFlight {0} failed or publishing was blocked.\
+          \ Check: {1}; build: {2}; publish: {3}.', needs.prepare.outputs.build_number, needs.check.result, needs['ios-build'].result,\
+          \ needs['ios-publish'].result)) }}\n${{ format('{0}/{1}/actions/runs/{2}', github.server_url, github.repository, github.run_id)\
+          \ }}"
+      if: ${{ always() }}
