@@ -36,7 +36,8 @@ runs:
       run: |
         target="$RUNNER_TEMP/central-pr-status.cjs"
         curl -fsSL --retry 3 --retry-delay 2 --retry-all-errors --connect-timeout 15 --max-time 120 -o "$target.tmp" "https://raw.githubusercontent.com/Lascade-Co/actions/$CONTROL_SHA/scripts/kmp/pr_status_comment.cjs"
-        test -s "$target.tmp" && mv "$target.tmp" "$target"
+        test -s "$target.tmp"
+        mv "$target.tmp" "$target"
     - name: Update owned marker comment
       id: comment
       uses: actions/github-script@v9

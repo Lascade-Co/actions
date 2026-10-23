@@ -52,7 +52,8 @@ runs:
         script=$(mktemp "$RUNNER_TEMP/bundle-cache.XXXXXX")
         trap 'rm -f "$script" "$script.tmp"' EXIT
         curl -fsSL --retry 3 --retry-delay 2 --retry-all-errors --connect-timeout 15 --max-time 120 -o "$script.tmp" "https://raw.githubusercontent.com/Lascade-Co/actions/$CONTROL_SHA/scripts/kmp/bundle_cache.py"
-        test -s "$script.tmp" && mv "$script.tmp" "$script"
+        test -s "$script.tmp"
+        mv "$script.tmp" "$script"
         python3 "$script" "$CACHE_MODE"
     - name: Report unavailable cache
       if: steps.bundle.outcome == 'failure'
