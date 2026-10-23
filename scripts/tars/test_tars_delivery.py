@@ -788,7 +788,7 @@ class FakeReleaseAPI:
             ),
             None,
         )
-        return {
+        resource = {
             "id": endpoint["id"],
             "name": endpoint["name"],
             "templateId": endpoint["templateId"],
@@ -811,6 +811,10 @@ class FakeReleaseAPI:
             "workers": [dict(worker) for worker in endpoint.get("workers", [])],
             "template": self._rest_template(template) if template is not None else {},
         }
+        if endpoint["workersMax"] == 0 and not endpoint.get("workers"):
+            # Runpod's own response for an idle endpoint has no worker list.
+            del resource["workers"]
+        return resource
 
     def read_template(self, template_id: str) -> dict:
         template = next(item for item in self.templates if item["id"] == template_id)
@@ -2051,6 +2055,42 @@ class RunpodReleaseTest(unittest.TestCase):
                         api, ids=self.stable_ids()
                     )
                 self.assertEqual(api.calls, [])
+
+    def test_stable_topology_accepts_an_idle_endpoints_missing_worker_lists(self) -> None:
+        # Runpod's REST read of an idle endpoint has no `workers` key at all
+        # (the fake mirrors that), and its GraphQL pods may be null too.
+        api = FakeReleaseAPI()
+        api.seed_stable(self.IMAGE, version=7)
+        api.endpoints[0]["workersMax"] = 0
+        api.endpoints[0]["pods"] = None
+        self.assertNotIn("workers", api.read_endpoint("stable-endpoint"))
+
+        tars_runpod_release.verify_stable_topology(
+            api, ids=self.stable_ids(), expected_image=self.IMAGE
+        )
+        self.assertEqual(api.calls, [])
+
+    def test_stable_topology_refuses_missing_worker_lists_on_an_enabled_endpoint(
+        self,
+    ) -> None:
+        api = FakeReleaseAPI()
+        api.seed_stable(self.IMAGE, version=7)
+        read = api.read_endpoint
+
+        def without_workers(endpoint_id: str) -> dict:
+            resource = read(endpoint_id)
+            resource.pop("workers")
+            return resource
+
+        api.read_endpoint = without_workers
+        with self.assertRaisesRegex(RunpodReleaseError, "invalid worker inventory"):
+            tars_runpod_release.verify_stable_topology(api, ids=self.stable_ids())
+
+        api = FakeReleaseAPI()
+        api.seed_stable(self.IMAGE, version=7)
+        api.endpoints[0]["pods"] = None
+        with self.assertRaisesRegex(RunpodReleaseError, "invalid pod inventory"):
+            tars_runpod_release.verify_stable_topology(api, ids=self.stable_ids())
 
     def test_stable_topology_accepts_missing_inverse_endpoint_binding(self) -> None:
         for marker in (None, "missing"):
