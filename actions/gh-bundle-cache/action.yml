@@ -35,7 +35,7 @@ runs:
     - uses: oras-project/setup-oras@v2
       continue-on-error: true
       with:
-        version: 1.3.5
+        version: 1.3.4  # setup-oras@v2 lists official releases only up to 1.3.4
     - name: Restore or publish bundle
       id: bundle
       continue-on-error: true
