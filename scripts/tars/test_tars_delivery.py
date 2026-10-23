@@ -2000,6 +2000,58 @@ class RunpodReleaseTest(unittest.TestCase):
                 expected_image=self.TARGET_IMAGE,
             )
 
+    def test_stable_topology_accepts_runpods_idle_worker_ceiling(self) -> None:
+        # Runpod zeroes an idle endpoint's workersMax; the dispatcher restores
+        # it before each render, so a release must not read it as drift.
+        api = FakeReleaseAPI()
+        api.seed_stable(self.IMAGE, version=7)
+        api.endpoints[0]["workersMax"] = 0
+
+        _, _, rest_endpoint = tars_runpod_release.verify_stable_topology(
+            api, ids=self.stable_ids(), expected_image=self.IMAGE
+        )
+
+        self.assertEqual(rest_endpoint["workersMax"], 0)
+        self.assertEqual(api.calls, [])
+
+    def test_stable_release_stages_and_rolls_back_an_idle_endpoint(self) -> None:
+        api = FakeReleaseAPI()
+        api.seed_stable(self.IMAGE, version=7)
+        api.endpoints[0]["workersMax"] = 0
+        with tempfile.TemporaryDirectory() as directory:
+            receipt = tars_runpod_release.stage_stable_release(
+                api,
+                ids=self.stable_ids(),
+                release_sha="b" * 40,
+                gpu_image=self.TARGET_IMAGE,
+                prior_release_sha="a" * 40,
+                prior_app_gpu_image=self.IMAGE,
+                greenfield=False,
+                receipt_path=Path(directory) / "rollout.json",
+            )
+            self.assertEqual(api.calls, [f"update_template:{self.TARGET_IMAGE}"])
+            tars_runpod_release.rollback_stable_release(
+                api, receipt=receipt, sleeper=lambda _: None
+            )
+        self.assertEqual(
+            api.calls,
+            [f"update_template:{self.TARGET_IMAGE}", f"update_template:{self.IMAGE}"],
+        )
+
+    def test_stable_topology_refuses_any_other_worker_ceiling(self) -> None:
+        for value in (1, 3, "2", None):
+            with self.subTest(workers_max=value):
+                api = FakeReleaseAPI()
+                api.seed_stable(self.IMAGE, version=7)
+                api.endpoints[0]["workersMax"] = value
+                with self.assertRaisesRegex(
+                    RunpodReleaseError, "endpoint workersMax does not match this release"
+                ):
+                    tars_runpod_release.verify_stable_topology(
+                        api, ids=self.stable_ids()
+                    )
+                self.assertEqual(api.calls, [])
+
     def test_stable_topology_accepts_missing_inverse_endpoint_binding(self) -> None:
         for marker in (None, "missing"):
             with self.subTest(marker=marker):
