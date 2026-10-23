@@ -1,10 +1,10 @@
 # Central KMP debug CI
 
-Implementation is local and pending rollout. The optimized iOS link hit the
-approved memory stop condition. After reviewing that failure and the free Intel
-alternative, the user chose to retain the 7-GB `macos-26` runner for now. Keep the
-measured failure and unverified archive/upload acceptance explicit; first hosted
-runs still need the reviewed source merged. The four signing profile values were
+The first hosted run (39952223435, 2026-10-23) confirmed the optimized iOS link
+runs out of Java heap on the 7-GB arm64 `macos-26` runner at a 5-GiB Native heap.
+The user then chose the free 14-GB Intel `macos-26-intel` runner (Xcode 26.6
+installed); the source repository raised the Native heap to 8 GiB. Intel timing
+and archive/upload acceptance remain unverified until the next hosted run. The four signing profile values were
 uploaded and verified through the CLI on 2026-10-23.
 Existing Android/iOS workflows are unchanged.
 
@@ -37,8 +37,8 @@ Build behavior belongs to the app's tested entrypoints:
 | `scripts/ci/ios-testflight.sh --build-suffix N --resolve-only` | Generate source version then resolve pinned Swift packages; no link/archive/export. |
 | `scripts/ci/ios-testflight.sh --build-suffix N --skip-resolve` | Generate source version, link optimized Staging framework, archive and export; outputs `ipa_path`, `dsym_path`, `build_number`, `timings_path`, `memory_path`. Never uploads. |
 
-JDK 25 is installed without Java's dependency cache. iOS uses the free standard
-`macos-26` and explicitly selects Xcode 26.6. Linux uses `ubuntu-latest`. No iOS
+JDK 25 is installed without Java's dependency cache. iOS builds on the free standard
+Intel `macos-26-intel` (14 GB) and explicitly selects Xcode 26.6; iOS publishing stays on `macos-26`. Linux uses `ubuntu-latest`. No iOS
 native, device, screenshot or instrumented tests run in the hosted check job.
 The app's complete local acceptance gate remains separate.
 
