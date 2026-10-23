@@ -32,8 +32,25 @@ permissions:
 jobs:
   validate-python:
     name: Python tests
+    # The Free Export parity tests run the real ta-render.jar and fail under CI without it, so
+    # this job waits for the one jvm-build produces instead of building a second copy.
+    needs: jvm-build
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    # The Hosted MCP's store tests need a real Postgres and fail under CI without one. A
+    # throwaway service: the tests drop and re-migrate their schema on every run.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: tada-test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     env:
       EGL_PLATFORM: surfaceless
       LIBGL_ALWAYS_SOFTWARE: "1"
@@ -116,7 +133,41 @@ jobs:
       - name: Generate protobuf modules
         run: uv run --locked --all-packages --all-extras python tada_render/hatch_build.py
 
+      # The widget tests read the built bundle in tada_hosted/static/ and fail under CI without
+      # it. Skipped for a tada commit that predates the Hosted MCP (no widgets project).
+      - name: Set up Node
+        if: hashFiles('tada_hosted/widgets/package.json') != ''
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          package-manager-cache: false
+
+      - name: Build the Hosted MCP widgets
+        if: hashFiles('tada_hosted/widgets/package.json') != ''
+        working-directory: tada_hosted/widgets
+        run: |
+          npm ci
+          npm run build
+
+      # Downloaded to where the tests look for it: the output path of tada's own
+      # `./gradlew :host:taJars`.
+      - name: Download ta-render.jar
+        uses: actions/download-artifact@v8
+        with:
+          name: ta-render-jar
+          path: host/build/libs
+
+      # The jar is Java 21 bytecode and the runner's default JAVA_HOME is older; the bridge
+      # resolves `java` through JAVA_HOME, so this decides which JVM runs it.
+      - name: Set up JDK
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "21"
+
       - name: Run tests from the lockfile
+        env:
+          TADA_TEST_DATABASE_URL: postgresql://postgres:tada-test@localhost:5432/postgres
         run: uv run --locked --all-packages --all-extras pytest
 
   # The jar is architecture-neutral for LWJGL (all six classifiers) but NOT for Skiko:
@@ -427,6 +478,23 @@ jobs:
           for name in build_tada_wheel.sh build_prepare_payload.py inject_wheel_payload.py; do
             curl -sSfL "$base/$name" -o "$RUNNER_TEMP/tada-wheel/$name"
           done
+
+      # The private `tada` wheel refuses to build without the Hosted MCP's widget bundle
+      # (tada_hosted/static/), which is ignored build output. Skipped for a tada commit that
+      # predates the Hosted MCP (no widgets project).
+      - name: Set up Node
+        if: hashFiles('tada_hosted/widgets/package.json') != ''
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          package-manager-cache: false
+
+      - name: Build the Hosted MCP widgets
+        if: hashFiles('tada_hosted/widgets/package.json') != ''
+        working-directory: tada_hosted/widgets
+        run: |
+          npm ci
+          npm run build
 
       - name: Build wheel bundle and runtime pylock
         env:

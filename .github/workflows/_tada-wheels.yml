@@ -59,7 +59,7 @@ jobs:
       # invalidated every wheel and the PyPI release rebuilt what the push-to-main run had
       # already built for the same tada SHA. Bump the version when the wheel build changes:
       # the build scripts are curled from main, so hashFiles cannot see them from here.
-      WHEEL_CACHE_KEY: ta-wheel-v2-${{ matrix.platform }}-${{ inputs.sha }}
+      WHEEL_CACHE_KEY: ta-wheel-v3-${{ matrix.platform }}-${{ inputs.sha }}
     strategy:
       fail-fast: false
       matrix:
@@ -166,9 +166,11 @@ jobs:
 
       # The PURE public wheel each leg folds its own payload into. Built per leg so `uv build`
       # runs on the same checkout that generated the protos; identical across legs by construction.
-      - name: Build the pure wheels
+      # Only `travel-animator`: the legs consume nothing else, and the private `tada` wheel would
+      # need the Hosted MCP's Node-built widgets on every platform runner.
+      - name: Build the pure public wheel
         if: steps.wheel-cache.outputs.cache-hit != 'true'
-        run: uv build --wheel --all-packages --out-dir pure
+        run: uv build --wheel --package travel-animator --out-dir pure
 
       - name: Download ta-render.jar
         if: steps.wheel-cache.outputs.cache-hit != 'true'

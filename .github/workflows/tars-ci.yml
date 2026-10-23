@@ -84,6 +84,16 @@ jobs:
           go-version-file: source/go.mod
           cache-dependency-path: source/go.sum
 
+      # The deploy tests run the real nginx from the locked digest and fail under CI when that
+      # image is not already local. Read through the same validator tars-deploy uses.
+      - name: Pull the locked nginx image
+        run: |
+          set -euo pipefail
+          nginx_image="$(python3 central/scripts/tars/tars_lock_outputs.py source/release/lock.json \
+            | sed -n 's/^nginx_image=//p')"
+          test -n "$nginx_image"
+          docker pull "$nginx_image"
+
       - name: Run merged-tree tests
         working-directory: source
         run: |
