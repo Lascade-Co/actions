@@ -58,6 +58,20 @@ jobs:
     timeout-minutes: 45
     permissions:
       contents: read
+    # The Hosted MCP's store tests need a real Postgres and fail under CI without one. A
+    # throwaway service: the tests drop and re-migrate their schema on every run.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: tada-test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     env:
       EGL_PLATFORM: surfaceless
       LIBGL_ALWAYS_SOFTWARE: "1"
@@ -197,13 +211,6 @@ jobs:
       - name: Generate protobuf modules
         run: uv run --locked --all-packages --all-extras python tada_render/hatch_build.py
 
-      # TADA_PREPARE_JAVA is the first rung of prepare_bridge's java ladder, so this
-      # decides which JVM runs the jar rather than leaving it to PATH.
-      - name: Run tests from the lockfile
-        run: |
-          export TADA_PREPARE_JAVA="$JAVA_HOME/bin/java"
-          uv run --locked --all-packages --all-extras pytest
-
       - name: Make gradlew executable
         if: steps.jars-cache.outputs.cache-hit != 'true'
         run: chmod +x gradlew
@@ -211,9 +218,36 @@ jobs:
       # verifyTaRenderJarSeal is the ADR 0006/0007 gate: no com/lascade/ta/shared/builder/**
       # class in the jar the public wheels ship. Re-checked by verify_tada_wheel.py on the jar
       # inside each finished wheel, which is also what keeps the gate honest on a cache hit.
+      # Built before the tests: the Free Export parity tests run the real ta-render.jar and fail
+      # under CI without it.
       - name: Build the two JARs and verify the builder seal
         if: steps.jars-cache.outputs.cache-hit != 'true'
         run: ./gradlew :host:taJars
+
+      # The widget tests read the built bundle in tada_hosted/static/ and fail under CI without
+      # it. Skipped for a tada commit that predates the Hosted MCP (no widgets project).
+      - name: Set up Node
+        if: hashFiles('tada_hosted/widgets/package.json') != ''
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          package-manager-cache: false
+
+      - name: Build the Hosted MCP widgets
+        if: hashFiles('tada_hosted/widgets/package.json') != ''
+        working-directory: tada_hosted/widgets
+        run: |
+          npm ci
+          npm run build
+
+      # TADA_PREPARE_JAVA is the first rung of prepare_bridge's java ladder, so this
+      # decides which JVM runs the jar rather than leaving it to PATH.
+      - name: Run tests from the lockfile
+        env:
+          TADA_TEST_DATABASE_URL: postgresql://postgres:tada-test@localhost:5432/postgres
+        run: |
+          export TADA_PREPARE_JAVA="$JAVA_HOME/bin/java"
+          uv run --locked --all-packages --all-extras pytest
 
       # The matrix downloads this. A jar is a zip, so upload-artifact stripping modes is moot.
       - name: Upload ta-render.jar
@@ -336,6 +370,23 @@ jobs:
           pattern: wheel-*
           merge-multiple: true
           path: wheels
+
+      # build_tada_wheel.sh builds the private `tada` wheel too (never uploaded, but verified),
+      # and that wheel refuses to build without the Hosted MCP's widget bundle. Skipped for a
+      # tada commit that predates the Hosted MCP (no widgets project).
+      - name: Set up Node
+        if: hashFiles('tada_hosted/widgets/package.json') != ''
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          package-manager-cache: false
+
+      - name: Build the Hosted MCP widgets
+        if: hashFiles('tada_hosted/widgets/package.json') != ''
+        working-directory: tada_hosted/widgets
+        run: |
+          npm ci
+          npm run build
 
       # Reuses the private path's build script so the bytes uploaded here are produced exactly
       # the way the tested GHCR bundle's wheels are -- one build path, not two. That script is
