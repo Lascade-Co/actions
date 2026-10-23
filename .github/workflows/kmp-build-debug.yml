@@ -820,6 +820,19 @@ jobs:
           repositories: ${{ needs.prepare.outputs.name }}
         id: app-token
         if: ${{ needs.prepare.outputs.repo != '' }}
+      # TELEGRAM_CHAT_ID lives in Infisical /Build, as in android-build-debug.yml; the bot token is a GitHub secret.
+      - name: Read /Build from Infisical staging
+        uses: Infisical/secrets-action@v1.0.18
+        with:
+          method: universal
+          client-id: ${{ secrets.INFISICAL_CLIENT_ID }}
+          client-secret: ${{ secrets.INFISICAL_CLIENT_SECRET }}
+          project-slug: ${{ needs.prepare.outputs.project_slug }}
+          env-slug: staging
+          domain: ${{ secrets.INFISICAL_DOMAIN }}
+          secret-path: /Build
+          export-type: env
+        if: ${{ always() }}
       - name: Update Android PR status
         uses: ./control/actions/pr-status-comment
         with:
