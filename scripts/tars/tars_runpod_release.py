@@ -1627,7 +1627,20 @@ def _endpoint_version(endpoint: Mapping[str, Any]) -> int:
     return value
 
 
+def _idle_inventory(endpoint: Mapping[str, Any], field: str) -> bool:
+    """Whether `field` is absent because Runpod has the endpoint idle.
+
+    An endpoint Runpod has set to workersMax 0 (see _stable_workers_max) can
+    have no workers, and Runpod then omits its worker list rather than
+    returning an empty one.
+    """
+
+    return endpoint.get(field) is None and endpoint.get("workersMax") == 0
+
+
 def _workers(endpoint: Mapping[str, Any]) -> tuple[dict[str, Any], ...]:
+    if _idle_inventory(endpoint, "workers"):
+        return ()
     value = endpoint.get("workers")
     if not isinstance(value, list) or any(
         not isinstance(worker, dict) for worker in value
@@ -1639,6 +1652,8 @@ def _workers(endpoint: Mapping[str, Any]) -> tuple[dict[str, Any], ...]:
 
 
 def _pod_statuses(endpoint: Mapping[str, Any]) -> dict[str, str]:
+    if _idle_inventory(endpoint, "pods"):
+        return {}
     value = endpoint.get("pods")
     if not isinstance(value, list):
         raise RunpodReleaseError(
