@@ -43,13 +43,13 @@ The account page also displays a notice that the account holder must accept the
 updated Apple Developer Program License Agreement by **2026-10-29** to maintain
 access. No agreement was accepted.
 
-## Created and downloaded profiles; user upload pending
+## Created, downloaded and uploaded profiles
 
 Created all four explicit **App Store** distribution profiles using only the
 existing certificate matched above. Each generated confirmation page verified the
 exact profile name, bundle ID, App Store type, and expiry **2027-04-01**.
 
-| Profile name | Portal profile ID | Bundle ID | Infisical key to be uploaded by the user |
+| Profile name | Portal profile ID | Bundle ID | Verified Infisical key |
 |---|---|---|---|
 | `TA Staging App` | `QMP7A26AB4` | `com.travelanimator.routemap.debug` | `IOS_STAGING_PROFILE_APP_BASE64` |
 | `TA Staging Share` | `BYN45Y5A83` | `com.travelanimator.routemap.debug.MapLinkShareExtension` | `IOS_STAGING_PROFILE_SHARE_BASE64` |
@@ -72,7 +72,8 @@ to mode 0600. No profile remains at the top level of Downloads.
 | `TA_Staging_Widget.mobileprovision` | `TA Staging Widget` |
 
 The same private directory also contains four unwrapped base64 text files, mode
-0600, ready for the user to paste into the corresponding Infisical secret value:
+0600. These prepared values were uploaded through the Infisical CLI following the
+user's explicit instruction:
 
 | Private text file | Infisical key |
 |---|---|
@@ -86,21 +87,31 @@ SHA-256 equality was checked privately. The files contain no line wrapping or
 trailing newline. Set each Infisical value to the complete content of its matching
 text file, under project `travelanimator` / environment `staging` / path `/Build`.
 Do not use the filename or binary profile itself as the secret value. No secret
-values were printed and no Infisical write was performed.
+values were printed. The CLI upload and fresh readback are recorded below.
 
 CMS contents were decoded privately with `security cms`; only safe metadata was
 printed. All four downloaded profiles match their exact names and bundle IDs in
 the table above, are App Store profiles without development-device lists or
 debugger entitlement, and expire **2027-04-01 17:53:55 GMT**. No certificate or
 profile contents were printed. Apple creation and profile download work is
-complete; Infisical upload is still explicitly the user's next step.
+complete; the four Infisical profile values are now uploaded and verified.
 
-The user uploads these profiles to Infisical project `travelanimator`, environment
-`staging`, path `/Build`, then confirms completion. The existing `.p12` and password
-have already been verified against the selected certificate. The first hosted
-build must wait for profile upload confirmation. Production identifiers, groups, profiles, and the
-production app record must remain untouched. Stop at any warning that would
-invalidate production profiles.
+### Infisical CLI upload verification (2026-10-23)
+
+The user explicitly requested the CLI upload and supplied the target project URL.
+Uploaded all four matching `IOS_STAGING_PROFILE_*_BASE64.txt` values as shared
+secrets to `https://secrets.lascade.com/api`, project `travelanimator`
+(`d3963969-c940-4fd7-84c9-7a38edaf404d`), environment `staging`, path `/Build`.
+The CLI used file references; no secret value was placed in command arguments or
+printed. A fresh unexpanded, non-imported shared-secret export matched each saved
+value byte-for-byte against its prepared file. All 15 other existing keys retained
+their exact values; only the four requested keys were added (15 keys before,
+19 afterward). The verification record contains names and booleans only.
+
+The existing `.p12` and password were already verified against the selected
+certificate. Profile provisioning is complete; hosted runs still await publication
+and coordinator merges. Production identifiers, groups, profiles, and the
+production app record remain untouched.
 
 ## Approval review history
 

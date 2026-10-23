@@ -4,7 +4,8 @@ Implementation is local and pending rollout. The optimized iOS link hit the
 approved memory stop condition. After reviewing that failure and the free Intel
 alternative, the user chose to retain the 7-GB `macos-26` runner for now. Keep the
 measured failure and unverified archive/upload acceptance explicit; first hosted
-runs still need the reviewed source merged and signing profiles uploaded.
+runs still need the reviewed source merged. The four signing profile values were
+uploaded and verified through the CLI on 2026-10-23.
 Existing Android/iOS workflows are unchanged.
 
 The authoritative approved plan is
@@ -138,7 +139,8 @@ Rollout order remains:
 2. Make the central workflow/composites live.
 3. Merge the reviewed app implementation through the coordinator. Merge the app
    trigger only after the central workflow is live.
-4. The user uploads the four generated profiles to Infisical `staging` `/Build`.
+4. Profile upload is complete: all four generated profile values were saved to
+   Infisical `staging` `/Build` and verified by fresh CLI readback.
 5. Open the test PR, run cold then warm, and report job/step timings, cache bytes,
    actual hosted Native RSS, TestFlight build/processing state and APK release URL.
 
