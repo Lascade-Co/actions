@@ -38,7 +38,8 @@ Build behavior belongs to the app's tested entrypoints:
 | `scripts/ci/ios-testflight.sh --build-suffix N --skip-resolve` | Generate source version, link optimized Staging framework, archive and export; outputs `ipa_path`, `dsym_path`, `build_number`, `timings_path`, `memory_path`. Never uploads. |
 
 JDK 25 is installed without Java's dependency cache. iOS builds on the free standard
-Intel `macos-26-intel` (14 GB) and explicitly selects Xcode 26.6; iOS publishing stays on `macos-26`. Linux uses `ubuntu-latest`. No iOS
+arm64 `macos-26` (7 GB) and explicitly selects Xcode 26.6; the source repository links with Kotlin/Native
+release caches. The Intel `macos-26-intel` trial timed out with the link still running after 41 minutes. Linux uses `ubuntu-latest`. No iOS
 native, device, screenshot or instrumented tests run in the hosted check job.
 The app's complete local acceptance gate remains separate.
 

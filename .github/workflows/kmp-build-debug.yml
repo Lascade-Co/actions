@@ -449,10 +449,10 @@ jobs:
           overwrite: true
         if: ${{ always() }}
   ios-build:
-    # 14-GiB Intel image with Xcode 26.6: the optimized Kotlin/Native link ran out of heap on the
-    # 7-GiB arm64 macos-26 runner (run 39952223435). Timeout is provisional until Intel timing is measured.
-    runs-on: macos-26-intel
-    timeout-minutes: 60
+    # Free 7-GB arm64 image with Xcode 26.6. The source repo links with Kotlin/Native release caches; the
+    # Intel image timed out (>41 min link) and the uncached optimized link ran out of heap here (run 39952223435).
+    runs-on: macos-26
+    timeout-minutes: 90
     defaults: *id001
     env: *id002
     needs:
