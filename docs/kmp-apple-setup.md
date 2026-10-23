@@ -43,7 +43,7 @@ The account page also displays a notice that the account holder must accept the
 updated Apple Developer Program License Agreement by **2026-10-29** to maintain
 access. No agreement was accepted.
 
-## Created profiles and pending download/upload
+## Created and downloaded profiles; user upload pending
 
 Created all four explicit **App Store** distribution profiles using only the
 existing certificate matched above. Each generated confirmation page verified the
@@ -56,14 +56,44 @@ exact profile name, bundle ID, App Store type, and expiry **2027-04-01**.
 | `TA Staging NSE` | `S8744GJ874` | `com.travelanimator.routemap.debug.NotificationServiceExtension` | `IOS_STAGING_PROFILE_NSE_BASE64` |
 | `TA Staging Widget` | `7Q8924H99R` | `com.travelanimator.routemap.debug.ExportActivityWidget` | `IOS_STAGING_PROFILE_WIDGET_BASE64` |
 
-Created `~/Downloads/ci-apple-setup-2026-10-23-private/` with mode 0700. No profile
-download has been initiated: the Chrome plugin only documents download-path
-retrieval, not choosing a destination or `saveAs`, and exposes no CDP download
-capability. A read-only attempt to inspect `chrome://settings/downloads` was
-blocked by its URL security policy, which permits only HTTP/HTTPS and explicitly
-forbids workarounds. The blank settings tab was closed. The user must set Chrome's
-download location to that private directory before supported downloads can resume,
-or download the four generated profiles there directly.
+Created `~/Downloads/ci-apple-setup-2026-10-23-private/` with mode 0700. The Chrome
+plugin cannot choose a download destination, and its URL policy blocks inspection
+of `chrome://settings/downloads`; no workaround was used. The user then explicitly
+approved **"Use Downloads, then move"**, allowing the existing Chrome Downloads
+directory as a temporary landing location. Each existing profile was downloaded
+through the Chrome plugin, immediately moved into the private directory, and set
+to mode 0600. No profile remains at the top level of Downloads.
+
+| Private filename | Verified profile name |
+|---|---|
+| `TA_Staging_App.mobileprovision` | `TA Staging App` |
+| `TA_Staging_Share.mobileprovision` | `TA Staging Share` |
+| `TA_Staging_NSE.mobileprovision` | `TA Staging NSE` |
+| `TA_Staging_Widget.mobileprovision` | `TA Staging Widget` |
+
+The same private directory also contains four unwrapped base64 text files, mode
+0600, ready for the user to paste into the corresponding Infisical secret value:
+
+| Private text file | Infisical key |
+|---|---|
+| `IOS_STAGING_PROFILE_APP_BASE64.txt` | `IOS_STAGING_PROFILE_APP_BASE64` |
+| `IOS_STAGING_PROFILE_SHARE_BASE64.txt` | `IOS_STAGING_PROFILE_SHARE_BASE64` |
+| `IOS_STAGING_PROFILE_NSE_BASE64.txt` | `IOS_STAGING_PROFILE_NSE_BASE64` |
+| `IOS_STAGING_PROFILE_WIDGET_BASE64.txt` | `IOS_STAGING_PROFILE_WIDGET_BASE64` |
+
+Each text file decodes byte-for-byte to its verified `.mobileprovision` original;
+SHA-256 equality was checked privately. The files contain no line wrapping or
+trailing newline. Set each Infisical value to the complete content of its matching
+text file, under project `travelanimator` / environment `staging` / path `/Build`.
+Do not use the filename or binary profile itself as the secret value. No secret
+values were printed and no Infisical write was performed.
+
+CMS contents were decoded privately with `security cms`; only safe metadata was
+printed. All four downloaded profiles match their exact names and bundle IDs in
+the table above, are App Store profiles without development-device lists or
+debugger entitlement, and expire **2027-04-01 17:53:55 GMT**. No certificate or
+profile contents were printed. Apple creation and profile download work is
+complete; Infisical upload is still explicitly the user's next step.
 
 The user uploads these profiles to Infisical project `travelanimator`, environment
 `staging`, path `/Build`, then confirms completion. The existing `.p12` and password

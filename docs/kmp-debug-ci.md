@@ -1,9 +1,11 @@
 # Central KMP debug CI
 
 Implementation is local and pending rollout. The optimized iOS link hit the
-approved memory stop condition; do not enable the app trigger or start hosted
-builds until the runner/memory decision is resolved and signing profiles are
-uploaded. Existing Android/iOS workflows are unchanged.
+approved memory stop condition. After reviewing that failure and the free Intel
+alternative, the user chose to retain the 7-GB `macos-26` runner for now. Keep the
+measured failure and unverified archive/upload acceptance explicit; first hosted
+runs still need the reviewed source merged and signing profiles uploaded.
+Existing Android/iOS workflows are unchanged.
 
 The authoritative approved plan is
 `~/Downloads/travel-animator-ci-plan-2026-10-23/plan.md`.
@@ -124,13 +126,15 @@ The first local optimized Native link used a 5-GiB out-of-process compiler heap,
 heap exhaustion after **118.47 s**, with **6,012,108,800 bytes (5.60 GiB)** peak RSS.
 This sample predates the final Native Staging hook-constant change. It is local
 failure evidence, not final-source acceptance or a hosted 7-GB measurement.
-No larger/paid/self-hosted runner was selected. Staging archive/export and the
-hosted iOS path remain unverified. Source evidence is archived separately by the
+No larger/paid/self-hosted runner was selected. The user retained the 7-GB runner
+after this report; that decision does not turn the failed measurement into
+acceptance. Staging archive/export and the hosted iOS path remain unverified. Source evidence is archived separately by the
 app implementation; see its `docs/ci.md` for the complete gate results.
 
 Rollout order remains:
 
-1. Resolve the memory stop condition with the user.
+1. Retain the user-selected 7-GB runner and the documented memory failure; report
+   any new OOM rather than assuming the budget is proven.
 2. Make the central workflow/composites live.
 3. Merge the reviewed app implementation through the coordinator. Merge the app
    trigger only after the central workflow is live.

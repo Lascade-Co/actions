@@ -202,7 +202,7 @@ jobs:
       uses: ./control/actions/gh-bundle-cache
       with:
         mode: restore
-        name: ${{ format('{0}-{1}-{2}', needs.prepare.outputs.name, runner.os, 'gradle') }}
+        name: ${{ format('{0}-{1}-{2}-{3}', needs.prepare.outputs.name, runner.os, runner.arch, 'gradle') }}
         key: ${{ format('deps-{0}-{1}', runner.arch, hashFiles('source/gradle/libs.versions.toml', 'source/gradle/wrapper/gradle-wrapper.properties',
           'source/**/*.gradle.kts', 'source/gradle.properties')) }}
         fallback-key: latest
@@ -281,7 +281,7 @@ jobs:
       uses: ./control/actions/gh-bundle-cache
       with:
         mode: publish
-        name: ${{ format('{0}-{1}-{2}', needs.prepare.outputs.name, runner.os, 'gradle') }}
+        name: ${{ format('{0}-{1}-{2}-{3}', needs.prepare.outputs.name, runner.os, runner.arch, 'gradle') }}
         key: ${{ format('deps-{0}-{1}', runner.arch, hashFiles('source/gradle/libs.versions.toml', 'source/gradle/wrapper/gradle-wrapper.properties',
           'source/**/*.gradle.kts', 'source/gradle.properties')) }}
         fallback-key: latest
@@ -303,6 +303,7 @@ jobs:
           source/**/build/reports/lint-results*.xml
         if-no-files-found: warn
         retention-days: 7
+        overwrite: true
       if: ${{ always() }}
   android:
     runs-on: ubuntu-latest
@@ -394,7 +395,7 @@ jobs:
       uses: ./control/actions/gh-bundle-cache
       with:
         mode: restore
-        name: ${{ format('{0}-{1}-{2}', needs.prepare.outputs.name, runner.os, 'gradle') }}
+        name: ${{ format('{0}-{1}-{2}-{3}', needs.prepare.outputs.name, runner.os, runner.arch, 'gradle') }}
         key: ${{ format('deps-{0}-{1}', runner.arch, hashFiles('source/gradle/libs.versions.toml', 'source/gradle/wrapper/gradle-wrapper.properties',
           'source/**/*.gradle.kts', 'source/gradle.properties')) }}
         fallback-key: latest
@@ -418,11 +419,12 @@ jobs:
         path: ${{ format('source/{0}', steps.build.outputs.apk_path) }}
         if-no-files-found: error
         retention-days: 3
+        overwrite: true
     - name: Publish gradle OCI bundle
       uses: ./control/actions/gh-bundle-cache
       with:
         mode: publish
-        name: ${{ format('{0}-{1}-{2}', needs.prepare.outputs.name, runner.os, 'gradle') }}
+        name: ${{ format('{0}-{1}-{2}-{3}', needs.prepare.outputs.name, runner.os, runner.arch, 'gradle') }}
         key: ${{ format('deps-{0}-{1}', runner.arch, hashFiles('source/gradle/libs.versions.toml', 'source/gradle/wrapper/gradle-wrapper.properties',
           'source/**/*.gradle.kts', 'source/gradle.properties')) }}
         fallback-key: latest
@@ -444,6 +446,7 @@ jobs:
           source/**/build/reports/lint-results*.xml
         if-no-files-found: warn
         retention-days: 7
+        overwrite: true
       if: ${{ always() }}
   ios-build:
     runs-on: macos-26
@@ -537,7 +540,7 @@ jobs:
       uses: ./control/actions/gh-bundle-cache
       with:
         mode: restore
-        name: ${{ format('{0}-{1}-{2}', needs.prepare.outputs.name, runner.os, 'gradle') }}
+        name: ${{ format('{0}-{1}-{2}-{3}', needs.prepare.outputs.name, runner.os, runner.arch, 'gradle') }}
         key: ${{ format('deps-{0}-{1}', runner.arch, hashFiles('source/gradle/libs.versions.toml', 'source/gradle/wrapper/gradle-wrapper.properties',
           'source/**/*.gradle.kts', 'source/gradle.properties')) }}
         fallback-key: latest
@@ -550,7 +553,7 @@ jobs:
       uses: ./control/actions/gh-bundle-cache
       with:
         mode: restore
-        name: ${{ format('{0}-{1}-{2}', needs.prepare.outputs.name, runner.os, 'konan') }}
+        name: ${{ format('{0}-{1}-{2}-{3}', needs.prepare.outputs.name, runner.os, runner.arch, 'konan') }}
         key: ${{ format('konan-{0}-{1}', runner.arch, needs.prepare.outputs.kotlin_version) }}
         fallback-key: latest
         paths: ~/.konan
@@ -560,7 +563,7 @@ jobs:
       uses: ./control/actions/gh-bundle-cache
       with:
         mode: restore
-        name: ${{ format('{0}-{1}-{2}', needs.prepare.outputs.name, runner.os, 'swiftpm') }}
+        name: ${{ format('{0}-{1}-{2}-{3}', needs.prepare.outputs.name, runner.os, runner.arch, 'swiftpm') }}
         key: ${{ format('xcode-26-6-{0}', hashFiles('source/**/Package.resolved')) }}
         fallback-key: latest
         paths: |-
@@ -572,7 +575,7 @@ jobs:
       uses: ./control/actions/gh-bundle-cache
       with:
         mode: restore
-        name: ${{ format('{0}-{1}-{2}', needs.prepare.outputs.name, runner.os, 'angle') }}
+        name: ${{ format('{0}-{1}-{2}-{3}', needs.prepare.outputs.name, runner.os, runner.arch, 'angle') }}
         key: ${{ format('angle-{0}', needs.prepare.outputs.angle_revision) }}
         fallback-key: latest
         paths: source/shared/build/angle
@@ -591,7 +594,7 @@ jobs:
       uses: ./control/actions/gh-bundle-cache
       with:
         mode: publish
-        name: ${{ format('{0}-{1}-{2}', needs.prepare.outputs.name, runner.os, 'swiftpm') }}
+        name: ${{ format('{0}-{1}-{2}-{3}', needs.prepare.outputs.name, runner.os, runner.arch, 'swiftpm') }}
         key: ${{ format('xcode-26-6-{0}', hashFiles('source/**/Package.resolved')) }}
         fallback-key: latest
         paths: |-
@@ -630,11 +633,12 @@ jobs:
         path: ${{ format('source/{0}', steps.build.outputs.ipa_path) }}
         if-no-files-found: error
         retention-days: 3
+        overwrite: true
     - name: Publish konan OCI bundle
       uses: ./control/actions/gh-bundle-cache
       with:
         mode: publish
-        name: ${{ format('{0}-{1}-{2}', needs.prepare.outputs.name, runner.os, 'konan') }}
+        name: ${{ format('{0}-{1}-{2}-{3}', needs.prepare.outputs.name, runner.os, runner.arch, 'konan') }}
         key: ${{ format('konan-{0}-{1}', runner.arch, needs.prepare.outputs.kotlin_version) }}
         fallback-key: latest
         paths: ~/.konan
@@ -645,7 +649,7 @@ jobs:
       uses: ./control/actions/gh-bundle-cache
       with:
         mode: publish
-        name: ${{ format('{0}-{1}-{2}', needs.prepare.outputs.name, runner.os, 'angle') }}
+        name: ${{ format('{0}-{1}-{2}-{3}', needs.prepare.outputs.name, runner.os, runner.arch, 'angle') }}
         key: ${{ format('angle-{0}', needs.prepare.outputs.angle_revision) }}
         fallback-key: latest
         paths: source/shared/build/angle
@@ -656,7 +660,7 @@ jobs:
       uses: ./control/actions/gh-bundle-cache
       with:
         mode: publish
-        name: ${{ format('{0}-{1}-{2}', needs.prepare.outputs.name, runner.os, 'gradle') }}
+        name: ${{ format('{0}-{1}-{2}-{3}', needs.prepare.outputs.name, runner.os, runner.arch, 'gradle') }}
         key: ${{ format('deps-{0}-{1}', runner.arch, hashFiles('source/gradle/libs.versions.toml', 'source/gradle/wrapper/gradle-wrapper.properties',
           'source/**/*.gradle.kts', 'source/gradle.properties')) }}
         fallback-key: latest
@@ -684,6 +688,7 @@ jobs:
           source/**/build/reports/lint-results*.xml
         if-no-files-found: warn
         retention-days: 7
+        overwrite: true
       if: ${{ always() }}
   publish-android:
     runs-on: ubuntu-latest

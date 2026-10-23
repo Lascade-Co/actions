@@ -51,6 +51,32 @@ class BundleTests(unittest.TestCase):
                     bundle_cache.unpack(archive, [root / 'cache'])
                 self.assertFalse((root / 'cache').exists())
 
+    def test_shared_inodes_across_roots_are_materialized_per_root(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            first, second = root / 'swift-cache', root / 'source-packages'
+            first.mkdir()
+            second.mkdir()
+            (first / 'pack').write_bytes(b'shared git packfile')
+            os.link(first / 'pack', first / 'internal-pack-alias')
+            os.link(first / 'pack', second / 'pack')
+            archive = root / 'bundle.tar'
+            bundle_cache.pack([first, second], archive)
+            with tarfile.open(archive) as stream:
+                members = stream.getmembers()
+                self.assertTrue(any(member.islnk() for member in members))
+                for member in members:
+                    if member.islnk():
+                        self.assertEqual(member.name.split('/')[0], member.linkname.split('/')[0])
+            first_restore, second_restore = root / 'restored-cache', root / 'restored-packages'
+            bundle_cache.unpack(archive, [first_restore, second_restore])
+            self.assertEqual((first_restore / 'pack').read_bytes(), b'shared git packfile')
+            self.assertEqual((second_restore / 'pack').read_bytes(), b'shared git packfile')
+            self.assertEqual((first_restore / 'pack').stat().st_ino,
+                             (first_restore / 'internal-pack-alias').stat().st_ino)
+            self.assertNotEqual((first_restore / 'pack').stat().st_ino,
+                                (second_restore / 'pack').stat().st_ino)
+
     def test_native_parent_relative_symlinks_and_chains_roundtrip(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

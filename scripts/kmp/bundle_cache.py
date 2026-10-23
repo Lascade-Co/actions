@@ -37,6 +37,10 @@ def pack(paths, destination):
         raise ValueError('None of the selected cache paths exist')
     with tarfile.open(destination, 'w') as archive:
         for i in present:
+            # SwiftPM local clones may share inodes across selected directories.
+            # Each root must remain independently relocatable: materialize the
+            # first copy per root, while retaining hardlinks inside that root.
+            archive.inodes.clear()
             archive.add(paths[i], arcname=f'path-{i}')
 
 
