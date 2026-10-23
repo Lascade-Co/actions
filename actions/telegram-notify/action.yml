@@ -1,0 +1,29 @@
+name: Telegram notification
+description: Send one plain-text build notification from Linux or macOS; fail visibly on transport or Telegram errors.
+inputs:
+  token:
+    description: Telegram bot token.
+    required: true
+  chat-id:
+    description: Destination chat ID.
+    required: true
+  message:
+    description: Plain-text message.
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Send notification
+      shell: bash
+      env:
+        TELEGRAM_TOKEN: ${{ inputs.token }}
+        TELEGRAM_CHAT: ${{ inputs.chat-id }}
+        TELEGRAM_MESSAGE: ${{ inputs.message }}
+        CONTROL_SHA: ${{ github.sha }}
+      run: |
+        script=$(mktemp "$RUNNER_TEMP/telegram-notify.XXXXXX")
+        trap 'rm -f "$script" "$script.tmp"' EXIT
+        curl -fsSL --retry 3 --retry-delay 2 --retry-all-errors --connect-timeout 15 --max-time 120 -o "$script.tmp" "https://raw.githubusercontent.com/Lascade-Co/actions/$CONTROL_SHA/scripts/kmp/telegram_notify.py"
+        test -s "$script.tmp"
+        mv "$script.tmp" "$script"
+        python3 "$script"

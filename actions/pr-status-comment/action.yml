@@ -1,0 +1,53 @@
+name: PR status marker comment
+description: Create, update or purge comments belonging to the current GitHub App and hidden marker.
+inputs:
+  token:
+    description: GitHub App installation token for the source repository.
+    required: true
+  app-slug:
+    description: App slug returned by actions/create-github-app-token.
+    required: true
+  repository:
+    description: Source owner/repository.
+    required: true
+  pr:
+    description: PR number; empty, null or zero means a manual run with no comment.
+    default: ''
+  marker:
+    description: Exact hidden HTML marker, e.g. <!-- central-ios-testflight -->.
+    required: true
+  body:
+    description: Markdown body below the marker.
+    default: ''
+  mode:
+    description: upsert updates a single comment, replace purges previous comments and creates one, purge only deletes.
+    default: upsert
+outputs:
+  comment-id:
+    description: Created or updated comment ID.
+    value: ${{ steps.comment.outputs.comment-id }}
+runs:
+  using: composite
+  steps:
+    - name: Fetch comment handler pinned to runner source
+      shell: bash
+      env:
+        CONTROL_SHA: ${{ github.sha }}
+      run: |
+        target="$RUNNER_TEMP/central-pr-status.cjs"
+        curl -fsSL --retry 3 --retry-delay 2 --retry-all-errors --connect-timeout 15 --max-time 120 -o "$target.tmp" "https://raw.githubusercontent.com/Lascade-Co/actions/$CONTROL_SHA/scripts/kmp/pr_status_comment.cjs"
+        test -s "$target.tmp"
+        mv "$target.tmp" "$target"
+    - name: Update owned marker comment
+      id: comment
+      uses: actions/github-script@v9
+      env:
+        STATUS_REPOSITORY: ${{ inputs.repository }}
+        STATUS_PR: ${{ inputs.pr }}
+        STATUS_MARKER: ${{ inputs.marker }}
+        STATUS_BODY: ${{ inputs.body }}
+        STATUS_MODE: ${{ inputs.mode }}
+        STATUS_APP_SLUG: ${{ inputs.app-slug }}
+      with:
+        github-token: ${{ inputs.token }}
+        script: await require(`${process.env.RUNNER_TEMP}/central-pr-status.cjs`)({github, core});

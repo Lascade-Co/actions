@@ -1,0 +1,38 @@
+name: Apple distribution signing
+description: Import a distribution certificate into an automatically cleaned temporary keychain and install explicit profiles.
+inputs:
+  mode:
+    description: install or cleanup; call cleanup with always() after the build for provisioning profiles.
+    default: install
+  certificate-env:
+    description: Environment variable containing the base64 PKCS12 file.
+    default: IOS_CERTIFICATE_BASE64
+  certificate-password-env:
+    description: Environment variable containing the PKCS12 password.
+    default: IOS_CERTIFICATE_PASSWORD
+  profiles:
+    description: Whitespace-separated required environment variable names containing base64 App Store profiles.
+    default: ''
+runs:
+  using: composite
+  steps:
+    - uses: apple-actions/import-codesign-certs@v7
+      if: inputs.mode == 'install'
+      with:
+        p12-file-base64: ${{ env[inputs.certificate-env] }}
+        p12-password: ${{ env[inputs.certificate-password-env] }}
+    - name: Install or clean profiles
+      shell: bash
+      env:
+        PROFILE_MODE: ${{ inputs.mode }}
+        PROFILE_VARIABLES: ${{ inputs.profiles }}
+        CONTROL_SHA: ${{ github.sha }}
+      run: |
+        script="$RUNNER_TEMP/central-apple-profiles.py"
+        trap 'rm -f "$script.tmp"' EXIT
+        if [ "$PROFILE_MODE" = install ] || [ ! -s "$script" ]; then
+          curl -fsSL --retry 3 --retry-delay 2 --retry-all-errors --connect-timeout 15 --max-time 120 -o "$script.tmp" "https://raw.githubusercontent.com/Lascade-Co/actions/$CONTROL_SHA/scripts/kmp/apple_profiles.py"
+          test -s "$script.tmp"
+          mv "$script.tmp" "$script"
+        fi
+        python3 "$script" "$PROFILE_MODE"
