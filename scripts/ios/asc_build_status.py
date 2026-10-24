@@ -9,6 +9,7 @@ import argparse
 import json
 import os
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 
@@ -63,6 +64,19 @@ def main():
               f"encryptionAnswered={attrs.get('usesNonExemptEncryption') is not None} "
               f"internalState={d.get('internalBuildState')} externalState={d.get('externalBuildState')} "
               f"groups={group_names}")
+    if not builds['data']:
+        print('No processed builds; checking build uploads for processing errors')
+    try:
+        uploads = get(f"apps/{app['id']}/buildUploads", {'limit': args.limit, 'sort': '-uploadedDate'}, bearer)
+        for upload in uploads.get('data', []):
+            a = upload['attributes']
+            state = a.get('state') or {}
+            print(f"Upload {a.get('cfBundleShortVersionString')} ({a.get('cfBundleVersion')}) uploaded {a.get('uploadedDate')} "
+                  f"state={state.get('state')}")
+            for issue in (state.get('errors') or []) + (state.get('warnings') or []):
+                print(f"  {issue.get('code')}: {issue.get('description') or issue.get('message')}")
+    except urllib.error.HTTPError as error:
+        print(f'buildUploads unavailable (HTTP {error.code}): {error.read().decode(errors="replace")[:300]}')
     return 0
 
 
