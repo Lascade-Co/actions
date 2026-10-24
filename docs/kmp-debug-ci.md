@@ -21,18 +21,23 @@ PRs and resolves the source to one immutable commit for every job. Manual builds
 use unique `debug-run-<run_number>` releases; PR builds use `debug-pr-<PR>`.
 
 `prepare` resolves that commit, reads the source version and starts the marker
-comments. `check`, `android` and `ios-build` then run in parallel. Publishing jobs
-require their build job and a successful `check` gate. If Claude pushes a lint
-fix, the old artifacts are withheld, an immediate PR comment explains the push,
-and the new commit retriggers CI. A source-HEAD lease protects concurrent changes;
-the loop guard prevents repeated bot-fix commits. Unit-test failures cannot enter
-the lint auto-fix path. Lint failures with no pushed fix fail the check job.
+comments. `unit-tests` (unit tests), `check` (both lint tasks and the lint
+auto-fix), `android` and `ios-build` then run in parallel; splitting unit tests
+from lint halves the old ~21-minute serial check. Publishing jobs require their
+build job, a successful `check` gate and a successful `unit-tests` job. If Claude
+pushes a lint fix, the old artifacts are withheld, an immediate PR comment explains
+the push, and the new commit retriggers CI. A source-HEAD lease protects concurrent
+changes; the loop guard prevents repeated bot-fix commits. The lint job cannot see
+the parallel unit result, so a lint fix may be pushed while unit tests fail; the
+retriggered run still gates publishing on unit tests. Lint failures with no pushed
+fix fail the check job.
 
 Build behavior belongs to the app's tested entrypoints:
 
 | Entrypoint | Contract |
 | --- | --- |
 | `scripts/ci/android-debug.sh check` | Unit tests and both Android lint tasks; exit 0 only when all pass; `build/ci/lint-result.json` carries `unit_test_exit_code` and `lint_exit_code`; lint log at `build/ci/lint-output.txt`. |
+| `scripts/ci/android-debug.sh unit` / `lint` | Each half of `check` alone for the parallel `unit-tests` and `check` jobs; `lint` writes `build/ci/lint-result.json` without unit fields. |
 | `scripts/ci/android-debug.sh build` | Build debug APK; `GITHUB_OUTPUT` supplies relative `apk_path`. |
 | `scripts/ci/ios-testflight.sh --build-suffix N --resolve-only` | Generate source version then resolve pinned Swift packages; no link/archive/export. |
 | `scripts/ci/ios-testflight.sh --build-suffix N --skip-resolve` | Generate source version, link optimized Staging framework, archive and export; outputs `ipa_path`, `dsym_path`, `build_number`, `timings_path`, `memory_path`. Never uploads. |

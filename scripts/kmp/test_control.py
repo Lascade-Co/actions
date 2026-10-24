@@ -82,6 +82,16 @@ class LintGateTests(unittest.TestCase):
     def test_lint_only_failure_can_trigger_autofix(self):
         self.assertEqual(self.state(0,1)['autofix_allowed'],'true')
 
+    def test_lint_only_job_result_without_unit_fields_can_autofix(self):
+        import json
+        with tempfile.TemporaryDirectory() as directory:
+            path=Path(directory)/'result.json'
+            path.write_text(json.dumps(dict(lint_exit_code=1)))
+            with patch.object(control.subprocess, 'check_output', return_value='change'):
+                state=control.lint_state(path)
+        self.assertEqual(state['autofix_allowed'],'true')
+        self.assertEqual(state['units_passed'],'true')
+
     def test_prior_bot_fix_never_loops(self):
         for author in ('Claude','Codex'):
             self.assertEqual(self.state(0,1,'lint: Lint fix by '+author)['autofix_allowed'],'false')

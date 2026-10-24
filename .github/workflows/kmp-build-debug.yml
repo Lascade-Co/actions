@@ -211,8 +211,8 @@ jobs:
             ~/.gradle/wrapper
           token: ${{ github.token }}
         id: gradle-cache
-      - name: Run unit tests and both Android lint tasks
-        run: bash scripts/ci/android-debug.sh check
+      - name: Run both Android lint tasks
+        run: bash scripts/ci/android-debug.sh lint
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           KEYSTORE_PASSWORD_DEBUG: ${{ env.KEYSTORE_PASSWORD }}
@@ -269,7 +269,7 @@ jobs:
       - name: Enforce publishing gate
         run: |-
           if [ "$CHECK_OUTCOME" != success ] && [ "$PUSHED" != true ]; then
-            echo '::error::Unit tests or lint failed and no lint fix was pushed.'
+            echo '::error::Android lint failed and no lint fix was pushed.'
             exit 1
           fi
           if [ "$CHECK_OUTCOME" = success ]; then echo 'publish=true' >> "$GITHUB_OUTPUT"; fi
@@ -301,6 +301,125 @@ jobs:
             source/build/ci/ios/*.txt
             source/build/ci/ios/*.log
             source/**/build/reports/lint-results*.xml
+          if-no-files-found: warn
+          retention-days: 7
+          overwrite: true
+        if: ${{ always() }}
+  unit-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults: *id001
+    env: *id002
+    needs:
+      - prepare
+    steps:
+      - name: Checkout trusted central controls
+        uses: actions/checkout@v7
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ github.sha }}
+          path: control
+          persist-credentials: false
+      - name: Fetch trusted orchestration helper
+        run: |-
+          curl -fsSL --retry 3 --retry-delay 2 --retry-all-errors --connect-timeout 10 --max-time 60 \
+            "$CONTROL_URL" -o "$RUNNER_TEMP/kmp-control.py.tmp"
+          test -s "$RUNNER_TEMP/kmp-control.py.tmp"
+          mv "$RUNNER_TEMP/kmp-control.py.tmp" "$RUNNER_TEMP/kmp-control.py"
+        working-directory: .
+        env:
+          CONTROL_URL: ${{ format('https://raw.githubusercontent.com/{0}/{1}/scripts/kmp/control.py', github.repository, github.sha) }}
+      - name: Mint source-scoped GitHub App token
+        uses: actions/create-github-app-token@v3.3.0
+        with:
+          client-id: ${{ secrets.CI_APP_CLIENT_ID }}
+          private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
+          owner: ${{ needs.prepare.outputs.owner }}
+          repositories: ${{ needs.prepare.outputs.name }}
+        id: app-token
+      - name: Checkout pinned source commit
+        uses: actions/checkout@v7
+        with:
+          repository: ${{ needs.prepare.outputs.repo }}
+          ref: ${{ needs.prepare.outputs.sha }}
+          token: ${{ steps.app-token.outputs.token }}
+          path: source
+          persist-credentials: false
+      - name: Read /Local-Properties from Infisical staging
+        uses: Infisical/secrets-action@v1.0.18
+        with:
+          method: universal
+          client-id: ${{ secrets.INFISICAL_CLIENT_ID }}
+          client-secret: ${{ secrets.INFISICAL_CLIENT_SECRET }}
+          project-slug: ${{ needs.prepare.outputs.project_slug }}
+          env-slug: staging
+          domain: ${{ secrets.INFISICAL_DOMAIN }}
+          secret-path: /Local-Properties
+          export-type: file
+          file-output-path: /source/.ci-local.env
+      - name: Render local.properties without shell evaluation
+        run: python3 "$RUNNER_TEMP/kmp-control.py" local-properties --input .ci-local.env --output local.properties
+      - name: Read /Build from Infisical staging
+        uses: Infisical/secrets-action@v1.0.18
+        with:
+          method: universal
+          client-id: ${{ secrets.INFISICAL_CLIENT_ID }}
+          client-secret: ${{ secrets.INFISICAL_CLIENT_SECRET }}
+          project-slug: ${{ needs.prepare.outputs.project_slug }}
+          env-slug: staging
+          domain: ${{ secrets.INFISICAL_DOMAIN }}
+          secret-path: /Build
+          export-type: env
+      - name: Install existing debug signing and Firebase files
+        run: python3 "$RUNNER_TEMP/kmp-control.py" android-inputs
+      - name: Set up JDK 25
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '25'
+      - name: Set up small Gradle configuration and build caches
+        uses: gradle/actions/setup-gradle@v6
+        with:
+          cache-read-only: false
+          cache-encryption-key: ${{ secrets.GRADLE_ENCRYPTION_KEY }}
+          cache-cleanup: never
+          gradle-home-cache-includes: |-
+            caches/build-cache-1
+            notifications
+          gradle-home-cache-excludes: |-
+            wrapper
+            caches/modules-2
+            caches/transforms-*
+            caches/*/transforms
+      - name: Restore gradle OCI bundle
+        uses: ./control/actions/gh-bundle-cache
+        with:
+          mode: restore
+          name: ${{ format('{0}-{1}-{2}-{3}', needs.prepare.outputs.name, runner.os, runner.arch, 'gradle') }}
+          key: ${{ format('deps-{0}-{1}', runner.arch, hashFiles('source/gradle/libs.versions.toml', 'source/gradle/wrapper/gradle-wrapper.properties',
+            'source/**/*.gradle.kts', 'source/gradle.properties')) }}
+          fallback-key: latest
+          paths: |-
+            ~/.gradle/caches/modules-2
+            ~/.gradle/wrapper
+          token: ${{ github.token }}
+        id: gradle-cache
+      # Runs in parallel with the lint job (check); publishing needs both.
+      - name: Run Android and shared unit tests
+        run: bash scripts/ci/android-debug.sh unit
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          KEYSTORE_PASSWORD_DEBUG: ${{ env.KEYSTORE_PASSWORD }}
+          KEY_ALIAS_DEBUG: ${{ env.KEY_ALIAS }}
+          KEY_PASSWORD_DEBUG: ${{ env.KEY_PASSWORD }}
+        id: units
+      - name: Retain unit diagnostics
+        uses: actions/upload-artifact@v7
+        with:
+          name: unit-diagnostics
+          path: |-
+            source/build/ci/*.json
+            source/build/ci/*.txt
           if-no-files-found: warn
           retention-days: 7
           overwrite: true
@@ -698,8 +817,9 @@ jobs:
     needs:
       - prepare
       - check
+      - unit-tests
       - android
-    if: ${{ needs.check.outputs.publish == 'true' }}
+    if: ${{ needs.check.outputs.publish == 'true' && needs['unit-tests'].result == 'success' }}
     outputs:
       url: ${{ steps.release.outputs.url }}
     steps:
@@ -746,8 +866,9 @@ jobs:
     needs:
       - prepare
       - check
+      - unit-tests
       - ios-build
-    if: ${{ needs.check.outputs.publish == 'true' }}
+    if: ${{ needs.check.outputs.publish == 'true' && needs['unit-tests'].result == 'success' }}
     steps:
       - name: Checkout trusted central controls
         uses: actions/checkout@v7
@@ -803,6 +924,7 @@ jobs:
     needs:
       - prepare
       - check
+      - unit-tests
       - android
       - ios-build
       - publish-android
@@ -848,7 +970,7 @@ jobs:
           marker: <!-- central-build-debug -->
           mode: upsert
           body: |-
-            ${{ needs.check.outputs.pushed == 'true' && 'Claude pushed an auto-fix for Android Lint. CI will retrigger on the new commit.' || (needs['publish-android'].result == 'success' && format('Debug APK is ready: {0}', needs['publish-android'].outputs.url) || format('Android failed or publishing was blocked. Check: {0}; build: {1}; publish: {2}.', needs.check.result, needs.android.result, needs['publish-android'].result)) }}
+            ${{ needs.check.outputs.pushed == 'true' && 'Claude pushed an auto-fix for Android Lint. CI will retrigger on the new commit.' || (needs['publish-android'].result == 'success' && format('Debug APK is ready: {0}', needs['publish-android'].outputs.url) || format('Android failed or publishing was blocked. Unit tests: {0}; lint: {1}; build: {2}; publish: {3}.', needs['unit-tests'].result, needs.check.result, needs.android.result, needs['publish-android'].result)) }}
             ${{ needs['publish-android'].result != 'success' && needs.check.outputs.pushed != 'true' && format('[Workflow run]({0}/{1}/actions/runs/{2})', github.server_url, github.repository, github.run_id) || '' }}
         if: ${{ always() && needs.prepare.outputs.repo != '' }}
       - name: Notify Telegram of Android result
@@ -863,7 +985,7 @@ jobs:
           title: ${{ needs.prepare.outputs.title }}
           pr-url: ${{ needs.prepare.outputs.pr_url }}
           link: ${{ needs['publish-android'].outputs.url }}
-          results: "${{ format('Check: {0} · Build: {1} · Publish: {2}', needs.check.result, needs.android.result, needs['publish-android'].result) }}"
+          results: "${{ format('Unit tests: {0} · Lint: {1} · Build: {2} · Publish: {3}', needs['unit-tests'].result, needs.check.result, needs.android.result, needs['publish-android'].result) }}"
           run-url: ${{ format('{0}/{1}/actions/runs/{2}', github.server_url, github.repository, github.run_id) }}
           github-token: ${{ github.token }}
         if: ${{ always() }}
@@ -877,7 +999,7 @@ jobs:
           marker: <!-- central-ios-testflight -->
           mode: upsert
           body: |-
-            ${{ needs.check.outputs.pushed == 'true' && format('TestFlight {0} withheld: Claude pushed an Android lint auto-fix; CI will retrigger.', needs.prepare.outputs.build_number) || (needs['ios-publish'].result == 'success' && format('TestFlight {0} uploaded; Apple processing is pending. Internal testers receive it automatically when processing completes.', needs.prepare.outputs.build_number) || format('TestFlight {0} failed or publishing was blocked. Check: {1}; build: {2}; publish: {3}.', needs.prepare.outputs.build_number, needs.check.result, needs['ios-build'].result, needs['ios-publish'].result)) }}
+            ${{ needs.check.outputs.pushed == 'true' && format('TestFlight {0} withheld: Claude pushed an Android lint auto-fix; CI will retrigger.', needs.prepare.outputs.build_number) || (needs['ios-publish'].result == 'success' && format('TestFlight {0} uploaded; Apple processing is pending. Internal testers receive it automatically when processing completes.', needs.prepare.outputs.build_number) || format('TestFlight {0} failed or publishing was blocked. Unit tests: {1}; lint: {2}; build: {3}; publish: {4}.', needs.prepare.outputs.build_number, needs['unit-tests'].result, needs.check.result, needs['ios-build'].result, needs['ios-publish'].result)) }}
             ${{ needs['ios-publish'].result != 'success' && needs.check.outputs.pushed != 'true' && format('[Workflow run]({0}/{1}/actions/runs/{2})', github.server_url, github.repository, github.run_id) || '' }}
         if: ${{ always() && needs.prepare.outputs.repo != '' }}
       - name: Notify Telegram of TestFlight result
@@ -892,7 +1014,7 @@ jobs:
           title: ${{ needs.prepare.outputs.title }}
           pr-url: ${{ needs.prepare.outputs.pr_url }}
           build-number: ${{ needs.prepare.outputs.build_number }}
-          results: "${{ format('Check: {0} · Build: {1} · Publish: {2}', needs.check.result, needs['ios-build'].result, needs['ios-publish'].result) }}"
+          results: "${{ format('Unit tests: {0} · Lint: {1} · Build: {2} · Publish: {3}', needs['unit-tests'].result, needs.check.result, needs['ios-build'].result, needs['ios-publish'].result) }}"
           run-url: ${{ format('{0}/{1}/actions/runs/{2}', github.server_url, github.repository, github.run_id) }}
           github-token: ${{ github.token }}
         if: ${{ always() }}

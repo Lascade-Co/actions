@@ -14,8 +14,8 @@ import urllib.error
 import urllib.request
 
 KINDS = {
-    'android': {'label': 'Android debug APK', 'jobs': ('check', 'android', 'publish-android')},
-    'testflight': {'label': 'TestFlight', 'jobs': ('check', 'ios-build', 'ios-publish')},
+    'android': {'label': 'Android debug APK', 'jobs': ('unit-tests', 'check', 'android', 'publish-android')},
+    'testflight': {'label': 'TestFlight', 'jobs': ('unit-tests', 'check', 'ios-build', 'ios-publish')},
 }
 GENERIC_ERROR = re.compile(r'^Process completed with exit code \d+\.?$')
 # A pointer for where to look, not a log: one short annotation per failed job.

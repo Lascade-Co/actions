@@ -116,7 +116,8 @@ def android_inputs():
 
 def lint_state(path):
     result = json.loads(Path(path).read_text())
-    unit = result['unit_test_exit_code']
+    # Lint-only jobs omit unit fields: the parallel unit-tests job gates publishing separately.
+    unit = result.get('unit_test_exit_code', 0)
     lint = result['lint_exit_code']
     if not isinstance(unit, int) or not isinstance(lint, int):
         raise ValueError('Invalid lint result')
