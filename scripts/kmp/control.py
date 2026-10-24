@@ -164,6 +164,24 @@ def push_fix(branch, sha):
     output({'pushed': 'true'})
 
 
+ALTOOL_ERROR = re.compile(r'ERROR: \[[^\]]*\] (.+)')
+
+
+def altool_errors(output, limit=2):
+    """Apple's own failure reasons from altool output, shortened, without the generic exit line."""
+    messages = []
+    for line in output.splitlines():
+        match = ALTOOL_ERROR.search(line)
+        if match and not match[1].startswith('ExitFailure'):
+            text = ' '.join(match[1].split())
+            messages.append(text if len(text) <= 300 else text[:299] + '…')
+    return list(dict.fromkeys(messages))[:limit]
+
+
+def workflow_escape(text):
+    return text.replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A')
+
+
 def upload_ipa(path):
     key_id = os.environ['APPSTORE_API_KEY_ID']
     issuer = os.environ['APPSTORE_ISSUER_ID']
@@ -176,8 +194,15 @@ def upload_ipa(path):
         key.write_text(os.environ['APPSTORE_API_PRIVATE_KEY'])
         key.chmod(0o600)
         env = dict(os.environ, API_PRIVATE_KEYS_DIR=str(folder))
-        subprocess.run(['xcrun', 'altool', '--upload-package', path,
-                        '--api-key', key_id, '--api-issuer', issuer], env=env, check=True)
+        result = subprocess.run(['xcrun', 'altool', '--upload-package', path,
+                                 '--api-key', key_id, '--api-issuer', issuer], env=env,
+                                text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        print(result.stdout, end='')
+        if result.returncode:
+            # Point the run page and Telegram at Apple's reason instead of only the exit code.
+            for message in altool_errors(result.stdout):
+                print(f'::error title=App Store upload::{workflow_escape(message)}')
+            raise subprocess.CalledProcessError(result.returncode, 'altool --upload-package')
     finally:
         key.unlink(missing_ok=True)
         folder.rmdir()

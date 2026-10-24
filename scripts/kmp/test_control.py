@@ -104,5 +104,15 @@ class LintGateTests(unittest.TestCase):
             out.assert_called_once_with({'pushed':'false'})
 
 
+class AltoolErrorTests(unittest.TestCase):
+    def test_apple_reason_is_extracted_and_generic_exit_skipped(self):
+        output = ('2026-10-23 22:07:01.664 ERROR: [ContentDelivery.Uploader.B82C711C0] \n'
+                  '2026-10-23 22:07:01.667 ERROR: [altool.B82C711C0] Invalid bundle. The orientations were provided\n'
+                  '   NSUnderlyingError : A server error occurred. (-19241)\n'
+                  '2026-10-23 22:07:01.669 ERROR: [altool.101806C30] ExitFailure (31)\n')
+        self.assertEqual(['Invalid bundle. The orientations were provided'], control.altool_errors(output))
+        self.assertEqual('a%25b%0Ac', control.workflow_escape('a%b\nc'))
+
+
 if __name__ == '__main__':
     unittest.main()
