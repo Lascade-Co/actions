@@ -542,3 +542,122 @@ def test_dated_dedupe_counts_recovery_runs_of_any_event():
 
 # Include edition and phase cases in the required verification entrypoint.
 from test_ip_watchdog import TestWatchdogEditions  # noqa: E402, F401
+
+
+# ------------------------------------------------------------ early read ----
+
+import ip_editions as E  # noqa: E402
+import ip_main as IM  # noqa: E402
+
+EARLY_DAY, LAST, FIRST = 18, 17, 11      # model(): report 20 Oct, cutoff 05:00 PDT -> last full day 18 Oct
+
+
+def early_raw(day_paid=3, day_n=100, base_paid=40, base_n=1000):
+    """Synthetic early rows: the newest day plus a 7-day same-basis baseline, iOS only."""
+    rows = [row("4.1.0", EARLY_DAY, day_n, paid=day_paid)]
+    rows += [row("4.1.0", FIRST + i, base_n // 7, paid=base_paid // 7) for i in range(7)]
+    return {"ios": rows, "android": []}
+
+
+def early_model(raw=None, **kw):
+    m = model({"ios": [row("4.1.0", d, 500, paid=25) for d in range(FIRST, LAST + 1)], "android": []})
+    m["edition"] = "pt"
+    m["early"] = M.build_early(raw or early_raw(**kw), m["first_day"], m["last_day"], m["last_day"] + dt.timedelta(days=1))
+    return m
+
+
+def test_early_sql_is_opt_in_and_caps_every_window():
+    s, e, c = dt.datetime(2026, 10, 12, 7), dt.datetime(2026, 10, 20, 7), dt.datetime(2026, 10, 20, 12)
+    dls = {dt.date(2026, 10, 19): c, dt.date(2026, 10, 18): dt.datetime(2026, 10, 19, 12)}
+    base = F.cohort_sql(dt.datetime(2026, 9, 1), dt.datetime(2026, 9, 15), dt.datetime(2026, 9, 20), "ios", CIDRS)
+    assert " dl" not in base and "multiIf" not in base           # default SQL unchanged
+    with __import__("pytest").raises(ValueError):
+        F.cohort_sql(s, e, c, "ios", CIDRS)                       # young installs need deadlines
+    sql = F.cohort_sql(s, e, c, "ios", CIDRS, deadlines=dls)
+    assert sql.count("AND x < dl") == 7                           # pw, pv, ex, exr, paid, pc, fp + export-after-preview
+    assert "toDate('2026-10-18'), toDateTime('2026-10-19 12:00:00', 'UTC')" in sql
+    assert "timestamp < toDateTime('2026-10-20 12:00:00', 'UTC')" in sql   # events scanned to the cutoff
+
+
+def test_early_window_is_dst_safe_for_both_editions():
+    for ed, rd, early, dl_early, dl_prev, end in [
+        ("pt", dt.date(2026, 10, 23), dt.date(2026, 10, 22), "2026-10-23 12:00", "2026-10-22 12:00", "2026-10-23 07:00"),
+        ("pt", dt.date(2026, 11, 2), dt.date(2026, 11, 1), "2026-11-02 13:00", "2026-11-01 13:00", "2026-11-02 08:00"),
+        ("pt", dt.date(2026, 3, 9), dt.date(2026, 3, 8), "2026-03-09 12:00", "2026-03-08 12:00", "2026-03-09 07:00"),
+        ("ist", dt.date(2026, 10, 23), dt.date(2026, 10, 21), "2026-10-22 23:30", "2026-10-21 23:30", "2026-10-22 07:00"),
+    ]:
+        first, last, e, start, stop, dls = M.early_window(rd, E.get_edition(ed), IM.cutoff_for(rd, ed))
+        assert e == early and last == early - dt.timedelta(days=1) and first == last - dt.timedelta(days=6)
+        assert f"{dls[early]:%Y-%m-%d %H:%M}" == dl_early and f"{dls[last]:%Y-%m-%d %H:%M}" == dl_prev
+        assert f"{stop:%Y-%m-%d %H:%M}" == end and stop <= IM.cutoff_for(rd, ed)
+        assert len(dls) == 8
+
+
+def test_early_model_counts_and_verdicts():
+    m = early_model(day_paid=1, day_n=100, base_paid=420, base_n=7000)
+    et = m["early"]["tracks"]["ios"]
+    assert et["day"]["n"] == 100 and et["day"]["paid"] == 1
+    assert et["base"]["n"] == 7000
+    assert et["cmp"]["paid"]["verdict"] == "worse"
+    assert m["early"]["tracks"]["android4"]["day"] == {} and m["early"]["tracks"]["android4"]["cmp"] == {}
+
+
+def test_early_render_subject_dateline_grid_and_block(tmp_path):
+    m = early_model(day_paid=3, day_n=100)
+    subj, html, text, _ = R.render(m, "A", tmp_path)
+    assert subj.startswith("TA install→paid · Mon 19 Oct (early): iOS 3.0%")
+    assert "early Mon 19 Oct · latest full day Sun 18 Oct" in html
+    assert "Early read, provisional: what Mon 19 Oct installs had done by 05:00 PT Tue 20 Oct" in html
+    assert "Mon 19 Oct (early)" in html and "No installs yet on Mon 19 Oct." in html
+    assert "Early read, provisional" in text and "Judged on the 7 days, never the single day" not in text
+    assert "measured at the same point" in text
+
+
+def test_without_early_the_email_is_unchanged(tmp_path):
+    m = early_model()
+    m["early"] = None
+    subj, html, text, _ = R.render(m, "A", tmp_path)
+    assert subj.startswith("TA install→paid · Sun 18 Oct: ")
+    assert "Early read" not in html and "Judged on the 7 days, never the single day" in text
+
+
+def test_early_render_failure_falls_back(tmp_path, monkeypatch):
+    m = early_model()
+    monkeypatch.setattr(R, "early_lines", lambda *a: (_ for _ in ()).throw(RuntimeError("boom")))
+    with redirect_stdout(io.StringIO()) as out:
+        subj, html, _, _ = R.render(m, "A", tmp_path)
+    assert "(early)" not in subj and "Early read" not in html
+    assert "boom" not in out.getvalue()
+
+
+def test_early_fetch_failures_and_budget_degrade_to_none():
+    rd, cut = dt.date(2026, 10, 20), dt.datetime(2026, 10, 20, 12)
+    now = dt.datetime(2026, 10, 20, 12, 10, tzinfo=dt.timezone.utc)
+
+    def boom():
+        raise F.Unavailable("x")
+
+    def malformed():
+        return {"ios": [{"v": "4.1.0", "d": "not-a-date", "n": "x"}], "android": []}
+
+    def half():
+        F.check_deadline(now - dt.timedelta(seconds=1))         # deadline passed after one platform
+
+    for fetch in (boom, malformed, half):
+        with redirect_stdout(io.StringIO()) as out:
+            assert IM.fetch_early_model(rd, cut, "pt", None, now=now, fetch=fetch) is None
+        assert "unavailable" in out.getvalue()
+    # Build deadline too close: skipped without fetching.
+    with redirect_stdout(io.StringIO()) as out:
+        assert IM.fetch_early_model(rd, cut, "pt", now + dt.timedelta(minutes=5), now=now, fetch=boom) is None
+    assert "skipped" in out.getvalue()
+    assert IM.early_deadline(None, now) == now + IM.EARLY_BUDGET
+    assert IM.early_deadline(now + dt.timedelta(minutes=10), now) == now + dt.timedelta(minutes=6)
+
+
+def test_early_track_with_empty_baseline_shows_figure(tmp_path):
+    raw = {"ios": [row("4.1.0", EARLY_DAY, 100, paid=2)], "android": []}
+    m = early_model(raw)
+    assert m["early"]["tracks"]["ios"]["cmp"]["paid"] is None
+    subj, html, _, _ = R.render(m, "A", tmp_path)
+    assert "iOS 2.0%" in subj and "can&#x27;t tell yet" in html

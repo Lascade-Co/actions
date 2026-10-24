@@ -164,6 +164,21 @@ def day_rate(t):
     return pct(d["paid"] / d["n"]) if d.get("n") else "—"
 
 
+def early_of(model):
+    """The early read, or None when it is missing or failed."""
+    return model.get("early") or None
+
+
+def early_track(model, t):
+    e = early_of(model)
+    return e["tracks"].get(t["key"]) if e else None
+
+
+def early_rate(et):
+    d = (et or {}).get("day") or {}
+    return pct(d["paid"] / d["n"]) if d.get("n") else "—"
+
+
 def verdict_color(c):
     """Bar colour vs Mar 2026; grey when the comparison is directional only (no verdict)."""
     if not c:
@@ -330,7 +345,8 @@ def _masthead(eyebrow, title, dateline):
 
 def dateline(model):
     rd = model["report_date"]
-    return f"{rd:%a %-d %b} · latest full day {day_label(model['last_day'])} · last 7 days {week_of(model)}"
+    early = f" · early {day_label(early_of(model)['day'])}" if early_of(model) else ""
+    return f"{rd:%a %-d %b}{early} · latest full day {day_label(model['last_day'])} · last 7 days {week_of(model)}"
 
 
 def _stat_grid(model):
@@ -338,6 +354,7 @@ def _stat_grid(model):
     cells = []
     for t in model["tracks"]:
         d = t["day"]
+        et = early_track(model, t)
         if t["empty"]:
             gloss, week = _c("no installs"), ""
         else:
@@ -346,12 +363,65 @@ def _stat_grid(model):
             gloss = f'{_c(lab + " ·")} {_n(d.get("paid", 0))} {_c("of")} {_n(num(d.get("n", 0)))}'
             week = (f'<p style="margin:6px 0 0 0; font-family:{FONT_HEADING}; font-size:13px; font-weight:700; '
                     f'color:{col};" class="{cls}">7 days: {esc(pct(t["rates"]["paid"][0]))}</p>')
+        if et is not None:
+            ed = et["day"]
+            elab = day_label(early_of(model)["day"])
+            gloss = (f'{_c(elab + " (early) ·")} {_n(ed.get("paid", 0))} {_c("of")} {_n(num(ed.get("n", 0)))}'
+                     + (f'</p><p style="margin:2px 0 0 0; font-family:{FONT_BODY}; font-size:12px;">'
+                        f'{_c(lab + " ·")} {_n(day_rate(t))}' if not t["empty"] else ""))
+            figure = early_rate(et)
+        else:
+            figure = day_rate(t) if not t["empty"] else "—"
         cells.append(
             f'<td valign="top" style="padding:0 8px 0 0;"><div style="min-height:30px;">{_caps(t["label"])}</div>'
             f'<p style="margin:4px 0 0 0; font-family:{FONT_HEADING}; font-size:26px; font-weight:700; '
-            f'line-height:1.1; color:{INK};" class="stat-fig hl-num">{esc(day_rate(t) if not t["empty"] else "—")}</p>'
+            f'line-height:1.1; color:{INK};" class="stat-fig hl-num">{esc(figure)}</p>'
             f'<p style="margin:4px 0 0 0; font-family:{FONT_BODY}; font-size:12px;">{gloss}</p>{week}</td>')
     return _row(f'{TABLE} class="tfix"><tr>{"".join(cells)}</tr></table>', 28)
+
+
+def early_lines(t, model):
+    """(paid html, paid text, steps html, steps text) for the newest day's early read."""
+    e, et = early_of(model), early_track(model, t)
+    lab = day_label(e["day"])
+    if not et["day"].get("n"):
+        s = f"No installs yet on {lab}."
+        return _c(s), s, "", ""
+    base = week_txt(model["first_day"], model["last_day"])
+
+    def word(k):
+        c = et["cmp"].get(k)
+        return (c or {}).get("verdict") or "unclear"
+    pv = word("paid")
+    ph = (f'{_n("Paid")} &nbsp;{_c(lab)} {_n(early_rate(et))} {_c("·")} {_v(pv)} {_c("vs " + base)}')
+    px = f"Paid  {lab} {early_rate(et)} · {VERDICT_WORD[pv]} vs {base}"
+    sh = [f"{_n(SHORT[k])} {_v(word(k))}" for k in ("pw", "pv", "ex")]
+    sx = [f"{SHORT[k]} {VERDICT_WORD[word(k)]}" for k in ("pw", "pv", "ex")]
+    return ph, px, f'{_c("Steps")} &nbsp;' + f' &nbsp;{_c("·")}&nbsp; '.join(sh), "Steps  " + " · ".join(sx)
+
+
+def early_caption(model):
+    e = early_of(model)
+    label = get_edition(model.get("edition", "pt")).label
+    return (f"Early read, provisional: what {day_label(e['day'])} installs had done by 05:00 {label} "
+            f"{day_label(model['report_date'])}. Late events can still change it. Compared with the 7 days before "
+            f"({week_txt(model['first_day'], model['last_day'])}), measured the same way.")
+
+
+def _early(model):
+    if not early_of(model):
+        return ""
+    out = [f'<p style="margin:0; font-family:{FONT_BODY}; font-size:12px; color:{CTX};" class="hl-ctx">'
+           f'{esc(early_caption(model))}</p>']
+    for t in model["tracks"]:
+        l1, _, l2, _ = early_lines(t, model)
+        out.append(f'<p style="margin:14px 0 0 0; font-family:{FONT_HEADING}; font-size:15px; font-weight:700; '
+                   f'color:{INK};" class="hl-num">{esc(t["label"])}</p>'
+                   f'<p style="margin:2px 0 0 0; font-family:{FONT_BODY}; font-size:15px; line-height:1.55;" '
+                   f'class="text-main">{l1}</p>' +
+                   (f'<p style="margin:2px 0 0 0; font-family:{FONT_BODY}; font-size:15px; line-height:1.55;" '
+                    f'class="text-main">{l2}</p>' if l2 else ""))
+    return _row("".join(out), 24)
 
 
 def _lead(model):
@@ -595,7 +665,10 @@ def footnote_lines(model):
         "after the first preview; paid = a subscription with a price above zero. Pacific install days, data to "
         f"05:00 {edition.label}.",
         "Better or worse when the 95% interval of the difference excludes zero; otherwise same when the whole interval "
-        "lies within ±10% of the benchmark rate; otherwise can't tell yet. Judged on the 7 days, never the single day.",
+        "lies within ±10% of the benchmark rate; otherwise can't tell yet. " + (
+            "Verdicts against Mar 2026 / Aug 2025 are judged on the 7 full days; the early read is a separate check of "
+            "the newest day against the 7 days before it, measured at the same point."
+            if early_of(model) else "Judged on the 7 days, never the single day."),
         "† Android Aug 2025 has no linked server-side subscription data, so that comparison uses the in-app purchase "
         "event on both sides; the event changed in Aug 2026, so read it as directional.",
         "Benchmarks are whole months, same query and filters. Suspected test installs removed. Install mix differs from "
@@ -612,7 +685,12 @@ def _footnotes(model):
 
 
 def subject_of(model):
-    """Dated by the latest full day, so Gmail never threads two days together."""
+    """Dated by the newest day shown (the early day when present), so Gmail never threads
+    two days together."""
+    e = early_of(model)
+    if e:
+        bits = [f"{t['label']} {early_rate(early_track(model, t))}" for t in model["tracks"]]
+        return f"TA install→paid · {day_label(e['day'])} (early): " + " · ".join(bits)
     bits = [f"{t['label']} {'—' if t['empty'] else day_rate(t)}" for t in model["tracks"]]
     return f"TA install→paid · {day_label(model['last_day'])}: " + " · ".join(bits)
 
@@ -627,6 +705,11 @@ def _text(model, subject):
         d = t["day"]
         out.append(f"{t['label']}: {day_rate(t)} on {lab} ({d.get('paid', 0)} of {num(d.get('n', 0))}) · "
                    f"7 days {pct(t['rates']['paid'][0])}")
+    if early_of(model):
+        out += ["", early_caption(model)]
+        for t in model["tracks"]:
+            _, l1, _, l2 = early_lines(t, model)
+            out += [t["label"], "  " + l1] + (["  " + l2] if l2 else [])
     out += ["", "7-day verdicts vs Mar 2026 / Aug 2025"]
     for t in model["tracks"]:
         _, l1, _, l2 = read_lines(t, model)
@@ -657,19 +740,34 @@ def _text(model, subject):
 
 
 def render(model, variant, out_dir):
+    """-> (subject, html, text, images). The early read is optional: if rendering it fails,
+    the email is rendered again without it."""
+    try:
+        return _render(model, variant, out_dir)
+    except Exception:
+        if not early_of(model):
+            raise
+        print("early read could not be rendered; sending without it")
+        return _render(dict(model, early=None), variant, out_dir)
+
+
+def _render(model, variant, out_dir):
     """-> (subject, html, text, images). images: [{"name", "path"}] for variant B; the html
     references images by bare file name (the sender swaps in cid: URLs)."""
     subject = subject_of(model)
     images = []
     first = next((t for t in model["tracks"] if not t["empty"]), None)
-    if first:
+    if early_of(model) and model["tracks"]:
+        _, l1, _, l2 = early_lines(model["tracks"][0], model)
+        preheader = f"{model['tracks'][0]['label']}: {l1}. {l2}." if l2 else f"{model['tracks'][0]['label']}: {l1}"
+    elif first:
         _, l1, _, l2 = read_lines(first, model)
         preheader = f"{first['label']}: {l1}. {l2}."
     else:
         preheader = subject
     parts = [
         _masthead("Lascade · TravelAnimator", "Install → paid", dateline(model)),
-        _stat_grid(model), _lead(model), _row(_legend(), 14),
+        _stat_grid(model), _early(model), _lead(model), _row(_legend(), 14),
         "".join(_track(t, model, variant, out_dir, images) for t in model["tracks"]),
         _footnotes(model),
     ]

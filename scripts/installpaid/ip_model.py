@@ -253,6 +253,47 @@ def build_model(raw, bench, report_date, cutoff_utc, cidr_date, bench_def):
                            for pl in ("ios", "android")} for bk, _ in BENCH}}
 
 
+EARLY_STEPS = ("pw", "pv", "ex", "paid")
+
+
+def early_window(report_date, edition, cutoff_utc):
+    """(first, last, early_day, start_utc, end_utc, deadlines) for the early read.
+
+    early_day is the day after the latest full day. Install days are Pacific dates, so
+    the cohort runs from first 00:00 PT to (early_day + 1) 00:00 PT. Each install date d
+    is measured to the same local clock time as the cutoff on report_date - (early_day - d)
+    days, built on calendar dates in the edition's timezone (DST-safe). All naive UTC."""
+    last = latest_full_day(cutoff_utc)
+    first = last - dt.timedelta(days=WEEK_DAYS - 1)
+    early_day = last + dt.timedelta(days=1)
+
+    def pt_midnight(d):
+        return dt.datetime.combine(d, dt.time(0), PT).astimezone(dt.timezone.utc).replace(tzinfo=None)
+
+    deadlines = {}
+    for i in range(WEEK_DAYS + 1):
+        d = first + dt.timedelta(days=i)
+        deadlines[d] = edition.at(report_date - (early_day - d), 5, 0).replace(tzinfo=None)
+    return first, last, early_day, pt_midnight(first), pt_midnight(early_day + dt.timedelta(days=1)), deadlines
+
+
+def build_early(early_raw, first, last, early_day):
+    """{"day": early_day, "tracks": {track: {...}}}: the newest day's provisional counts and,
+    per step, a comparison with the 7 days before it measured the same way."""
+    kept, _ = split(early_raw)
+    tracks = {}
+    for tk, _store, _label in TRACKS:
+        day, base = {}, {}
+        for r in kept.get(tk, []):
+            if r["d"] == early_day:
+                add(day, r)
+            elif first <= r["d"] <= last:
+                add(base, r)
+        tracks[tk] = {"day": day, "base": base,
+                      "cmp": {s: compare(day, base, s) for s in EARLY_STEPS} if day.get("n") else {}}
+    return {"day": early_day, "tracks": tracks}
+
+
 def mix(now_cc, base_cc, top=3):
     tot_n, tot_b = sum(now_cc.values()), sum(base_cc.values())
     if not tot_n:

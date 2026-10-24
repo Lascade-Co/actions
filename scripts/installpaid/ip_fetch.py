@@ -68,19 +68,33 @@ def google_ip_sql(cidrs, expr="ip"):
     return "(" + " OR ".join(f"isIPAddressInRange({e}, '{c}')" for c in cidrs) + ")"
 
 
-def cohort_sql(start: dt.datetime, end: dt.datetime, cutoff: dt.datetime, plat: str, cidrs) -> str:
+def deadline_sql(deadlines, cutoff):
+    """Per-install event deadline keyed on the Pacific install date: {date: naive UTC}."""
+    arms = ", ".join(f"toDate(toTimeZone(t0, 'America/Los_Angeles')) = toDate('{d}'), {_utc(x)}"
+                     for d, x in sorted(deadlines.items()))
+    return f"multiIf({arms}, {_utc(cutoff)})"
+
+
+def cohort_sql(start: dt.datetime, end: dt.datetime, cutoff: dt.datetime, plat: str, cidrs,
+               deadlines=None) -> str:
     """Installs with first install in [start, end), all naive UTC. Every install must
     be >= 24h old at `cutoff` (the caller guarantees end <= cutoff - 24h); events are
-    scanned to min(end + 24h, cutoff)."""
-    if end > cutoff - dt.timedelta(hours=H):
+    scanned to min(end + 24h, cutoff).
+
+    Early read: with `deadlines` ({Pacific install date: naive UTC}), installs may be
+    younger than 24h; each event must also fall before its install date's deadline, and
+    events are scanned to the cutoff. Without it the SQL is unchanged."""
+    if deadlines is None and end > cutoff - dt.timedelta(hours=H):
         raise ValueError("cohort end must be at least 24h before the cutoff")
     look = start - dt.timedelta(days=LOOKBACK_DAYS)
-    scan_end = min(end + dt.timedelta(hours=H), cutoff)
+    scan_end = min(end + dt.timedelta(hours=H), cutoff) if deadlines is None else cutoff
     s = _utc(start)
     arrays = ",\n".join(
         f"    groupArrayIf(timestamp, {cond} AND timestamp >= {s}) AS a_{k}" for k, cond in STEPS)
     ev_or = " OR ".join(f"({cond})" for _, cond in STEPS)
-    win = f"x >= t0 AND x < t0 + toIntervalHour({H})"
+    cap = "" if deadlines is None else " AND x < dl"
+    win = f"x >= t0 AND x < t0 + toIntervalHour({H}){cap}"
+    dl_col = "" if deadlines is None else f" {deadline_sql(deadlines, cutoff)} AS dl,"
     return f"""
 SELECT v, cc, gip, emu, miss, d,
        count() AS n,
@@ -89,14 +103,14 @@ SELECT v, cc, gip, emu, miss, d,
        countIf(paid1 AND pv1) AS paid_pv, countIf(pc1 AND pv1) AS pc_pv
 FROM (
  SELECT v, cc, gip, emu, miss, d, pw1, pv1, paid1, pc1, exr1,
-        pv1 AND arrayExists(x -> x >= fp AND x < t0 + toIntervalHour({H}), a_ex) AS ex1
+        pv1 AND arrayExists(x -> x >= fp AND x < t0 + toIntervalHour({H}){cap}, a_ex) AS ex1
  FROM (
   SELECT ifNull(toString(v0), '') AS v, ifNull(toString(cc0), '') AS cc,
          {google_ip_sql(cidrs)} AS gip,
          startsWith(ifNull(toString(model), ''), 'sdk_') AS emu,
          (ip = '' OR ifNull(toString(model), '') = '') AS miss,
          toDate(toTimeZone(t0, 'America/Los_Angeles')) AS d,
-         t0, a_ex,
+         t0, a_ex,{dl_col}
          arrayExists(x -> {win}, a_pw) AS pw1,
          arrayExists(x -> {win}, a_pv) AS pv1,
          arrayExists(x -> {win}, a_ex) AS exr1,
@@ -258,6 +272,21 @@ def chunks(start: dt.datetime, end: dt.datetime, days: int = CHUNK_DAYS):
         b = min(a + dt.timedelta(days=days), end)
         yield a, b
         a = b
+
+
+def fetch_early(run, start, end, cutoff, deadlines, cidrs, log=print, deadline=None):
+    """{plat: [rows]} for the early read: installs in [start, end), events capped per
+    install date by `deadlines`. Logs carry dates only, never figures."""
+    out = {}
+    for plat in PLAT_OS:
+        rows = []
+        for a, b in chunks(start, end):
+            check_deadline(deadline)
+            rows += run(cohort_sql(a, b, cutoff, plat, cidrs, deadlines=deadlines))
+            check_deadline(deadline)
+            log(f"fetched early {plat} {a:%Y-%m-%d}..{b:%Y-%m-%d}")
+        out[plat] = rows
+    return out
 
 
 def fetch_cohort(run, start, end, cutoff, cidrs, log=print, deadline=None):

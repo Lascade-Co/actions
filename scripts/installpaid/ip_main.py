@@ -70,6 +70,41 @@ def fetch_window(report_date, cutoff, use_cache, edition="pt", deadline=None):
     return raw
 
 
+EARLY_BUDGET = dt.timedelta(minutes=8)
+EARLY_RESERVE = dt.timedelta(minutes=4)      # left for the base build to finish rendering
+EARLY_MIN = dt.timedelta(seconds=90)
+
+
+def early_deadline(build_deadline, now):
+    """Own, finite budget for the optional early read; None means skip it."""
+    end = now + EARLY_BUDGET
+    if build_deadline is not None:
+        end = min(end, build_deadline - EARLY_RESERVE)
+    return end if end - now >= EARLY_MIN else None
+
+
+def fetch_early_model(report_date, cutoff, edition, build_deadline, now=None, fetch=None):
+    """The early read, or None. Optional by design: any failure leaves the email as it was.
+    Logs never carry figures (public repository)."""
+    try:
+        now = now or dt.datetime.now(dt.timezone.utc)
+        dl = early_deadline(build_deadline, now)
+        if dl is None:
+            print("early read skipped: not enough build time left")
+            return None
+        first, last, early_day, start, end, deadlines = M.early_window(report_date, get_edition(edition), cutoff)
+        if fetch is None:
+            cidrs, _ = F.load_cidrs()
+            run = F.make_runner(os.environ["POSTHOG_PERSONAL_API_KEY"], deadline=dl)
+
+            def fetch():
+                return F.fetch_early(run, start, end, cutoff, deadlines, cidrs, deadline=dl)
+        return M.build_early(fetch(), first, last, early_day)
+    except Exception:
+        print("early read unavailable; sending without it")
+        return None
+
+
 def main(argv=None):
     started_at = dt.datetime.now(dt.timezone.utc)
     ap = argparse.ArgumentParser()
@@ -103,6 +138,7 @@ def main(argv=None):
     import ip_render_email as R
     model = M.build_model(raw, bench, report_date, cutoff, cidr_date, bench["definition"])
     model["edition"] = a.edition
+    model["early"] = fetch_early_model(report_date, cutoff, a.edition, deadline)
     out = Path(a.out)
     out.mkdir(parents=True, exist_ok=True)
     (out / "report-date.txt").write_text(report_date.isoformat())
