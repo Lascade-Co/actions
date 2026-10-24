@@ -28,6 +28,11 @@ Return the release notes as plain text only. The workflow writes the response to
 ## Hard constraints
 
 - Return only the release notes. The workflow handles files, versioning and pushes.
+- The whole output must be at most 450 characters, counting every character: bullets, spaces,
+  line breaks and emojis (an emoji counts as 2). Google Play rejects release notes over 500
+  characters per language and the same text is used for the App Store.
+- If the changes do not fit, merge related items and keep the most user-visible ones. Every
+  bullet must be a complete sentence; never end mid-word or mid-sentence to save space.
 
 ## Git diff
 

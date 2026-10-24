@@ -335,6 +335,21 @@ jobs:
           CLAUDE_API_KEY: ${{ secrets.CLAUDE_API_KEY }}
         run: python3 release_notes.py --prompt claude-release-prompt.md --out releasenotes.txt
 
+      # Same rule as scripts/android/release_notes.py: Play rejects >500 characters (UTF-16 units)
+      # per language. Fail here, before a release exists, instead of at Play upload; never truncate.
+      - name: Check release notes length
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import pathlib, sys
+          text = pathlib.Path('releasenotes.txt').read_text(encoding='utf-8').strip()
+          length = len(text.encode('utf-16-le')) // 2
+          print(f'releasenotes.txt: {length}/500 characters')
+          if length > 500:
+              print('::error::releasenotes.txt is over the Google Play limit of 500 characters; shorten it without cutting sentences.')
+              sys.exit(1)
+          PY
+
       - name: Create GitHub Release in source repo
         uses: softprops/action-gh-release@v2
         with:
