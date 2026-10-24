@@ -290,6 +290,7 @@ jobs:
             ~/.gradle/wrapper
           token: ${{ github.token }}
         continue-on-error: true
+        if: ${{ steps.gradle-cache.outputs.hit != 'true' }}
       - name: Retain check diagnostics
         uses: actions/upload-artifact@v7
         with:
@@ -552,6 +553,7 @@ jobs:
             ~/.gradle/wrapper
           token: ${{ github.token }}
         continue-on-error: true
+        if: ${{ steps.gradle-cache.outputs.hit != 'true' }}
       - name: Retain android diagnostics
         uses: actions/upload-artifact@v7
         with:
@@ -675,17 +677,22 @@ jobs:
         with:
           mode: restore
           name: ${{ format('{0}-{1}-{2}-{3}', needs.prepare.outputs.name, runner.os, runner.arch, 'konan') }}
-          key: ${{ format('konan-{0}-{1}', runner.arch, needs.prepare.outputs.kotlin_version) }}
+          key: ${{ format('konan-{0}-{1}-{2}', runner.arch, needs.prepare.outputs.kotlin_version, hashFiles('source/gradle/libs.versions.toml')) }}
           fallback-key: latest
           paths: ~/.konan
           token: ${{ github.token }}
         id: konan-cache
+      # Resolve rewrites Package.resolved; hash it once so restore and publish share one key.
+      - name: Compute SwiftPM cache key
+        run: echo "key=xcode-26-6-${{ hashFiles('source/**/Package.resolved') }}" >> "$GITHUB_OUTPUT"
+        working-directory: .
+        id: spm-key
       - name: Restore swiftpm OCI bundle
         uses: ./control/actions/gh-bundle-cache
         with:
           mode: restore
           name: ${{ format('{0}-{1}-{2}-{3}', needs.prepare.outputs.name, runner.os, runner.arch, 'swiftpm') }}
-          key: ${{ format('xcode-26-6-{0}', hashFiles('source/**/Package.resolved')) }}
+          key: ${{ steps.spm-key.outputs.key }}
           fallback-key: latest
           paths: |-
             ~/Library/Caches/org.swift.swiftpm
@@ -716,13 +723,14 @@ jobs:
         with:
           mode: publish
           name: ${{ format('{0}-{1}-{2}-{3}', needs.prepare.outputs.name, runner.os, runner.arch, 'swiftpm') }}
-          key: ${{ format('xcode-26-6-{0}', hashFiles('source/**/Package.resolved')) }}
+          key: ${{ steps.spm-key.outputs.key }}
           fallback-key: latest
           paths: |-
             ~/Library/Caches/org.swift.swiftpm
             source/build/ci/ios/SourcePackages
           token: ${{ github.token }}
         continue-on-error: true
+        if: ${{ steps.spm-cache.outputs.hit != 'true' }}
       - name: Install temporary Apple distribution signing
         uses: ./control/actions/apple-signing
         with:
@@ -760,12 +768,12 @@ jobs:
         with:
           mode: publish
           name: ${{ format('{0}-{1}-{2}-{3}', needs.prepare.outputs.name, runner.os, runner.arch, 'konan') }}
-          key: ${{ format('konan-{0}-{1}', runner.arch, needs.prepare.outputs.kotlin_version) }}
+          key: ${{ format('konan-{0}-{1}-{2}', runner.arch, needs.prepare.outputs.kotlin_version, hashFiles('source/gradle/libs.versions.toml')) }}
           fallback-key: latest
           paths: ~/.konan
           token: ${{ github.token }}
         continue-on-error: true
-        if: ${{ !cancelled() && steps.build.outcome != 'skipped' }}
+        if: ${{ !cancelled() && steps.build.outcome != 'skipped' && steps.konan-cache.outputs.hit != 'true' }}
       - name: Publish angle OCI bundle
         uses: ./control/actions/gh-bundle-cache
         with:
@@ -776,7 +784,7 @@ jobs:
           paths: source/shared/build/angle
           token: ${{ github.token }}
         continue-on-error: true
-        if: ${{ !cancelled() && steps.build.outcome != 'skipped' }}
+        if: ${{ !cancelled() && steps.build.outcome != 'skipped' && steps.angle-cache.outputs.hit != 'true' }}
       - name: Publish gradle OCI bundle
         uses: ./control/actions/gh-bundle-cache
         with:
@@ -790,7 +798,7 @@ jobs:
             ~/.gradle/wrapper
           token: ${{ github.token }}
         continue-on-error: true
-        if: ${{ !cancelled() && steps.build.outcome != 'skipped' }}
+        if: ${{ !cancelled() && steps.build.outcome != 'skipped' && steps.gradle-cache.outputs.hit != 'true' }}
       - name: Remove temporary provisioning profiles
         uses: ./control/actions/apple-signing
         with:

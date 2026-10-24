@@ -91,7 +91,10 @@ signing, marker comments and Telegram messages. Every control download is pinned
 to the workflow SHA, retried with bounded curl retries, and promoted from a
 successful nonempty temporary file.
 
-GHCR bundles cover Gradle dependencies/wrapper, Kotlin/Native, SwiftPM and ANGLE.
+GHCR bundles cover Gradle dependencies/wrapper, Kotlin/Native, SwiftPM and ANGLE. A bundle is published only when its exact key was not restored, so warm runs
+skip re-uploading unchanged gigabytes. The Kotlin/Native key includes `libs.versions.toml`, so release
+caches built for new dependency versions are saved; the SwiftPM key is computed once before resolve,
+which rewrites `Package.resolved`, so restore and publish agree.
 Exact keys include build/catalog/wrapper hashes, Kotlin version plus architecture,
 `Package.resolved` plus pinned Xcode, and the ANGLE revision respectively. Each
 namespace has a moving `latest` fallback. SwiftPM publishes immediately after
