@@ -3,14 +3,16 @@ run-name: "${{ github.event.client_payload.repo }} · ${{ github.event.client_pa
 
 on:
   repository_dispatch:
-    types: [publish-playstore]
+    types: [publish-playstore, publish-kmp]
 
 permissions:
   contents: read
+  actions: read
+  checks: read
 
 concurrency:
   group: playstore-${{ github.event.client_payload.package_name }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   publish:
@@ -26,28 +28,34 @@ jobs:
       - name: Checkout central repo (for scripts)
         uses: actions/checkout@v6
 
-      - name: Validate payload
-        shell: bash
-        run: |
-          set -euo pipefail
-          : "${{ github.event.client_payload.repo }}"
-          : "${{ github.event.client_payload.release_id }}"
-          : "${{ github.event.client_payload.package_name }}"
-          : "${{ github.event.client_payload.app_name }}"
-          : "${{ github.event.client_payload.play_console_production_url }}"
-
-      - name: Parse owner/repo
+      - name: Validate payload and parse source repository
         id: repo
-        shell: bash
+        env:
+          PAYLOAD: ${{ toJSON(github.event.client_payload) }}
+          EVENT_TYPE: ${{ github.event.action }}
         run: |
-          set -euo pipefail
-          FULL="${{ github.event.client_payload.repo }}"
-          echo "owner=${FULL%%/*}" >> "$GITHUB_OUTPUT"
-          echo "name=${FULL#*/}"   >> "$GITHUB_OUTPUT"
+          python3 - <<'PYTHON'
+          import json, os, re
+          payload = json.loads(os.environ['PAYLOAD'])
+          repo = payload.get('repo', '')
+          if not re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+', repo) or repo.split('/')[0].lower() != os.environ['GITHUB_REPOSITORY'].split('/')[0].lower():
+              raise ValueError('Source repository must belong to the central organization')
+          for key in ('release_id', 'package_name', 'app_name', 'play_console_production_url'):
+              if not payload.get(key):
+                  raise ValueError('Missing publish payload field: ' + key)
+          if not str(payload['release_id']).isdigit():
+              raise ValueError('Invalid release ID')
+          if os.environ['EVENT_TYPE'] == 'publish-kmp' and payload['package_name'] != 'com.travelanimator.routemap':
+              raise ValueError('KMP package must be com.travelanimator.routemap')
+          if os.environ['EVENT_TYPE'] == 'publish-kmp' and repo != 'Lascade-Co/travel-animator-shared':
+              raise ValueError('Only the approved KMP source repository may publish')
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as out:
+              out.write(f'owner={repo.split("/")[0]}\nname={repo.split("/")[1]}\n')
+          PYTHON
 
       - name: Mint GitHub App token (target repo)
         id: app-token
-        uses: actions/create-github-app-token@v3
+        uses: actions/create-github-app-token@v3.3.0
         with:
           client-id: ${{ secrets.CI_APP_CLIENT_ID }}
           private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
@@ -57,16 +65,21 @@ jobs:
       - name: Fetch GitHub Release + write Play whatsnew (single locale)
         id: meta
         uses: actions/github-script@v8
+        env:
+          SOURCE_REPO: ${{ github.event.client_payload.repo }}
+          RELEASE_ID: ${{ github.event.client_payload.release_id }}
+          RELEASE_LOCALE: ${{ github.event.client_payload.release_notes_locale || 'en-US' }}
+          EVENT_TYPE: ${{ github.event.action }}
         with:
           github-token: ${{ steps.app-token.outputs.token }}
           script: |
             const fs = require('fs');
             const path = require('path');
 
-            const owner = '${{ steps.repo.outputs.owner }}';
-            const repo  = '${{ steps.repo.outputs.name }}';
-            const releaseId = Number('${{ github.event.client_payload.release_id }}');
-            const locale = ('${{ github.event.client_payload.release_notes_locale || 'en-US' }}').trim();
+            const [owner, repo] = process.env.SOURCE_REPO.split('/');
+            const releaseId = Number(process.env.RELEASE_ID);
+            const locale = process.env.RELEASE_LOCALE.trim();
+            if (!/^[a-z]{2,3}(?:-[A-Za-z0-9]+)*$/.test(locale)) throw new Error('Invalid release locale');
 
             const sleep = ms => new Promise(r => setTimeout(r, ms));
             let rel;
@@ -84,19 +97,21 @@ jobs:
             const ghUrl = rel.data.html_url;
             const rawNotes = (rel.data.body || '').trim();
 
-            const truncate = (s, max) => {
-              const a = Array.from(s);
-              return a.length <= max ? s : a.slice(0, max - 1).join('') + '…';
-            };
-
-            // Play "What's new": 500 Unicode chars per locale
-            const playNotes = truncate(rawNotes || `See GitHub release: ${ghUrl}`, 500);
+            if (process.env.EVENT_TYPE === 'publish-kmp' && (rel.data.draft || rel.data.prerelease)) {
+              throw new Error('KMP publishing requires a published production release');
+            }
+            if (process.env.EVENT_TYPE === 'publish-kmp' && !rawNotes) {
+              throw new Error('KMP release notes must be nonempty and shared by both stores');
+            }
+            const playNotes = rawNotes || `See GitHub release: ${ghUrl}`;
+            // JS length counts UTF-16 units, matching the source notes checker. Never truncate.
+            if (playNotes.length > 500) throw new Error('Release notes exceed 500 characters; shorten the release body');
 
             const whatsNewDir = path.join(process.env.GITHUB_WORKSPACE, 'whatsnew');
             fs.mkdirSync(whatsNewDir, { recursive: true });
             fs.writeFileSync(path.join(whatsNewDir, `whatsnew-${locale}`), playNotes, 'utf8');
 
-            // Raw notes for Telegram (truncate later in python)
+            // Retain the original notes for the publisher's release summary.
             fs.writeFileSync('release_notes_raw.txt', rawNotes, 'utf8');
 
             core.setOutput('tag', tag);
@@ -117,13 +132,18 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          ls -lah release-assets
-          AAB=$(find release-assets -maxdepth 1 -name "*.aab" | head -n 1)
-          SYM=$(find release-assets -maxdepth 1 -iname "*native-debug-symbols*.zip" | head -n 1)
-          : "${AAB:?Missing AAB}"
-          : "${SYM:?Missing native debug symbols zip}"
-          echo "aab=$AAB" >> "$GITHUB_OUTPUT"
-          echo "symbols=$SYM" >> "$GITHUB_OUTPUT"
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+          files = list(Path('release-assets').iterdir())
+          selected = {'aab': [p for p in files if p.name.lower().endswith('.aab')],
+                      'symbols': [p for p in files if 'native-debug-symbols' in p.name.lower() and p.name.lower().endswith('.zip')]}
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as out:
+              for key, paths in selected.items():
+                  if len(paths) != 1 or any(c in str(paths[0]) for c in '\r\n'):
+                      raise ValueError('Expected exactly one release artifact: ' + key)
+                  out.write(f'{key}={paths[0]}\n')
+          PY
 
       - name: Set up Python
         uses: actions/setup-python@v6
@@ -133,67 +153,64 @@ jobs:
       - name: Publish rollout + write Telegram message (python)
         env:
           SA_B64: ${{ secrets.SUBSCRIPTION_PLAY_SERVICE_ACCOUNT_JSON_BASE64 }}
+          PACKAGE_NAME: ${{ github.event.client_payload.package_name }}
+          RELEASE_TAG: ${{ steps.meta.outputs.tag }}
+          RELEASE_LOCALE: ${{ steps.meta.outputs.locale }}
+          APP_NAME: ${{ github.event.client_payload.app_name }}
+          RELEASE_URL: ${{ steps.meta.outputs.gh_url }}
+          PLAY_URL: ${{ github.event.client_payload.play_console_production_url }}
+          AAB_PATH: ${{ steps.assets.outputs.aab }}
+          SYMBOLS_PATH: ${{ steps.assets.outputs.symbols }}
         run: |
           set -euo pipefail
+          trap 'rm -f play-sa.json' EXIT
           echo "$SA_B64" | base64 --decode > play-sa.json
 
           python3 scripts/android/publish_playstore.py \
             --service-account-json play-sa.json \
-            --package-name "${{ github.event.client_payload.package_name }}" \
+            --package-name "$PACKAGE_NAME" \
             --track "${{ env.TRACK }}" \
-            --aab "${{ steps.assets.outputs.aab }}" \
-            --native-symbols "${{ steps.assets.outputs.symbols }}" \
-            --release-name "${{ steps.meta.outputs.tag }}" \
-            --notes-file "whatsnew/whatsnew-${{ steps.meta.outputs.locale }}" \
+            --aab "$AAB_PATH" \
+            --native-symbols "$SYMBOLS_PATH" \
+            --release-name "$RELEASE_TAG" \
+            --notes-file "whatsnew/whatsnew-$RELEASE_LOCALE" \
             --raw-notes-file "release_notes_raw.txt" \
-            --app-name "${{ github.event.client_payload.app_name }}" \
-            --github-release-url "${{ steps.meta.outputs.gh_url }}" \
-            --play-console-production-url "${{ github.event.client_payload.play_console_production_url }}" \
+            --app-name "$APP_NAME" \
+            --github-release-url "$RELEASE_URL" \
+            --play-console-production-url "$PLAY_URL" \
             --country "${{ env.TARGET_COUNTRY }}" \
             --user-fraction "${{ env.TARGET_FRACTION }}" \
             --telegram-out "github_release_body.txt"
-
-      - name: Notify Telegram (success)
-        uses: appleboy/telegram-action@v1.0.1
-        with:
-          token: ${{ secrets.SUBSCRIPTION_TELEGRAM_TOKEN }}
-          to: ${{ secrets.SUBSCRIPTION_TELEGRAM_TO }}
-          format: html
-          message_file: github_release_body.txt
-          disable_web_page_preview: true
 
       - name: Create PostHog annotation
         if: github.event.client_payload.posthog_project_id != ''
         shell: bash
         env:
           POSTHOG_API_KEY: ${{ secrets.POSTHOG_PERSONAL_API_KEY }}
+          POSTHOG_PROJECT: ${{ github.event.client_payload.posthog_project_id }}
+          RELEASE_TAG: ${{ steps.meta.outputs.tag }}
         run: |
           set -euo pipefail
+          [[ "$POSTHOG_PROJECT" =~ ^[0-9]+$ ]]
           curl -sf -X POST \
             -H 'Content-Type: application/json' \
             -H "Authorization: Bearer $POSTHOG_API_KEY" \
-            "https://us.posthog.com/api/projects/${{ github.event.client_payload.posthog_project_id }}/annotations/" \
+            "https://us.posthog.com/api/projects/$POSTHOG_PROJECT/annotations/" \
             -d "$(jq -n \
-              --arg content "Android ${{ steps.meta.outputs.tag }} released" \
+              --arg content "Android $RELEASE_TAG released" \
               --arg date "$(date -u +%Y-%m-%dT%H:%M:%S%z)" \
               '{content: $content, date_marker: $date, scope: "project"}')"
 
-      - name: Notify Telegram (FAILURE)
-        if: failure()
-        continue-on-error: true
-        uses: appleboy/telegram-action@v1.0.1
+      - name: Notify Telegram
+        if: always()
+        uses: ./actions/telegram-notify
         with:
           token: ${{ secrets.SUBSCRIPTION_TELEGRAM_TOKEN }}
-          to: ${{ secrets.SUBSCRIPTION_TELEGRAM_TO }}
-          format: html
-          disable_web_page_preview: true
-          message: |
-            <b>❌ Play Store publish failed</b>
-
-            <b>App:</b> ${{ github.event.client_payload.app_name }}
-            <b>Repo:</b> <code>${{ github.event.client_payload.repo }}</code>
-            <b>Release ID:</b> <code>${{ github.event.client_payload.release_id }}</code>
-
-            <a href="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}">
-              View logs
-            </a>
+          chat-id: ${{ secrets.SUBSCRIPTION_TELEGRAM_TO }}
+          kind: playstore
+          status: ${{ job.status == 'success' && 'success' || 'failure' }}
+          repo: ${{ github.event.client_payload.repo }}
+          title: ${{ github.event.client_payload.app_name }} · ${{ steps.meta.outputs.tag }}
+          link: ${{ steps.meta.outputs.gh_url }}
+          run-url: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          github-token: ${{ github.token }}

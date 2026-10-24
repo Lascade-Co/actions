@@ -14,6 +14,9 @@ import urllib.error
 import urllib.request
 
 KINDS = {
+    'release': {'label': 'KMP release', 'jobs': ('prepare', 'android', 'ios-build', 'release')},
+    'playstore': {'label': 'Play production rollout', 'jobs': ('publish',)},
+    'appstore': {'label': 'App Store submission', 'jobs': ('publish',)},
     'android': {'label': 'Android debug APK', 'jobs': ('unit-tests', 'check', 'android', 'publish-android')},
     'testflight': {'label': 'TestFlight', 'jobs': ('unit-tests', 'check', 'ios-build', 'ios-publish')},
 }
@@ -83,7 +86,8 @@ def compose(kind, status, fields, details=()):
     label = KINDS[kind]['label']
     build = fields.get('build_number')
     name = f'{label} {build}' if kind == 'testflight' and build else label
-    header = {'success': f'✅ <b>{e(name)} ready</b>',
+    success = {'appstore': 'App Store submitted for review', 'playstore': 'Play production rollout submitted'}.get(kind, name + ' ready')
+    header = {'success': f'✅ <b>{e(success)}</b>',
               'failure': f'❌ <b>{e(name)} failed</b>',
               'withheld': f'🔧 <b>{e(name)} withheld</b>'}[status]
     source = ' · '.join(part for part in (
@@ -95,7 +99,14 @@ def compose(kind, status, fields, details=()):
         lines.append(f'<a href="{e(fields["pr_url"], quote=True)}">{title}</a>' if fields.get('pr_url') else f'<i>{title}</i>')
     lines.append('')
     if status == 'success':
-        if kind == 'android' and fields.get('link'):
+        if kind in ('release', 'playstore', 'appstore'):
+            if kind == 'appstore':
+                lines.append('Submitted for App Store review; release follows approval with a 7-day phased rollout.')
+            elif kind == 'playstore':
+                lines.append('Production rollout submitted: Bangladesh, 99%.')
+            if fields.get('link'):
+                lines.append(f'📦 <a href="{e(fields["link"], quote=True)}">View release</a>')
+        elif kind == 'android' and fields.get('link'):
             lines.append(f'📦 <a href="{e(fields["link"], quote=True)}">Download APK</a>')
         elif kind == 'testflight':
             lines.append('Apple is processing it; internal testers get it automatically.')

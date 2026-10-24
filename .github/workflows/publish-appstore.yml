@@ -1,0 +1,126 @@
+name: Publish App Store
+run-name: "App Store · ${{ github.event.client_payload.repo }} · ${{ github.event.client_payload.release_id }}"
+
+on:
+  repository_dispatch:
+    types: [publish-kmp]
+
+permissions:
+  contents: read
+  actions: read
+  checks: read
+
+concurrency:
+  group: appstore-${{ github.event.client_payload.repo }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: macos-26
+    timeout-minutes: 120
+    steps:
+      - name: Checkout trusted central scripts
+        uses: actions/checkout@v6
+
+      - name: Validate source repository
+        id: repo
+        env:
+          SOURCE_REPO: ${{ github.event.client_payload.repo }}
+          RELEASE_ID: ${{ github.event.client_payload.release_id }}
+          PACKAGE_NAME: ${{ github.event.client_payload.package_name }}
+        run: |
+          python3 - <<'PY'
+          import os, re
+          repo = os.environ['SOURCE_REPO']
+          if not re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+', repo) or repo.split('/')[0].lower() != os.environ['GITHUB_REPOSITORY'].split('/')[0].lower():
+              raise ValueError('Source repository must belong to the central organization')
+          if not os.environ['RELEASE_ID'].isdigit():
+              raise ValueError('release_id must be numeric')
+          if repo != 'Lascade-Co/travel-animator-shared' or os.environ['PACKAGE_NAME'] != 'com.travelanimator.routemap':
+              raise ValueError('Only the approved KMP source repository/package may publish')
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as out:
+              out.write(f'owner={repo.split("/")[0]}\nname={repo.split("/")[1]}\n')
+          PY
+
+      - name: Mint source repository token
+        id: token
+        uses: actions/create-github-app-token@v3.3.0
+        with:
+          client-id: ${{ secrets.CI_APP_CLIENT_ID }}
+          private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
+          owner: ${{ steps.repo.outputs.owner }}
+          repositories: ${{ steps.repo.outputs.name }}
+
+      - name: Fetch and validate published release
+        id: meta
+        env:
+          GH_TOKEN: ${{ steps.token.outputs.token }}
+          SOURCE_REPO: ${{ github.event.client_payload.repo }}
+          RELEASE_ID: ${{ github.event.client_payload.release_id }}
+        run: |
+          gh api "repos/$SOURCE_REPO/releases/$RELEASE_ID" > release.json
+          python3 scripts/ios/publish_metadata.py --event "$GITHUB_EVENT_PATH" \
+            --release release.json --central-repository "$GITHUB_REPOSITORY" \
+            --output "$GITHUB_OUTPUT" --notes release_notes.txt
+
+      - name: Download IPA from GitHub release
+        env:
+          GH_TOKEN: ${{ steps.token.outputs.token }}
+          SOURCE_REPO: ${{ github.event.client_payload.repo }}
+          RELEASE_TAG: ${{ steps.meta.outputs.tag }}
+        run: gh release download "$RELEASE_TAG" --repo "$SOURCE_REPO" --pattern '*.ipa' --dir release-assets
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+      - name: Install App Store JWT support
+        run: pip install --quiet 'pyjwt[crypto]==2.15.1'
+
+      - name: Upload exact build, wait for processing, and submit for review
+        env:
+          RELEASE_VERSION: ${{ steps.meta.outputs.version }}
+          ALREADY_UPLOADED: ${{ github.event.client_payload.ios_uploaded }}
+          APPSTORE_API_KEY_ID: ${{ secrets.APPSTORE_API_KEY_ID }}
+          APPSTORE_ISSUER_ID: ${{ secrets.APPSTORE_ISSUER_ID }}
+          APPSTORE_API_PRIVATE_KEY: ${{ secrets.APPSTORE_API_PRIVATE_KEY }}
+        run: |
+          python3 - <<'PY'
+          import os, pathlib, subprocess, sys
+          files = list(pathlib.Path('release-assets').glob('*.ipa'))
+          if len(files) != 1:
+              raise ValueError('Expected exactly one release IPA')
+          command = [sys.executable, 'scripts/ios/publish_appstore.py', '--ipa', str(files[0]),
+                     '--version', os.environ['RELEASE_VERSION'], '--notes-file', 'release_notes.txt']
+          if os.environ['ALREADY_UPLOADED'].lower() == 'true':
+              command.append('--already-uploaded')
+          subprocess.run(command, check=True)
+          PY
+
+      - name: Create PostHog annotation
+        if: github.event.client_payload.posthog_project_id != ''
+        env:
+          POSTHOG_API_KEY: ${{ secrets.POSTHOG_PERSONAL_API_KEY }}
+          POSTHOG_PROJECT: ${{ github.event.client_payload.posthog_project_id }}
+          RELEASE_TAG: ${{ steps.meta.outputs.tag }}
+        run: |
+          [[ "$POSTHOG_PROJECT" =~ ^[0-9]+$ ]]
+          curl --fail-with-body --silent --show-error -X POST \
+            -H 'Content-Type: application/json' -H "Authorization: Bearer $POSTHOG_API_KEY" \
+            "https://us.posthog.com/api/projects/$POSTHOG_PROJECT/annotations/" \
+            -d "$(jq -n --arg content "iOS $RELEASE_TAG submitted for review" \
+              --arg date "$(date -u +%Y-%m-%dT%H:%M:%S%z)" \
+              '{content: $content, date_marker: $date, scope: "project"}')"
+
+      - name: Notify Telegram
+        if: always()
+        uses: ./actions/telegram-notify
+        with:
+          token: ${{ secrets.SUBSCRIPTION_TELEGRAM_TOKEN }}
+          chat-id: ${{ secrets.SUBSCRIPTION_TELEGRAM_TO }}
+          kind: appstore
+          status: ${{ job.status == 'success' && 'success' || 'failure' }}
+          repo: ${{ github.event.client_payload.repo }}
+          title: ${{ github.event.client_payload.app_name }} · ${{ steps.meta.outputs.tag }}
+          link: ${{ steps.meta.outputs.gh_url }}
+          run-url: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          github-token: ${{ github.token }}
