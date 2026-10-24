@@ -937,7 +937,7 @@ jobs:
       - ios-build
       - publish-android
       - ios-publish
-    if: ${{ always() }}
+    if: ${{ !cancelled() }}
     steps:
       - name: Checkout trusted central controls
         uses: actions/checkout@v7
@@ -967,7 +967,7 @@ jobs:
           domain: ${{ secrets.INFISICAL_DOMAIN }}
           secret-path: /Build
           export-type: env
-        if: ${{ always() }}
+        if: ${{ !cancelled() }}
       - name: Update Android PR status
         uses: ./control/actions/pr-status-comment
         with:
@@ -980,7 +980,7 @@ jobs:
           body: |-
             ${{ needs.check.outputs.pushed == 'true' && 'Claude pushed an auto-fix for Android Lint. CI will retrigger on the new commit.' || (needs['publish-android'].result == 'success' && format('Debug APK is ready: {0}', needs['publish-android'].outputs.url) || format('Android failed or publishing was blocked. Unit tests: {0}; lint: {1}; build: {2}; publish: {3}.', needs['unit-tests'].result, needs.check.result, needs.android.result, needs['publish-android'].result)) }}
             ${{ needs['publish-android'].result != 'success' && needs.check.outputs.pushed != 'true' && format('[Workflow run]({0}/{1}/actions/runs/{2})', github.server_url, github.repository, github.run_id) || '' }}
-        if: ${{ always() && needs.prepare.outputs.repo != '' }}
+        if: ${{ !cancelled() && needs.prepare.outputs.repo != '' }}
       - name: Notify Telegram of Android result
         uses: ./control/actions/telegram-notify
         with:
@@ -996,7 +996,7 @@ jobs:
           results: "${{ format('Unit tests: {0} · Lint: {1} · Build: {2} · Publish: {3}', needs['unit-tests'].result, needs.check.result, needs.android.result, needs['publish-android'].result) }}"
           run-url: ${{ format('{0}/{1}/actions/runs/{2}', github.server_url, github.repository, github.run_id) }}
           github-token: ${{ github.token }}
-        if: ${{ always() }}
+        if: ${{ !cancelled() }}
       - name: Update TestFlight PR status
         uses: ./control/actions/pr-status-comment
         with:
@@ -1009,7 +1009,7 @@ jobs:
           body: |-
             ${{ needs.check.outputs.pushed == 'true' && format('TestFlight {0} withheld: Claude pushed an Android lint auto-fix; CI will retrigger.', needs.prepare.outputs.build_number) || (needs['ios-publish'].result == 'success' && format('TestFlight {0} uploaded; Apple processing is pending. Internal testers receive it automatically when processing completes.', needs.prepare.outputs.build_number) || format('TestFlight {0} failed or publishing was blocked. Unit tests: {1}; lint: {2}; build: {3}; publish: {4}.', needs.prepare.outputs.build_number, needs['unit-tests'].result, needs.check.result, needs['ios-build'].result, needs['ios-publish'].result)) }}
             ${{ needs['ios-publish'].result != 'success' && needs.check.outputs.pushed != 'true' && format('[Workflow run]({0}/{1}/actions/runs/{2})', github.server_url, github.repository, github.run_id) || '' }}
-        if: ${{ always() && needs.prepare.outputs.repo != '' }}
+        if: ${{ !cancelled() && needs.prepare.outputs.repo != '' }}
       - name: Notify Telegram of TestFlight result
         uses: ./control/actions/telegram-notify
         with:
@@ -1025,4 +1025,4 @@ jobs:
           results: "${{ format('Unit tests: {0} · Lint: {1} · Build: {2} · Publish: {3}', needs['unit-tests'].result, needs.check.result, needs['ios-build'].result, needs['ios-publish'].result) }}"
           run-url: ${{ format('{0}/{1}/actions/runs/{2}', github.server_url, github.repository, github.run_id) }}
           github-token: ${{ github.token }}
-        if: ${{ always() }}
+        if: ${{ !cancelled() }}

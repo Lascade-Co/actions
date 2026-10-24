@@ -112,7 +112,7 @@ jobs:
               '{content: $content, date_marker: $date, scope: "project"}')"
 
       - name: Notify Telegram
-        if: always()
+        if: ${{ !cancelled() }}
         uses: ./actions/telegram-notify
         with:
           token: ${{ secrets.SUBSCRIPTION_TELEGRAM_TOKEN }}

@@ -562,7 +562,7 @@ jobs:
         SOURCE_REPO: ${{ needs.prepare.outputs.repo }}
         RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
   notify:
-    if: ${{ always() && needs.prepare.outputs.skip != 'true' }}
+    if: ${{ !cancelled() && needs.prepare.outputs.skip != 'true' }}
     needs:
     - prepare
     - android
