@@ -22,6 +22,19 @@ class ClaudeError(RuntimeError):
 STOP_REASONS = {"max_tokens", "refusal", "tool_use", "pause_turn", "stop_sequence", "model_context_window_exceeded"}
 
 
+def _category(exc) -> str:
+    body = getattr(exc, "body", None)
+    error = body.get("error", body) if isinstance(body, dict) else {}
+    message = str(error.get("message", "")).lower() if isinstance(error, dict) else ""
+    for phrase, category in (("credit balance", "credit"), ("model", "model"), ("max_tokens", "max-tokens"),
+                             ("must be non-empty", "empty-input"), ("too long", "too-long"),
+                             ("prompt is too long", "too-long")):
+        if phrase in message:
+            return ":" + category
+    kind = error.get("type") if isinstance(error, dict) else None
+    return ":" + kind if kind in ("invalid_request_error", "not_found_error", "overloaded_error", "api_error") else ""
+
+
 def generate_text(prompt: str, *, max_tokens: int = 8192, timeout: int = 300) -> str:
     key = os.environ.get("CLAUDE_API_KEY", "")
     if not key.strip():
@@ -54,8 +67,9 @@ def generate_text(prompt: str, *, max_tokens: int = 8192, timeout: int = 300) ->
         elif isinstance(exc, TimeoutError) or type(exc).__name__ == "APITimeoutError":
             reason = "timeout"
         elif isinstance(status, int):
-            # The numeric HTTP status is safe to log and tells 400/404 (request/model) from 5xx/529.
-            reason = f"request-failed:http-{status}"
+            # The numeric HTTP status and a fixed category are safe to log; the API message is not
+            # (it can quote request content), so only known phrases map to categories.
+            reason = f"request-failed:http-{status}{_category(exc)}"
         else:
             reason = f"request-failed:{type(exc).__name__}"
         raise ClaudeError(reason) from None

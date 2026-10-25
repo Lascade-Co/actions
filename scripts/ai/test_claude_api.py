@@ -80,7 +80,7 @@ def test_missing_key_never_sends_a_request(transport, monkeypatch, key):
     assert transport[0] == []
 
 
-@pytest.mark.parametrize("status,reason", [(401, "auth"), (403, "auth"), (429, "rate-limit"), (503, "request-failed:http-503"), (404, "request-failed:http-404")])
+@pytest.mark.parametrize("status,reason", [(401, "auth"), (403, "auth"), (429, "rate-limit"), (503, "request-failed:http-503:api_error"), (404, "request-failed:http-404:api_error")])
 def test_http_errors_do_not_expose_response_bodies(transport, status, reason, capsys):
     _, _, replies = transport
     replies[:] = [httpx2.Response(status, headers={"retry-after-ms": "1"},
@@ -177,3 +177,13 @@ def test_cli_runner_failures_have_safe_reasons(monkeypatch, outcome, reason):
     with pytest.raises(api.ClaudeError) as error:
         api.generate_text_cli("prompt")
     assert error.value.reason == reason and "private" not in str(error.value)
+
+
+def test_bad_request_reports_only_a_fixed_category(transport):
+    _, _, replies = transport
+    replies[:] = [httpx2.Response(400, json={"type": "error", "error": {"type": "invalid_request_error",
+                  "message": "Your credit balance is too low to access the Anthropic API. private prompt"}})]
+    with pytest.raises(api.ClaudeError) as error:
+        api.generate_text("prompt")
+    assert error.value.reason == "request-failed:http-400:credit"
+    assert "private" not in str(error.value)
