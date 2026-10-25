@@ -50,15 +50,34 @@ def git(*args):
     return subprocess.check_output(['git', *args], text=True).strip()
 
 
+# The Claude request must stay small: a first release once diffed the whole repository history
+# (47 MB with binary content) and the API rejected it with HTTP 400.
+MAX_PROMPT_COMMITS = 300
+MAX_PROMPT_DIFF_CHARS = 150_000
+
+
+def release_base(tags):
+    """Last release tag; else the previous main state (first parent of the merge); else the root."""
+    if tags:
+        return git('rev-list', '-1', tags[0])
+    parent = subprocess.run(['git', 'rev-parse', '--verify', '--quiet', 'HEAD^1'], capture_output=True, text=True)
+    return parent.stdout.strip() if parent.returncode == 0 else git('rev-list', '--max-parents=0', 'HEAD').splitlines()[0]
+
+
 def notes(prompt_template, prompt_path):
     tags = git('tag', '--merged', 'HEAD', '--sort=-version:refname').splitlines()
     tags = [tag for tag in tags if re.fullmatch(r'v?[0-9]+\.[0-9]+\.[0-9]+', tag)]
-    base = git('rev-list', '-1', tags[0]) if tags else git('rev-list', '--max-parents=0', 'HEAD').splitlines()[0]
+    base = release_base(tags)
     updated = bool(tags and Path('releasenotes.txt').is_file() and
                    git('log', f'{base}..HEAD', '--format=%H', '--', 'releasenotes.txt'))
     if not updated:
-        diff = git('diff', base, 'HEAD')
-        Path(prompt_path).write_text(Path(prompt_template).read_text() + '\n\n```diff\n' + diff + '\n```\n')
+        commits = git('log', '--no-merges', f'--max-count={MAX_PROMPT_COMMITS}', '--format=- %s', f'{base}..HEAD')
+        # Binary changes are summarized by git; NULs from oddly encoded text files are dropped.
+        diff = git('diff', '--no-color', '--no-ext-diff', base, 'HEAD').replace('\x00', '')
+        if len(diff) > MAX_PROMPT_DIFF_CHARS:
+            diff = diff[:MAX_PROMPT_DIFF_CHARS] + '\n[diff truncated; rely on the commit list for the rest]'
+        Path(prompt_path).write_text(Path(prompt_template).read_text() + '\n\n## Commits\n\n' + commits +
+                                     '\n\n```diff\n' + diff + '\n```\n')
     return dict(base=base, outdated=str(not updated).lower())
 
 

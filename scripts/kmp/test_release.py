@@ -83,6 +83,21 @@ class Notes(unittest.TestCase):
             self.assertEqual(release.notes('template','prompt')['outdated'],'false')
 
 
+    def test_untagged_release_diffs_from_the_previous_main_and_bounds_the_prompt(self):
+        with tempfile.TemporaryDirectory() as temp,in_directory(temp),patch.object(release,'MAX_PROMPT_DIFF_CHARS',200):
+            root=Path(temp);git(root,'init');git(root,'config','user.email','test@example.com');git(root,'config','user.name','Test')
+            Path('old').write_text('ancient history '*100);git(root,'add','.');git(root,'commit','-m','ancient')
+            Path('template').write_text('Write notes')
+            Path('feature').write_text('New fix '+'x'*1000);Path('icon.bin').write_bytes(b'\x00\x01'*50)
+            git(root,'add','feature','icon.bin');git(root,'commit','-m','Fix the route line')
+            self.assertEqual(release.notes('template','prompt')['outdated'],'true')
+            prompt=Path('prompt').read_text()
+            self.assertIn('- Fix the route line',prompt)
+            self.assertNotIn('ancient history',prompt)
+            self.assertNotIn('\x00',prompt)
+            self.assertIn('[diff truncated',prompt)
+
+
 class Assets(unittest.TestCase):
     def fixture(self,path):
         for name in ('TravelAnimator.aab','TravelAnimator-universal.apk','TravelAnimator.ipa','native-debug-symbols.zip','mapping.txt','TravelAnimator-dSYMs.zip'):
