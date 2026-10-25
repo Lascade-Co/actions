@@ -53,8 +53,11 @@ def generate_text(prompt: str, *, max_tokens: int = 8192, timeout: int = 300) ->
             reason = "rate-limit"
         elif isinstance(exc, TimeoutError) or type(exc).__name__ == "APITimeoutError":
             reason = "timeout"
+        elif isinstance(status, int):
+            # The numeric HTTP status is safe to log and tells 400/404 (request/model) from 5xx/529.
+            reason = f"request-failed:http-{status}"
         else:
-            reason = "request-failed"
+            reason = f"request-failed:{type(exc).__name__}"
         raise ClaudeError(reason) from None
 
     if message.stop_reason != "end_turn":

@@ -80,7 +80,7 @@ def test_missing_key_never_sends_a_request(transport, monkeypatch, key):
     assert transport[0] == []
 
 
-@pytest.mark.parametrize("status,reason", [(401, "auth"), (403, "auth"), (429, "rate-limit"), (503, "request-failed")])
+@pytest.mark.parametrize("status,reason", [(401, "auth"), (403, "auth"), (429, "rate-limit"), (503, "request-failed:http-503"), (404, "request-failed:http-404")])
 def test_http_errors_do_not_expose_response_bodies(transport, status, reason, capsys):
     _, _, replies = transport
     replies[:] = [httpx2.Response(status, headers={"retry-after-ms": "1"},
