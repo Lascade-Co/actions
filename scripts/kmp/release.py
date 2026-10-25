@@ -159,7 +159,9 @@ def push_version(source_sha, version, number):
     return dict(release_sha=git('rev-parse', 'HEAD'))
 
 
-ARTIFACT_SUFFIXES = ('.aab', '.apk', '.ipa', 'native-debug-symbols.zip', 'mapping.txt', 'dSYMs.zip')
+# iOS disabled until production signing keys exist (user, 2026-10-26); restore '.ipa' and 'dSYMs.zip'.
+# ARTIFACT_SUFFIXES = ('.aab', '.apk', '.ipa', 'native-debug-symbols.zip', 'mapping.txt', 'dSYMs.zip')
+ARTIFACT_SUFFIXES = ('.aab', '.apk', 'native-debug-symbols.zip', 'mapping.txt')
 
 
 def release_assets(folder):

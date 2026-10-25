@@ -106,7 +106,7 @@ class Assets(unittest.TestCase):
     def test_release_requires_every_nonempty_unique_asset(self):
         with tempfile.TemporaryDirectory() as temp:
             folder=Path(temp);self.fixture(folder)
-            self.assertEqual(len(release.release_assets(folder)),6)
+            self.assertEqual(len(release.release_assets(folder)),len(release.ARTIFACT_SUFFIXES))  # 4 while iOS is disabled
             (folder/'extra.apk').write_bytes(b'duplicate')
             with self.assertRaisesRegex(ValueError,'.apk'):release.release_assets(folder)
             (folder/'extra.apk').unlink();(folder/'mapping.txt').write_bytes(b'')

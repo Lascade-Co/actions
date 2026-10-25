@@ -2,8 +2,10 @@ name: Publish App Store
 run-name: "App Store · ${{ github.event.client_payload.repo }} · ${{ github.event.client_payload.release_id }}"
 
 on:
-  repository_dispatch:
-    types: [publish-kmp]
+  # iOS disabled until production signing keys exist (user, 2026-10-26); restore the publish-kmp trigger.
+  # repository_dispatch:
+  #   types: [publish-kmp]
+  workflow_dispatch:
 
 permissions:
   contents: read
