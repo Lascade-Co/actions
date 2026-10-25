@@ -23,7 +23,7 @@ def test_generated_notes_replace_the_requested_file(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("reason", ["auth", "incomplete-response", "timeout"])
-def test_failed_generation_preserves_existing_notes(tmp_path, monkeypatch, reason):
+def test_failed_generation_falls_back_without_failing_the_release(tmp_path, monkeypatch, reason, capsys):
     prompt, output = tmp_path / "prompt.md", tmp_path / "releasenotes.txt"
     prompt.write_text("Supplied diff")
     output.write_text("existing notes")
@@ -32,8 +32,9 @@ def test_failed_generation_preserves_existing_notes(tmp_path, monkeypatch, reaso
         raise ClaudeError(reason)
 
     monkeypatch.setattr(notes, "generate_text", fail)
-    assert notes.main(["--prompt", str(prompt), "--out", str(output)]) == 1
-    assert output.read_text() == "existing notes"
+    assert notes.main(["--prompt", str(prompt), "--out", str(output)]) == 0
+    assert output.read_text() == "Bug fixes and performance improvements\n"
+    assert "::warning" in capsys.readouterr().out
 
 
 def test_overlong_notes_are_rewritten_by_claude_never_truncated(tmp_path, monkeypatch):
@@ -51,13 +52,13 @@ def test_overlong_notes_are_rewritten_by_claude_never_truncated(tmp_path, monkey
     assert "Rewrite required" in calls[1] and "at most 500" in calls[1]
 
 
-def test_notes_still_too_long_fail_and_keep_the_existing_file(tmp_path, monkeypatch):
+def test_notes_still_too_long_fall_back(tmp_path, monkeypatch):
     prompt, output = tmp_path / "prompt.md", tmp_path / "releasenotes.txt"
     prompt.write_text("Supplied diff")
     output.write_text("existing notes")
     monkeypatch.setattr(notes, "generate_text", lambda text, **kwargs: "x" * 501)
-    assert notes.main(["--prompt", str(prompt), "--out", str(output)]) == 1
-    assert output.read_text() == "existing notes"
+    assert notes.main(["--prompt", str(prompt), "--out", str(output)]) == 0
+    assert output.read_text() == "Bug fixes and performance improvements\n"
 
 
 def test_length_counts_emoji_as_two_and_check_mode_rejects_overlong_files(tmp_path):

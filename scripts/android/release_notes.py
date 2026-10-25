@@ -18,6 +18,8 @@ from claude_api import ClaudeError, generate_text
 MAX_CHARS = 500
 TARGET_CHARS = 450
 MAX_REWRITES = 3
+# Used when generation fails: release notes must never block a release (user rule 2026-10-26).
+FALLBACK_NOTES = "Bug fixes and performance improvements"
 
 
 def play_length(text):
@@ -61,10 +63,10 @@ def main(argv=None):
         parser.error("--prompt is required unless --check is used")
     try:
         text = generate_within_limit(Path(args.prompt).read_text(encoding="utf-8"))
-        Path(args.out).write_text(text + "\n", encoding="utf-8")
     except (ClaudeError, OSError) as exc:
-        print(f"Release notes generation failed: {exc}", file=sys.stderr)
-        return 1
+        print(f"::warning title=Release notes::Generation failed ({exc}); using the fallback notes")
+        text = FALLBACK_NOTES
+    Path(args.out).write_text(text + "\n", encoding="utf-8")
     return 0
 
 
