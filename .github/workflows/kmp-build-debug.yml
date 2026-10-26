@@ -877,6 +877,10 @@ jobs:
       - unit-tests
       - ios-build
     if: ${{ needs.check.outputs.publish == 'true' && needs['unit-tests'].result == 'success' }}
+    outputs:
+      bundle_id: ${{ steps.identity.outputs.bundle_id }}
+      version: ${{ steps.identity.outputs.version }}
+      build_number: ${{ steps.identity.outputs.build_number }}
     steps:
       - name: Checkout trusted central controls
         uses: actions/checkout@v7
@@ -918,6 +922,106 @@ jobs:
           test "${#ipas[@]}" -eq 1
           python3 "$RUNNER_TEMP/kmp-control.py" upload-ipa "${ipas[0]}"
         env:
+          APPSTORE_API_KEY_ID: ${{ secrets.APPSTORE_API_KEY_ID }}
+          APPSTORE_ISSUER_ID: ${{ secrets.APPSTORE_ISSUER_ID }}
+          APPSTORE_API_PRIVATE_KEY: ${{ secrets.APPSTORE_API_PRIVATE_KEY }}
+      # Notes problems never fail the upload: testflight-notes fails visibly when the identity is missing.
+      - name: Fetch trusted What to Test helpers
+        continue-on-error: true
+        id: notes-helpers
+        run: |-
+          mkdir -p "$RUNNER_TEMP/testflight-notes"
+          for name in asc_client.py testflight_notes.py; do
+            curl -fsSL --retry 3 --retry-delay 2 --retry-all-errors --connect-timeout 10 --max-time 60 \
+              "$HELPER_BASE/$name" -o "$RUNNER_TEMP/testflight-notes/$name.tmp"
+            test -s "$RUNNER_TEMP/testflight-notes/$name.tmp"
+            mv "$RUNNER_TEMP/testflight-notes/$name.tmp" "$RUNNER_TEMP/testflight-notes/$name"
+          done
+        working-directory: .
+        env:
+          HELPER_BASE: ${{ format('https://raw.githubusercontent.com/{0}/{1}/scripts/ios', github.repository, github.sha) }}
+      - name: Read uploaded IPA identity for What to Test notes
+        run: |-
+          shopt -s nullglob
+          ipas=(artifacts/ios/*.ipa)
+          python3 "$RUNNER_TEMP/testflight-notes/testflight_notes.py" identity "${ipas[0]}"
+        id: identity
+        continue-on-error: true
+        if: ${{ steps.notes-helpers.outcome == 'success' }}
+  # Sets TestFlight "What to Test" from the PR (or head commit) once App Store Connect lists the build.
+  # A separate job so a notes failure never marks the upload failed; notify does not wait for it.
+  testflight-notes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    permissions:
+      contents: read
+    needs:
+      - prepare
+      - ios-publish
+    if: ${{ needs['ios-publish'].result == 'success' }}
+    steps:
+      - name: Require the uploaded IPA identity
+        run: |-
+          if [ -z "$BUNDLE_ID" ] || [ -z "$VERSION" ] || [ -z "$BUILD_NUMBER" ]; then
+            echo '::error::ios-publish did not report the uploaded IPA identity; What to Test notes were not set.'
+            exit 1
+          fi
+        env:
+          BUNDLE_ID: ${{ needs['ios-publish'].outputs.bundle_id }}
+          VERSION: ${{ needs['ios-publish'].outputs.version }}
+          BUILD_NUMBER: ${{ needs['ios-publish'].outputs.build_number }}
+      - name: Fetch trusted What to Test helpers
+        run: |-
+          mkdir -p "$RUNNER_TEMP/testflight-notes"
+          for name in asc_client.py testflight_notes.py; do
+            curl -fsSL --retry 3 --retry-delay 2 --retry-all-errors --connect-timeout 10 --max-time 60 \
+              "$HELPER_BASE/$name" -o "$RUNNER_TEMP/testflight-notes/$name.tmp"
+            test -s "$RUNNER_TEMP/testflight-notes/$name.tmp"
+            mv "$RUNNER_TEMP/testflight-notes/$name.tmp" "$RUNNER_TEMP/testflight-notes/$name"
+          done
+        working-directory: .
+        env:
+          HELPER_BASE: ${{ format('https://raw.githubusercontent.com/{0}/{1}/scripts/ios', github.repository, github.sha) }}
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+      - name: Install App Store JWT support
+        run: pip install --quiet 'pyjwt[crypto]==2.15.1'
+      - name: Mint source-scoped GitHub App token
+        uses: actions/create-github-app-token@v3.3.0
+        with:
+          client-id: ${{ secrets.CI_APP_CLIENT_ID }}
+          private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
+          owner: ${{ needs.prepare.outputs.owner }}
+          repositories: ${{ needs.prepare.outputs.name }}
+        id: app-token
+      # PR text is untrusted: it reaches the helper only as a GitHub API JSON file, never through shell or expressions.
+      - name: Compose notes from the PR or head commit
+        run: |-
+          if [ -n "$PR" ]; then
+            gh api "repos/$REPO/pulls/$PR" > "$RUNNER_TEMP/notes-source.json"
+            kind=--pull
+          else
+            gh api "repos/$REPO/commits/$SHA" > "$RUNNER_TEMP/notes-source.json"
+            kind=--commit
+          fi
+          python3 "$RUNNER_TEMP/testflight-notes/testflight_notes.py" compose --branch "$BRANCH" --sha "$SHA" \
+            "$kind" "$RUNNER_TEMP/notes-source.json" --output "$RUNNER_TEMP/what-to-test.txt"
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          REPO: ${{ needs.prepare.outputs.repo }}
+          PR: ${{ needs.prepare.outputs.pr }}
+          SHA: ${{ needs.prepare.outputs.sha }}
+          BRANCH: ${{ needs.prepare.outputs.branch }}
+      - name: Set What to Test once App Store Connect lists the build
+        run: |-
+          python3 "$RUNNER_TEMP/testflight-notes/testflight_notes.py" publish --bundle-id "$BUNDLE_ID" \
+            --version "$VERSION" --build-number "$BUILD_NUMBER" --notes-file "$RUNNER_TEMP/what-to-test.txt" --timeout 1800
+        env:
+          BUNDLE_ID: ${{ needs['ios-publish'].outputs.bundle_id }}
+          VERSION: ${{ needs['ios-publish'].outputs.version }}
+          BUILD_NUMBER: ${{ needs['ios-publish'].outputs.build_number }}
           APPSTORE_API_KEY_ID: ${{ secrets.APPSTORE_API_KEY_ID }}
           APPSTORE_ISSUER_ID: ${{ secrets.APPSTORE_ISSUER_ID }}
           APPSTORE_API_PRIVATE_KEY: ${{ secrets.APPSTORE_API_PRIVATE_KEY }}

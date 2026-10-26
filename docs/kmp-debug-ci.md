@@ -81,8 +81,47 @@ The committed export mapping must match the exact profile names in
 The build uploads dSYMs using the checked-out Firebase SDK and the source Staging
 Firebase plist. A separate macOS job uploads the retained IPA with `altool
 --upload-package`, using a temporary private-key file deleted on success or
-failure. No processing poll or tester-group API call is performed. Successful
+failure. That job neither waits for processing nor calls the tester-group API. Successful
 upload comments explicitly say Apple processing is pending.
+
+## What to Test notes
+
+`altool` cannot set TestFlight notes, so after a successful `ios-publish` the
+`ubuntu-latest` job `testflight-notes` sets them through the App Store Connect API.
+`ios-publish` reads the uploaded IPA's bundle ID, marketing version and build number
+(`scripts/ios/testflight_notes.py identity`) after the upload, in steps that cannot
+fail the upload; missing identity fails only `testflight-notes`.
+
+The notes are, for a PR build, `PR #N · <title>`, `Branch <branch> @ <short sha>`,
+the PR URL, a blank line and the PR description; for a manual build, the branch line
+and the head commit's subject. The short SHA is the pinned, built commit. The PR or
+commit is read with the source-scoped App token into a JSON file and passed to the
+helper as data, never through shell or `${{ }}` expressions. HTML comments (PR
+templates), control/invisible characters and the characters App Store Connect rejects
+in `whatsNew` are removed: emoji and every other supplementary-plane character,
+variation selectors, enclosing keycaps, box drawing, block elements, misc symbols,
+dingbats, braille, misc symbols and arrows, private use and U+FFFD. That list comes
+from a [third-party PATCH probe](https://github.com/rorkai/App-Store-Connect-CLI/issues/2754),
+not from Apple. The description is truncated at a line or word boundary, with an
+ellipsis marker, so the whole note fits 4,000 characters. Neither Apple's API reference
+nor its OpenAPI 4.5.1 schema states that length; the limit is the user-supplied App
+Store Connect figure. The notes text is never logged.
+
+The helper finds the app by bundle ID and the build by `filter[version]` (build
+number) plus marketing version and platform, polls until App Store Connect lists it,
+then PATCHes the build's `en-US` beta build localization or creates one. It does not
+wait for processing. 404, 409, 422, 429 and 5xx responses and transport errors are
+retried with 15 s doubling backoff (120 s cap) for 30 minutes in total. Other
+statuses, and attribute errors that name `whatsNew`, fail at once. A failure
+fails only this job; `notify` does not wait for it, so its upload messages are
+unchanged. Apple references:
+[list builds](https://developer.apple.com/documentation/appstoreconnectapi/get-v1-builds),
+[a build's beta build localizations](https://developer.apple.com/documentation/appstoreconnectapi/get-v1-builds-_id_-betabuildlocalizations),
+[create](https://developer.apple.com/documentation/appstoreconnectapi/post-v1-betabuildlocalizations)
+and [modify](https://developer.apple.com/documentation/appstoreconnectapi/patch-v1-betabuildlocalizations-_id_).
+`scripts/ios/asc_client.py` holds the App Store Connect JWT client shared with the
+App Store publisher and the build status report. The live write path stays unverified
+until a hosted run sets notes on a real build.
 
 ## Caches and evidence
 
@@ -116,6 +155,7 @@ Local central checks:
 
 ```sh
 python3 -m unittest discover -s scripts/kmp -p 'test_*.py' -v
+python3 -m unittest discover -s scripts/ios -p 'test_*.py' -v
 node --test scripts/kmp/pr_status_comment.test.cjs
 actionlint .github/workflows/kmp-build-debug.yml triggers/kmp-debug.yml
 git diff --check
@@ -151,7 +191,8 @@ Rollout order remains:
 4. Profile upload is complete: all four generated profile values were saved to
    Infisical `staging` `/Build` and verified by fresh CLI readback.
 5. Open the test PR, run cold then warm, and report job/step timings, cache bytes,
-   actual hosted Native RSS, TestFlight build/processing state and APK release URL.
+   actual hosted Native RSS, TestFlight build/processing state, the What to Test
+   notes on that build and APK release URL.
 
 Targets are Android ≤12 min warm / ≤20 min cold and iOS ≤25 min warm / ≤35 min
 cold. No target is claimed met before those runs. Stop and report any new OOM or

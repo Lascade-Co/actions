@@ -335,6 +335,12 @@ the version is public.
 A workflow in this repo that does the work, invoked by `repository_dispatch` from an app repo.
 **Trigger**: the thin workflow in the app repo that dispatches to it.
 
+**What to Test notes**:
+The TestFlight text testers see first for a build: the `whatsNew` of its `en-US` beta build
+localization. The central KMP debug CI writes the PR (or head commit) there after upload;
+`altool` cannot.
+_Avoid_: release notes, What's New — those are the App Store version's `whatsNew`.
+
 ## Relationships — iOS Builds
 
 - A **trigger** dispatches `debug-ios` with `{repo, pr, branch, title, project_slug}`; `pr` is

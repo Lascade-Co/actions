@@ -283,4 +283,6 @@ Verification is end-to-end:
 - Merging the trigger beyond branch `ci`.
 - Adding a `Beta` build configuration to the Xcode project (the cleaner form of ADR-0009).
 - Running tests or lint before the iOS build.
-- Assigning TestFlight groups or setting "What to Test" notes, which `altool` cannot do.
+- Assigning TestFlight groups, which `altool` cannot do. "What to Test" notes, which `altool`
+  also cannot set, are now set through the App Store Connect API by the central KMP debug CI
+  (`docs/kmp-debug-ci.md`, "What to Test notes").
