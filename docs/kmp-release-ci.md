@@ -74,7 +74,8 @@ configured and exercised by the coordinator. Nothing in the offline tests publis
 remote service; Git lease tests use temporary local bare repositories.
 
 The App Store publisher uses `scripts/ios/publish_appstore.py` with PyJWT 2.15.1 for refreshed
-ES256 authentication. Its fake-client tests run without that dependency or credentials:
+ES256 authentication through the shared `scripts/ios/asc_client.py`. Its fake-client tests run
+without that dependency or credentials:
 
 ```sh
 python3 -m unittest discover -s scripts/ios -p 'test_publish*.py'
