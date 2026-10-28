@@ -7,8 +7,9 @@ at a glance: figures ink, context words grey, verdict words green (better), red 
 blue (same / can't tell yet). Bars use the same colours against Mar 2026; grey = directional
 only, no verdict. Benchmark ticks are amber (Aug 2025) and charcoal (Mar 2026).
 
-Every section covers the same 7 full Pacific days and every build; the latest full day is
-shown too, but better or worse is judged on the 7 days only.
+Every section covers the same 7 full Pacific days and every build, and better or worse is
+judged on the 7 days. The per-store bars are the exception: they show the latest full day,
+coloured by that day's own comparison, with the 7-day rate beside each figure.
 
 Variant A draws every chart from table cells (works with images off and in dark mode).
 Variant B draws them as PNGs (ip_charts.py), inline by CID when sent.
@@ -445,7 +446,7 @@ def _legend():
              (sw(C_LEVEL, 10, 10), "same / can't tell yet (bar colour vs Mar 2026)"),
              (sw(C_THIN, 10, 10), "grey: directional only, no verdict"),
              (sw(C_AUG, 3, 12, "tick-aug-dm"), "Aug 2025"), (sw(C_MAR, 3, 12, "tick-mar-dm"), "Mar 2026"),
-             ("", "deltas in points vs the named month")]
+             ("", "Mar/Aug figures are that month's own rate")]
     body = " &nbsp;&nbsp; ".join(
         f'<span style="white-space:nowrap;">{s}&nbsp;<span style="font-family:{FONT_BODY}; font-size:11px; '
         f'color:{CTX};" class="hl-ctx">{esc(x)}</span></span>' for s, x in items)
@@ -488,29 +489,38 @@ def _scale_for(vals):
     return 1.0
 
 
-def delta(t, model, bk, k):
-    """-> (html, text) for one benchmark delta; coloured only when better or worse."""
+def delta(t, model, bk, k, cmp_key="cmp"):
+    """-> (html, text) for one benchmark: the month's own rate (a bare delta such as
+    "Mar −23.7" was read as March's value); coloured only when better or worse.
+    cmp_key "day_cmp" colours it by the latest day's verdict instead of the 7 days'."""
     lab = "Mar" if bk == "mar26" else "Aug"
-    if bench_for(t, model, bk, k) is None:
+    base = bench_for(t, model, bk, k)
+    if base is None:
         return f'<span class="hl-ctx" style="color:{CTX};">{lab} —†</span>', f"{lab} —†"
-    c = t["cmp"][bk][k]
+    c = t[cmp_key][bk][k]
     if not c:
         return f'<span class="hl-ctx" style="color:{CTX};">{lab} —</span>', f"{lab} —"
-    s, v = pts(c["diff"]), c.get("verdict")
+    s, v = pct(base), c.get("verdict")
     if v in ("better", "worse"):
         cls, col = ROLE[v]
-        return (f'<span class="{cls}" style="color:{col}; font-weight:600;">{lab} {esc(s.replace(" pts", ""))}</span>',
+        return (f'<span class="{cls}" style="color:{col}; font-weight:600;">{lab} {esc(s)}</span>',
                 f"{lab} {s} ({v})")
-    return f'<span class="hl-ctx" style="color:{CTX};">{lab} {esc(s.replace(" pts", ""))}</span>', f"{lab} {s}"
+    return f'<span class="hl-ctx" style="color:{CTX};">{lab} {esc(s)}</span>', f"{lab} {s}"
 
 
 def _funnel_a(t, model):
+    """Bars show the latest full day; the 7-day rate is the grey line under each figure."""
+    lab, d = day_label(model["last_day"]), t["day"]
+    if not d.get("n"):
+        return _muted(esc(f"No installs on {lab}. The 7-day verdicts are above."), 13, 0) + _client_note(t)
+    cap = _muted(esc(f"Bars: {lab} only · {num(d['n'])} installs · {num(d.get('paid', 0))} payer{'' if d.get('paid', 0) == 1 else 's'}. "
+                     f"Grey line: the 7 days."), 12, 0)
     rows = []
     for step in steps_for(t):
-        now = t["rates"][step][0]
+        now, week = t["day_rates"][step][0], t["rates"][step][0]
         aug, mar = bench_for(t, model, "aug25", step), bench_for(t, model, "mar26", step)
         scale = 1.0 if step not in ("paid", "pc") else _scale_for([now, aug, mar])
-        color = verdict_color(t["cmp"]["mar26"][step])
+        color = verdict_color(t["day_cmp"]["mar26"][step])
         label = STEP_NAMES[step] + (f'<br/><span style="font-size:10px; color:{CTX}; font-weight:400;" class="hl-ctx">'
                                     f'scale 0–{int(scale * 100)}%</span>' if step in ("paid", "pc") else "")
         rows.append(
@@ -522,8 +532,10 @@ def _funnel_a(t, model):
             f'<td class="bar-val-cell" width="84" align="right" valign="top" style="width:84px; padding:2px 0 10px 8px; '
             f'font-family:{FONT_BODY}; font-size:11px; line-height:1.35; font-variant-numeric:tabular-nums;">'
             f'<span class="hl-num" style="font-family:{FONT_HEADING}; font-size:14px; font-weight:700; color:{INK};">'
-            f'{pct(now)}</span><br/>{delta(t, model, "mar26", step)[0]}<br/>{delta(t, model, "aug25", step)[0]}</td></tr>')
-    return f'{TABLE} class="tfix">{"".join(rows)}</table>' + _client_note(t)
+            f'{pct(now)}</span><br/><span class="hl-ctx" style="color:{CTX};">7d {pct(week)}</span><br/>'
+            f'{delta(t, model, "mar26", step, "day_cmp")[0]}<br/>{delta(t, model, "aug25", step, "day_cmp")[0]}</td></tr>')
+    return cap + f'<div style="height:8px; line-height:8px; font-size:0;">&nbsp;</div>' + \
+        f'{TABLE} class="tfix">{"".join(rows)}</table>' + _client_note(t)
 
 
 def _client_note(t):
@@ -633,7 +645,7 @@ def _track(t, model, variant, out_dir, images):
     parts = [head, f'<p style="margin:4px 0 0 0; font-family:{FONT_BODY}; font-size:13px; line-height:1.5;">{sub}</p>']
     for lab, now, base in checks(t, model):
         parts.append(f'<p style="margin:8px 0 0 0; font-family:{FONT_BODY}; font-size:13px;">{_v("worse", "Check:")} '
-                     f'{_c(lab)} {_n(pct(now))} {_c("vs Mar")} {_c(pct(base))}{_c(". Investigate.")}</p>')
+                     f'{_c("7 days,")} {_c(lab)} {_n(pct(now))} {_c("vs Mar")} {_c(pct(base))}{_c(". Investigate.")}</p>')
     parts.append('<div style="height:14px; line-height:14px; font-size:0;">&nbsp;</div>')
     if variant == "A":
         parts += [_funnel_a(t, model), _trend_a(t, model)]
@@ -658,7 +670,7 @@ def _track(t, model, variant, out_dir, images):
     return _row("".join(parts), 34)
 
 
-def footnote_lines(model):
+def footnote_lines(model, variant="A"):
     edition = get_edition(model.get("edition", "pt"))
     return [
         "Rates are what people did within 24 hours of first install, as a share of installs; export = a video export "
@@ -666,9 +678,11 @@ def footnote_lines(model):
         f"05:00 {edition.label}.",
         "Better or worse when the 95% interval of the difference excludes zero; otherwise same when the whole interval "
         "lies within ±10% of the benchmark rate; otherwise can't tell yet. " + (
-            "Verdicts against Mar 2026 / Aug 2025 are judged on the 7 full days; the early read is a separate check of "
-            "the newest day against the 7 days before it, measured at the same point."
-            if early_of(model) else "Judged on the 7 days, never the single day."),
+            ("Verdicts against Mar 2026 / Aug 2025 are judged on the 7 full days; the early read is a separate check of "
+             "the newest day against the 7 days before it, measured at the same point."
+             if early_of(model) else "Verdicts are judged on the 7 days.") +
+            (" The bars and their Mar/Aug colours show the latest full day only, so they are noisier."
+             if variant == "A" else "" if early_of(model) else " Never the single day.")),
         "† Android Aug 2025 has no linked server-side subscription data, so that comparison uses the in-app purchase "
         "event on both sides; the event changed in Aug 2026, so read it as directional.",
         "Benchmarks are whole months, same query and filters. Suspected test installs removed. Install mix differs from "
@@ -676,8 +690,8 @@ def footnote_lines(model):
     ]
 
 
-def _footnotes(model):
-    lines = footnote_lines(model)
+def _footnotes(model, variant="A"):
+    lines = footnote_lines(model, variant)
     body = "".join(_muted(esc(x), 11, 0 if i == 0 else 6) for i, x in enumerate(lines))
     link = (f'<p style="margin:12px 0 0 0; font-family:{FONT_BODY}; font-size:11px; text-align:center;" class="text-muted">'
             f'<a href="{esc(WORKFLOW_URL)}" style="color:{CTX}; text-decoration:underline;" class="hl-ctx">Workflow &#8599;</a></p>')
@@ -695,7 +709,7 @@ def subject_of(model):
     return f"TA install→paid · {day_label(model['last_day'])}: " + " · ".join(bits)
 
 
-def _text(model, subject):
+def _text(model, subject, variant="A"):
     lab = day_label(model["last_day"])
     out = [subject, "", "LASCADE · TRAVELANIMATOR", "Install → paid", dateline(model), ""]
     for t in model["tracks"]:
@@ -721,21 +735,30 @@ def _text(model, subject):
             continue
         c = t["counts"]
         out.append(f"  Builds {builds_txt(t)[1]} · {num(c['n'])} installs · {num(c['paid'])} payers")
-        for k in steps_for(t):
-            out.append(f"  {STEP_NAMES[k]}: {pct(t['rates'][k][0])} · {delta(t, model, 'mar26', k)[1]} · "
-                       f"{delta(t, model, 'aug25', k)[1]}")
+        d = t["day"]
+        if variant != "A":              # variant B charts the 7 days
+            for k in steps_for(t):
+                out.append(f"  {STEP_NAMES[k]}: {pct(t['rates'][k][0])} · {delta(t, model, 'mar26', k)[1]} · "
+                           f"{delta(t, model, 'aug25', k)[1]}")
+        elif not d.get("n"):
+            out.append(f"  No installs on {lab}. The 7-day verdicts are above.")
+        else:
+            out.append(f"  {lab} only · {num(d['n'])} installs · {num(d.get('paid', 0))} payer{'' if d.get('paid', 0) == 1 else 's'}:")
+            for k in steps_for(t):
+                out.append(f"  {STEP_NAMES[k]}: {pct(t['day_rates'][k][0])} (7d {pct(t['rates'][k][0])}) · "
+                           f"{delta(t, model, 'mar26', k, 'day_cmp')[1]} · {delta(t, model, 'aug25', k, 'day_cmp')[1]}")
         if t["cmp"]["aug25"]["client_basis"]:
             out.append("  † Aug 2025 is compared on the in-app purchase event row, like for like; directional only.")
         if len(t["trend"]) >= 2:
-            out.append("  Paid within a day, by build: " +
+            out.append(f"  Paid within a day, by build, {week_of(model)}: " +
                        " · ".join(f"{p['v']} {pct(p['rate'][0])} (n={num(p['n'])})" for p in reversed(t["trend"])))
         else:
             out.append("  By build: " + trend_note(t, model))
-        out += [f"  Check: {lab_} {pct(now)} vs Mar {pct(base)}. Investigate." for lab_, now, base in checks(t, model)]
+        out += [f"  Check: 7 days, {lab_} {pct(now)} vs Mar {pct(base)}. Investigate." for lab_, now, base in checks(t, model)]
         mx = mix_txt(t)[1]
         if mx:
             out.append("  " + mx)
-    out += ["", "Notes:"] + [f"- {x}" for x in footnote_lines(model)] + ["", "Workflow: " + WORKFLOW_URL]
+    out += ["", "Notes:"] + [f"- {x}" for x in footnote_lines(model, variant)] + ["", "Workflow: " + WORKFLOW_URL]
     return "\n".join(out)
 
 
@@ -769,7 +792,7 @@ def _render(model, variant, out_dir):
         _masthead("Lascade · TravelAnimator", "Install → paid", dateline(model)),
         _stat_grid(model), _early(model), _lead(model), _row(_legend(), 14),
         "".join(_track(t, model, variant, out_dir, images) for t in model["tracks"]),
-        _footnotes(model),
+        _footnotes(model, variant),
     ]
     html = (HEAD.replace("__TITLE__", esc(subject)) +
             '<body style="margin:0; padding:0; background-color:#f5f3f1; width:100%; -webkit-text-size-adjust:100%;" class="body-bg">'
@@ -779,4 +802,4 @@ def _render(model, variant, out_dir):
             '<table role="presentation" cellspacing="0" cellpadding="0" border="0" width="600" align="center" '
             'style="width:100%; max-width:600px;" class="email-container"><tr><td>' + "".join(parts) +
             '</td></tr></table></td></tr></table></body></html>')
-    return subject, html, _text(model, subject), images
+    return subject, html, _text(model, subject, variant), images

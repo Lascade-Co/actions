@@ -201,8 +201,8 @@ def test_android_aug25_compares_client_with_client(tmp_path):
     assert t["cmp"]["mar26"]["paid"]["verdict"] is not None
     _, html, text, _ = R.render(m, "A", tmp_path)
     assert "Aug: see †" in R.step_verdict(t, "paid")[1]
-    assert "Paid: 1.00% · Mar ±0.00 pts · Aug —†" in text               # server row: no Aug figure
-    assert "Paid, in-app event †: 1.33% · Mar +0.33 pts · Aug +0.33 pts" in text
+    assert "Paid: 1.00% (7d 1.00%) · Mar 1.00% · Aug —†" in text               # server row: no Aug figure
+    assert "Paid, in-app event †: 1.33% (7d 1.33%) · Mar 1.00% · Aug 1.00%" in text
     row_html = html.split("Paid, in-app event †")[1].split("</tr>")[0]
     assert f'bgcolor="{R.C_THIN}"' in row_html                          # the directional bar itself is grey
 
@@ -221,7 +221,7 @@ def test_read_block_combines_or_splits_benchmarks():
 def test_check_line_flags_a_step_under_half_of_march(tmp_path):
     m = model({"ios": [row("4.1.0", LAST, 1000, paid=50, pw=300)], "android": []})   # Mar paywall 90%
     _, html, text, _ = R.render(m, "A", tmp_path)
-    assert "Check: saw the paywall 30.0% vs Mar 90.0%. Investigate." in text and "Check:" in html
+    assert "Check: 7 days, saw the paywall 30.0% vs Mar 90.0%. Investigate." in text and "Check:" in html
 
 
 def test_week_formatting_crosses_months_and_years():
@@ -400,7 +400,7 @@ def test_android_rows_are_like_for_like(tmp_path):
     assert R.steps_for(track(model({"ios": [row("4.1.0", LAST, 900, paid=45)], "android": []}), "ios")) == \
         ["pw", "pv", "ex", "paid"]
     _, html, text, _ = R.render(m, "A", tmp_path)
-    assert "Paid: 0.50% · Mar −0.50 pts (worse) · Aug —†" in text
+    assert "Paid: 0.50% (7d 0.50%) · Mar 1.00% (worse) · Aug —†" in text
     assert "Paid, in-app event †: 2.0%" in text and "Aug —†" in html
 
 
@@ -618,7 +618,7 @@ def test_without_early_the_email_is_unchanged(tmp_path):
     m["early"] = None
     subj, html, text, _ = R.render(m, "A", tmp_path)
     assert subj.startswith("TA install→paid · Sun 18 Oct: ")
-    assert "Early read" not in html and "Judged on the 7 days, never the single day" in text
+    assert "Early read" not in html and "Verdicts are judged on the 7 days. The bars and their Mar/Aug colours show the latest full day only" in text
 
 
 def test_early_render_failure_falls_back(tmp_path, monkeypatch):
@@ -661,3 +661,24 @@ def test_early_track_with_empty_baseline_shows_figure(tmp_path):
     assert m["early"]["tracks"]["ios"]["cmp"]["paid"] is None
     subj, html, _, _ = R.render(m, "A", tmp_path)
     assert "iOS 2.0%" in subj and "can&#x27;t tell yet" in html
+
+
+def test_bars_show_the_latest_day_not_the_week(tmp_path):
+    """Bars and step lines use the latest full day; the 7-day rate rides alongside."""
+    m = model({"ios": [row("4.1.0", FIRST, 900, pv=900), row("4.1.0", LAST, 100, pv=20)], "android": []})
+    t = track(m, "ios")
+    assert t["day"]["n"] == 100 and t["counts"]["n"] == 1000
+    assert abs(t["day_rates"]["pv"][0] - 0.20) < 1e-9 and abs(t["rates"]["pv"][0] - 0.92) < 1e-9
+    assert t["day_cmp"]["mar26"]["pv"]["verdict"] == "worse" and t["cmp"]["mar26"]["pv"]["verdict"] == "better"
+    _, html, text, _ = R.render(m, "A", tmp_path)
+    assert "Previewed a trip: 20.0% (7d 92.0%) · Mar 70.0% (worse) · Aug 70.0% (worse)" in text
+    assert "Sun 18 Oct only · 100 installs · 0 payers:" in text
+    row_html = html.split("Previewed a trip")[1].split("Exported a video")[0]
+    assert "20.0%" in row_html and "7d 92.0%" in row_html and R.C_WORSE in row_html
+
+
+def test_no_installs_on_the_latest_day(tmp_path):
+    m = model({"ios": [row("4.1.0", FIRST, 900)], "android": []})
+    _, html, text, _ = R.render(m, "A", tmp_path)
+    assert "No installs on Sun 18 Oct. The 7-day verdicts are above." in text
+    assert "No installs on Sun 18 Oct. The 7-day verdicts are above." in html

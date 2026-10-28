@@ -5,8 +5,8 @@ install day) with per-person counts. Every rate is reach within 24 h of first in
 
 Window: every track covers the same fixed 7 Pacific days, ending on the latest full day
 (the newest PT date every installer of which has had 24 hours by the cutoff), across all
-real builds, like the benchmarks. The single latest day is reported too, but verdicts
-are judged on the 7 days only.
+real builds, like the benchmarks. The single latest day is reported too, with its own
+comparisons (day_cmp) for the per-store bars; the verdicts are judged on the 7 days only.
 """
 from __future__ import annotations
 
@@ -208,6 +208,25 @@ def compare(now, base, step):
             "verdict": verdict(diff, lo, hi, b0)}
 
 
+def compare_all(c, bench, plat):
+    """{bench key: {step: compare(...)}} for one set of counts (the 7 days or one day)."""
+    cmp = {}
+    for bk, _ in BENCH:
+        bc = bench[bk][plat]["counts"]
+        client = (plat, bk) in SERVER_UNAVAILABLE
+        cmp[bk] = {"client_basis": client}
+        for step in ("pw", "pv", "ex"):
+            cmp[bk][step] = compare(c, bc, step)
+        # Client (in-app purchase event) vs client: always directional, the Android
+        # event changed definition in Aug 2026. Server vs server only where both exist.
+        x = compare(c, bc, "pc")
+        if x:
+            x["verdict"] = None
+        cmp[bk]["pc"] = x
+        cmp[bk]["paid"] = x if client else compare(c, bc, "paid")
+    return cmp
+
+
 def build_model(raw, bench, report_date, cutoff_utc, cidr_date, bench_def):
     """raw: {plat: rows} for the 60-day window; bench: {"aug25": {plat: agg}, "mar26": ...}."""
     kept, audit = split(raw)
@@ -227,24 +246,12 @@ def build_model(raw, bench, report_date, cutoff_utc, cidr_date, bench_def):
             tracks.append({"key": tk, "store": store, "label": label, "empty": True, "day": day,
                            "audit": dict(audit.get(tk, {}))})
             continue
-        cmp = {}
-        for bk, _ in BENCH:
-            bc = bench[bk][plat]["counts"]
-            client = (plat, bk) in SERVER_UNAVAILABLE
-            cmp[bk] = {"client_basis": client}
-            for step in ("pw", "pv", "ex"):
-                cmp[bk][step] = compare(c, bc, step)
-            # Client (in-app purchase event) vs client: always directional, the Android
-            # event changed definition in Aug 2026. Server vs server only where both exist.
-            x = compare(c, bc, "pc")
-            if x:
-                x["verdict"] = None
-            cmp[bk]["pc"] = x
-            cmp[bk]["paid"] = x if client else compare(c, bc, "paid")
         tracks.append({
             "key": tk, "store": store, "label": label, "empty": False, "day": day,
             "counts": c, "rates": rates(c), "builds": w["builds"],
-            "cmp": cmp, "mix": mix(w["countries"], bench["mar26"][plat]["countries"]),
+            "cmp": compare_all(c, bench, plat),
+            "day_rates": rates(day), "day_cmp": compare_all(day, bench, plat),
+            "mix": mix(w["countries"], bench["mar26"][plat]["countries"]),
             "audit": dict(audit.get(tk, {})), "trend": trend(rows, first, last),
         })
     return {"report_date": report_date, "cutoff_utc": cutoff_utc, "cidr_date": cidr_date,
