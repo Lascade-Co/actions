@@ -68,7 +68,7 @@ jobs:
 
       - name: Mint GitHub App token (tada + shared)
         id: app-token
-        uses: actions/create-github-app-token@v3.3.0
+        uses: actions/create-github-app-token@v3
         with:
           client-id: ${{ secrets.CI_APP_CLIENT_ID }}
           private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
@@ -78,7 +78,7 @@ jobs:
             travel-animator-shared
 
       - name: Check out TADA @ dispatched commit
-        uses: actions/checkout@v6.1.0
+        uses: actions/checkout@v6
         with:
           repository: ${{ github.event.client_payload.repo }}
           ref: ${{ github.event.client_payload.sha }}
@@ -91,7 +91,7 @@ jobs:
         run: echo "revision=$(git rev-parse HEAD:shared)" >> "$GITHUB_OUTPUT"
 
       - name: Check out private shared protos
-        uses: actions/checkout@v6.1.0
+        uses: actions/checkout@v6
         with:
           repository: Lascade-Co/travel-animator-shared
           ref: ${{ steps.shared.outputs.revision }}
@@ -137,7 +137,7 @@ jobs:
       # it. Skipped for a tada commit that predates the Hosted MCP (no widgets project).
       - name: Set up Node
         if: hashFiles('tada_hosted/widgets/package.json') != ''
-        uses: actions/setup-node@v7.1.0
+        uses: actions/setup-node@v7
         with:
           node-version: 24
           package-manager-cache: false
@@ -152,7 +152,7 @@ jobs:
       # Downloaded to where the tests look for it: the output path of tada's own
       # `./gradlew :host:taJars`.
       - name: Download ta-render.jar
-        uses: actions/download-artifact@v8.0.2
+        uses: actions/download-artifact@v8
         with:
           name: ta-render-jar
           path: host/build/libs
@@ -160,7 +160,7 @@ jobs:
       # The jar is Java 21 bytecode and the runner's default JAVA_HOME is older; the bridge
       # resolves `java` through JAVA_HOME, so this decides which JVM runs it.
       - name: Set up JDK
-        uses: actions/setup-java@v5.7.0
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: "21"
@@ -195,7 +195,7 @@ jobs:
 
       - name: Mint GitHub App token (tada + shared)
         id: app-token
-        uses: actions/create-github-app-token@v3.3.0
+        uses: actions/create-github-app-token@v3
         with:
           client-id: ${{ secrets.CI_APP_CLIENT_ID }}
           private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
@@ -205,7 +205,7 @@ jobs:
             travel-animator-shared
 
       - name: Check out TADA @ dispatched commit
-        uses: actions/checkout@v6.1.0
+        uses: actions/checkout@v6
         with:
           repository: ${{ github.event.client_payload.repo }}
           ref: ${{ github.event.client_payload.sha }}
@@ -218,7 +218,7 @@ jobs:
         run: echo "revision=$(git rev-parse HEAD:shared)" >> "$GITHUB_OUTPUT"
 
       - name: Check out private shared protos
-        uses: actions/checkout@v6.1.0
+        uses: actions/checkout@v6
         with:
           repository: Lascade-Co/travel-animator-shared
           ref: ${{ steps.shared.outputs.revision }}
@@ -246,7 +246,7 @@ jobs:
       # failure, which would cache jars from a red build and mark a failing revision as tested.
       - name: Restore the built JARs
         id: jars-cache
-        uses: actions/cache/restore@v4.3.0
+        uses: actions/cache/restore@v4
         with:
           path: |
             host/build/libs
@@ -255,7 +255,7 @@ jobs:
 
       - name: Restore the :shared:jvmTest result
         id: jvmtest-cache
-        uses: actions/cache/restore@v4.3.0
+        uses: actions/cache/restore@v4
         with:
           path: .ci-cache
           key: ${{ steps.keys.outputs.jvmtest }}
@@ -274,7 +274,7 @@ jobs:
 
       - name: Set up JDK
         if: steps.jars-cache.outputs.cache-hit != 'true' || steps.jvmtest-cache.outputs.cache-hit != 'true'
-        uses: actions/setup-java@v5.7.0
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: ${{ env.JAVA_VERSION }}
@@ -283,7 +283,7 @@ jobs:
       # it the entry is stored every run and reused never. An unset secret degrades to that.
       - name: Setup Gradle
         if: steps.jars-cache.outputs.cache-hit != 'true' || steps.jvmtest-cache.outputs.cache-hit != 'true'
-        uses: gradle/actions/setup-gradle@v6.4.1
+        uses: gradle/actions/setup-gradle@v6
         with:
           cache-encryption-key: ${{ secrets.GRADLE_ENCRYPTION_KEY }}
 
@@ -304,7 +304,7 @@ jobs:
       # `warn`, not `error`: an earlier failure legitimately leaves no report to collect.
       - name: Upload ta-render.jar seal report
         if: ${{ !cancelled() }}
-        uses: actions/upload-artifact@v7.0.2
+        uses: actions/upload-artifact@v7
         with:
           name: ta-jars-seal
           path: host/build/reports/ta-jars/seal.txt
@@ -320,7 +320,7 @@ jobs:
 
       # A jar is a zip: no file modes travel with it, so upload-artifact stripping them is moot.
       - name: Upload ta-render.jar
-        uses: actions/upload-artifact@v7.0.2
+        uses: actions/upload-artifact@v7
         with:
           name: ta-render-jar
           path: host/build/libs/ta-render.jar
@@ -333,7 +333,7 @@ jobs:
       # `builder/` package. Only the bundle job -- the single place the shipped private wheel
       # is built -- pulls it.
       - name: Upload ta-prepare.jar
-        uses: actions/upload-artifact@v7.0.2
+        uses: actions/upload-artifact@v7
         with:
           name: ta-prepare-jar
           path: host/build/libs/ta-prepare.jar
@@ -345,7 +345,7 @@ jobs:
       # neither its jars nor a passing verdict for its shared revision.
       - name: Cache the built JARs
         if: steps.jars-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4.3.0
+        uses: actions/cache/save@v4
         with:
           path: |
             host/build/libs
@@ -360,7 +360,7 @@ jobs:
 
       - name: Save the :shared:jvmTest result
         if: steps.jvmtest-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4.3.0
+        uses: actions/cache/save@v4
         with:
           path: .ci-cache
           key: ${{ steps.keys.outputs.jvmtest }}
@@ -405,7 +405,7 @@ jobs:
 
       - name: Mint GitHub App token (tada + shared)
         id: app-token
-        uses: actions/create-github-app-token@v3.3.0
+        uses: actions/create-github-app-token@v3
         with:
           client-id: ${{ secrets.CI_APP_CLIENT_ID }}
           private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
@@ -415,7 +415,7 @@ jobs:
             travel-animator-shared
 
       - name: Check out TADA @ dispatched commit
-        uses: actions/checkout@v6.1.0
+        uses: actions/checkout@v6
         with:
           repository: ${{ github.event.client_payload.repo }}
           ref: ${{ github.event.client_payload.sha }}
@@ -428,7 +428,7 @@ jobs:
         run: echo "revision=$(git rev-parse HEAD:shared)" >> "$GITHUB_OUTPUT"
 
       - name: Check out private shared protos
-        uses: actions/checkout@v6.1.0
+        uses: actions/checkout@v6
         with:
           repository: Lascade-Co/travel-animator-shared
           ref: ${{ steps.shared.outputs.revision }}
@@ -454,7 +454,7 @@ jobs:
       # deliberately not downloaded here -- a bundle that quietly grew a second public wheel
       # would break every one of TARS's shape checks at deploy time rather than here.
       - name: Download the manylinux x86-64 wheel
-        uses: actions/download-artifact@v8.0.2
+        uses: actions/download-artifact@v8
         with:
           name: wheel-linux-x64
           path: platform
@@ -462,7 +462,7 @@ jobs:
       # The PRIVATE wheel's payload (ADR 0015): ta-render.jar plus the sealed `builder/`
       # package, which is why it lands here and never in a wheel job.
       - name: Download ta-prepare.jar
-        uses: actions/download-artifact@v8.0.2
+        uses: actions/download-artifact@v8
         with:
           name: ta-prepare-jar
           path: jar
@@ -484,7 +484,7 @@ jobs:
       # predates the Hosted MCP (no widgets project).
       - name: Set up Node
         if: hashFiles('tada_hosted/widgets/package.json') != ''
-        uses: actions/setup-node@v7.1.0
+        uses: actions/setup-node@v7
         with:
           node-version: 24
           package-manager-cache: false
@@ -546,7 +546,7 @@ jobs:
           echo "platform_tag: $(python3 -c 'import json;print(json.load(open("bundle/build-metadata.json"))["platform_tag"])')"
 
       - name: Upload publish bundle
-        uses: actions/upload-artifact@v7.0.2
+        uses: actions/upload-artifact@v7
         with:
           name: tada-wheel-bundle
           path: bundle/
@@ -582,7 +582,7 @@ jobs:
 
       - name: Mint GitHub App token (tada, packages)
         id: app-token
-        uses: actions/create-github-app-token@v3.3.0
+        uses: actions/create-github-app-token@v3
         with:
           client-id: ${{ secrets.CI_APP_CLIENT_ID }}
           private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
@@ -590,7 +590,7 @@ jobs:
           repositories: ${{ steps.repo.outputs.name }}
 
       - name: Download verified bundle
-        uses: actions/download-artifact@v8.0.2
+        uses: actions/download-artifact@v8
         with:
           name: tada-wheel-bundle
           path: bundle
@@ -641,7 +641,7 @@ jobs:
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
       - name: Install ORAS
-        uses: oras-project/setup-oras@v2.0.3
+        uses: oras-project/setup-oras@v2
         with:
           version: 1.3.2
 
@@ -730,7 +730,7 @@ jobs:
       # renderer's source to a job that only ever needs to read its commit log.
       - name: Mint a writable TARS GitHub App token
         id: tars-token
-        uses: actions/create-github-app-token@v3.3.0
+        uses: actions/create-github-app-token@v3
         with:
           client-id: ${{ secrets.CI_APP_CLIENT_ID }}
           private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
@@ -740,7 +740,7 @@ jobs:
 
       - name: Mint a read-only tada GitHub App token
         id: tada-token
-        uses: actions/create-github-app-token@v3.3.0
+        uses: actions/create-github-app-token@v3
         with:
           client-id: ${{ secrets.CI_APP_CLIENT_ID }}
           private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
@@ -753,7 +753,7 @@ jobs:
       # and nowhere else. Still depth 1: the push below never rebases, it re-fetches main and
       # redoes the rewrite, so no history is needed.
       - name: Check out TARS main
-        uses: actions/checkout@v6.1.0
+        uses: actions/checkout@v6
         with:
           repository: ${{ env.TARS_REPOSITORY }}
           ref: main

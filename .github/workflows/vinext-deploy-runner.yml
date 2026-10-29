@@ -19,7 +19,7 @@ jobs:
     outputs:
       worker_key: ${{ steps.prepare.outputs.worker_key }}
     steps:
-      - uses: actions/setup-node@v7.1.0
+      - uses: actions/setup-node@v7
         with:
           node-version: 24
           package-manager-cache: false
@@ -45,7 +45,7 @@ jobs:
 
       - name: Mint source configuration and status token
         id: status-token
-        uses: actions/create-github-app-token@v3.3.0
+        uses: actions/create-github-app-token@v3
         with:
           client-id: ${{ secrets.CI_APP_CLIENT_ID }}
           private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
@@ -84,7 +84,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Set up Node for deployment controls
-        uses: actions/setup-node@v7.1.0
+        uses: actions/setup-node@v7
         with:
           node-version: 24
           package-manager-cache: false
@@ -110,7 +110,7 @@ jobs:
 
       - name: Mint read-only source configuration token
         id: config-token
-        uses: actions/create-github-app-token@v3.3.0
+        uses: actions/create-github-app-token@v3
         with:
           client-id: ${{ secrets.CI_APP_CLIENT_ID }}
           private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
@@ -129,14 +129,14 @@ jobs:
         run: node control/scripts/vinext/cli.mjs prepare
 
       - name: Set up project Node version
-        uses: actions/setup-node@v7.1.0
+        uses: actions/setup-node@v7
         with:
           node-version: ${{ fromJSON(steps.prepare.outputs.plan).project.node_version }}
           package-manager-cache: false
 
       - name: Mint read-only source and submodule checkout token
         id: checkout-token
-        uses: actions/create-github-app-token@v3.3.0
+        uses: actions/create-github-app-token@v3
         with:
           client-id: ${{ secrets.CI_APP_CLIENT_ID }}
           private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
@@ -145,7 +145,7 @@ jobs:
           permission-contents: read
 
       - name: Checkout requested source and recorded submodule revisions
-        uses: actions/checkout@v7.0.1
+        uses: actions/checkout@v7
         with:
           repository: ${{ fromJSON(steps.prepare.outputs.plan).repo }}
           ref: ${{ fromJSON(steps.prepare.outputs.plan).sha }}
@@ -195,7 +195,7 @@ jobs:
         run: node control/scripts/vinext/cli.mjs build
 
       - name: Upload sanitized deployment bundle
-        uses: actions/upload-artifact@v7.0.2
+        uses: actions/upload-artifact@v7
         with:
           name: vinext-bundle-${{ github.run_id }}-${{ github.run_attempt }}
           path: bundle/
@@ -218,7 +218,7 @@ jobs:
       queue: max
       cancel-in-progress: false
     steps:
-      - uses: actions/setup-node@v7.1.0
+      - uses: actions/setup-node@v7
         with:
           node-version: 24
           package-manager-cache: false
@@ -244,7 +244,7 @@ jobs:
 
       - name: Mint source configuration, verification, and status token
         id: source-token
-        uses: actions/create-github-app-token@v3.3.0
+        uses: actions/create-github-app-token@v3
         with:
           client-id: ${{ secrets.CI_APP_CLIENT_ID }}
           private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
@@ -271,7 +271,7 @@ jobs:
 
       - name: Download deployment bundle
         if: ${{ needs.build.result == 'success' && steps.prepare.outcome == 'success' }}
-        uses: actions/download-artifact@v8.0.2
+        uses: actions/download-artifact@v8
         with:
           name: vinext-bundle-${{ github.run_id }}-${{ github.run_attempt }}
           path: bundle

@@ -32,7 +32,7 @@ jobs:
     timeout-minutes: 20
     steps:
       - name: Set up Python
-        uses: actions/setup-python@v7.1.0
+        uses: actions/setup-python@v7
         with:
           python-version: '3.13'
 
@@ -71,7 +71,7 @@ jobs:
         # A published day is immutable, so without this a run on the 28th
         # re-downloads 27 unchanging reports. Keyed per run so each saves a fresh
         # entry; restore-keys pulls the newest prior one.
-        uses: actions/cache@v6.1.0
+        uses: actions/cache@v6
         with:
           path: .appstore-cache
           key: appstore-${{ github.run_id }}
@@ -85,7 +85,7 @@ jobs:
 
       - name: Upload the rendered card
         if: always()
-        uses: actions/upload-artifact@v7.0.2
+        uses: actions/upload-artifact@v7
         with:
           name: marketing-net-message
           path: |

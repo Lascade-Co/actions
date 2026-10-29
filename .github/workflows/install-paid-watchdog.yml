@@ -34,7 +34,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v6.1.0
+      - uses: actions/checkout@v6
         with:
           sparse-checkout: |
             scripts/catchup/catchup_gate.py

@@ -36,7 +36,7 @@ jobs:
       angle_revision: ${{ steps.version.outputs.angle_revision }}
     steps:
       - name: Checkout trusted central controls
-        uses: actions/checkout@v7.0.1
+        uses: actions/checkout@v7
         with:
           repository: ${{ github.repository }}
           ref: ${{ github.sha }}
@@ -68,7 +68,7 @@ jobs:
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
       - name: Checkout pinned source commit
-        uses: actions/checkout@v7.0.1
+        uses: actions/checkout@v7
         with:
           repository: ${{ steps.source.outputs.repo }}
           ref: ${{ steps.source.outputs.sha }}
@@ -121,7 +121,7 @@ jobs:
       pushed: ${{ steps.push.outputs.pushed }}
     steps:
       - name: Checkout trusted central controls
-        uses: actions/checkout@v7.0.1
+        uses: actions/checkout@v7
         with:
           repository: ${{ github.repository }}
           ref: ${{ github.sha }}
@@ -145,7 +145,7 @@ jobs:
           repositories: ${{ needs.prepare.outputs.name }}
         id: app-token
       - name: Checkout pinned source commit
-        uses: actions/checkout@v7.0.1
+        uses: actions/checkout@v7
         with:
           repository: ${{ needs.prepare.outputs.repo }}
           ref: ${{ needs.prepare.outputs.sha }}
@@ -180,12 +180,12 @@ jobs:
       - name: Install existing debug signing and Firebase files
         run: python3 "$RUNNER_TEMP/kmp-control.py" android-inputs
       - name: Set up JDK 25
-        uses: actions/setup-java@v6.1.0
+        uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: '25'
       - name: Set up small Gradle configuration and build caches
-        uses: gradle/actions/setup-gradle@v6.4.1
+        uses: gradle/actions/setup-gradle@v6
         with:
           cache-read-only: false
           cache-encryption-key: ${{ secrets.GRADLE_ENCRYPTION_KEY }}
@@ -235,7 +235,7 @@ jobs:
           PROMPT_URL: ${{ format('https://raw.githubusercontent.com/{0}/{1}/data/LINT.md', github.repository, github.sha) }}
         if: ${{ steps.lint.outputs.autofix_allowed == 'true' }}
       - name: Apply the existing Claude lint auto-fix
-        uses: anthropics/claude-code-action@v1.0.264
+        uses: anthropics/claude-code-action@v1
         with:
           anthropic_api_key: ${{ secrets.CLAUDE_API_KEY }}
           github_token: ${{ github.token }}
@@ -292,7 +292,7 @@ jobs:
         continue-on-error: true
         if: ${{ steps.gradle-cache.outputs.hit != 'true' }}
       - name: Retain check diagnostics
-        uses: actions/upload-artifact@v7.0.2
+        uses: actions/upload-artifact@v7
         with:
           name: check-diagnostics
           path: |-
@@ -315,7 +315,7 @@ jobs:
       - prepare
     steps:
       - name: Checkout trusted central controls
-        uses: actions/checkout@v7.0.1
+        uses: actions/checkout@v7
         with:
           repository: ${{ github.repository }}
           ref: ${{ github.sha }}
@@ -339,7 +339,7 @@ jobs:
           repositories: ${{ needs.prepare.outputs.name }}
         id: app-token
       - name: Checkout pinned source commit
-        uses: actions/checkout@v7.0.1
+        uses: actions/checkout@v7
         with:
           repository: ${{ needs.prepare.outputs.repo }}
           ref: ${{ needs.prepare.outputs.sha }}
@@ -374,12 +374,12 @@ jobs:
       - name: Install existing debug signing and Firebase files
         run: python3 "$RUNNER_TEMP/kmp-control.py" android-inputs
       - name: Set up JDK 25
-        uses: actions/setup-java@v6.1.0
+        uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: '25'
       - name: Set up small Gradle configuration and build caches
-        uses: gradle/actions/setup-gradle@v6.4.1
+        uses: gradle/actions/setup-gradle@v6
         with:
           cache-read-only: false
           cache-encryption-key: ${{ secrets.GRADLE_ENCRYPTION_KEY }}
@@ -415,7 +415,7 @@ jobs:
           KEY_PASSWORD_DEBUG: ${{ env.KEY_PASSWORD }}
         id: units
       - name: Retain unit diagnostics
-        uses: actions/upload-artifact@v7.0.2
+        uses: actions/upload-artifact@v7
         with:
           name: unit-diagnostics
           path: |-
@@ -434,7 +434,7 @@ jobs:
       - prepare
     steps:
       - name: Checkout trusted central controls
-        uses: actions/checkout@v7.0.1
+        uses: actions/checkout@v7
         with:
           repository: ${{ github.repository }}
           ref: ${{ github.sha }}
@@ -458,7 +458,7 @@ jobs:
           repositories: ${{ needs.prepare.outputs.name }}
         id: app-token
       - name: Checkout pinned source commit
-        uses: actions/checkout@v7.0.1
+        uses: actions/checkout@v7
         with:
           repository: ${{ needs.prepare.outputs.repo }}
           ref: ${{ needs.prepare.outputs.sha }}
@@ -493,12 +493,12 @@ jobs:
       - name: Install existing debug signing and Firebase files
         run: python3 "$RUNNER_TEMP/kmp-control.py" android-inputs
       - name: Set up JDK 25
-        uses: actions/setup-java@v6.1.0
+        uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: '25'
       - name: Set up small Gradle configuration and build caches
-        uses: gradle/actions/setup-gradle@v6.4.1
+        uses: gradle/actions/setup-gradle@v6
         with:
           cache-read-only: false
           cache-encryption-key: ${{ secrets.GRADLE_ENCRYPTION_KEY }}
@@ -533,7 +533,7 @@ jobs:
           KEY_PASSWORD_DEBUG: ${{ env.KEY_PASSWORD }}
         id: build
       - name: Retain APK for gated publishing
-        uses: actions/upload-artifact@v7.0.2
+        uses: actions/upload-artifact@v7
         with:
           name: android-debug-apk
           path: ${{ format('source/{0}', steps.build.outputs.apk_path) }}
@@ -555,7 +555,7 @@ jobs:
         continue-on-error: true
         if: ${{ steps.gradle-cache.outputs.hit != 'true' }}
       - name: Retain android diagnostics
-        uses: actions/upload-artifact@v7.0.2
+        uses: actions/upload-artifact@v7
         with:
           name: android-diagnostics
           path: |-
@@ -580,7 +580,7 @@ jobs:
       - prepare
     steps:
       - name: Checkout trusted central controls
-        uses: actions/checkout@v7.0.1
+        uses: actions/checkout@v7
         with:
           repository: ${{ github.repository }}
           ref: ${{ github.sha }}
@@ -604,7 +604,7 @@ jobs:
           repositories: ${{ needs.prepare.outputs.name }}
         id: app-token
       - name: Checkout pinned source commit
-        uses: actions/checkout@v7.0.1
+        uses: actions/checkout@v7
         with:
           repository: ${{ needs.prepare.outputs.repo }}
           ref: ${{ needs.prepare.outputs.sha }}
@@ -637,16 +637,16 @@ jobs:
           secret-path: /Build
           export-type: env
       - name: Pin Xcode 26.6
-        uses: maxim-lobanov/setup-xcode@v1.7.0
+        uses: maxim-lobanov/setup-xcode@v1
         with:
           xcode-version: '26.6'
       - name: Set up JDK 25
-        uses: actions/setup-java@v6.1.0
+        uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: '25'
       - name: Set up small Gradle configuration and build caches
-        uses: gradle/actions/setup-gradle@v6.4.1
+        uses: gradle/actions/setup-gradle@v6
         with:
           cache-read-only: false
           cache-encryption-key: ${{ secrets.GRADLE_ENCRYPTION_KEY }}
@@ -756,7 +756,7 @@ jobs:
         env:
           DSYM_PATH: ${{ steps.build.outputs.dsym_path }}
       - name: Retain IPA for gated publishing
-        uses: actions/upload-artifact@v7.0.2
+        uses: actions/upload-artifact@v7
         with:
           name: ios-staging-ipa
           path: ${{ format('source/{0}', steps.build.outputs.ipa_path) }}
@@ -805,7 +805,7 @@ jobs:
           mode: cleanup
         if: ${{ always() }}
       - name: Retain ios diagnostics
-        uses: actions/upload-artifact@v7.0.2
+        uses: actions/upload-artifact@v7
         with:
           name: ios-diagnostics
           path: |-
@@ -832,7 +832,7 @@ jobs:
       url: ${{ steps.release.outputs.url }}
     steps:
       - name: Checkout trusted central controls
-        uses: actions/checkout@v7.0.1
+        uses: actions/checkout@v7
         with:
           repository: ${{ github.repository }}
           ref: ${{ github.sha }}
@@ -847,12 +847,12 @@ jobs:
           repositories: ${{ needs.prepare.outputs.name }}
         id: app-token
       - name: Download checked Android APK
-        uses: actions/download-artifact@v8.0.2
+        uses: actions/download-artifact@v8
         with:
           name: android-debug-apk
           path: artifacts/android
       - name: Publish debug prerelease in source repository
-        uses: softprops/action-gh-release@v3.0.3
+        uses: softprops/action-gh-release@v3
         with:
           repository: ${{ needs.prepare.outputs.repo }}
           token: ${{ steps.app-token.outputs.token }}
@@ -883,7 +883,7 @@ jobs:
       build_number: ${{ steps.identity.outputs.build_number }}
     steps:
       - name: Checkout trusted central controls
-        uses: actions/checkout@v7.0.1
+        uses: actions/checkout@v7
         with:
           repository: ${{ github.repository }}
           ref: ${{ github.sha }}
@@ -907,11 +907,11 @@ jobs:
           repositories: ${{ needs.prepare.outputs.name }}
         id: app-token
       - name: Pin Xcode 26.6
-        uses: maxim-lobanov/setup-xcode@v1.7.0
+        uses: maxim-lobanov/setup-xcode@v1
         with:
           xcode-version: '26.6'
       - name: Download checked Staging IPA
-        uses: actions/download-artifact@v8.0.2
+        uses: actions/download-artifact@v8
         with:
           name: ios-staging-ipa
           path: artifacts/ios
@@ -983,7 +983,7 @@ jobs:
         env:
           HELPER_BASE: ${{ format('https://raw.githubusercontent.com/{0}/{1}/scripts/ios', github.repository, github.sha) }}
       - name: Set up Python
-        uses: actions/setup-python@v7.1.0
+        uses: actions/setup-python@v7
         with:
           python-version: '3.13'
       - name: Install App Store JWT support
@@ -1044,7 +1044,7 @@ jobs:
     if: ${{ !cancelled() }}
     steps:
       - name: Checkout trusted central controls
-        uses: actions/checkout@v7.0.1
+        uses: actions/checkout@v7
         with:
           repository: ${{ github.repository }}
           ref: ${{ github.sha }}

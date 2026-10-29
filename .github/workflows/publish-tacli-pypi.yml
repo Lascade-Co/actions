@@ -91,7 +91,7 @@ jobs:
 
       - name: Mint GitHub App token (tada + shared)
         id: app-token
-        uses: actions/create-github-app-token@v3.3.0
+        uses: actions/create-github-app-token@v3
         with:
           client-id: ${{ secrets.CI_APP_CLIENT_ID }}
           private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
@@ -101,7 +101,7 @@ jobs:
             travel-animator-shared
 
       - name: Check out TADA @ requested commit
-        uses: actions/checkout@v6.1.0
+        uses: actions/checkout@v6
         with:
           repository: Lascade-Co/tada
           ref: ${{ inputs.sha }}
@@ -114,7 +114,7 @@ jobs:
         run: echo "revision=$(git rev-parse HEAD:shared)" >> "$GITHUB_OUTPUT"
 
       - name: Check out private shared protos
-        uses: actions/checkout@v6.1.0
+        uses: actions/checkout@v6
         with:
           repository: Lascade-Co/travel-animator-shared
           ref: ${{ steps.shared.outputs.revision }}
@@ -143,7 +143,7 @@ jobs:
 
       - name: Restore the built JARs
         id: jars-cache
-        uses: actions/cache/restore@v4.3.0
+        uses: actions/cache/restore@v4
         with:
           path: |
             host/build/libs
@@ -180,7 +180,7 @@ jobs:
       # needs a JVM. Skipping it left them on the runner's Java 17 against Java 21
       # bytecode. Only Gradle is cache-conditional.
       - name: Set up JDK
-        uses: actions/setup-java@v5.7.0
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: ${{ env.JAVA_VERSION }}
@@ -189,7 +189,7 @@ jobs:
       # runs; without it the entry is stored every run and reused never.
       - name: Setup Gradle
         if: steps.jars-cache.outputs.cache-hit != 'true'
-        uses: gradle/actions/setup-gradle@v6.4.1
+        uses: gradle/actions/setup-gradle@v6
         with:
           cache-encryption-key: ${{ secrets.GRADLE_ENCRYPTION_KEY }}
 
@@ -228,7 +228,7 @@ jobs:
       # it. Skipped for a tada commit that predates the Hosted MCP (no widgets project).
       - name: Set up Node
         if: hashFiles('tada_hosted/widgets/package.json') != ''
-        uses: actions/setup-node@v7.1.0
+        uses: actions/setup-node@v7
         with:
           node-version: 24
           package-manager-cache: false
@@ -251,7 +251,7 @@ jobs:
 
       # The matrix downloads this. A jar is a zip, so upload-artifact stripping modes is moot.
       - name: Upload ta-render.jar
-        uses: actions/upload-artifact@v7.0.2
+        uses: actions/upload-artifact@v7
         with:
           name: ta-render-jar
           path: host/build/libs/ta-render.jar
@@ -262,7 +262,7 @@ jobs:
       # A SEPARATE artifact: this is the one carrying the sealed `builder/` package, and only
       # the publish job -- which builds the private wheel it goes into -- pulls it.
       - name: Upload ta-prepare.jar
-        uses: actions/upload-artifact@v7.0.2
+        uses: actions/upload-artifact@v7
         with:
           name: ta-prepare-jar
           path: host/build/libs/ta-prepare.jar
@@ -272,7 +272,7 @@ jobs:
 
       - name: Cache the built JARs
         if: steps.jars-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4.3.0
+        uses: actions/cache/save@v4
         with:
           path: |
             host/build/libs
@@ -314,7 +314,7 @@ jobs:
 
       - name: Mint GitHub App token (tada + shared)
         id: app-token
-        uses: actions/create-github-app-token@v3.3.0
+        uses: actions/create-github-app-token@v3
         with:
           client-id: ${{ secrets.CI_APP_CLIENT_ID }}
           private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
@@ -324,7 +324,7 @@ jobs:
             travel-animator-shared
 
       - name: Check out TADA @ requested commit
-        uses: actions/checkout@v6.1.0
+        uses: actions/checkout@v6
         with:
           repository: Lascade-Co/tada
           ref: ${{ inputs.sha }}
@@ -333,7 +333,7 @@ jobs:
           persist-credentials: false
 
       - name: Check out private shared protos
-        uses: actions/checkout@v6.1.0
+        uses: actions/checkout@v6
         with:
           repository: Lascade-Co/travel-animator-shared
           ref: ${{ needs.validate.outputs.shared_revision }}
@@ -356,7 +356,7 @@ jobs:
         run: uv run --locked --all-packages --all-extras python tada_render/hatch_build.py
 
       - name: Download ta-prepare.jar
-        uses: actions/download-artifact@v8.0.2
+        uses: actions/download-artifact@v8
         with:
           name: ta-prepare-jar
           path: jar
@@ -365,7 +365,7 @@ jobs:
       # PAYLOAD-<platform>.json, which is provenance rather than a publishable file and is
       # therefore never copied into bundle/.
       - name: Download every platform wheel
-        uses: actions/download-artifact@v8.0.2
+        uses: actions/download-artifact@v8
         with:
           pattern: wheel-*
           merge-multiple: true
@@ -376,7 +376,7 @@ jobs:
       # tada commit that predates the Hosted MCP (no widgets project).
       - name: Set up Node
         if: hashFiles('tada_hosted/widgets/package.json') != ''
-        uses: actions/setup-node@v7.1.0
+        uses: actions/setup-node@v7
         with:
           node-version: 24
           package-manager-cache: false
@@ -467,7 +467,7 @@ jobs:
     steps:
       - name: Mint GitHub App token (travelanimator-mcp)
         id: app-token
-        uses: actions/create-github-app-token@v3.3.0
+        uses: actions/create-github-app-token@v3
         with:
           client-id: ${{ secrets.CI_APP_CLIENT_ID }}
           private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
@@ -477,7 +477,7 @@ jobs:
       # persist-credentials is TRUE here, unlike every other checkout in this file: those are
       # read-only, and this one pushes.
       - name: Check out travelanimator-mcp
-        uses: actions/checkout@v6.1.0
+        uses: actions/checkout@v6
         with:
           repository: Lascade-Co/travelanimator-mcp
           ref: main

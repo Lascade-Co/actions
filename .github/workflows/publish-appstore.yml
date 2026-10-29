@@ -22,7 +22,7 @@ jobs:
     timeout-minutes: 120
     steps:
       - name: Checkout trusted central scripts
-        uses: actions/checkout@v6.1.0
+        uses: actions/checkout@v6
 
       - name: Validate source repository
         id: repo
@@ -72,7 +72,7 @@ jobs:
           RELEASE_TAG: ${{ steps.meta.outputs.tag }}
         run: gh release download "$RELEASE_TAG" --repo "$SOURCE_REPO" --pattern '*.ipa' --dir release-assets
 
-      - uses: actions/setup-python@v6.3.0
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.13'
       - name: Install App Store JWT support

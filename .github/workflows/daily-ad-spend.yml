@@ -87,7 +87,7 @@ jobs:
         run: echo "ad_date=$(date -d '${{ needs.gate2.outputs.report_date }} - 1 day' +%F)" >> "$GITHUB_OUTPUT"
 
       - name: Set up Python
-        uses: actions/setup-python@v7.1.0
+        uses: actions/setup-python@v7
         with:
           python-version: '3.13'
 
