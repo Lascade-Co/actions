@@ -64,6 +64,31 @@ level and `env.production`. Sanitization keeps the staging binding under
 VPC Service binding names cannot also be Infisical runtime secret names. The
 runner does not create services or change their network connectivity.
 
+## Workers Cache and rate limits
+
+Source-owned `cache` and Worker-entrypoint `exports` configuration is retained
+as deployment behavior, separate from resource bindings. Pin Wrangler 4.107.0
+or later to use it. The runner accepts `cache.enabled` and optional boolean
+`cross_version_cache`; each export accepts only `type: "worker"` and optional
+`cache: { "enabled": true | false }`. Durable Object lifecycle and Workflow
+exports are outside this deployment contract. Generated behavior must match
+the selected source environment exactly; empty generated `exports: {}` is
+accepted when the source declares no exports.
+
+Cache and exports inherit into Wrangler environments. Native Preview projects
+keep shared entrypoint exports and production cache settings at the top level,
+with matching effective `env.production` settings. Stage builds retain those
+shared exports; configure the Preview's global cache under `previews.cache` and
+match it in `env.staging.cache`. Do not add `previews.exports`. Sanitization
+restores the production base and preserves Preview cache separately on both
+validation passes. Cloudflare isolates each Preview's cache from production.
+See [Workers Cache configuration](https://developers.cloudflare.com/workers/cache/configuration/).
+
+`ratelimits` preserve exact source names, namespace IDs, and `simple` policies.
+Their `name` fields cannot collide with Infisical runtime secrets. Put native
+production rate bindings at the top level and Preview bindings under `previews`
+and `env.staging`; use separate namespace IDs for independent counters.
+
 ## D1 migrations
 
 D1 migrations are explicit and source-owned. A target opts in by setting

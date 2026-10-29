@@ -24,7 +24,49 @@ export function inside(root, path) {
 const variable = /^[A-Z][A-Z0-9_]*$/;
 const reserved = /^(?:NODE_|NPM_|PNPM_|YARN_|GITHUB_|GH_|ACTIONS_|RUNNER_|CLOUDFLARE_|WRANGLER_|INFISICAL_|CI$|PATH$|HOME$|BASH_ENV$|ENV$)/;
 const script = /^[a-zA-Z0-9][a-zA-Z0-9:_-]*$/;
-export const bindingKeys = ['kv_namespaces', 'r2_buckets', 'd1_databases', 'services', 'vpc_services', 'durable_objects', 'images', 'ai', 'version_metadata', 'analytics_engine_datasets', 'hyperdrive', 'vectorize', 'queues', 'workflows', 'secrets_store_secrets'];
+export const bindingKeys = ['kv_namespaces', 'r2_buckets', 'd1_databases', 'services', 'vpc_services', 'durable_objects', 'images', 'ai', 'version_metadata', 'analytics_engine_datasets', 'hyperdrive', 'vectorize', 'queues', 'workflows', 'secrets_store_secrets', 'ratelimits'];
+export const behaviorKeys = ['cache', 'exports'];
+
+export function validateRateLimits(value) {
+  if (value === undefined) return;
+  assert(Array.isArray(value) && value.length <= 32, 'Source ratelimits must be an array of at most 32 bindings');
+  const names = new Set();
+  for (const limit of value) {
+    assert(limit && typeof limit === 'object' && !Array.isArray(limit) &&
+      Object.keys(limit).every(key => ['name', 'namespace_id', 'simple'].includes(key)) &&
+      typeof limit.name === 'string' && limit.name.length <= 128 && /^[A-Za-z_][A-Za-z0-9_]*$(?![\s\S])/.test(limit.name) && !names.has(limit.name), 'Invalid or duplicate rate limit binding');
+    names.add(limit.name);
+    assert(typeof limit.namespace_id === 'string' && /^(?:0|[1-9][0-9]{0,19})$(?![\s\S])/.test(limit.namespace_id), 'Invalid rate limit namespace_id');
+    const simple = limit.simple;
+    assert(simple && typeof simple === 'object' && !Array.isArray(simple) &&
+      Object.keys(simple).every(key => ['limit', 'period'].includes(key)) &&
+      Number.isSafeInteger(simple.limit) && simple.limit > 0 && [10, 60].includes(simple.period), 'Invalid rate limit simple configuration');
+  }
+}
+
+const plainObject = value => value !== null && typeof value === 'object' && !Array.isArray(value);
+
+function validateCache(value, entrypoint = false) {
+  if (value === undefined) return;
+  const keys = entrypoint ? ['enabled'] : ['enabled', 'cross_version_cache'];
+  assert(plainObject(value) && typeof value.enabled === 'boolean' && Object.keys(value).every(key => keys.includes(key)) &&
+    (value.cross_version_cache === undefined || typeof value.cross_version_cache === 'boolean'), 'Unsupported Worker cache configuration');
+}
+
+export function validateWorkerBehavior(value) {
+  assert(plainObject(value) && Object.keys(value).every(key => behaviorKeys.includes(key)), 'Unsupported Worker deployment behavior');
+  validateCache(value.cache);
+  if (value.exports === undefined) return;
+  assert(plainObject(value.exports) && Object.keys(value.exports).length <= 128, 'Worker exports must be a map of at most 128 entrypoints');
+  for (const [name, entrypoint] of Object.entries(value.exports)) {
+    assert(/^[A-Za-z_$][A-Za-z0-9_$]{0,127}$(?![\s\S])/.test(name), 'Invalid Worker export name');
+    assert(plainObject(entrypoint) && entrypoint.type === 'worker' && Object.keys(entrypoint).every(key => ['type', 'cache'].includes(key)), 'Only Worker entrypoint exports with cache configuration are supported');
+    validateCache(entrypoint.cache, true);
+  }
+}
+
+export const sameBehaviorValue = (key, left, right) => isDeepStrictEqual(left, right) ||
+  (key === 'exports' && Object.keys(left ?? {}).length === 0 && Object.keys(right ?? {}).length === 0);
 
 function resourceBindingNames(bindings) {
   const names = new Set();
@@ -36,6 +78,7 @@ function resourceBindingNames(bindings) {
   };
   for (const key of bindingKeys) visit(bindings[key]);
   for (const item of bindings.durable_objects?.bindings ?? []) if (typeof item.name === 'string') names.add(item.name);
+  for (const item of bindings.ratelimits ?? []) if (typeof item.name === 'string') names.add(item.name);
   return names;
 }
 
@@ -99,6 +142,8 @@ export function prepare(payload, project) {
     assert(/^[a-zA-Z0-9_-]+$/.test(env.infisical_env), 'Missing Infisical environment mapping');
     assert(typeof env.infisical_path === 'string' && /^\/[a-zA-Z0-9_/-]*$/.test(env.infisical_path) && !env.infisical_path.includes('//'), 'Invalid Infisical path');
     assert(env.bindings && typeof env.bindings === 'object' && !Array.isArray(env.bindings) && Object.keys(env.bindings).every(k => bindingKeys.includes(k)), 'Unsupported resource binding configuration');
+    validateRateLimits(env.bindings.ratelimits);
+    validateWorkerBehavior(env.deployment_behavior ?? {});
   }
   const stageKv = project.environments.staging?.bindings.kv_namespaces ?? [];
   const prodKv = project.environments.production.bindings.kv_namespaces ?? [];
@@ -146,11 +191,18 @@ export function sanitizeConfig(config, plan) {
   for (const key of bindingKeys) {
     assert(isDeepStrictEqual(generated[key], expected[key]) || (empty(generated[key]) && empty(expected[key])), `Unexpected ${bindingTarget} resource binding: ${key}`);
   }
+  const expectedBehavior = p.environments[bindingTarget].deployment_behavior ?? {};
+  const generatedBehavior = Object.fromEntries(behaviorKeys.filter(key => config[key] !== undefined).map(key => [key, config[key]]));
+  validateWorkerBehavior(generatedBehavior);
+  for (const key of behaviorKeys) assert(sameBehaviorValue(key, config[key], expectedBehavior[key]), `Unexpected ${bindingTarget} Worker behavior: ${key}`);
   const result = {};
   for (const key of ['name', 'account_id', 'compatibility_date', 'compatibility_flags', 'main', 'assets', 'rules', 'vars', 'workers_dev', 'preview_urls', 'observability', 'limits', 'placement', 'jsx_factory', 'jsx_fragment', ...bindingKeys]) {
     if (generated[key] !== undefined) result[key] = generated[key];
   }
+  // Wrangler normalizes absent rate bindings to []; keep existing bundles unchanged.
+  if (expected.ratelimits === undefined && empty(generated.ratelimits)) delete result.ratelimits;
   result.no_bundle = true;
+  Object.assign(result, structuredClone(expectedBehavior));
   if (p.preview_mode === 'native') {
     assert(config.vars === undefined || (config.vars && typeof config.vars === 'object' && !Array.isArray(config.vars) && Object.keys(config.vars).length === 0), 'Generated native Preview config must not declare plaintext vars');
     assert(isDeepStrictEqual(config.previews && deploymentBindings(config.previews), deploymentBindings(p.preview_config)), 'Generated Preview configuration differs from source');
@@ -160,6 +212,11 @@ export function sanitizeConfig(config, plan) {
       else result[key] = production[key];
     }
     result.previews = deploymentBindings(p.preview_config);
+    const productionBehavior = p.environments.production.deployment_behavior ?? {};
+    for (const key of behaviorKeys) {
+      if (productionBehavior[key] === undefined) delete result[key];
+      else result[key] = structuredClone(productionBehavior[key]);
+    }
   } else {
     assert(empty(config.previews), 'Legacy alias build must not configure native Previews');
   }

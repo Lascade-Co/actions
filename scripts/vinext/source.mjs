@@ -1,6 +1,7 @@
-import { assert, bindingKeys, nonemptyValues, validateDispatch } from './config.mjs';
+import { assert, behaviorKeys, bindingKeys, nonemptyValues, sameBehaviorValue, validateDispatch, validateRateLimits, validateWorkerBehavior } from './config.mjs';
 
 const noPlainVars = source => source.vars === undefined || (source.vars && typeof source.vars === 'object' && !Array.isArray(source.vars) && Object.keys(source.vars).length === 0);
+const behavior = source => Object.fromEntries(behaviorKeys.filter(key => source[key] !== undefined).map(key => [key, source[key]]));
 
 async function fileAtCommit(payload, github, name) {
   const file = await github(`/repos/${payload.repo}/contents/${name}?ref=${payload.sha}`);
@@ -93,9 +94,14 @@ export function projectFromSource(payload, { pkg, wrangler, submodule_repos }, v
   const topName = wrangler.name, topAccount = wrangler.account_id;
   assert(typeof topName === 'string' && typeof topAccount === 'string', 'Source Wrangler must declare Worker and account');
   const nativePreview = wrangler.previews !== undefined;
+  const productionBehavior = behavior(wrangler);
+  validateRateLimits(wrangler.ratelimits);
+  validateWorkerBehavior(productionBehavior);
   if (nativePreview) {
     assert(wrangler.previews && typeof wrangler.previews === 'object' && !Array.isArray(wrangler.previews), 'Source previews must be an object');
     assert(noPlainVars(wrangler) && noPlainVars(wrangler.previews), 'Native Preview source must not declare plaintext vars; use Infisical');
+    validateRateLimits(wrangler.previews.ratelimits);
+    validateWorkerBehavior(behavior(wrangler.previews));
     const [major, minor] = wranglerVersion.split('.').map(Number);
     assert(major > 4 || (major === 4 && minor >= 135), 'Native Previews require Wrangler 4.135.0 or later');
   }
@@ -104,17 +110,27 @@ export function projectFromSource(payload, { pkg, wrangler, submodule_repos }, v
     const source = wrangler.env?.[target];
     if (!source) continue;
     if (nativePreview) assert(noPlainVars(source), 'Native Preview source environments must not declare plaintext vars; use Infisical');
+    validateRateLimits(source.ratelimits);
+    validateWorkerBehavior(behavior(source));
     assert(source.name === topName && (source.account_id ?? topAccount) === topAccount, 'All source environments must target the same Worker and account');
     const bindings = Object.fromEntries(bindingKeys.filter(key => source[key] !== undefined).map(key => [key, source[key]]));
-    environments[target] = { infisical_env, infisical_path: '/', bindings };
+    const deployment_behavior = { ...productionBehavior, ...behavior(source) };
+    environments[target] = { infisical_env, infisical_path: '/', bindings, deployment_behavior };
   }
   const target = payload.branch === 'main' ? 'production' : 'staging';
   assert(environments[target], `Source Wrangler has no ${target} environment`);
+  if ([productionBehavior, ...Object.values(environments).map(environment => environment.deployment_behavior), behavior(wrangler.previews ?? {})].some(settings => Object.keys(settings).length > 0)) {
+    const [major, minor] = wranglerVersion.split('.').map(Number);
+    assert(major > 4 || (major === 4 && minor >= 107), 'Worker cache and entrypoint configuration requires Wrangler 4.107.0 or later');
+  }
   if (nativePreview) {
     assert(environments.staging && environments.production, 'Native Previews require staging and production source environments for Vinext builds');
+    for (const key of behaviorKeys) assert(sameBehaviorValue(key, environments.production.deployment_behavior[key], productionBehavior[key]), `Native production ${key} must match the top-level source configuration`);
+    assert(sameBehaviorValue('exports', environments.staging.deployment_behavior.exports, productionBehavior.exports), 'Native staging exports must match shared top-level Worker exports');
+    assert(sameBehaviorValue('cache', environments.staging.deployment_behavior.cache, wrangler.previews.cache), 'Native staging cache must match previews.cache');
     const previewBindings = Object.fromEntries(bindingKeys.filter(key => wrangler.previews[key] !== undefined).map(key => [key, wrangler.previews[key]]));
     const productionBindings = Object.fromEntries(bindingKeys.filter(key => wrangler[key] !== undefined).map(key => [key, wrangler[key]]));
-    assert(Object.keys(wrangler.previews).every(key => bindingKeys.includes(key) || ['vars', 'compatibility_date', 'compatibility_flags', 'observability', 'limits', 'placement'].includes(key)), 'Unsupported native Preview configuration');
+    assert(Object.keys(wrangler.previews).every(key => bindingKeys.includes(key) || ['vars', 'compatibility_date', 'compatibility_flags', 'observability', 'limits', 'placement', 'cache'].includes(key)), 'Unsupported native Preview configuration');
     environments.staging.bindings = previewBindings;
     environments.production.bindings = productionBindings;
   }

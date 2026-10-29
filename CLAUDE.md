@@ -27,6 +27,10 @@ migrated.
 Classify Infisical `NEXT_PUBLIC_*` keys as build values and every other key
 as a runtime secret, including `VINEXT_*`. Ignore blank and whitespace-only
 values after resolving import overrides; preserve nonempty values verbatim.
+Keep source-owned `cache` and Worker-only `exports` behavior exact; native
+bundles keep shared exports/production cache at the base and Preview cache under
+`previews.cache`. Never add `previews.exports` or lifecycle exports. Preserve
+rate-limit identities/policies and collision-check their `name` fields.
 Keep the system-name validation
 guard for keys that could shadow runner process settings.
 Keep this public runner free of project-specific registries and examples. `dev`
