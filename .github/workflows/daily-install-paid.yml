@@ -123,7 +123,7 @@ jobs:
       group: daily-install-paid-email-${{ needs.gate2.outputs.edition }}
       cancel-in-progress: false
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v6.1.0
         with:
           sparse-checkout: |
             scripts/installpaid
@@ -131,7 +131,7 @@ jobs:
             data/installpaid_google_ipranges.json
           sparse-checkout-cone-mode: false
       - name: Set up Python
-        uses: actions/setup-python@v7
+        uses: actions/setup-python@v7.1.0
         with:
           python-version: '3.13'
       - name: Install dependencies

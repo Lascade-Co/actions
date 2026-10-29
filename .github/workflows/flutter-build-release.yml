@@ -61,7 +61,7 @@ jobs:
 
       - name: Mint GitHub App token
         id: app-token
-        uses: actions/create-github-app-token@v3
+        uses: actions/create-github-app-token@v3.3.0
         with:
           client-id: ${{ secrets.CI_APP_CLIENT_ID }}
           private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
@@ -69,7 +69,7 @@ jobs:
           repositories: ${{ steps.repo.outputs.name }}
 
       - name: Checkout target repo @ branch
-        uses: actions/checkout@v6
+        uses: actions/checkout@v6.1.0
         with:
           repository: ${{ github.event.client_payload.repo }}
           ref: refs/heads/${{ github.event.client_payload.branch }}
@@ -124,7 +124,7 @@ jobs:
     steps:
       - name: Mint GitHub App token
         id: app-token
-        uses: actions/create-github-app-token@v3
+        uses: actions/create-github-app-token@v3.3.0
         with:
           client-id: ${{ secrets.CI_APP_CLIENT_ID }}
           private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
@@ -132,7 +132,7 @@ jobs:
           repositories: ${{ needs.prepare.outputs.name }}
 
       - name: Checkout target repo @ version-bumped commit
-        uses: actions/checkout@v6
+        uses: actions/checkout@v6.1.0
         with:
           repository: ${{ github.event.client_payload.repo }}
           ref: ${{ needs.prepare.outputs.commit_sha }}
@@ -212,13 +212,13 @@ jobs:
           echo "Using dart-define mode (env.json)"
 
       - name: Set up JDK 21
-        uses: actions/setup-java@v5
+        uses: actions/setup-java@v5.7.0
         with:
           distribution: microsoft
           java-version: '21'
 
       - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@v6
+        uses: gradle/actions/setup-gradle@v6.4.1
         with:
           cache-overwrite-existing: true
           cache-read-only: false
@@ -232,7 +232,7 @@ jobs:
           fi
 
       - name: Set up Flutter
-        uses: subosito/flutter-action@v2
+        uses: subosito/flutter-action@v2.23.0
         with:
           flutter-version: ${{ steps.flutter-version.outputs.version }}
           channel: stable
@@ -283,7 +283,7 @@ jobs:
           fi
 
       - name: Upload build artifacts
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@v7.0.2
         with:
           name: android-release
           path: |
@@ -301,7 +301,7 @@ jobs:
     steps:
       - name: Mint GitHub App token
         id: app-token
-        uses: actions/create-github-app-token@v3
+        uses: actions/create-github-app-token@v3.3.0
         with:
           client-id: ${{ secrets.CI_APP_CLIENT_ID }}
           private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
@@ -309,7 +309,7 @@ jobs:
           repositories: ${{ needs.prepare.outputs.name }}
 
       - name: Checkout target repo @ version-bumped commit
-        uses: actions/checkout@v6
+        uses: actions/checkout@v6.1.0
         with:
           repository: ${{ github.event.client_payload.repo }}
           ref: ${{ needs.prepare.outputs.commit_sha }}
@@ -466,7 +466,7 @@ jobs:
           fi
 
       - name: Set up Flutter
-        uses: subosito/flutter-action@v2
+        uses: subosito/flutter-action@v2.23.0
         with:
           flutter-version: ${{ steps.flutter-version.outputs.version }}
           channel: stable
@@ -498,7 +498,7 @@ jobs:
         run: flutter build ipa --export-options-plist=ExportOptions.plist --no-pub ${{ steps.build-mode.outputs.dart_define_args }}
 
       - name: Upload IPA artifact
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@v7.0.2
         with:
           name: ios-release
           path: build/ios/ipa/*.ipa
@@ -517,7 +517,7 @@ jobs:
 
     steps:
       - name: Download build artifacts
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@v8.0.2
         with:
           name: android-release
 
@@ -542,7 +542,7 @@ jobs:
           echo "$NOTES" > release_notes_raw.txt
 
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v6.3.0
         with:
           python-version: "3.11"
 
@@ -621,7 +621,7 @@ jobs:
     steps:
       - name: Mint GitHub App token
         id: app-token
-        uses: actions/create-github-app-token@v3
+        uses: actions/create-github-app-token@v3.3.0
         with:
           client-id: ${{ secrets.CI_APP_CLIENT_ID }}
           private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
@@ -629,7 +629,7 @@ jobs:
           repositories: ${{ needs.prepare.outputs.name }}
 
       - name: Download build artifacts
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@v8.0.2
         with:
           name: android-release
 
@@ -664,7 +664,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Create GitHub Release on target repo
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v2.6.2
         with:
           repository: ${{ github.event.client_payload.repo }}
           token: ${{ steps.app-token.outputs.token }}
@@ -683,7 +683,7 @@ jobs:
     timeout-minutes: 25
     steps:
       - name: Download IPA artifact
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@v8.0.2
         with:
           name: ios-release
 

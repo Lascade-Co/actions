@@ -34,7 +34,7 @@ jobs:
     steps:
       - name: Mint central dispatch token
         id: dispatch-token
-        uses: actions/create-github-app-token@v3
+        uses: actions/create-github-app-token@v3.3.0
         with:
           client-id: ${{ secrets.CI_APP_CLIENT_ID }}
           private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
@@ -43,7 +43,7 @@ jobs:
           permission-contents: write
 
       - name: Request deployment of this exact commit
-        uses: peter-evans/repository-dispatch@v4
+        uses: peter-evans/repository-dispatch@v4.0.1
         with:
           token: ${{ steps.dispatch-token.outputs.token }}
           repository: Lascade-Co/actions

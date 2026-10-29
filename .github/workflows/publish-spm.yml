@@ -35,7 +35,7 @@ jobs:
 
       - name: Mint GitHub App token (source repo)
         id: app-token
-        uses: actions/create-github-app-token@v3
+        uses: actions/create-github-app-token@v3.3.0
         with:
           client-id: ${{ secrets.CI_APP_CLIENT_ID }}
           private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
@@ -52,7 +52,7 @@ jobs:
 
       - name: Mint GitHub App token (SPM repo)
         id: spm-token
-        uses: actions/create-github-app-token@v3
+        uses: actions/create-github-app-token@v3.3.0
         with:
           client-id: ${{ secrets.CI_APP_CLIENT_ID }}
           private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
@@ -60,7 +60,7 @@ jobs:
           repositories: ${{ steps.spm_repo.outputs.name }}
 
       - name: Checkout target repo
-        uses: actions/checkout@v6
+        uses: actions/checkout@v6.1.0
         with:
           repository: ${{ github.event.client_payload.repo }}
           ref: ${{ github.event.client_payload.branch }}
@@ -103,13 +103,13 @@ jobs:
         run: sed -i -e "s/'//g" local.properties
 
       - name: Set up JDK
-        uses: actions/setup-java@v5
+        uses: actions/setup-java@v5.7.0
         with:
           distribution: temurin
           java-version: 21
 
       - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v6
+        uses: gradle/actions/setup-gradle@v6.4.1
 
       - name: Make gradlew executable
         run: chmod +x gradlew
@@ -129,7 +129,7 @@ jobs:
         run: ./gradlew assembleTASharedReleaseXCFramework
 
       - name: Checkout SPM repo
-        uses: actions/checkout@v6
+        uses: actions/checkout@v6.1.0
         with:
           repository: ${{ github.event.client_payload.spm_repo }}
           ref: ${{ github.event.client_payload.spm_branch || 'main' }}
@@ -220,7 +220,7 @@ jobs:
           PY
 
       - name: Commit XCFramework
-        uses: stefanzweifel/git-auto-commit-action@v7
+        uses: stefanzweifel/git-auto-commit-action@v7.2.1
         with:
           repository: spm-repo
           tag_name: v${{ steps.version.outputs.new_version }}
@@ -246,7 +246,7 @@ jobs:
       # default branch, so an unmarked bot commit here would dispatch another publish and
       # loop indefinitely.
       - name: Commit version bump back to source repo
-        uses: stefanzweifel/git-auto-commit-action@v7
+        uses: stefanzweifel/git-auto-commit-action@v7.2.1
         with:
           commit_message: "chore: bump SPM version to v${{ steps.version.outputs.new_version }} [skip ci]"
           branch: ${{ github.event.client_payload.branch }}

@@ -14,5 +14,5 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v6.1.0
       - run: python3 -m unittest discover -s scripts/catchup -p 'test_catchup_email.py' -v
