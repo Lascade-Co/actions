@@ -98,10 +98,10 @@ def test_test_device_flags():
 
 def test_tracks_and_builds():
     assert M.track_of("ios", "4.1.1") == "ios"
-    assert M.track_of("android", "4.0.155") == "android4"
+    assert M.track_of("android", "4.0.155") is None
     assert M.track_of("android", "5.0.8") == "android5"
     assert M.track_of("android", "3.4.93") is None and M.track_of("android", "6.0.0") is None
-    assert M.is_real_build("4.0.155")
+    assert M.is_real_build("5.0.8")
     assert not M.is_real_build("5.0.8-billing-test") and not M.is_real_build("4.1-debug") and not M.is_real_build("")
 
 
@@ -110,9 +110,9 @@ LAST, FIRST = 17, 11
 
 
 def test_test_installs_are_audited_and_dropped():
-    raw = {"ios": [], "android": [row("4.0.9", LAST, 13, gip=True), row("4.0.9", LAST, 40)]}
+    raw = {"ios": [], "android": [row("5.0.9", LAST, 13, gip=True), row("5.0.9", LAST, 40)]}
     kept, audit = M.split(raw)
-    assert audit["android4"]["test"] == 13 and sum(r["n"] for r in kept["android4"]) == 40
+    assert audit["android5"]["test"] == 13 and sum(r["n"] for r in kept["android5"]) == 40
 
 
 def test_latest_full_day_for_both_editions_across_dst():
@@ -171,7 +171,7 @@ def test_small_builds_are_counted_not_hidden():
 
 def test_empty_tracks_render(tmp_path):
     outside = row("4.1.0", FIRST - 3, 900, paid=45)
-    for raw in ({"ios": [], "android": [row("4.0.150", LAST, 900, paid=9)]},       # empty iOS
+    for raw in ({"ios": [], "android": [row("5.0.8", LAST, 900, paid=9)]},         # empty iOS
                 {"ios": [row("4.1.0", LAST, 900, paid=45)], "android": []},       # empty Android
                 {"ios": [], "android": []},                                       # all empty
                 {"ios": [outside], "android": []}):                               # rows only outside the week
@@ -191,9 +191,9 @@ def test_zero_install_last_day_shows_a_dash(tmp_path):
 
 
 def test_android_aug25_compares_client_with_client(tmp_path):
-    m = model({"ios": [], "android": [row("4.0.150", LAST, 9000, paid=90, pc=120)]},     # server and client diverge
+    m = model({"ios": [], "android": [row("5.0.8", LAST, 9000, paid=90, pc=120)]},       # server and client diverge
               bench(and_rate=0.01, aug_android_paid=0))
-    t = track(m, "android4")
+    t = track(m, "android5")
     assert t["cmp"]["aug25"]["client_basis"] and not t["cmp"]["mar26"]["client_basis"]
     aug = t["cmp"]["aug25"]["paid"]
     assert aug["verdict"] is None                                      # directional only
@@ -246,11 +246,13 @@ def test_verdict_rules():
 # --------------------------------------------------------------- render ----
 
 def test_render_variant_a(tmp_path):
+    # Retired Android 4.0 installs must not appear in the subject or body.
     raw = {"ios": [row("4.1.1", LAST, 500, paid=30), row("4.1.0", FIRST, 500, paid=22)],
            "android": [row("4.0.155", LAST, 6000, paid=70), row("5.0.8", LAST, 200, paid=1)]}
     m = model(raw)
     subj, html, text, imgs = R.render(m, "A", tmp_path)
-    assert subj == "TA install→paid · Sun 18 Oct: iOS 6.0% · Android 5.x 0.50% · Android 4.0.x 1.17%"
+    assert subj == "TA install→paid · Sun 18 Oct: iOS 6.0% · Android 5.x 0.50%"
+    assert "4.0.x" not in subj + html + text
     assert "<img" not in html and not imgs
     assert "App Store · iOS" in html and "Play Store · Android 5.x" in text
     assert "latest full day Sun 18 Oct · last 7 days 12–18 Oct" in html and "7-day verdicts vs Mar 2026 / Aug 2025" in text
@@ -267,11 +269,12 @@ def test_render_variant_a(tmp_path):
 
 
 def test_render_variant_b(tmp_path):
+    # Retired Android 4.0 installs must not produce a track chart.
     raw = {"ios": [row("4.1.1", LAST, 500, paid=30), row("4.1.0", FIRST, 500, paid=22)],
            "android": [row("4.0.155", LAST, 6000, paid=70), row("5.0.8", LAST, 200, paid=1)]}
     _, html_b, _, imgs_b = R.render(model(raw), "B", tmp_path)
     # funnel for every track; a by-build trend only where >= 2 builds (iOS here)
-    assert len(imgs_b) == 4 and all(os.path.exists(i["path"]) for i in imgs_b)
+    assert len(imgs_b) == 3 and all(os.path.exists(i["path"]) for i in imgs_b)
     assert all(i["name"] in html_b for i in imgs_b)
     assert "Previewed a trip</td>" in html_b                            # values as text, not only in the PNG
 
@@ -289,7 +292,7 @@ def test_ist_edition_labels_its_cutoff(tmp_path):
 def test_logs_carry_no_figures(tmp_path, monkeypatch):
     """ip_main prints step names only: no counts or rates reach the public run log."""
     import ip_main
-    raw = {"ios": [row("4.1.1", LAST, 987, paid=61)], "android": [row("4.0.155", LAST, 6543, paid=77)]}
+    raw = {"ios": [row("4.1.1", LAST, 987, paid=61)], "android": [row("5.0.8", LAST, 6543, paid=77)]}
     b = bench()
     cidrs, cidr_date = F.load_cidrs()
     b["definition"] = F.definition_hash(cidrs, cidr_date, M.RULES)
@@ -393,8 +396,8 @@ def test_incomplete_benchmarks_are_refused(tmp_path, monkeypatch):
 
 def test_android_rows_are_like_for_like(tmp_path):
     """The server Paid row carries no Aug 2025 mark; the in-app event row carries both."""
-    m = model({"ios": [], "android": [row("4.0.150", LAST, 9000, paid=45, pc=180)]}, bench(aug_android_paid=0))
-    t = track(m, "android4")
+    m = model({"ios": [], "android": [row("5.0.8", LAST, 9000, paid=45, pc=180)]}, bench(aug_android_paid=0))
+    t = track(m, "android5")
     assert R.steps_for(t) == ["pw", "pv", "ex", "paid", "pc"]
     assert R.bench_for(t, m, "aug25", "paid") is None and R.bench_for(t, m, "aug25", "pc") is not None
     assert R.steps_for(track(model({"ios": [row("4.1.0", LAST, 900, paid=45)], "android": []}), "ios")) == \
@@ -512,7 +515,7 @@ def test_gate_dedupe_matches_the_report_date_step():
 
 def test_subject_carries_the_latest_full_day():
     m = model({"ios": [row("4.1.0", LAST, 900, paid=45)], "android": []})
-    assert R.subject_of(m) == "TA install→paid · Sun 18 Oct: iOS 5.0% · Android 5.x — · Android 4.0.x —"
+    assert R.subject_of(m) == "TA install→paid · Sun 18 Oct: iOS 5.0% · Android 5.x —"
 
 
 def test_dated_dedupe_counts_recovery_runs_of_any_event():
@@ -599,7 +602,7 @@ def test_early_model_counts_and_verdicts():
     assert et["day"]["n"] == 100 and et["day"]["paid"] == 1
     assert et["base"]["n"] == 7000
     assert et["cmp"]["paid"]["verdict"] == "worse"
-    assert m["early"]["tracks"]["android4"]["day"] == {} and m["early"]["tracks"]["android4"]["cmp"] == {}
+    assert m["early"]["tracks"]["android5"]["day"] == {} and m["early"]["tracks"]["android5"]["cmp"] == {}
 
 
 def test_early_render_subject_dateline_grid_and_block(tmp_path):

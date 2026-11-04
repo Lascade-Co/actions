@@ -5,7 +5,7 @@ executable test of the SQL semantics (first install wins, 24 h window, export af
 first preview, paid regardless of preview order). Prints MATCH / MISMATCH only: the
 repository is public.
 
-    POSTHOG_PERSONAL_API_KEY=... python3 ip_crosscheck.py --report-date 2026-10-20 [--builds ios:4.1.1,android:4.0.155]
+    POSTHOG_PERSONAL_API_KEY=... python3 ip_crosscheck.py --report-date 2026-10-20 [--builds ios:4.1.1,android:5.0.8]
 
 Alert reconciliation (all eligible builds, calendar days in Asia/Muscat):
     python3 ip_crosscheck.py --muscat-days 2024-02-03 2024-02-04 2024-02-05 \
@@ -253,7 +253,7 @@ def muscat_main(args):
 def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--report-date")
-    ap.add_argument("--builds", default="ios:4.1.1,android:4.0.155,android:5.0.8")
+    ap.add_argument("--builds", default="ios:4.1.1,android:5.0.8")
     ap.add_argument("--muscat-days", nargs="+", metavar="YYYY-MM-DD")
     ap.add_argument("--spine-start", help="Earliest day in the whole alert spine (before selecting check days)")
     output_mode = ap.add_mutually_exclusive_group()

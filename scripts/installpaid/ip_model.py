@@ -23,12 +23,12 @@ WINDOW_DAYS = 60
 PT = ZoneInfo("America/Los_Angeles")   # install days are Pacific dates (ip_fetch cohort_sql)
 # The filter rules applied after the fetch; part of the benchmark fingerprint, so a rule
 # change makes the stored benchmarks refuse to load until they are rebuilt.
+# families= is a frozen historical fingerprint value, not the live track list.
 RULES = "real=dotted-numeric|test=gip,emu|families=ios,android4.0,android5|bench=all-real-builds"
 COUNTS = ("n", "pw", "pv", "ex", "exr", "paid", "pc", "paid_pv", "pc_pv")
 TRACKS = [
     ("ios", "App Store", "iOS"),
-    ("android5", "Play Store", "Android 5.x"),     # upcoming release, shown above 4.0.x
-    ("android4", "Play Store", "Android 4.0.x"),
+    ("android5", "Play Store", "Android 5.x"),
 ]
 BENCH = [("aug25", "Aug 2025"), ("mar26", "Mar 2026")]
 # Android Adapty subscription_started is not linked to app users before ~Jan 2026
@@ -80,13 +80,10 @@ def plat_of(track):
 
 
 def track_of(plat, v):
-    """iOS: every build. Android: the 4.0.x and 5.x families only; anything else (old
-    3.x binaries, a future 6.x) returns None and is left out."""
+    """iOS: every build. Android: the 5.x family only; anything else returns None."""
     if plat == "ios":
         return "ios"
     k = vkey(v)
-    if k[:2] == (4, 0):
-        return "android4"
     if k[:1] == (5,):
         return "android5"
     return None

@@ -421,3 +421,13 @@ _Avoid_: release notes, What's New — those are the App Store version's `whatsN
   **contextual internal links**, the term the audit already uses, and the pool they are chosen from
   is the **link candidates**. "Backlink" means an inbound link from another site and is reserved for
   that, so it never names an internal one.
+
+## Settled decisions — Install → paid
+
+- 2026-11-04 — Android 4.0.x track deleted fully from the install→paid email (model, render,
+  tests, crosscheck default builds); the Muscat alert-reconciliation SQL keeps 4.0 to stay matched
+  with the alert producer. Why: series retired; no dead code; reconciliation must compare like cohorts.
+- 2026-11-04 — `RULES` benchmark fingerprint left unchanged; `families` is historical.
+  Why: editing it forces a benchmark secret rotation with no change to benchmark numbers.
+- 2026-11-04 — meta-product-analysis install→paid stops excluding Android 5.x.
+  Why: 5.x is now the whole Android base.
