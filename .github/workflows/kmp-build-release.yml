@@ -308,7 +308,7 @@ jobs:
   #       domain: ${{ secrets.INFISICAL_DOMAIN }}
   #       secret-path: /Build
   #       export-type: env
-  #   - name: Install production Firebase plist
+  #   - name: Install production Firebase source for generated iOS config
   #     run: python3 ../control/scripts/kmp/release.py ios-inputs
   #   - name: Pin Xcode 26.6
   #     uses: maxim-lobanov/setup-xcode@v1

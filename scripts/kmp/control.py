@@ -88,8 +88,8 @@ def java_value(value):
 
 
 def local_properties(source, destination, sdk):
-    values = {'PLAY_LICENSE_KEY': '', 'CHATWOOT_BASE_URL': '', 'CHATWOOT_WEBSITE_TOKEN': ''}
-    values.update(parse_secret_file(Path(source).read_text()))
+    # No seeded defaults: a key missing from Infisical must fail the app build, never become blank.
+    values = parse_secret_file(Path(source).read_text())
     for name in ('ZOHO_APP_KEY', 'ZOHO_ACCESS_KEY', 'sdk.dir'):
         values.pop(name, None)
     if not sdk:
@@ -102,8 +102,17 @@ def local_properties(source, destination, sdk):
 
 
 def android_inputs():
-    for name, target in [('KEYSTORE_BASE64', 'androidApp/keystore-debug.jks'),
-                         ('SERVICE_JSON_BASE64', 'androidApp/google-services.json')]:
+    install_inputs([('KEYSTORE_BASE64', 'androidApp/keystore-debug.jks'),
+                    ('SERVICE_JSON_BASE64', 'androidApp/google-services.json')])
+
+
+def ios_inputs():
+    # The iOS build generates its Firebase plist from the Android google-services.json (single source).
+    install_inputs([('SERVICE_JSON_BASE64', 'androidApp/google-services.json')])
+
+
+def install_inputs(targets):
+    for name, target in targets:
         value = os.environ.get(name, '')
         if not value:
             raise ValueError('Missing build input ' + name)
@@ -211,7 +220,7 @@ def upload_ipa(path):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest='command', required=True)
-    for command in ['validate', 'resolve', 'android-inputs', 'metadata', 'lint-state', 'push-fix', 'upload-ipa', 'local-properties']:
+    for command in ['validate', 'resolve', 'android-inputs', 'ios-inputs', 'metadata', 'lint-state', 'push-fix', 'upload-ipa', 'local-properties']:
         child = sub.add_parser(command)
         if command == 'local-properties':
             child.add_argument('--input', required=True)
@@ -227,6 +236,7 @@ def main():
     elif args.command == 'local-properties':
         local_properties(args.input, args.output, os.environ.get('ANDROID_HOME') or os.environ.get('ANDROID_SDK_ROOT'))
     elif args.command == 'android-inputs': android_inputs()
+    elif args.command == 'ios-inputs': ios_inputs()
     elif args.command == 'metadata': output(metadata(args.suffix))
     elif args.command == 'lint-state': output(lint_state(args.path))
     elif args.command == 'push-fix': push_fix(os.environ['HEAD_BRANCH'], os.environ['SOURCE_SHA'])

@@ -1,4 +1,5 @@
 import importlib.util
+import base64
 import os
 from pathlib import Path
 import tempfile
@@ -55,12 +56,31 @@ class SecretsTests(unittest.TestCase):
             source.write_text("TOKEN=' leading\\slash\nnext'\nZOHO_APP_KEY='excluded'")
             control.local_properties(source, target, '/sdk')
             text = target.read_text()
-            self.assertIn('PLAY_LICENSE_KEY=\n', text)
+            self.assertNotIn('PLAY_LICENSE_KEY', text)
             self.assertIn('TOKEN=\\ leading\\\\slash\\nnext\n', text)
             self.assertIn('sdk.dir=/sdk\n', text)
             self.assertNotIn('ZOHO', text)
             self.assertFalse(source.exists())
             self.assertEqual(target.stat().st_mode & 0o777, 0o600)
+
+    def test_ios_inputs_install_only_the_firebase_source_and_require_it(self):
+        with tempfile.TemporaryDirectory() as directory:
+            cwd = os.getcwd()
+            os.chdir(directory)
+            try:
+                Path('androidApp').mkdir()
+                with patch.dict(os.environ, {'SERVICE_JSON_BASE64': base64.b64encode(b'firebase').decode(),
+                                             'KEYSTORE_BASE64': ''}):
+                    control.ios_inputs()
+                target = Path('androidApp/google-services.json')
+                self.assertEqual(target.read_bytes(), b'firebase')
+                self.assertEqual(target.stat().st_mode & 0o777, 0o600)
+                self.assertFalse(Path('androidApp/keystore-debug.jks').exists())
+                with patch.dict(os.environ, {'SERVICE_JSON_BASE64': ''}):
+                    with self.assertRaisesRegex(ValueError, '^Missing build input SERVICE_JSON_BASE64$'):
+                        control.ios_inputs()
+            finally:
+                os.chdir(cwd)
 
     def test_malformed_secret_export_fails_without_logging_values(self):
         with self.assertRaisesRegex(ValueError, '^Malformed Infisical export$'):

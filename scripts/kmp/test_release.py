@@ -132,12 +132,13 @@ class Assets(unittest.TestCase):
     def test_signing_inputs_private_and_use_correct_release_paths(self):
         with tempfile.TemporaryDirectory() as temp,in_directory(temp),patch.dict(os.environ,{
             'KEYSTORE_BASE64':base64.b64encode(b'keystore').decode(),
-            'SERVICE_JSON_BASE64':base64.b64encode(b'firebase').decode(),
-            'SERVICE_PLIST_BASE64':base64.b64encode(b'plist').decode()}):
-            release.install_inputs('android');release.install_inputs('ios')
+            'SERVICE_JSON_BASE64':base64.b64encode(b'firebase').decode()}):
+            release.install_inputs('ios')
+            service=Path('androidApp/google-services.json')
+            self.assertEqual(service.read_bytes(),b'firebase');self.assertEqual(service.stat().st_mode & 0o777,0o600)
+            self.assertFalse(Path('iosApp').exists())
+            release.install_inputs('android')
             self.assertEqual(Path('androidApp/keystore.jks').read_bytes(),b'keystore')
-            plist=Path('iosApp/iosApp/Config/Release/GoogleService-Info.plist')
-            self.assertEqual(plist.read_bytes(),b'plist');self.assertEqual(plist.stat().st_mode & 0o777,0o600)
 
 
 class GitTransaction(unittest.TestCase):

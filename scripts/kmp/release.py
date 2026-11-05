@@ -94,7 +94,8 @@ def install_inputs(platform):
     targets = ([('KEYSTORE_BASE64', 'androidApp/keystore.jks'),
                 ('SERVICE_JSON_BASE64', 'androidApp/google-services.json')]
                if platform == 'android' else
-               [('SERVICE_PLIST_BASE64', 'iosApp/iosApp/Config/Release/GoogleService-Info.plist')])
+               # iOS generates its Firebase plist from this file at build time (single source).
+               [('SERVICE_JSON_BASE64', 'androidApp/google-services.json')])
     for key, filename in targets:
         value = os.environ.get(key, '')
         if not value:
