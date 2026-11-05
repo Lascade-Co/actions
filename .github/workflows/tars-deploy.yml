@@ -1458,7 +1458,7 @@ jobs:
           rm -f "$HOME/$incoming"
           REMOTE
 
-      - name: Stage the immutable image on the stable Runpod template
+      - name: Stage the immutable image on the stable Runpod endpoint
         id: runpod-stage
         run: |
           python3 central/scripts/tars/tars_runpod_release.py stage \

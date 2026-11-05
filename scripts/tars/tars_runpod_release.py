@@ -3,10 +3,12 @@
 
 Ordinary production releases never create or delete Runpod resources. They
 verify the stable endpoint, template, and registry-auth IDs supplied by
-Infisical, capture the complete prior template contract, and update only the
-template image. Existing exact v1 resources can be renamed in place through
-the explicit ``migrate`` command; creation is available solely through the
-explicit one-time ``bootstrap`` command. The reviewed expansion from the
+Infisical, capture the prior endpoint image and version, and update only the
+endpoint image. REST calls use Runpod's v2 API, where an endpoint owns its
+image and a template is only the snapshot it was created from. Existing exact
+v1 resources can be renamed in place through the explicit ``migrate``
+command; creation is available solely through the explicit one-time
+``bootstrap`` command. The reviewed expansion from the
 16/24 GB GPU pools to the 16/24 GB plus ADA 24 GB fallback is available only
 through the explicit one-time ``add-ada24-fallback`` command. Excluding the
 incompatible Blackwell 24 GB MIG slice is likewise available only through the
@@ -38,7 +40,7 @@ from typing import Any, Callable, Mapping, Protocol, TypeVar
 
 
 GRAPHQL_URL = "https://api.runpod.io/graphql"
-REST_BASE_URL = "https://rest.runpod.io/v1"
+REST_BASE_URL = "https://api.runpod.io/v2"
 SERVERLESS_BASE_URL = "https://api.runpod.ai/v2"
 MAX_TRANSIENT_CALLS = 3
 REQUEST_TIMEOUT_SECONDS = 30
@@ -60,6 +62,7 @@ LEGACY_GPU_POOL_SELECTOR = "AMPERE_16"
 WORKERS_MIN = 0
 WORKERS_MAX = 2
 ENDPOINT_TYPE = "QB"
+REST_ENDPOINT_TYPE = "QUEUE"
 FLASH_BOOT_TYPE = "OFF"
 SCALER_TYPE = "REQUEST_COUNT"
 SCALER_VALUE = 1
@@ -227,6 +230,10 @@ class ReleaseAPI(Protocol):
 
     def update_template(
         self, template_id: str, name: str, image: str, auth_id: str
+    ) -> dict[str, Any]: ...
+
+    def update_endpoint_image(
+        self, endpoint_id: str, image: str
     ) -> dict[str, Any]: ...
 
     def rename_endpoint(
@@ -577,36 +584,54 @@ class RunpodClient:
         endpoint_id = _resource_id(created.get("id"), "endpoint ID")
         return self._confirmed_endpoint_patch(
             endpoint_id=endpoint_id,
-            payload={"executionTimeoutMs": ENDPOINT_TIMEOUT_MS, "gpuCount": 1},
+            payload={"timeout": ENDPOINT_TIMEOUT_MS, "gpu": {"count": 1}},
             expected_name=name,
-            template_id=template_id,
             workers_max=WORKERS_MAX,
             operation="configure endpoint execution",
         )
 
     def _get_endpoint(self, endpoint_id: str, *, max_calls: int) -> dict[str, Any]:
+        """Read the v2 endpoint plus its version and worker inventory.
+
+        v2 moved the configuration version and worker list to /workers; they
+        are folded in as ``version`` and ``workerInventory``.
+        """
+
         endpoint_id = _resource_id(endpoint_id, "endpoint ID")
-        query = urllib.parse.urlencode(
-            {"includeTemplate": "true", "includeWorkers": "true"}
+        endpoint = _object(
+            self._request(
+                "GET",
+                f"{REST_BASE_URL}/serverless/{endpoint_id}",
+                operation="read endpoint",
+                max_calls=max_calls,
+                bearer_auth=True,
+            ),
+            "endpoint",
         )
-        document = self._request(
-            "GET",
-            f"{REST_BASE_URL}/endpoints/{endpoint_id}?{query}",
-            operation="read endpoint",
-            max_calls=max_calls,
-            bearer_auth=True,
+        workers = _object(
+            self._request(
+                "GET",
+                f"{REST_BASE_URL}/serverless/{endpoint_id}/workers",
+                operation="read endpoint workers",
+                max_calls=max_calls,
+                bearer_auth=True,
+            ),
+            "endpoint workers",
         )
-        return _object(document, "endpoint")
+        return {
+            **endpoint,
+            "version": workers.get("endpointVersion"),
+            "workerInventory": workers.get("workers"),
+        }
 
     def read_endpoint(self, endpoint_id: str) -> dict[str, Any]:
         return self._get_endpoint(endpoint_id, max_calls=MAX_TRANSIENT_CALLS)
 
     def read_template(self, template_id: str) -> dict[str, Any]:
         template_id = _resource_id(template_id, "template ID")
-        query = urllib.parse.urlencode({"includeEndpointBoundTemplates": "true"})
         document = self._request(
             "GET",
-            f"{REST_BASE_URL}/templates/{template_id}?{query}",
+            f"{REST_BASE_URL}/templates/{template_id}",
             operation="read template",
             max_calls=MAX_TRANSIENT_CALLS,
             bearer_auth=True,
@@ -616,7 +641,10 @@ class RunpodClient:
     def update_template(
         self, template_id: str, name: str, image: str, auth_id: str
     ) -> dict[str, Any]:
-        """Issue exactly one update; callers observe eventual convergence."""
+        """Issue exactly one update; callers observe eventual convergence.
+
+        In v2 this changes only the template, never an existing endpoint.
+        """
 
         template_id = _resource_id(template_id, "template ID")
         _expect_equal(name, STABLE_TEMPLATE_NAME, "stable template name")
@@ -624,8 +652,8 @@ class RunpodClient:
         payload = stable_template_payload(name=name, image=image, auth_id=auth_id)
         try:
             document = self._request(
-                "POST",
-                f"{REST_BASE_URL}/templates/{template_id}/update",
+                "PATCH",
+                f"{REST_BASE_URL}/templates/{template_id}",
                 operation="update stable template",
                 payload=payload,
                 max_calls=1,
@@ -639,6 +667,32 @@ class RunpodClient:
             return {}
         return _object(document, "updated stable template")
 
+    def update_endpoint_image(
+        self, endpoint_id: str, image: str
+    ) -> dict[str, Any]:
+        """Set the endpoint image once; Runpod rolls workers to a new version."""
+
+        endpoint_id = _resource_id(endpoint_id, "endpoint ID")
+        if IMMUTABLE_GPU_IMAGE.fullmatch(image) is None:
+            raise RunpodReleaseError(
+                "GPU image must be the immutable TARS DOCR exact-SHA tag and digest"
+            )
+        try:
+            document = self._request(
+                "PATCH",
+                f"{REST_BASE_URL}/serverless/{endpoint_id}",
+                operation="update stable endpoint image",
+                payload={"image": image},
+                max_calls=1,
+                bearer_auth=True,
+            )
+        except RunpodDefinitiveRequestError:
+            raise
+        except RunpodReleaseError:
+            # Ambiguous outcome: never reissue; the version/image poll resolves it.
+            return {}
+        return _object(document, "updated stable endpoint")
+
     def rename_endpoint(
         self, endpoint_id: str, template_id: str
     ) -> dict[str, Any]:
@@ -649,7 +703,7 @@ class RunpodClient:
         try:
             document = self._request(
                 "PATCH",
-                f"{REST_BASE_URL}/endpoints/{endpoint_id}",
+                f"{REST_BASE_URL}/serverless/{endpoint_id}",
                 operation="adopt stable endpoint name",
                 payload={"name": STABLE_ENDPOINT_NAME},
                 empty_ok=True,
@@ -769,7 +823,6 @@ class RunpodClient:
         endpoint_id: str,
         payload: Mapping[str, Any],
         expected_name: str,
-        template_id: str,
         workers_max: int,
         operation: str,
     ) -> dict[str, Any]:
@@ -780,7 +833,7 @@ class RunpodClient:
         try:
             self._request(
                 "PATCH",
-                f"{REST_BASE_URL}/endpoints/{endpoint_id}",
+                f"{REST_BASE_URL}/serverless/{endpoint_id}",
                 operation=operation,
                 payload=payload,
                 empty_ok=True,
@@ -803,7 +856,6 @@ class RunpodClient:
                     endpoint,
                     endpoint_id=endpoint_id,
                     expected_name=expected_name,
-                    template_id=template_id,
                     workers_max=workers_max,
                 )
             except RunpodReleaseError as error:
@@ -832,12 +884,10 @@ class RunpodClient:
         name = _resource_name(
             endpoint.get("name"), OWNED_ENDPOINT_NAME, "endpoint name"
         )
-        template_id = _resource_id(endpoint.get("templateId"), "template ID")
         return self._confirmed_endpoint_patch(
             endpoint_id=endpoint_id,
-            payload={"workersMin": WORKERS_MIN, "workersMax": workers_max},
+            payload={"workers": {"min": WORKERS_MIN, "max": workers_max}},
             expected_name=name,
-            template_id=template_id,
             workers_max=workers_max,
             operation=operation,
         )
@@ -933,7 +983,7 @@ class RunpodClient:
             operation="TARS registry auth",
             delete_once=lambda: self._request(
                 "DELETE",
-                f"{REST_BASE_URL}/containerregistryauth/{auth_id}",
+                f"{REST_BASE_URL}/registries/{auth_id}",
                 operation="delete registry auth",
                 empty_ok=True,
                 max_calls=1,
@@ -1124,52 +1174,54 @@ def verify_endpoint(
     )
 
 
+def _rest_workers_bounds(resource: Mapping[str, Any]) -> tuple[Any, Any]:
+    """Return v2 ``workers.min`` and ``workers.max`` (unvalidated)."""
+
+    workers = resource.get("workers")
+    if not isinstance(workers, dict):
+        return None, None
+    return workers.get("min"), workers.get("max")
+
+
 def verify_endpoint_rest_base(
     resource: Mapping[str, Any],
     *,
     endpoint_id: str,
     expected_name: str,
-    template_id: str,
     workers_max: int = WORKERS_MAX,
 ) -> str:
-    """Verify REST identity and scaling fields that are never self-healed."""
+    """Verify v2 identity and scaling fields that are never self-healed.
 
-    expectations = {
+    v2 endpoints no longer carry a template link; the GraphQL inventory still
+    proves the template binding and the exact ordered GPU selector.
+    """
+
+    for field, expected in {
         "id": endpoint_id,
         "name": expected_name,
-        "templateId": template_id,
-        "workersMin": WORKERS_MIN,
-        "workersMax": workers_max,
-    }
-    for field, expected in expectations.items():
+        "type": REST_ENDPOINT_TYPE,
+    }.items():
         _expect_equal(resource.get(field), expected, f"REST endpoint {field}")
-    # Runpod's endpoint-specific and list responses currently omit computeType
-    # even though the REST schema documents it. The GraphQL side of every
-    # release reconciliation separately proves the ordered primary/fallback
-    # gpuIds selector before handing the endpoint off; the REST side must still
-    # prove a concrete GPU selector and reject any explicit CPU identity.
-    if resource.get("computeType") not in (None, "GPU"):
-        raise RunpodReleaseError(
-            "existing Runpod REST endpoint computeType does not match this release"
-        )
-    gpu_type_ids = resource.get("gpuTypeIds")
+    workers_min_value, workers_max_value = _rest_workers_bounds(resource)
+    _expect_equal(workers_min_value, WORKERS_MIN, "REST endpoint workers.min")
+    _expect_equal(workers_max_value, workers_max, "REST endpoint workers.max")
+    gpu = resource.get("gpu")
+    pools = gpu.get("pools") if isinstance(gpu, dict) else None
     if (
-        not isinstance(gpu_type_ids, list)
-        or not gpu_type_ids
+        not isinstance(pools, list)
+        or not pools
         or any(
-            not isinstance(gpu_type_id, str)
-            or not 1 <= len(gpu_type_id) <= 191
-            or gpu_type_id.strip() != gpu_type_id
-            for gpu_type_id in gpu_type_ids
+            not isinstance(pool, str)
+            or not 1 <= len(pool) <= 191
+            or pool.strip() != pool
+            for pool in pools
         )
-        or len(set(gpu_type_ids)) != len(gpu_type_ids)
+        or len(set(pools)) != len(pools)
     ):
         raise RunpodReleaseError(
-            "existing Runpod REST endpoint gpuTypeIds does not match this release"
+            "existing Runpod REST endpoint gpu pools do not match this release"
         )
-    if resource.get("cpuFlavorIds") not in (None, []) or resource.get(
-        "instanceIds"
-    ) not in (None, []):
+    if resource.get("cpu") not in (None, []):
         raise RunpodReleaseError(
             "existing Runpod REST endpoint CPU selectors do not match this release"
         )
@@ -1181,30 +1233,33 @@ def verify_endpoint_rest(
     *,
     endpoint_id: str,
     expected_name: str,
-    template_id: str,
     workers_max: int = WORKERS_MAX,
 ) -> str:
-    """Verify every deterministic field in Runpod's REST endpoint response."""
+    """Verify every deterministic field in Runpod's v2 endpoint response."""
 
     verified_id = verify_endpoint_rest_base(
         resource,
         endpoint_id=endpoint_id,
         expected_name=expected_name,
-        template_id=template_id,
         workers_max=workers_max,
     )
-    for field, expected in {
-        "gpuCount": 1,
-        "executionTimeoutMs": ENDPOINT_TIMEOUT_MS,
-    }.items():
-        _expect_equal(resource.get(field), expected, f"REST endpoint {field}")
+    gpu = resource.get("gpu")
+    # v2 defaults an omitted gpu.count to 1.
+    _expect_equal(
+        gpu.get("count", 1) if isinstance(gpu, dict) else None,
+        1,
+        "REST endpoint gpu.count",
+    )
+    _expect_equal(
+        resource.get("timeout"), ENDPOINT_TIMEOUT_MS, "REST endpoint timeout"
+    )
     return verified_id
 
 
 def _owned_template_payload(
     *, name: str, image: str, auth_id: str
 ) -> dict[str, Any]:
-    """Return the complete reviewed representation for an owned template."""
+    """Return the reviewed v2 representation for an owned template."""
 
     if name != STABLE_TEMPLATE_NAME and TEMPLATE_NAME.fullmatch(name) is None:
         raise RunpodReleaseError("Runpod returned an invalid TARS template name")
@@ -1214,25 +1269,21 @@ def _owned_template_payload(
         )
     _resource_id(auth_id, "registry auth ID")
     return {
-        "containerDiskInGb": CONTAINER_DISK_GB,
-        "containerRegistryAuthId": auth_id,
-        "dockerEntrypoint": [],
-        "dockerStartCmd": [],
+        "disk": CONTAINER_DISK_GB,
         "env": dict(TEMPLATE_ENV),
-        "imageName": image,
-        "isPublic": False,
+        "image": image,
         "name": name,
         "ports": [],
-        "readme": "",
-        "volumeInGb": 0,
-        "volumeMountPath": TEMPLATE_VOLUME_MOUNT_PATH,
+        "public": False,
+        "registry": auth_id,
+        "serverless": True,
     }
 
 
 def stable_template_payload(
     *, name: str, image: str, auth_id: str
 ) -> dict[str, Any]:
-    """Return the complete reviewed stable-template update representation."""
+    """Return the reviewed stable-template update representation."""
 
     _expect_equal(name, STABLE_TEMPLATE_NAME, "stable template name")
     return _owned_template_payload(name=name, image=image, auth_id=auth_id)
@@ -1252,20 +1303,14 @@ def verify_owned_template_rest(
         auth_id=auth_id,
     )
     _expect_equal(resource.get("id"), template_id, "owned REST template id")
-    for field in (
-        "containerDiskInGb",
-        "containerRegistryAuthId",
-        "env",
-        "imageName",
-        "name",
-    ):
+    for field in ("disk", "env", "image", "name", "registry"):
         _expect_equal(
             resource.get(field),
             expected[field],
             f"owned REST template {field}",
         )
     _verify_sparse_template_defaults(resource, expected)
-    if resource.get("isServerless") is not True:
+    if resource.get("serverless") is not True:
         raise RunpodReleaseError(
             "existing Runpod owned REST template is not serverless"
         )
@@ -1277,15 +1322,7 @@ def _verify_sparse_template_defaults(
 ) -> None:
     """Reject explicit non-defaults while allowing Runpod's sparse reads."""
 
-    for field in (
-        "dockerEntrypoint",
-        "dockerStartCmd",
-        "isPublic",
-        "ports",
-        "readme",
-        "volumeInGb",
-        "volumeMountPath",
-    ):
+    for field in ("ports", "public"):
         actual = resource.get(field)
         value = expected[field]
         if actual is not None and (
@@ -1297,47 +1334,32 @@ def _verify_sparse_template_defaults(
             )
 
 
-def verify_embedded_template_rest(
-    resource: Mapping[str, Any],
+def _verify_endpoint_container(
+    endpoint: Mapping[str, Any],
     *,
-    template_id: str,
-    expected_name: str,
+    ids: StableResourceIDs,
     image: str,
-    auth_id: str,
-) -> str:
-    """Verify the documented subset in an endpoint-embedded template."""
+) -> None:
+    """Verify the container settings a v2 endpoint owns directly."""
 
-    expected = _owned_template_payload(
-        name=expected_name,
-        image=image,
-        auth_id=auth_id,
-    )
-    for field in (
-        "id",
-        "name",
-        "containerDiskInGb",
-        "containerRegistryAuthId",
-        "env",
-    ):
-        expected_value = template_id if field == "id" else expected[field]
-        _expect_equal(
-            resource.get(field),
-            expected_value,
-            f"embedded REST template {field}",
-        )
-    embedded_image = resource.get("imageName")
-    if embedded_image is not None:
-        _expect_equal(
-            embedded_image,
-            image,
-            "embedded REST template imageName",
-        )
-    _verify_sparse_template_defaults(resource, expected)
-    if resource.get("isServerless") is not True:
+    for field, expected in {
+        "image": image,
+        "registry": ids.auth_id,
+        "env": TEMPLATE_ENV,
+        "disk": CONTAINER_DISK_GB,
+    }.items():
+        _expect_equal(endpoint.get(field), expected, f"REST endpoint {field}")
+
+
+def _stable_image(rest_endpoint: Mapping[str, Any]) -> str:
+    """The stable endpoint's own image: the v2 source of truth for a release."""
+
+    image = str(rest_endpoint.get("image", ""))
+    if IMMUTABLE_GPU_IMAGE.fullmatch(image) is None:
         raise RunpodReleaseError(
-            "existing Runpod embedded REST template is not serverless"
+            "existing Runpod stable endpoint image is not immutable"
         )
-    return _resource_id(resource.get("id"), "template ID")
+    return image
 
 
 def verify_stable_template_rest(
@@ -1514,7 +1536,7 @@ def _stable_inventory_resources(
     return endpoint, template, auth
 
 
-def _stable_workers_max(endpoint: Mapping[str, Any], description: str) -> int:
+def _stable_workers_max(workers_max: Any, description: str) -> int:
     """The stable endpoint's worker ceiling at rest: WORKERS_MAX, or zero.
 
     Runpod sets an idle endpoint's workersMax to zero, and TARS's dispatcher
@@ -1523,7 +1545,6 @@ def _stable_workers_max(endpoint: Mapping[str, Any], description: str) -> int:
     ceiling is drift.
     """
 
-    workers_max = endpoint.get("workersMax")
     if type(workers_max) is not int or workers_max not in (0, WORKERS_MAX):
         raise RunpodReleaseError(
             f"existing Runpod {description} workersMax does not match this release"
@@ -1547,31 +1568,31 @@ def _verify_stable_topology_once(
         raise RunpodReleaseError(
             "existing Runpod endpoint gpuIds does not match this release"
         )
-    image = str(template.get("imageName", ""))
-    if IMMUTABLE_GPU_IMAGE.fullmatch(image) is None:
+    # The template is only the endpoint's creation snapshot in v2, so it must
+    # hold some immutable TARS image but need not match the live release.
+    template_image = str(template.get("imageName", ""))
+    if IMMUTABLE_GPU_IMAGE.fullmatch(template_image) is None:
         raise RunpodReleaseError(
             "existing Runpod stable template image is not immutable"
         )
-    if expected_image is not None:
-        _expect_equal(image, expected_image, "stable template image")
     verify_auth(auth, str(auth.get("name")))
     verify_template(
         template,
         expected_name=STABLE_TEMPLATE_NAME,
-        image=image,
+        image=template_image,
         auth_id=ids.auth_id,
     )
     verify_endpoint(
         endpoint,
         expected_name=STABLE_ENDPOINT_NAME,
         template_id=ids.template_id,
-        workers_max=_stable_workers_max(endpoint, "endpoint"),
+        workers_max=_stable_workers_max(endpoint.get("workersMax"), "endpoint"),
         gpu_pool_selector=gpu_pool_selector,
     )
     verify_stable_template_rest(
         client.read_template(ids.template_id),
         template_id=ids.template_id,
-        image=image,
+        image=template_image,
         auth_id=ids.auth_id,
     )
     rest_endpoint = client.read_endpoint(ids.endpoint_id)
@@ -1579,10 +1600,14 @@ def _verify_stable_topology_once(
         rest_endpoint,
         endpoint_id=ids.endpoint_id,
         expected_name=STABLE_ENDPOINT_NAME,
-        template_id=ids.template_id,
-        workers_max=_stable_workers_max(rest_endpoint, "REST endpoint"),
+        workers_max=_stable_workers_max(
+            _rest_workers_bounds(rest_endpoint)[1], "REST endpoint"
+        ),
     )
-    _verify_endpoint_template(rest_endpoint, ids=ids, image=image)
+    image = _stable_image(rest_endpoint)
+    if expected_image is not None:
+        _expect_equal(image, expected_image, "stable endpoint image")
+    _verify_endpoint_container(rest_endpoint, ids=ids, image=image)
     version = _endpoint_version(rest_endpoint)
     _workers(rest_endpoint)
     verify_active_worker_generation(
@@ -1639,9 +1664,13 @@ def _idle_inventory(endpoint: Mapping[str, Any], field: str) -> bool:
 
 
 def _workers(endpoint: Mapping[str, Any]) -> tuple[dict[str, Any], ...]:
-    if _idle_inventory(endpoint, "workers"):
-        return ()
-    value = endpoint.get("workers")
+    """The v2 /workers list folded in by ``read_endpoint``.
+
+    It also lists exited workers with a derived status, so GraphQL pods stay
+    the authority on which workers are active.
+    """
+
+    value = endpoint.get("workerInventory")
     if not isinstance(value, list) or any(
         not isinstance(worker, dict) for worker in value
     ):
@@ -1719,8 +1748,9 @@ def _stable_observation_once(
         rest_endpoint,
         endpoint_id=ids.endpoint_id,
         expected_name=STABLE_ENDPOINT_NAME,
-        template_id=ids.template_id,
-        workers_max=_stable_workers_max(rest_endpoint, "REST endpoint"),
+        workers_max=_stable_workers_max(
+            _rest_workers_bounds(rest_endpoint)[1], "REST endpoint"
+        ),
     )
     _endpoint_version(rest_endpoint)
     _workers(rest_endpoint)
@@ -1824,13 +1854,13 @@ def add_ada24_fallback_to_stable_endpoint(
     if timeout_seconds <= 0 or poll_seconds <= 0:
         raise ValueError("Runpod rollout timing must be positive")
     ids = _validate_stable_ids(ids)
-    endpoint, template, _ = _verify_ada24_transition_idle(
+    endpoint, _, rest_endpoint = _verify_ada24_transition_idle(
         client,
         ids=ids,
         expected_image=None,
         sleeper=sleeper,
     )
-    image = str(template.get("imageName", ""))
+    image = _stable_image(rest_endpoint)
     if endpoint.get("gpuIds") in (
         PRE_MIG_EXCLUSION_GPU_POOL_SELECTOR,
         GPU_POOL_SELECTOR,
@@ -1913,13 +1943,13 @@ def exclude_blackwell_mig_from_stable_endpoint(
     if timeout_seconds <= 0 or poll_seconds <= 0:
         raise ValueError("Runpod rollout timing must be positive")
     ids = _validate_stable_ids(ids)
-    endpoint, template, _ = _verify_blackwell_mig_exclusion_transition_idle(
+    endpoint, _, rest_endpoint = _verify_blackwell_mig_exclusion_transition_idle(
         client,
         ids=ids,
         expected_image=None,
         sleeper=sleeper,
     )
-    image = str(template.get("imageName", ""))
+    image = _stable_image(rest_endpoint)
     if endpoint.get("gpuIds") == GPU_POOL_SELECTOR:
         return ids
     _expect_equal(
@@ -1952,26 +1982,6 @@ def exclude_blackwell_mig_from_stable_endpoint(
                 "before the deadline"
             )
         sleeper(poll_seconds)
-
-
-def _verify_endpoint_template(
-    endpoint: Mapping[str, Any],
-    *,
-    ids: StableResourceIDs,
-    image: str,
-) -> None:
-    template = endpoint.get("template")
-    if not isinstance(template, dict):
-        raise RunpodReleaseError(
-            "Runpod stable endpoint omitted its bound template"
-        )
-    verify_embedded_template_rest(
-        template,
-        template_id=ids.template_id,
-        expected_name=STABLE_TEMPLATE_NAME,
-        image=image,
-        auth_id=ids.auth_id,
-    )
 
 
 def wait_for_stable_template_image(
@@ -2016,7 +2026,7 @@ def wait_for_stable_version(
     sleeper: Callable[[float], None] = time.sleep,
     clock: Callable[[], float] = time.monotonic,
 ) -> int:
-    """Wait until Runpod exposes a new endpoint version for the template."""
+    """Wait until Runpod exposes a new endpoint version for the image."""
 
     if timeout_seconds <= 0 or poll_seconds <= 0:
         raise ValueError("Runpod rollout timing must be positive")
@@ -2055,16 +2065,11 @@ def verify_active_worker_generation(
 ) -> None:
     """Allow historical EXITED rows but reject every active old generation."""
 
+    # v2 workers carry no registry; the endpoint's registry is what they pull with.
+    _expect_equal(rest_endpoint.get("registry"), auth_id, "REST endpoint registry")
     for worker in _active_workers(inventory_endpoint, rest_endpoint):
         _expect_equal(worker.get("image"), image, "active worker image")
-        _expect_equal(
-            worker.get("containerRegistryAuthId"),
-            auth_id,
-            "active worker registry auth",
-        )
-        _expect_equal(
-            worker.get("slsVersion"), version, "active worker slsVersion"
-        )
+        _expect_equal(worker.get("version"), version, "active worker version")
 
 
 def wait_for_active_worker_generation(
@@ -2086,7 +2091,7 @@ def wait_for_active_worker_generation(
             client, ids, sleeper=sleeper
         )
         try:
-            _verify_endpoint_template(endpoint, ids=ids, image=image)
+            _verify_endpoint_container(endpoint, ids=ids, image=image)
             _expect_equal(
                 _endpoint_version(endpoint),
                 version,
@@ -2410,8 +2415,8 @@ def prepare_stable_release(
 
     ids = _validate_stable_ids(ids)
     _validate_release_image(release_sha, gpu_image)
-    _, template, endpoint = verify_stable_topology(client, ids=ids)
-    prior_image = str(template.get("imageName", ""))
+    _, _, endpoint = verify_stable_topology(client, ids=ids)
+    prior_image = _stable_image(endpoint)
     prior_version = _endpoint_version(endpoint)
     if greenfield:
         if prior_release_sha is not None or prior_app_gpu_image is not None:
@@ -2490,7 +2495,7 @@ def stage_prepared_stable_release(
     inventory_endpoint, _, settled_endpoint = verify_stable_topology(
         client, ids=ids, expected_image=receipt.prior_image
     )
-    _verify_endpoint_template(
+    _verify_endpoint_container(
         settled_endpoint,
         ids=ids,
         image=receipt.prior_image,
@@ -2511,12 +2516,7 @@ def stage_prepared_stable_release(
     if receipt.mode == "noop":
         return receipt
 
-    client.update_template(
-        ids.template_id,
-        STABLE_TEMPLATE_NAME,
-        receipt.target_image,
-        ids.auth_id,
-    )
+    client.update_endpoint_image(ids.endpoint_id, receipt.target_image)
     target_version = wait_for_stable_version(
         client,
         ids=ids,
@@ -2589,8 +2589,8 @@ def rollback_stable_release(
             receipt.endpoint_id, receipt.template_id, receipt.auth_id
         )
     )
-    _, template, endpoint = verify_stable_topology(client, ids=ids)
-    current_image = str(template.get("imageName", ""))
+    _, _, endpoint = verify_stable_topology(client, ids=ids)
+    current_image = _stable_image(endpoint)
     if current_image == receipt.prior_image:
         wait_for_stable_idle(
             client,
@@ -2603,7 +2603,7 @@ def rollback_stable_release(
         inventory_endpoint, _, settled_endpoint = verify_stable_topology(
             client, ids=ids, expected_image=receipt.prior_image
         )
-        _verify_endpoint_template(
+        _verify_endpoint_container(
             settled_endpoint,
             ids=ids,
             image=receipt.prior_image,
@@ -2619,11 +2619,11 @@ def rollback_stable_release(
         return
     if receipt.mode == "noop":
         raise RunpodReleaseError(
-            "a no-op rollout receipt does not match the stable template"
+            "a no-op rollout receipt does not match the stable endpoint image"
         )
     if current_image != receipt.target_image:
         raise RunpodReleaseError(
-            "stable template drifted after staging; refusing blind rollback"
+            "stable endpoint image drifted after staging; refusing blind rollback"
         )
     current_version = _endpoint_version(endpoint)
     wait_for_stable_idle(
@@ -2639,7 +2639,7 @@ def rollback_stable_release(
         ids=ids,
         expected_image=receipt.target_image,
     )
-    _verify_endpoint_template(
+    _verify_endpoint_container(
         settled_endpoint,
         ids=ids,
         image=receipt.target_image,
@@ -2663,12 +2663,7 @@ def rollback_stable_release(
         auth_id=ids.auth_id,
         version=settled_version,
     )
-    client.update_template(
-        ids.template_id,
-        STABLE_TEMPLATE_NAME,
-        receipt.prior_image,
-        ids.auth_id,
-    )
+    client.update_endpoint_image(ids.endpoint_id, receipt.prior_image)
     rollback_version = wait_for_stable_version(
         client,
         ids=ids,
@@ -2709,16 +2704,16 @@ def verify_application_generation(
         baseline.endpoint_id,
         "application baseline stable endpoint",
     )
-    inventory_endpoint, template, rest_endpoint = verify_stable_topology(
+    inventory_endpoint, _, rest_endpoint = verify_stable_topology(
         client, ids=ids
     )
-    provider_image = str(template.get("imageName", ""))
+    provider_image = _stable_image(rest_endpoint)
     _validate_application_provider_coupling(
         baseline.release_sha,
         baseline.gpu_image,
         provider_image,
     )
-    _verify_endpoint_template(
+    _verify_endpoint_container(
         rest_endpoint,
         ids=ids,
         image=provider_image,
@@ -2784,7 +2779,7 @@ def verify_receipt_target(
     _, _, rest_endpoint = verify_stable_topology(
         client, ids=ids, expected_image=receipt.target_image
     )
-    _verify_endpoint_template(
+    _verify_endpoint_container(
         rest_endpoint,
         ids=ids,
         image=receipt.target_image,
@@ -2809,7 +2804,7 @@ def verify_receipt_target(
     endpoint, _, rest_endpoint = verify_stable_topology(
         client, ids=ids, expected_image=receipt.target_image
     )
-    _verify_endpoint_template(
+    _verify_endpoint_container(
         rest_endpoint,
         ids=ids,
         image=receipt.target_image,
@@ -2987,20 +2982,8 @@ def verify_adoptable_topology(
         rest_endpoint,
         endpoint_id=ids.endpoint_id,
         expected_name=endpoint_name,
-        template_id=ids.template_id,
     )
-    embedded_template = rest_endpoint.get("template")
-    if not isinstance(embedded_template, dict):
-        raise RunpodReleaseError(
-            "Runpod endpoint to adopt omitted its bound template"
-        )
-    verify_embedded_template_rest(
-        embedded_template,
-        template_id=ids.template_id,
-        expected_name=template_name,
-        image=image,
-        auth_id=ids.auth_id,
-    )
+    _verify_endpoint_container(rest_endpoint, ids=ids, image=image)
     version = _endpoint_version(rest_endpoint)
     _workers(rest_endpoint)
     verify_active_worker_generation(
@@ -3173,11 +3156,12 @@ def adopt_existing_stable_resources(
         )
     if endpoint.get("name") != STABLE_ENDPOINT_NAME:
         client.rename_endpoint(ids.endpoint_id, ids.template_id)
+    # A v2 template update no longer rolls the endpoint, so no version bump.
     wait_for_adopted_topology(
         client,
         ids=ids,
         image=image,
-        minimum_version=prior_version + (1 if template_changed else 0),
+        minimum_version=prior_version,
         timeout_seconds=timeout_seconds,
         poll_seconds=poll_seconds,
         sleeper=sleeper,
@@ -3360,10 +3344,9 @@ def verify_retirement_template_rest(
     if variant == "current":
         _expect_equal(resource.get("env"), TEMPLATE_ENV, "REST template env")
     elif variant == "legacy":
-        # Runpod omits env entirely from the REST representation of the
-        # historical GraphQL env=[] form. Keep this exception retirement-only;
-        # current release reconciliation still requires the exact env object.
-        if "env" in resource:
+        # The historical GraphQL env=[] form reads back as an omitted or empty
+        # env. Keep this exception retirement-only.
+        if resource.get("env") not in (None, {}):
             raise RunpodReleaseError(
                 "existing Runpod REST template env does not match this release"
             )
@@ -3501,7 +3484,6 @@ def _legacy_retirement_chains(
             client.read_endpoint(endpoint_id),
             endpoint_id=endpoint_id,
             expected_name=endpoint_name,
-            template_id=template_id,
             workers_max=workers_max,
         )
         verify_retirement_template_rest(
@@ -3788,7 +3770,6 @@ def _verify_planned_legacy_inventory(
             rest_endpoint,
             endpoint_id=chain["endpoint_id"],
             expected_name=chain["endpoint_name"],
-            template_id=chain["template_id"],
             workers_max=workers_max,
         )
         verify_retirement_template_rest(
@@ -4184,14 +4165,14 @@ def main() -> None:
                     "endpoint_version",
                     str(receipt.target_version),
                 )
-                print("staged the immutable image on the stable Runpod template")
+                print("staged the immutable image on the stable Runpod endpoint")
                 return
             if args.command == "rollback":
                 rollback_stable_release(
                     client,
                     receipt=read_rollout_receipt(args.receipt_file),
                 )
-                print("restored the prior stable Runpod template image")
+                print("restored the prior stable Runpod endpoint image")
                 return
             if args.command == "finalize":
                 finalize_stable_release(

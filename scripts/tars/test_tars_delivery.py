@@ -779,46 +779,50 @@ class FakeReleaseAPI:
         return Inventory(tuple(self.endpoints), tuple(self.templates), tuple(self.auths))
 
     def read_endpoint(self, endpoint_id: str) -> dict:
+        """Runpod v2 endpoint plus the folded-in /workers inventory."""
+
         endpoint = next(item for item in self.endpoints if item["id"] == endpoint_id)
-        template = next(
-            (
-                item
-                for item in self.templates
-                if item["id"] == endpoint["templateId"]
-            ),
-            None,
-        )
-        resource = {
+        workers = []
+        for worker in endpoint.get("workers", []):
+            converted = dict(worker)
+            if "slsVersion" in converted:
+                converted["version"] = converted.pop("slsVersion")
+            converted.pop("containerRegistryAuthId", None)
+            workers.append(converted)
+        return {
             "id": endpoint["id"],
             "name": endpoint["name"],
-            "templateId": endpoint["templateId"],
-            "workersMin": endpoint["workersMin"],
-            "workersMax": endpoint["workersMax"],
-            "computeType": endpoint["computeType"],
-            "gpuCount": endpoint["gpuCount"],
-            "executionTimeoutMs": endpoint["executionTimeoutMs"],
-            "gpuTypeIds": [
-                "NVIDIA RTX A4000",
-                "NVIDIA RTX A4500",
-                "NVIDIA RTX 4000 Ada Generation",
-                "NVIDIA RTX 2000 Ada Generation",
-                "NVIDIA L4",
-                "NVIDIA RTX A5000",
-                "NVIDIA GeForce RTX 3090",
-                "NVIDIA GeForce RTX 4090",
-            ],
+            "type": "QUEUE",
+            "workers": {
+                "min": endpoint["workersMin"],
+                "max": endpoint["workersMax"],
+            },
+            "gpu": {
+                "pools": ["AMPERE_16", "AMPERE_24", "ADA_24"],
+                "excludedTypes": [tars_runpod_release.BLACKWELL_MIG_GPU_ID],
+                "count": endpoint["gpuCount"],
+            },
+            "timeout": endpoint["executionTimeoutMs"],
+            "image": endpoint.get("image"),
+            "registry": endpoint.get("registry"),
+            "env": dict(endpoint.get("env", self.template_env)),
+            "disk": endpoint.get("disk", 20),
             "version": endpoint.get("version", 0),
-            "workers": [dict(worker) for worker in endpoint.get("workers", [])],
-            "template": self._rest_template(template) if template is not None else {},
+            "workerInventory": workers,
         }
-        if endpoint["workersMax"] == 0 and not endpoint.get("workers"):
-            # Runpod's own response for an idle endpoint has no worker list.
-            del resource["workers"]
-        return resource
 
     def read_template(self, template_id: str) -> dict:
         template = next(item for item in self.templates if item["id"] == template_id)
-        resource = self._rest_template(template)
+        resource = {
+            "id": template["id"],
+            "name": template["name"],
+            "image": template.get("imageName"),
+            "registry": template.get("containerRegistryAuthId"),
+            "disk": template.get("containerDiskInGb"),
+            "public": template.get("isPublic", False),
+            "serverless": template.get("isServerless"),
+            "ports": list(template.get("ports", [])),
+        }
         environment = (
             self.template_env_by_id[template_id]
             if template_id in self.template_env_by_id
@@ -826,28 +830,7 @@ class FakeReleaseAPI:
         )
         if environment is not self.OMIT_TEMPLATE_ENV:
             resource["env"] = environment
-        else:
-            resource.pop("env", None)
         return resource
-
-    @staticmethod
-    def _rest_template(template: dict) -> dict:
-        return {
-            "id": template["id"],
-            "name": template["name"],
-            "imageName": template.get("imageName"),
-            "containerRegistryAuthId": template.get("containerRegistryAuthId"),
-            "containerDiskInGb": template.get("containerDiskInGb"),
-            "volumeInGb": template.get("volumeInGb"),
-            "volumeMountPath": template.get("volumeMountPath", "/workspace"),
-            "dockerEntrypoint": list(template.get("dockerEntrypoint", [])),
-            "dockerStartCmd": list(template.get("dockerStartCmd", [])),
-            "env": {"RUNPOD_INIT_TIMEOUT": "1200"},
-            "isPublic": template.get("isPublic", False),
-            "isServerless": template.get("isServerless"),
-            "ports": list(template.get("ports", [])),
-            "readme": template.get("readme", ""),
-        }
 
     def read_endpoint_health(
         self, endpoint_id: str
@@ -898,6 +881,9 @@ class FakeReleaseAPI:
         for template in self.templates:
             if template["id"] == template_id:
                 template["boundEndpointId"] = resource["id"]
+                # A v2 endpoint snapshots the template's container settings.
+                resource["image"] = template.get("imageName")
+                resource["registry"] = template.get("containerRegistryAuthId")
         return resource
 
     def update_template(
@@ -923,10 +909,17 @@ class FakeReleaseAPI:
                 "readme": "",
             }
         )
-        for endpoint in self.endpoints:
-            if endpoint["templateId"] == template_id:
-                endpoint["version"] = endpoint.get("version", 0) + 1
+        # v2: a template update never changes an existing endpoint.
         return self.read_template(template_id)
+
+    def update_endpoint_image(self, endpoint_id: str, image: str) -> dict:
+        self.calls.append(f"update_endpoint_image:{image}")
+        if self.update_observer is not None:
+            self.update_observer()
+        endpoint = next(item for item in self.endpoints if item["id"] == endpoint_id)
+        endpoint["image"] = image
+        endpoint["version"] = endpoint.get("version", 0) + 1
+        return self.read_endpoint(endpoint_id)
 
     def rename_endpoint(self, endpoint_id: str, template_id: str) -> dict:
         self.calls.append(f"rename_endpoint:{endpoint_id}")
@@ -1021,6 +1014,8 @@ class FakeReleaseAPI:
             created=datetime.now(timezone.utc),
         )
         endpoint["version"] = version
+        endpoint["image"] = image
+        endpoint["registry"] = "stable-auth"
         self.endpoints.append(endpoint)
 
     def seed_release(self, release_sha: str, suffix: str, created: datetime) -> None:
@@ -1052,14 +1047,15 @@ class FakeReleaseAPI:
                 "boundEndpointId": endpoint_id,
             }
         )
-        self.endpoints.append(
-            self.endpoint(
-                endpoint_id=endpoint_id,
-                name=f"tars-runpod-endpoint-v1-{release_sha}",
-                template_id=template_id,
-                created=created,
-            )
+        legacy_endpoint = self.endpoint(
+            endpoint_id=endpoint_id,
+            name=f"tars-runpod-endpoint-v1-{release_sha}",
+            template_id=template_id,
+            created=created,
         )
+        legacy_endpoint["image"] = self.templates[-1]["imageName"]
+        legacy_endpoint["registry"] = auth_id
+        self.endpoints.append(legacy_endpoint)
 
     def zero_endpoint(self, endpoint: dict) -> dict:
         self.calls.append(f"zero:{endpoint['id']}")
@@ -1128,7 +1124,7 @@ class RacingWorkerInventoryAPI(FakeReleaseAPI):
             self.race == self.ACTIVE_MISSING_REST
             and self.correlation_endpoint_calls <= self.transient_reads
         ):
-            endpoint["workers"] = []
+            endpoint["workerInventory"] = []
         return endpoint
 
 
@@ -1245,7 +1241,7 @@ class RunpodReleaseTest(unittest.TestCase):
             )
 
             self.assertEqual(
-                api.calls, [f"update_template:{self.TARGET_IMAGE}"]
+                api.calls, [f"update_endpoint_image:{self.TARGET_IMAGE}"]
             )
             self.assertNotIn("create_auth", api.calls)
             self.assertNotIn("create_template", api.calls)
@@ -1260,15 +1256,14 @@ class RunpodReleaseTest(unittest.TestCase):
             self.assertEqual(stored.target_image, self.TARGET_IMAGE)
             self.assertEqual(stored.target_version, 8)
 
-    def test_stable_stage_waits_for_standalone_rest_template(self) -> None:
-        class StaleRESTTemplateAPI(FakeReleaseAPI):
-            def read_template(self, template_id: str) -> dict:
-                template = super().read_template(template_id)
-                if template["imageName"] == RunpodReleaseTest.TARGET_IMAGE:
-                    template["imageName"] = RunpodReleaseTest.IMAGE
-                return template
+    def test_stable_stage_waits_for_endpoint_image_convergence(self) -> None:
+        class StaleEndpointImageAPI(FakeReleaseAPI):
+            def update_endpoint_image(self, endpoint_id: str, image: str) -> dict:
+                # Runpod accepted the PATCH but never applied it.
+                self.calls.append(f"update_endpoint_image:{image}")
+                return {}
 
-        api = StaleRESTTemplateAPI()
+        api = StaleEndpointImageAPI()
         api.seed_stable(self.IMAGE, version=7)
         ticks = iter((0.0, 0.0, 1.0))
         with tempfile.TemporaryDirectory() as directory:
@@ -1290,7 +1285,7 @@ class RunpodReleaseTest(unittest.TestCase):
                     clock=lambda: next(ticks),
                 )
         self.assertEqual(
-            api.calls, [f"update_template:{self.TARGET_IMAGE}"]
+            api.calls, [f"update_endpoint_image:{self.TARGET_IMAGE}"]
         )
 
     def test_durable_prepared_boundary_recovers_after_runner_receipt_loss(
@@ -1318,7 +1313,7 @@ class RunpodReleaseTest(unittest.TestCase):
                 receipt=prepared,
                 receipt_path=runner,
             )
-            self.assertEqual(api.templates[0]["imageName"], self.TARGET_IMAGE)
+            self.assertEqual(api.endpoints[0]["image"], self.TARGET_IMAGE)
 
             # A replacement runner has only the control-node boundary written
             # before mutation, not the runner-local post-stage receipt.
@@ -1327,7 +1322,7 @@ class RunpodReleaseTest(unittest.TestCase):
                 receipt=tars_runpod_release.read_rollout_receipt(durable),
             )
 
-        self.assertEqual(api.templates[0]["imageName"], self.IMAGE)
+        self.assertEqual(api.endpoints[0]["image"], self.IMAGE)
         self.assertEqual(api.endpoints[0]["version"], 9)
 
     def test_prepare_refuses_live_app_and_provider_image_mismatch(self) -> None:
@@ -1387,10 +1382,10 @@ class RunpodReleaseTest(unittest.TestCase):
                 greenfield=False,
                 receipt_path=boundary,
             )
-            api.templates[0]["imageName"] = self.TARGET_IMAGE
+            api.endpoints[0]["image"] = self.TARGET_IMAGE
             api.endpoints[0]["version"] = 8
             with self.assertRaisesRegex(
-                RunpodReleaseError, "stable template image"
+                RunpodReleaseError, "stable endpoint image"
             ):
                 tars_runpod_release.stage_prepared_stable_release(
                     api,
@@ -1406,7 +1401,7 @@ class RunpodReleaseTest(unittest.TestCase):
             ) -> tars_runpod_release.EndpointHealth:
                 health = super().read_endpoint_health(endpoint_id)
                 if len(self.health_calls) == 2:
-                    self.templates[0]["imageName"] = (
+                    self.endpoints[0]["image"] = (
                         RunpodReleaseTest.IMAGE_WITH_DIFFERENT_DIGEST
                     )
                 return health
@@ -1430,7 +1425,7 @@ class RunpodReleaseTest(unittest.TestCase):
                 tars_runpod_release.EndpointHealth(0, 0),
             ]
             with self.assertRaisesRegex(
-                RunpodReleaseError, "stable template image"
+                RunpodReleaseError, "stable endpoint image"
             ):
                 tars_runpod_release.stage_prepared_stable_release(
                     api,
@@ -1847,12 +1842,8 @@ class RunpodReleaseTest(unittest.TestCase):
 
         for field, value, message in (
             ("image", self.TARGET_IMAGE, "active worker image"),
-            (
-                "containerRegistryAuthId",
-                "old-auth",
-                "active worker registry auth",
-            ),
-            ("slsVersion", 6, "active worker slsVersion"),
+            ("registry", "old-auth", "REST endpoint registry"),
+            ("slsVersion", 6, "active worker version"),
         ):
             with self.subTest(field=field):
                 api = FakeReleaseAPI()
@@ -1863,10 +1854,12 @@ class RunpodReleaseTest(unittest.TestCase):
                 worker = {
                     "id": "worker",
                     "image": self.IMAGE,
-                    "containerRegistryAuthId": "stable-auth",
                     "slsVersion": 7,
                 }
-                worker[field] = value
+                if field == "registry":
+                    api.endpoints[0]["registry"] = value
+                else:
+                    worker[field] = value
                 api.endpoints[0]["workers"] = [worker]
                 with self.assertRaisesRegex(RunpodReleaseError, message):
                     tars_runpod_release.verify_application_generation(
@@ -1968,7 +1961,7 @@ class RunpodReleaseTest(unittest.TestCase):
 
         self.assertEqual(receipt.baseline, "greenfield")
         self.assertEqual(receipt.mode, "noop")
-        self.assertEqual(api.templates[0]["imageName"], self.TARGET_IMAGE)
+        self.assertEqual(api.endpoints[0]["image"], self.TARGET_IMAGE)
         self.assertEqual(api.calls, [])
 
     def test_stable_stage_missing_configured_resources_never_bootstraps(self) -> None:
@@ -2015,7 +2008,7 @@ class RunpodReleaseTest(unittest.TestCase):
             api, ids=self.stable_ids(), expected_image=self.IMAGE
         )
 
-        self.assertEqual(rest_endpoint["workersMax"], 0)
+        self.assertEqual(rest_endpoint["workers"]["max"], 0)
         self.assertEqual(api.calls, [])
 
     def test_stable_release_stages_and_rolls_back_an_idle_endpoint(self) -> None:
@@ -2033,13 +2026,13 @@ class RunpodReleaseTest(unittest.TestCase):
                 greenfield=False,
                 receipt_path=Path(directory) / "rollout.json",
             )
-            self.assertEqual(api.calls, [f"update_template:{self.TARGET_IMAGE}"])
+            self.assertEqual(api.calls, [f"update_endpoint_image:{self.TARGET_IMAGE}"])
             tars_runpod_release.rollback_stable_release(
                 api, receipt=receipt, sleeper=lambda _: None
             )
         self.assertEqual(
             api.calls,
-            [f"update_template:{self.TARGET_IMAGE}", f"update_template:{self.IMAGE}"],
+            [f"update_endpoint_image:{self.TARGET_IMAGE}", f"update_endpoint_image:{self.IMAGE}"],
         )
 
     def test_stable_topology_refuses_any_other_worker_ceiling(self) -> None:
@@ -2057,13 +2050,12 @@ class RunpodReleaseTest(unittest.TestCase):
                 self.assertEqual(api.calls, [])
 
     def test_stable_topology_accepts_an_idle_endpoints_missing_worker_lists(self) -> None:
-        # Runpod's REST read of an idle endpoint has no `workers` key at all
-        # (the fake mirrors that), and its GraphQL pods may be null too.
+        # GraphQL pods of an idle endpoint may be null; v2 /workers is a list.
         api = FakeReleaseAPI()
         api.seed_stable(self.IMAGE, version=7)
         api.endpoints[0]["workersMax"] = 0
         api.endpoints[0]["pods"] = None
-        self.assertNotIn("workers", api.read_endpoint("stable-endpoint"))
+        self.assertEqual(api.read_endpoint("stable-endpoint")["workerInventory"], [])
 
         tars_runpod_release.verify_stable_topology(
             api, ids=self.stable_ids(), expected_image=self.IMAGE
@@ -2079,7 +2071,7 @@ class RunpodReleaseTest(unittest.TestCase):
 
         def without_workers(endpoint_id: str) -> dict:
             resource = read(endpoint_id)
-            resource.pop("workers")
+            resource["workerInventory"] = None
             return resource
 
         api.read_endpoint = without_workers
@@ -2191,7 +2183,7 @@ class RunpodReleaseTest(unittest.TestCase):
 
         self.assertEqual(endpoint["id"], "stable-endpoint")
         self.assertEqual(template["id"], "stable-template")
-        self.assertEqual(rest_endpoint["workers"][0]["id"], "worker")
+        self.assertEqual(rest_endpoint["workerInventory"][0]["id"], "worker")
         self.assertEqual(api.correlation_inventory_calls, 2)
         self.assertEqual(api.correlation_endpoint_calls, 2)
         self.assertEqual(sleeps, [1.0])
@@ -2369,20 +2361,18 @@ class RunpodReleaseTest(unittest.TestCase):
             api.health_calls, ["stable-endpoint", "stable-endpoint"]
         )
 
-    def test_stable_noop_stage_refuses_stale_embedded_template(self) -> None:
-        class StaleEmbeddedTemplateAPI(FakeReleaseAPI):
+    def test_stable_noop_stage_refuses_endpoint_container_drift(self) -> None:
+        class DriftedContainerAPI(FakeReleaseAPI):
             def read_endpoint(self, endpoint_id: str) -> dict:
                 endpoint = super().read_endpoint(endpoint_id)
-                endpoint["template"]["imageName"] = (
-                    RunpodReleaseTest.IMAGE
-                )
+                endpoint["env"] = {}
                 return endpoint
 
-        api = StaleEmbeddedTemplateAPI()
+        api = DriftedContainerAPI()
         api.seed_stable(self.TARGET_IMAGE, version=11)
         with tempfile.TemporaryDirectory() as directory:
             with self.assertRaisesRegex(
-                RunpodReleaseError, "REST template imageName"
+                RunpodReleaseError, "REST endpoint env"
             ):
                 tars_runpod_release.stage_stable_release(
                     api,
@@ -2414,28 +2404,26 @@ class RunpodReleaseTest(unittest.TestCase):
                 api, receipt=receipt
             )
         self.assertEqual(
-            [call for call in api.calls if call.startswith("update_template:")],
+            [call for call in api.calls if call.startswith("update_endpoint_image:")],
             [
-                f"update_template:{self.TARGET_IMAGE}",
-                f"update_template:{self.IMAGE}",
+                f"update_endpoint_image:{self.TARGET_IMAGE}",
+                f"update_endpoint_image:{self.IMAGE}",
             ],
         )
-        self.assertEqual(api.templates[0]["imageName"], self.IMAGE)
+        self.assertEqual(api.endpoints[0]["image"], self.IMAGE)
         self.assertEqual(api.endpoints[0]["version"], 9)
 
-    def test_stable_rollback_refuses_stale_embedded_prior_template(self) -> None:
-        class StaleEmbeddedTemplateAPI(FakeReleaseAPI):
+    def test_stable_rollback_refuses_endpoint_container_drift(self) -> None:
+        class DriftedContainerAPI(FakeReleaseAPI):
             def read_endpoint(self, endpoint_id: str) -> dict:
                 endpoint = super().read_endpoint(endpoint_id)
-                endpoint["template"]["imageName"] = (
-                    RunpodReleaseTest.TARGET_IMAGE
-                )
+                endpoint["env"] = {}
                 return endpoint
 
-        api = StaleEmbeddedTemplateAPI()
+        api = DriftedContainerAPI()
         api.seed_stable(self.IMAGE, version=9)
         with self.assertRaisesRegex(
-            RunpodReleaseError, "REST template imageName"
+            RunpodReleaseError, "REST endpoint env"
         ):
             tars_runpod_release.rollback_stable_release(
                 api,
@@ -2459,7 +2447,7 @@ class RunpodReleaseTest(unittest.TestCase):
                 greenfield=False,
                 receipt_path=Path(directory) / "rollout.json",
             )
-            api.templates[0]["imageName"] = self.IMAGE_WITH_DIFFERENT_DIGEST
+            api.endpoints[0]["image"] = self.IMAGE_WITH_DIFFERENT_DIGEST
             with self.assertRaisesRegex(
                 RunpodReleaseError, "drifted after staging"
             ):
@@ -2470,9 +2458,9 @@ class RunpodReleaseTest(unittest.TestCase):
             [
                 call
                 for call in api.calls
-                if call.startswith("update_template:")
+                if call.startswith("update_endpoint_image:")
             ],
-            [f"update_template:{self.TARGET_IMAGE}"],
+            [f"update_endpoint_image:{self.TARGET_IMAGE}"],
         )
 
     def test_stable_rollback_refuses_image_drift_during_idle_wait(self) -> None:
@@ -2482,7 +2470,7 @@ class RunpodReleaseTest(unittest.TestCase):
             ) -> tars_runpod_release.EndpointHealth:
                 health = super().read_endpoint_health(endpoint_id)
                 if len(self.health_calls) == 2:
-                    self.templates[0]["imageName"] = (
+                    self.endpoints[0]["image"] = (
                         RunpodReleaseTest.IMAGE_WITH_DIFFERENT_DIGEST
                     )
                 return health
@@ -2494,7 +2482,7 @@ class RunpodReleaseTest(unittest.TestCase):
             tars_runpod_release.EndpointHealth(0, 0),
         ]
         with self.assertRaisesRegex(
-            RunpodReleaseError, "stable template image"
+            RunpodReleaseError, "stable endpoint image"
         ):
             tars_runpod_release.rollback_stable_release(
                 api,
@@ -2577,7 +2565,7 @@ class RunpodReleaseTest(unittest.TestCase):
                     sleeper=lambda _seconds: None,
                 )
 
-    def test_verify_target_refuses_embedded_template_drift_after_idle(
+    def test_verify_target_refuses_endpoint_container_drift_after_idle(
         self,
     ) -> None:
         class DriftingEmbeddedTemplateAPI(FakeReleaseAPI):
@@ -2589,15 +2577,13 @@ class RunpodReleaseTest(unittest.TestCase):
                 self.endpoint_reads += 1
                 endpoint = super().read_endpoint(endpoint_id)
                 if self.endpoint_reads >= 3:
-                    endpoint["template"]["imageName"] = (
-                        RunpodReleaseTest.IMAGE
-                    )
+                    endpoint["env"] = {}
                 return endpoint
 
         api = DriftingEmbeddedTemplateAPI()
         api.seed_stable(self.TARGET_IMAGE, version=8)
         with self.assertRaisesRegex(
-            RunpodReleaseError, "REST template imageName"
+            RunpodReleaseError, "REST endpoint env"
         ):
             tars_runpod_release.verify_receipt_target(
                 api,
@@ -2717,7 +2703,7 @@ class RunpodReleaseTest(unittest.TestCase):
         )
         ticks = iter((0.0, 1.0))
         with self.assertRaisesRegex(
-            RunpodReleaseError, "active worker slsVersion"
+            RunpodReleaseError, "active worker version"
         ):
             tars_runpod_release.finalize_stable_release(
                 api,
@@ -2790,7 +2776,7 @@ class RunpodReleaseTest(unittest.TestCase):
             api.endpoints[0]["gpuIds"],
             tars_runpod_release.PRE_MIG_EXCLUSION_GPU_POOL_SELECTOR,
         )
-        self.assertEqual(api.templates[0]["imageName"], self.IMAGE)
+        self.assertEqual(api.endpoints[0]["image"], self.IMAGE)
         self.assertEqual(
             api.calls, ["add_ada24_fallback:stable-endpoint"]
         )
@@ -2967,7 +2953,7 @@ class RunpodReleaseTest(unittest.TestCase):
                 result = super().add_ada24_fallback(
                     endpoint_id, template_id
                 )
-                self.templates[0]["imageName"] = (
+                self.endpoints[0]["image"] = (
                     RunpodReleaseTest.TARGET_IMAGE
                 )
                 return result
@@ -2979,7 +2965,7 @@ class RunpodReleaseTest(unittest.TestCase):
         )
 
         with self.assertRaisesRegex(
-            RunpodReleaseError, "stable template image"
+            RunpodReleaseError, "stable endpoint image"
         ):
             tars_runpod_release.add_ada24_fallback_to_stable_endpoint(
                 api,
@@ -3083,7 +3069,7 @@ class RunpodReleaseTest(unittest.TestCase):
 
         self.assertEqual(ids, self.stable_ids())
         self.assertEqual(api.endpoints[0]["gpuIds"], GPU_POOL_SELECTOR)
-        self.assertEqual(api.templates[0]["imageName"], self.IMAGE)
+        self.assertEqual(api.endpoints[0]["image"], self.IMAGE)
         self.assertEqual(
             api.calls, ["exclude_blackwell_mig:stable-endpoint"]
         )
@@ -3246,7 +3232,7 @@ class RunpodReleaseTest(unittest.TestCase):
                 result = super().exclude_blackwell_mig(
                     endpoint_id, template_id
                 )
-                self.templates[0]["imageName"] = (
+                self.endpoints[0]["image"] = (
                     RunpodReleaseTest.TARGET_IMAGE
                 )
                 return result
@@ -3258,7 +3244,7 @@ class RunpodReleaseTest(unittest.TestCase):
         )
 
         with self.assertRaisesRegex(
-            RunpodReleaseError, "stable template image"
+            RunpodReleaseError, "stable endpoint image"
         ):
             (
                 tars_runpod_release
@@ -3440,7 +3426,8 @@ class RunpodReleaseTest(unittest.TestCase):
         self.assertEqual(
             api.templates[0]["name"], "tars-runpod-template-v2"
         )
-        self.assertEqual(api.endpoints[0]["version"], 1)
+        # A v2 template update never rolls the endpoint.
+        self.assertEqual(api.endpoints[0]["version"], 0)
         self.assertFalse(
             any(call.startswith("create_") for call in api.calls)
         )
@@ -3485,23 +3472,9 @@ class RunpodReleaseTest(unittest.TestCase):
         self,
     ) -> None:
         class SparseRESTTemplateAPI(FakeReleaseAPI):
-            def read_endpoint(self, endpoint_id: str) -> dict:
-                resource = super().read_endpoint(endpoint_id)
-                resource["template"].pop("imageName", None)
-                return resource
-
-            @staticmethod
-            def _rest_template(template: dict) -> dict:
-                resource = FakeReleaseAPI._rest_template(template)
-                for field in (
-                    "dockerEntrypoint",
-                    "dockerStartCmd",
-                    "isPublic",
-                    "ports",
-                    "readme",
-                    "volumeInGb",
-                    "volumeMountPath",
-                ):
+            def read_template(self, template_id: str) -> dict:
+                resource = super().read_template(template_id)
+                for field in ("ports", "public"):
                     resource.pop(field, None)
                 return resource
 
@@ -3532,20 +3505,15 @@ class RunpodReleaseTest(unittest.TestCase):
         base = {
             "id": "stable-template",
             "name": "tars-runpod-template-v2",
-            "imageName": self.TARGET_IMAGE,
-            "containerRegistryAuthId": "stable-auth",
-            "containerDiskInGb": 20,
+            "image": self.TARGET_IMAGE,
+            "registry": "stable-auth",
+            "disk": 20,
             "env": {"RUNPOD_INIT_TIMEOUT": "1200"},
-            "isServerless": True,
+            "serverless": True,
         }
         cases = {
-            "dockerEntrypoint": ["/bin/sh"],
-            "dockerStartCmd": ["serve"],
-            "isPublic": True,
+            "public": True,
             "ports": ["8080/http"],
-            "readme": "unexpected",
-            "volumeInGb": 1,
-            "volumeMountPath": "/unexpected",
         }
         for field, value in cases.items():
             with self.subTest(field=field):
@@ -3611,23 +3579,21 @@ class RunpodReleaseTest(unittest.TestCase):
 
         self.assertEqual(api.calls, [])
 
-    def test_explicit_migration_refuses_stale_embedded_template(self) -> None:
-        class StaleEmbeddedTemplateAPI(FakeReleaseAPI):
+    def test_explicit_migration_refuses_endpoint_container_drift(self) -> None:
+        class DriftedContainerAPI(FakeReleaseAPI):
             def read_endpoint(self, endpoint_id: str) -> dict:
                 endpoint = super().read_endpoint(endpoint_id)
-                endpoint["template"]["imageName"] = (
-                    RunpodReleaseTest.TARGET_IMAGE
-                )
+                endpoint["env"] = {}
                 return endpoint
 
-        api = StaleEmbeddedTemplateAPI()
+        api = DriftedContainerAPI()
         api.seed_release(
             "a" * 40,
             "current",
             datetime.now(timezone.utc) - timedelta(days=1),
         )
         with self.assertRaisesRegex(
-            RunpodReleaseError, "REST template imageName"
+            RunpodReleaseError, "REST endpoint env"
         ):
             tars_runpod_release.adopt_existing_stable_resources(
                 api,
@@ -3723,7 +3689,7 @@ class RunpodReleaseTest(unittest.TestCase):
             )
         self.assertEqual(api.calls, [])
 
-    def test_stable_template_update_uses_one_official_post_without_blind_retry(
+    def test_stable_template_update_uses_one_patch_without_blind_retry(
         self,
     ) -> None:
         calls: list[urllib.request.Request] = []
@@ -3743,10 +3709,10 @@ class RunpodReleaseTest(unittest.TestCase):
 
         self.assertEqual(updated, {})
         self.assertEqual(len(calls), 1)
-        self.assertEqual(calls[0].method, "POST")
+        self.assertEqual(calls[0].method, "PATCH")
         self.assertEqual(
             urllib.parse.urlsplit(calls[0].full_url).path,
-            "/v1/templates/stable-template/update",
+            "/v2/templates/stable-template",
         )
         self.assertEqual(
             json.loads(calls[0].data),
@@ -3784,6 +3750,42 @@ class RunpodReleaseTest(unittest.TestCase):
             )
         self.assertEqual(calls, 1)
 
+    def test_endpoint_image_update_uses_one_patch_without_blind_retry(
+        self,
+    ) -> None:
+        calls: list[urllib.request.Request] = []
+
+        def lose_update_response(request, *, timeout):
+            calls.append(request)
+            raise urllib.error.URLError("response lost")
+
+        updated = RunpodClient(
+            "api-key", opener=lose_update_response
+        ).update_endpoint_image("stable-endpoint", self.TARGET_IMAGE)
+
+        self.assertEqual(updated, {})
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0].method, "PATCH")
+        self.assertEqual(
+            urllib.parse.urlsplit(calls[0].full_url).path,
+            "/v2/serverless/stable-endpoint",
+        )
+        self.assertEqual(json.loads(calls[0].data), {"image": self.TARGET_IMAGE})
+        self.assertEqual(
+            calls[0].get_header("Authorization"), "Bearer api-key"
+        )
+
+    def test_endpoint_image_update_refuses_mutable_image_before_request(
+        self,
+    ) -> None:
+        def unexpected(request, *, timeout):
+            raise AssertionError("request must not be sent")
+
+        with self.assertRaisesRegex(RunpodReleaseError, "immutable TARS"):
+            RunpodClient("api-key", opener=unexpected).update_endpoint_image(
+                "stable-endpoint", "registry.digitalocean.com/lascade/tars:latest"
+            )
+
     def test_stable_endpoint_rename_uses_one_patch_without_blind_retry(
         self,
     ) -> None:
@@ -3802,7 +3804,7 @@ class RunpodReleaseTest(unittest.TestCase):
         self.assertEqual(calls[0].method, "PATCH")
         self.assertEqual(
             urllib.parse.urlsplit(calls[0].full_url).path,
-            "/v1/endpoints/stable-endpoint",
+            "/v2/serverless/stable-endpoint",
         )
         self.assertEqual(
             json.loads(calls[0].data),
@@ -4278,9 +4280,8 @@ class RunpodReleaseTest(unittest.TestCase):
         )
         patch_endpoint.assert_called_once_with(
             endpoint_id="endpoint1",
-            payload={"executionTimeoutMs": ENDPOINT_TIMEOUT_MS, "gpuCount": 1},
+            payload={"timeout": ENDPOINT_TIMEOUT_MS, "gpu": {"count": 1}},
             expected_name=response["name"],
-            template_id="template1",
             workers_max=2,
             operation="configure endpoint execution",
         )
@@ -4396,11 +4397,8 @@ class RunpodReleaseTest(unittest.TestCase):
         self.assertEqual(client.read_template("template1"), template)
         self.assertEqual(len(requests), 1)
         parsed = urllib.parse.urlsplit(requests[0].full_url)
-        self.assertEqual(parsed.path, "/v1/templates/template1")
-        self.assertEqual(
-            urllib.parse.parse_qs(parsed.query),
-            {"includeEndpointBoundTemplates": ["true"]},
-        )
+        self.assertEqual(parsed.path, "/v2/templates/template1")
+        self.assertEqual(parsed.query, "")
         self.assertEqual(requests[0].get_header("Authorization"), "Bearer api-key")
 
     def test_auth_and_template_create_recover_lost_responses_without_reissuing_mutations(self) -> None:
@@ -4527,31 +4525,23 @@ class RunpodReleaseTest(unittest.TestCase):
         self.assertNotIn("registry-password", str(caught.exception))
 
     def test_endpoint_rest_patch_recovers_a_lost_response_and_verifies_exactly(self) -> None:
-        graphql_endpoint = FakeReleaseAPI.endpoint(
-            endpoint_id="endpoint1",
-            name="tars-runpod-endpoint-v1-" + "a" * 40,
-            template_id="template1",
-            created=datetime.now(timezone.utc),
-        )
+        name = "tars-runpod-endpoint-v1-" + "a" * 40
         endpoint = {
-            "id": graphql_endpoint["id"],
-            "name": graphql_endpoint["name"],
-            "templateId": graphql_endpoint["templateId"],
-            "workersMin": graphql_endpoint["workersMin"],
-            "workersMax": graphql_endpoint["workersMax"],
-            "gpuCount": graphql_endpoint["gpuCount"],
-            "executionTimeoutMs": graphql_endpoint["executionTimeoutMs"],
-            "gpuTypeIds": [
-                "NVIDIA RTX A4000",
-                "NVIDIA RTX A4500",
-                "NVIDIA RTX 4000 Ada Generation",
-                "NVIDIA RTX 2000 Ada Generation",
-            ],
+            "id": "endpoint1",
+            "name": name,
+            "type": "QUEUE",
+            "workers": {"min": 0, "max": 2},
+            "gpu": {"pools": ["AMPERE_16", "AMPERE_24"], "count": 1},
+            "timeout": ENDPOINT_TIMEOUT_MS,
         }
+        workers = {"endpointVersion": 3, "workers": []}
         calls: list[urllib.request.Request] = []
 
         class Response:
             status = 200
+
+            def __init__(self, document):
+                self.document = document
 
             def __enter__(self):
                 return self
@@ -4560,35 +4550,41 @@ class RunpodReleaseTest(unittest.TestCase):
                 return False
 
             def read(self):
-                return json.dumps(endpoint).encode("utf-8")
+                return json.dumps(self.document).encode("utf-8")
 
         def lose_patch_response(request, *, timeout):
             calls.append(request)
             if len(calls) == 1:
                 raise urllib.error.URLError("response lost")
-            return Response()
+            path = urllib.parse.urlsplit(request.full_url).path
+            return Response(workers if path.endswith("/workers") else endpoint)
 
         client = RunpodClient("api-key", opener=lose_patch_response)
         verified = client._confirmed_endpoint_patch(
             endpoint_id="endpoint1",
-            payload={"executionTimeoutMs": ENDPOINT_TIMEOUT_MS, "gpuCount": 1},
-            expected_name=graphql_endpoint["name"],
-            template_id="template1",
+            payload={"timeout": ENDPOINT_TIMEOUT_MS, "gpu": {"count": 1}},
+            expected_name=name,
             workers_max=2,
             operation="configure endpoint execution",
         )
 
-        self.assertEqual(verified, endpoint)
-        self.assertEqual(len(calls), 2)
-        self.assertEqual(calls[0].method, "PATCH")
-        self.assertEqual(calls[1].method, "GET")
         self.assertEqual(
-            urllib.parse.parse_qs(urllib.parse.urlsplit(calls[1].full_url).query),
-            {"includeTemplate": ["true"], "includeWorkers": ["true"]},
+            verified, {**endpoint, "version": 3, "workerInventory": []}
+        )
+        self.assertEqual(
+            [
+                (call.method, urllib.parse.urlsplit(call.full_url).path)
+                for call in calls
+            ],
+            [
+                ("PATCH", "/v2/serverless/endpoint1"),
+                ("GET", "/v2/serverless/endpoint1"),
+                ("GET", "/v2/serverless/endpoint1/workers"),
+            ],
         )
         self.assertEqual(calls[0].get_header("Authorization"), "Bearer api-key")
 
-    def test_endpoint_rest_requires_gpu_identity_when_compute_type_is_omitted(self) -> None:
+    def test_endpoint_rest_requires_gpu_identity_and_queue_type(self) -> None:
         api = FakeReleaseAPI()
         endpoint = FakeReleaseAPI.endpoint(
             endpoint_id="endpoint1",
@@ -4598,42 +4594,31 @@ class RunpodReleaseTest(unittest.TestCase):
         )
         api.endpoints.append(endpoint)
         live_shape = api.read_endpoint("endpoint1")
-        live_shape.pop("computeType")
-        self.assertEqual(
-            tars_runpod_release.verify_endpoint_rest(
-                live_shape,
-                endpoint_id="endpoint1",
-                expected_name=endpoint["name"],
-                template_id="template1",
-            ),
-            "endpoint1",
-        )
+        omitted_count = {**live_shape, "gpu": {"pools": ["AMPERE_16"]}}
+        for shape in (live_shape, omitted_count):
+            self.assertEqual(
+                tars_runpod_release.verify_endpoint_rest(
+                    shape,
+                    endpoint_id="endpoint1",
+                    expected_name=endpoint["name"],
+                ),
+                "endpoint1",
+            )
 
         invalid = (
+            ("missing GPU", {k: v for k, v in live_shape.items() if k != "gpu"}),
+            ("empty GPU pools", {**live_shape, "gpu": {"pools": [], "count": 1}}),
+            ("non-list GPU pools", {**live_shape, "gpu": {"pools": "AMPERE_16"}}),
+            ("malformed GPU pools", {**live_shape, "gpu": {"pools": [{}]}}),
             (
-                "missing GPU selectors",
-                {
-                    key: value
-                    for key, value in live_shape.items()
-                    if key != "gpuTypeIds"
-                },
+                "duplicate GPU pools",
+                {**live_shape, "gpu": {"pools": ["AMPERE_16"] * 2}},
             ),
-            ("empty GPU selectors", {**live_shape, "gpuTypeIds": []}),
-            (
-                "non-list GPU selectors",
-                {**live_shape, "gpuTypeIds": "AMPERE_16"},
-            ),
-            ("malformed GPU selectors", {**live_shape, "gpuTypeIds": [{}]}),
-            (
-                "duplicate GPU selectors",
-                {**live_shape, "gpuTypeIds": ["NVIDIA RTX A4000"] * 2},
-            ),
-            ("explicit CPU compute", {**live_shape, "computeType": "CPU"}),
-            ("CPU flavor selectors", {**live_shape, "cpuFlavorIds": ["cpu3c"]}),
-            (
-                "CPU instance selectors",
-                {**live_shape, "instanceIds": ["cpu3c-8-16"]},
-            ),
+            ("two GPUs", {**live_shape, "gpu": {"pools": ["AMPERE_16"], "count": 2}}),
+            ("CPU selectors", {**live_shape, "cpu": [{"id": "cpu3c"}]}),
+            ("load balancer", {**live_shape, "type": "LOAD_BALANCER"}),
+            ("missing workers", {k: v for k, v in live_shape.items() if k != "workers"}),
+            ("timeout drift", {**live_shape, "timeout": 600_000}),
         )
         for label, drift in invalid:
             with self.subTest(label=label), self.assertRaises(RunpodReleaseError):
@@ -4641,7 +4626,6 @@ class RunpodReleaseTest(unittest.TestCase):
                     drift,
                     endpoint_id="endpoint1",
                     expected_name=endpoint["name"],
-                    template_id="template1",
                 )
 
     def test_endpoint_rest_patch_stops_after_three_total_calls(self) -> None:
@@ -4656,9 +4640,8 @@ class RunpodReleaseTest(unittest.TestCase):
         with self.assertRaises(RunpodReleaseError):
             client._confirmed_endpoint_patch(
                 endpoint_id="endpoint1",
-                payload={"workersMin": 0, "workersMax": 0},
+                payload={"workers": {"min": 0, "max": 0}},
                 expected_name="tars-runpod-endpoint-v1-" + "a" * 40,
-                template_id="template1",
                 workers_max=0,
                 operation="set endpoint workers to zero",
             )
@@ -5116,7 +5099,7 @@ class WorkflowContractTest(unittest.TestCase):
             "Prepare and persist the coupled rollout boundary"
         )
         stage = deploy.index(
-            "Stage the immutable image on the stable Runpod template"
+            "Stage the immutable image on the stable Runpod endpoint"
         )
         self.assertLess(source_upload, lock_preflight)
         self.assertLess(lock_preflight, final_main)

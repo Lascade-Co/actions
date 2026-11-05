@@ -10,7 +10,12 @@ and one fixed registry-auth record. Their IDs live in Infisical
 
 The ordinary `main` deployment never creates or deletes Runpod resources. It
 pauses the TARS dispatcher, drains the endpoint, records the exact prior image
-and endpoint version, and updates only the fixed template's immutable image.
+and endpoint version, and updates only the fixed endpoint's immutable image.
+REST calls use Runpod's v2 API (`api.runpod.io/v2`). In v2 an endpoint owns its
+image and a template is only the snapshot it was created from, so releases and
+rollbacks patch the endpoint image directly and leave the template unchanged.
+GraphQL pod status stays authoritative for which workers are active, since v2
+`/workers` also lists exited workers.
 The endpoint remains configured for zero minimum and two maximum workers. Its
 ordered pool selectors are `AMPERE_16,AMPERE_24,ADA_24`, followed by the exact
 negative selector
@@ -109,7 +114,7 @@ update is active, and only then remove `tars_deploy_lock`. On interruption,
 timeout, readiness failure, or an ambiguous provider outcome, retain the lock
 and keep the dispatcher at zero. Rerun the same idempotent command to reconcile
 by reads. Never overlap this selector migration with an application/provider
-rollout: rollout receipts bind template images and endpoint versions, not a
+rollout: rollout receipts bind endpoint images and versions, not a
 selector transition.
 
 ## Adopt the existing production resources once
