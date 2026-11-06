@@ -20,18 +20,21 @@ Infisical `/Local-Properties` and `/Build`, release keystore/Firebase inputs and
 mapping upload enabled. It retains AAB, universal APK, native debug symbols and R8 mapping.
 The `gradle` OCI dependency bundle is restored with latest fallback and published on a miss.
 
-`ios-build` runs the source `scripts/ci/ios_release.py` on paid `macos-26-xlarge`, Xcode 26.6,
-Release configuration, production runtime inputs and a fully optimized Native link with
-8-GiB Native heap and release binary caches disabled. It restores/publishes Gradle, ANGLE,
-SwiftPM and Konan OCI bundles. Production Konan and SwiftPM bundles have separate names
-from Staging. The archive and export retain an App Store IPA plus a dSYMs zip; production
-Firebase Crashlytics receives the unzipped dSYMs. This build does not upload the IPA to Apple;
+`ios-build` runs the source `scripts/ci/ios_release.py` on the free arm64 `macos-26` runner
+(paid `macos-26-xlarge` is not allowed), Xcode 26.6, 90-minute timeout, Release configuration,
+production Infisical `/Local-Properties` rendered to `local.properties` exactly as the Staging
+job does, the production `google-services.json` from `/Build`, and the source-owned Native link
+recipe (Kotlin/Native release binary caches with a 3-GiB Native heap, as Staging). It
+restores/publishes Gradle, ANGLE, SwiftPM and Konan OCI bundles. The Konan bundle is shared
+with Staging because both build the same release caches; the SwiftPM bundle keeps a separate
+name because its paths differ. The archive and export retain an App Store IPA plus a dSYMs zip;
+production Firebase Crashlytics receives the unzipped dSYMs. This build does not upload the IPA to Apple;
 the `publish-kmp` consumer does that once it owns the publishing transaction.
 
 Infisical `travelanimator`, `prod`, `/Build` must supply:
 
 - Android `KEYSTORE_BASE64`, `KEYSTORE_PASSWORD`, `KEY_ALIAS`, `KEY_PASSWORD`, `SERVICE_JSON_BASE64`.
-- Apple `IOS_CERTIFICATE_BASE64`, `IOS_CERTIFICATE_PASSWORD`, `SERVICE_PLIST_BASE64`.
+- Apple `IOS_CERTIFICATE_BASE64`, `IOS_CERTIFICATE_PASSWORD` (iOS reads `SERVICE_JSON_BASE64` too).
 - Apple `IOS_PROD_PROFILE_APP_BASE64`, `IOS_PROD_PROFILE_SHARE_BASE64`,
   `IOS_PROD_PROFILE_NSE_BASE64`, `IOS_PROD_PROFILE_WIDGET_BASE64`.
 
