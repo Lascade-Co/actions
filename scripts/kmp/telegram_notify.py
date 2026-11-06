@@ -17,6 +17,8 @@ KINDS = {
     'release': {'label': 'KMP release', 'jobs': ('prepare', 'android', 'ios-build', 'release')},
     'playstore': {'label': 'Play production rollout', 'jobs': ('publish',)},
     'appstore': {'label': 'App Store submission', 'jobs': ('publish',)},
+    # publish-appstore dispatch with submit:false: version prepared, review submission left to a person.
+    'appstore-prepared': {'label': 'App Store preparation', 'jobs': ('publish',)},
     'android': {'label': 'Android debug APK', 'jobs': ('unit-tests', 'check', 'android', 'publish-android')},
     'testflight': {'label': 'TestFlight', 'jobs': ('unit-tests', 'check', 'ios-build', 'ios-publish')},
 }
@@ -86,7 +88,8 @@ def compose(kind, status, fields, details=()):
     label = KINDS[kind]['label']
     build = fields.get('build_number')
     name = f'{label} {build}' if kind == 'testflight' and build else label
-    success = {'appstore': 'App Store submitted for review', 'playstore': 'Play production rollout submitted'}.get(kind, name + ' ready')
+    success = {'appstore': 'App Store submitted for review', 'appstore-prepared': 'App Store version prepared, not submitted',
+               'playstore': 'Play production rollout submitted'}.get(kind, name + ' ready')
     header = {'success': f'✅ <b>{e(success)}</b>',
               'failure': f'❌ <b>{e(name)} failed</b>',
               'withheld': f'🔧 <b>{e(name)} withheld</b>'}[status]
@@ -99,9 +102,11 @@ def compose(kind, status, fields, details=()):
         lines.append(f'<a href="{e(fields["pr_url"], quote=True)}">{title}</a>' if fields.get('pr_url') else f'<i>{title}</i>')
     lines.append('')
     if status == 'success':
-        if kind in ('release', 'playstore', 'appstore'):
+        if kind in ('release', 'playstore', 'appstore', 'appstore-prepared'):
             if kind == 'appstore':
                 lines.append('Submitted for App Store review; release follows approval with a 7-day phased rollout.')
+            elif kind == 'appstore-prepared':
+                lines.append('Build, metadata and phased release are set; complete App Store Connect and submit for review there.')
             elif kind == 'playstore':
                 lines.append('Production rollout submitted: Bangladesh, 99%.')
             if fields.get('link'):

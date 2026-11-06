@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Validate a publish-kmp dispatch/release and write safe workflow outputs and shared notes."""
+"""Validate a publish-kmp/publish-appstore dispatch and release; write safe workflow outputs and shared notes.
+
+Both dispatch types share one client_payload contract. The optional `submit` (JSON boolean, default true) is
+read only by the App Store publisher: false prepares the App Store version without submitting it for review.
+"""
 import argparse
 import json
 from pathlib import Path
@@ -19,11 +23,15 @@ def validate(payload, release, central_repository):
     match = re.fullmatch(r'v(\d+\.\d+\.\d+)', release.get('tag_name', ''))
     if not match:
         raise ValueError('Release tag must be vX.Y.Z')
+    submit = payload.get('submit', True)
+    if not isinstance(submit, bool):
+        raise ValueError('submit must be a JSON boolean when present')
     notes = (release.get('body') or '').strip()
     if not notes or len(notes.encode('utf-16-le')) // 2 > 500:
         raise ValueError('Release notes must contain 1–500 UTF-16 code units; shorten without truncating')
     return {'owner': repo.split('/')[0], 'name': repo.split('/')[1], 'version': match[1],
-            'tag': release['tag_name'], 'gh_url': f'https://github.com/{repo}/releases/tag/{release["tag_name"]}'}, notes
+            'tag': release['tag_name'], 'gh_url': f'https://github.com/{repo}/releases/tag/{release["tag_name"]}',
+            'submit': 'true' if submit else 'false'}, notes
 
 
 def main():

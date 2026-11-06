@@ -1,9 +1,12 @@
 name: Publish App Store
 run-name: "App Store · ${{ github.event.client_payload.repo }} · ${{ github.event.client_payload.release_id }}"
 
+# publish-kmp: the source release trigger (Play Store listens too).
+# publish-appstore: App Store only, for retriggering after a failure; same client_payload plus an
+# optional boolean `submit` (false prepares the version without submitting it). See docs/kmp-release-ci.md.
 on:
   repository_dispatch:
-    types: [publish-kmp]
+    types: [publish-kmp, publish-appstore]
 
 permissions:
   contents: read
@@ -79,6 +82,7 @@ jobs:
       - name: Upload exact build, wait for processing, and submit for review
         env:
           RELEASE_VERSION: ${{ steps.meta.outputs.version }}
+          SUBMIT: ${{ steps.meta.outputs.submit }}
           ALREADY_UPLOADED: ${{ github.event.client_payload.ios_uploaded }}
           APPSTORE_API_KEY_ID: ${{ secrets.APPSTORE_API_KEY_ID }}
           APPSTORE_ISSUER_ID: ${{ secrets.APPSTORE_ISSUER_ID }}
@@ -93,11 +97,15 @@ jobs:
                      '--version', os.environ['RELEASE_VERSION'], '--notes-file', 'release_notes.txt']
           if os.environ['ALREADY_UPLOADED'].lower() == 'true':
               command.append('--already-uploaded')
+          if os.environ['SUBMIT'] == 'false':
+              command.append('--no-submit')
+          elif os.environ['SUBMIT'] != 'true':
+              raise ValueError('Validated submit output missing')
           subprocess.run(command, check=True)
           PY
 
       - name: Create PostHog annotation
-        if: github.event.client_payload.posthog_project_id != ''
+        if: github.event.client_payload.posthog_project_id != '' && steps.meta.outputs.submit == 'true'
         env:
           POSTHOG_API_KEY: ${{ secrets.POSTHOG_PERSONAL_API_KEY }}
           POSTHOG_PROJECT: ${{ github.event.client_payload.posthog_project_id }}
@@ -117,7 +125,7 @@ jobs:
         with:
           token: ${{ secrets.SUBSCRIPTION_TELEGRAM_TOKEN }}
           chat-id: ${{ secrets.SUBSCRIPTION_TELEGRAM_TO }}
-          kind: appstore
+          kind: ${{ steps.meta.outputs.submit == 'false' && 'appstore-prepared' || 'appstore' }}
           status: ${{ job.status == 'success' && 'success' || 'failure' }}
           repo: ${{ github.event.client_payload.repo }}
           title: ${{ github.event.client_payload.app_name }} · ${{ steps.meta.outputs.tag }}

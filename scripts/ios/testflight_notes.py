@@ -21,22 +21,14 @@ import time
 import unicodedata
 import urllib.error
 
-from asc_client import ApiError, Client, find_app, find_build, ipa_identity, resource
+from asc_client import (ApiError, Client, REJECTED, find_app, find_build, ipa_identity,  # noqa: F401 (REJECTED re-exported)
+                        resource, strip_rejected)
 
 LIMIT = 4000  # App Store Connect's "What to Test" length limit (characters).
 LOCALE = 'en-US'
 PR_MARKER = '\n\n\u2026 (truncated; full description on the PR)'
 COMMIT_MARKER = '\n\n\u2026 (truncated)'
 EMPTY_BODY = '(No PR description.)'
-# App Store Connect rejects these in whatsNew ("Text for whatsNew contains invalid characters"):
-# every supplementary-plane character (emoji, flags, ZWJ sequences), variation selectors, enclosing
-# keycaps, box drawing/blocks, misc symbols/dingbats, braille, misc symbols and arrows, private use
-# and U+FFFD. Source: third-party PATCH probe, https://github.com/rorkai/App-Store-Connect-CLI/issues/2754
-REJECTED_CLASS = ('[\U00010000-\U0010FFFF\uFE00-\uFE0F\u200D\u20DD-\u20E4\u2500-\u259F'
-                  '\u2600-\u27BF\u2800-\u28FF\u2B00-\u2BFF\uE000-\uF8FF\uFFFD]')
-REJECTED = re.compile(REJECTED_CLASS)
-# A removed symbol that began a line or word takes one following space with it.
-REJECTED_WORD = re.compile(r'(^|(?<= ))(?:' + REJECTED_CLASS + ')+ ', re.M)
 HTML_COMMENT = re.compile(r'<!--.*?(?:-->|\Z)', re.S)
 # Retry these while the fresh build is processing; 400/401/403 and invalid notes text are final.
 RETRY_STATUSES = {404, 409, 422, 429, 500, 502, 503, 504}
@@ -44,7 +36,7 @@ RETRY_STATUSES = {404, 409, 422, 429, 500, 502, 503, 504}
 
 def clean(text, single_line=False):
     text = HTML_COMMENT.sub('', str(text or '').replace('\r\n', '\n').replace('\r', '\n'))
-    text = REJECTED.sub('', REJECTED_WORD.sub(r'\1', text))
+    text = strip_rejected(text)
     # Controls, invisible format characters and unassigned code points carry no review value.
     text = ''.join(c for c in text if c in '\n\t' or unicodedata.category(c) not in ('Cc', 'Cf', 'Cs', 'Co', 'Cn'))
     if single_line:

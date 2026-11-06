@@ -1,9 +1,11 @@
 """Offline App Store API contract tests. No credentials, Apple calls or IPA upload."""
+import contextlib
 import copy
 import io
 import json
 from pathlib import Path
 import plistlib
+import re
 import tempfile
 import types
 import unittest
@@ -13,6 +15,22 @@ import zipfile
 
 import publish_appstore as asc
 import publish_metadata
+
+ROOT = Path(__file__).resolve().parents[2]
+# The shared notes of Travel Animator 5.0.14, whose emoji App Store Connect rejected on 2026-11-07.
+NOTES_5_0_14 = ('- \U0001F4B3 Purchases on Android now complete reliably, even if you switch to another app during checkout.\n'
+                '- \U0001F4AC Support chat is now available on iPhone.\n'
+                '- \U0001F50A Fixed audio issues in the onboarding intro videos.\n'
+                '- \U0001F4CD Home now counts route points correctly.')
+WHATS_NEW_5_0_14 = ('- Purchases on Android now complete reliably, even if you switch to another app during checkout.\n'
+                    '- Support chat is now available on iPhone.\n'
+                    '- Fixed audio issues in the onboarding intro videos.\n'
+                    '- Home now counts route points correctly.')
+REVIEW_MUTATIONS = ('reviewSubmissions', 'reviewSubmissionItems')
+
+
+def review_mutations(client):
+    return [c for c in client.calls if c[0] in ('POST', 'PATCH') and c[1].split('/')[0] in REVIEW_MUTATIONS]
 
 
 def item(kind, identifier, **attrs):
@@ -183,17 +201,99 @@ class PublisherTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'metadata'):
             asc.Publisher(client).publish('app', '5.0.9', client.builds[0], 'Notes.')
 
+    def test_no_submit_prepares_build_metadata_and_phased_release_but_never_touches_review_submissions(self):
+        for target in (False, True):
+            with self.subTest(existing_version=target):
+                client = FakeClient(target=target)
+                publisher = asc.Publisher(client)
+                self.assertEqual(publisher.publish('app', '5.0.9', client.builds[0], 'Notes.', submit=False), 'new')
+                self.assertEqual(publisher.outcome, 'prepared')
+                self.assertIn(('PATCH', 'appStoreVersions/new/relationships/build',
+                               {'data': {'type': 'builds', 'id': 'exact-build'}}), client.calls)
+                self.assertTrue(any(c[:2] == ('POST', 'appStoreVersionPhasedReleases') for c in client.calls))
+                self.assertTrue(any(c[0] == 'PATCH' and c[1].startswith('appStoreVersionLocalizations/')
+                                    for c in client.calls))
+                self.assertEqual(review_mutations(client), [])
+
+    def test_default_still_submits_the_version_for_review(self):
+        client = FakeClient()
+        publisher = asc.Publisher(client)
+        publisher.publish('app', '5.0.9', client.builds[0], 'Notes.')
+        self.assertEqual(publisher.outcome, 'submitted')
+        self.assertEqual([c[:2] for c in review_mutations(client)], [
+            ('POST', 'reviewSubmissions'), ('POST', 'reviewSubmissionItems'), ('PATCH', 'reviewSubmissions/review')])
+
+    def test_existing_manual_version_keeps_its_release_type(self):
+        client = FakeClient()
+        client.versions[1]['attributes']['releaseType'] = 'MANUAL'
+        asc.Publisher(client).publish('app', '5.0.9', client.builds[0], 'Notes.')
+        self.assertFalse([c for c in client.calls if c[0] in ('POST', 'PATCH') and c[1].startswith('appStoreVersions')
+                          and 'releaseType' in ((c[2] or {}).get('data') or {}).get('attributes', {})])
+        self.assertFalse(any(c[:2] == ('PATCH', 'appStoreVersions/new') for c in client.calls))
+
+    def test_created_version_requests_after_approval_only_in_its_creation(self):
+        client = FakeClient(target=False)
+        asc.Publisher(client).publish('app', '5.0.9', client.builds[0], 'Notes.')
+        release_types = [(c[:2], c[2]['data']['attributes']['releaseType']) for c in client.calls
+                         if c[0] in ('POST', 'PATCH') and c[1].startswith('appStoreVersions')
+                         and 'releaseType' in (c[2]['data'] or {}).get('attributes', {})]
+        self.assertEqual(release_types, [(('POST', 'appStoreVersions'), 'AFTER_APPROVAL')])
+
+
+class WhatsNewTests(unittest.TestCase):
+    def test_5_0_14_notes_lose_only_their_emoji(self):
+        self.assertEqual(asc.appstore_whats_new(NOTES_5_0_14), WHATS_NEW_5_0_14)
+
+    def test_variation_selectors_zwj_sequences_and_trailing_emoji_are_removed_without_other_changes(self):
+        text = ('- \u2764\ufe0f Love it\n- \U0001F468\u200d\U0001F469\u200d\U0001F467 Family trips\n'
+                'Faster export \U0001F680\nCaf\u00e9 \u5730\u56f3 \u2192 done\u2705 now')
+        self.assertEqual(asc.appstore_whats_new(text),
+                         '- Love it\n- Family trips\nFaster export\nCaf\u00e9 \u5730\u56f3 \u2192 done now')
+
+    def test_empty_or_overlong_result_fails_instead_of_truncating(self):
+        for text in ('\U0001F680 \u2728', 'a' * (asc.WHATS_NEW_LIMIT + 1)):
+            with self.assertRaisesRegex(ValueError, "What's New"):
+                asc.appstore_whats_new(text)
+        self.assertEqual(len(asc.appstore_whats_new('a' * asc.WHATS_NEW_LIMIT)), asc.WHATS_NEW_LIMIT)
+
 
 class IdentityTests(unittest.TestCase):
-    def run_main(self, client, extra=(), upload=None):
+    def run_main(self, client, extra=(), upload=None, text='Shared English notes.', stdout=None):
         with tempfile.TemporaryDirectory() as folder:
             notes = Path(folder) / 'notes.txt'
-            notes.write_text('Shared English notes.')
+            notes.write_text(text)
             with patch.object(asc, 'Client', return_value=client), patch.object(asc, 'ipa_identity',
                     return_value=('com.travelanimator.routemap', '5.0.9', '509')), patch.object(
-                    asc.subprocess, 'run', side_effect=upload) as run:
+                    asc.subprocess, 'run', side_effect=upload) as run, contextlib.redirect_stdout(stdout or io.StringIO()):
                 result = asc.main(['--ipa', 'release.ipa', '--version', '5.0.9', '--notes-file', str(notes), *extra])
                 return result, run.call_args_list
+
+    def test_no_submit_flag_prepares_and_says_so(self):
+        client, out = FakeClient(), io.StringIO()
+        result, _ = self.run_main(client, ['--no-submit'], stdout=out)
+        self.assertEqual(result, 0)
+        self.assertEqual(review_mutations(client), [])
+        self.assertIn('prepared, not submitted', out.getvalue())
+
+    def test_default_run_submits_and_says_so(self):
+        client, out = FakeClient(), io.StringIO()
+        self.run_main(client, stdout=out)
+        self.assertIn(('PATCH', 'reviewSubmissions/review'), [c[:2] for c in review_mutations(client)])
+        self.assertIn('Submitted App Store version 5.0.9', out.getvalue())
+
+    def test_app_store_whats_new_drops_emoji_from_the_shared_notes(self):
+        client = FakeClient()
+        self.run_main(client, text=NOTES_5_0_14)
+        sent = [c[2]['data']['attributes']['whatsNew'] for c in client.calls
+                if c[0] in ('POST', 'PATCH') and c[1].startswith('appStoreVersionLocalizations')]
+        self.assertTrue(sent)
+        self.assertTrue(all(text == WHATS_NEW_5_0_14 for text in sent))
+
+    def test_emoji_only_notes_fail_before_any_app_store_call(self):
+        client = FakeClient()
+        with self.assertRaisesRegex(ValueError, "What's New"):
+            self.run_main(client, text='\U0001F680')
+        self.assertEqual(client.calls, [])
 
     def test_existing_build_skips_altool_on_retry(self):
         result, calls = self.run_main(FakeClient())
@@ -256,6 +356,18 @@ class MetadataTests(unittest.TestCase):
         self.assertEqual(outputs['version'], '5.0.9')
         self.assertEqual(notes, 'English notes.')
 
+    def test_optional_submit_must_be_a_json_boolean_and_becomes_an_output(self):
+        payload = {'repo': 'Lascade-Co/travel-animator-shared', 'release_id': 42, 'package_name': 'com.travelanimator.routemap'}
+        release = {'id': 42, 'tag_name': 'v5.0.14', 'body': NOTES_5_0_14}
+        for extra, expected in (({}, 'true'), ({'submit': True}, 'true'), ({'submit': False}, 'false')):
+            with self.subTest(extra=extra):
+                outputs, notes = publish_metadata.validate(payload | extra, release, 'Lascade-Co/actions')
+                self.assertEqual(outputs['submit'], expected)
+                self.assertEqual(notes, NOTES_5_0_14)  # Shared notes (Play) keep their emoji.
+        for bad in ('false', 'true', 0, 1, None, [], {}):
+            with self.subTest(submit=bad), self.assertRaisesRegex(ValueError, 'submit'):
+                publish_metadata.validate(payload | {'submit': bad}, release, 'Lascade-Co/actions')
+
     def test_bad_releases_and_overlong_notes_rejected_without_truncation(self):
         payload = {'repo': 'Lascade-Co/travel-animator-shared', 'release_id': 42, 'package_name': 'com.travelanimator.routemap'}
         release = {'id': 42, 'tag_name': 'v5.0.9', 'body': 'Notes.'}
@@ -269,6 +381,27 @@ class MetadataTests(unittest.TestCase):
             publish_metadata.validate(payload | {'repo': 'Lascade-Co/other'}, release, 'Lascade-Co/actions')
         with self.assertRaises(ValueError):
             publish_metadata.validate(payload | {'package_name': 'com.attacker.app'}, release, 'Lascade-Co/actions')
+
+
+class WorkflowTriggerTests(unittest.TestCase):
+    @staticmethod
+    def dispatch_types(name):
+        text = (ROOT / '.github/workflows' / name).read_text()
+        match = re.search(r'^on:\n  repository_dispatch:\n    types: \[([^\]]*)\]\n(?=\S|\n)', text, re.M)
+        assert match, name
+        return [kind.strip() for kind in match[1].split(',')]
+
+    def test_app_store_only_dispatch_reaches_only_the_app_store_publisher(self):
+        self.assertEqual(self.dispatch_types('publish-appstore.yml'), ['publish-kmp', 'publish-appstore'])
+        self.assertIn('publish-kmp', self.dispatch_types('publish-playstore.yml'))
+        self.assertNotIn('publish-appstore', self.dispatch_types('publish-playstore.yml'))
+        workflows = [p.name for p in (ROOT / '.github/workflows').glob('*.y*ml') if 'publish-appstore' in p.read_text()]
+        self.assertEqual(workflows, ['publish-appstore.yml'])
+
+    def test_validated_submit_output_drives_no_submit(self):
+        text = (ROOT / '.github/workflows/publish-appstore.yml').read_text()
+        self.assertIn("SUBMIT: ${{ steps.meta.outputs.submit }}", text)
+        self.assertIn("if os.environ['SUBMIT'] == 'false':\n              command.append('--no-submit')", text)
 
 
 class ClientTests(unittest.TestCase):

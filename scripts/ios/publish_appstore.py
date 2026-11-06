@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Upload a release IPA and submit its exact version/build to App Review.
+"""Upload a release IPA and submit its exact version/build to App Review (or, with --no-submit, prepare it).
 
 Only main() uses credentials/network. Publisher accepts a fake client and clock for offline tests.
 API contracts: https://developer.apple.com/documentation/appstoreconnectapi
@@ -8,6 +8,15 @@ Apple's phased-release resource always represents its standard seven-day schedul
 Apple carries metadata into a new version automatically; app-level age rating is left intact:
 https://developer.apple.com/help/app-store-connect/update-your-app/create-a-new-version/
 The prerelease checklist still requires a production metadata check before this is enabled.
+
+Release type: a version this script creates requests AFTER_APPROVAL. An existing editable version keeps
+whatever release type it already has (for example MANUAL set in App Store Connect); it is never patched.
+--no-submit does everything up to and including the phased-release setup, then stops before any
+reviewSubmission/reviewSubmissionItem is created or changed, so privacy labels and review sign-in can be
+entered in App Store Connect and the version submitted there.
+What's New: the shared notes are validated as before (1-500 UTF-16 units), then only the App Store copy has
+the characters App Store Connect rejects (emoji and other pictographs, with their variation selectors, ZWJ
+and one following space) removed; nothing is truncated. Google Play receives the shared notes unchanged.
 """
 import argparse
 from pathlib import Path
@@ -16,7 +25,8 @@ import sys
 import time
 import zipfile
 
-from asc_client import API, ApiError, Client, find_app, find_build, ipa_identity, resource  # noqa: F401 (re-exported)
+from asc_client import (API, ApiError, Client, find_app, find_build, ipa_identity, resource,  # noqa: F401 (re-exported)
+                        strip_rejected)
 
 LOCALIZATION_FIELDS = ('description', 'keywords', 'marketingUrl', 'promotionalText', 'supportUrl')
 REVIEW_FIELDS = ('contactEmail', 'contactFirstName', 'contactLastName', 'contactPhone',
@@ -24,6 +34,18 @@ REVIEW_FIELDS = ('contactEmail', 'contactFirstName', 'contactLastName', 'contact
 SUBMITTED_STATES = {'WAITING_FOR_REVIEW', 'IN_REVIEW', 'PENDING_APPLE_RELEASE',
                     'PENDING_DEVELOPER_RELEASE', 'READY_FOR_SALE', 'PROCESSING_FOR_APP_STORE',
                     'READY_FOR_DISTRIBUTION', 'PROCESSING_FOR_DISTRIBUTION', 'ACCEPTED'}
+# App Store Connect's limit for "What's New in This Version" (characters).
+WHATS_NEW_LIMIT = 4000
+
+
+def appstore_whats_new(notes):
+    """The App Store copy of the shared notes without the characters Apple rejects; never truncated."""
+    lines = [line.rstrip() for line in strip_rejected(notes).split('\n')]
+    text = '\n'.join(lines).strip()
+    if not text or len(text) > WHATS_NEW_LIMIT:
+        raise ValueError(f"App Store What's New must contain 1-{WHATS_NEW_LIMIT} characters after removing "
+                         'emoji/pictographs; edit the release notes instead of truncating')
+    return text
 
 
 def version_state(version):
@@ -35,6 +57,8 @@ def version_state(version):
 class Publisher:
     def __init__(self, client, sleep=time.sleep, monotonic=time.monotonic):
         self.client, self.sleep, self.monotonic = client, sleep, monotonic
+        # After publish(): 'submitted', 'prepared' (--no-submit) or the state of an already submitted version.
+        self.outcome = None
 
     def find_build(self, app, version, number):
         return find_build(self.client, app, version, number)
@@ -94,7 +118,7 @@ class Publisher:
                     client.request('POST', 'appStoreReviewDetails', data=resource('appStoreReviewDetails', attrs,
                         {'appStoreVersion': ('appStoreVersions', version)}))
 
-    def publish(self, app, version, build, notes):
+    def publish(self, app, version, build, notes, submit=True):
         client = self.client
         versions = client.list(f'apps/{app}/appStoreVersions', {'filter[platform]': 'IOS', 'limit': 200})
         matches = [v for v in versions if v['attributes']['versionString'] == version]
@@ -110,16 +134,17 @@ class Publisher:
                 linked = client.related(f'appStoreVersions/{target["id"]}/build')
                 if not linked or linked['id'] != build['id']:
                     raise ValueError('Submitted version is attached to a different build')
+                self.outcome = version_state(target)
                 return target['id']
+            # Existing editable version: keep its release type (e.g. MANUAL chosen in App Store Connect).
         else:
+            # Only a version created here gets the default automatic release after approval.
             attrs = {'platform': 'IOS', 'versionString': version, 'releaseType': 'AFTER_APPROVAL'}
             if previous and previous['attributes'].get('copyright'):
                 attrs['copyright'] = previous['attributes']['copyright']
             target = client.request('POST', 'appStoreVersions', data=resource('appStoreVersions', attrs,
                 {'app': ('apps', app)}))['data']
         identifier = target['id']
-        client.request('PATCH', f'appStoreVersions/{identifier}', data=resource('appStoreVersions',
-                       {'releaseType': 'AFTER_APPROVAL'}, identifier=identifier))
         self.carry_metadata(identifier, previous['id'] if previous else None, notes)
         client.request('PATCH', f'appStoreVersions/{identifier}/relationships/build',
                        data={'data': {'type': 'builds', 'id': build['id']}})
@@ -129,6 +154,9 @@ class Publisher:
                 {'phasedReleaseState': 'INACTIVE'}, {'appStoreVersion': ('appStoreVersions', identifier)}))
         elif phased['attributes']['phasedReleaseState'] != 'INACTIVE':
             raise ValueError('Existing phased release is already active/completed; inspect it before resubmitting')
+        if not submit:
+            self.outcome = 'prepared'
+            return identifier
         # Resume an existing READY_FOR_REVIEW submission after an interrupted run.
         submissions = client.list(f'apps/{app}/reviewSubmissions', {'limit': 200})
         submission = None
@@ -149,6 +177,7 @@ class Publisher:
                 'appStoreVersion': ('appStoreVersions', identifier)}))
         client.request('PATCH', f'reviewSubmissions/{submission["id"]}', data=resource('reviewSubmissions',
             {'submitted': True}, identifier=submission['id']))
+        self.outcome = 'submitted'
         return identifier
 
 
@@ -161,6 +190,8 @@ def main(argv=None):
     parser.add_argument('--notes-file', required=True)
     parser.add_argument('--already-uploaded', action='store_true')
     parser.add_argument('--processing-timeout', type=int, default=5400)
+    parser.add_argument('--no-submit', dest='submit', action='store_false',
+                        help='Prepare the version (build, metadata, phased release) but do not submit it for review')
     args = parser.parse_args(argv)
     bundle, version, number = ipa_identity(args.ipa)
     if (bundle, version) != (args.bundle_id, args.version) or (args.build_number and args.build_number != number):
@@ -168,6 +199,7 @@ def main(argv=None):
     notes = Path(args.notes_file).read_text().strip()
     if not notes or len(notes.encode('utf-16-le')) // 2 > 500:
         raise ValueError('Shared release notes must contain 1–500 UTF-16 code units; never truncate')
+    whats_new = appstore_whats_new(notes)
     client = Client()
     app = find_app(client, bundle)
     publisher = Publisher(client)
@@ -175,8 +207,16 @@ def main(argv=None):
         subprocess.run([sys.executable, str(Path(__file__).resolve().parents[1] / 'kmp/control.py'),
                         'upload-ipa', args.ipa], check=True)
     build = publisher.wait_build(app, version, number, args.processing_timeout)
-    identifier = publisher.publish(app, version, build, notes)
-    print(f'Submitted App Store version {version} ({number}); version ID {identifier}; seven-day phased release after approval')
+    identifier = publisher.publish(app, version, build, whats_new, submit=args.submit)
+    if publisher.outcome == 'prepared':
+        print(f'App Store version {version} ({number}) prepared, not submitted for review; version ID {identifier}; '
+              'complete it and submit it in App Store Connect')
+    elif publisher.outcome == 'submitted':
+        print(f'Submitted App Store version {version} ({number}); version ID {identifier}; '
+              'seven-day phased release after approval')
+    else:
+        print(f'App Store version {version} ({number}) is already {publisher.outcome} with this build; '
+              f'version ID {identifier}; nothing changed')
     return 0
 
 

@@ -36,5 +36,13 @@ class ReleaseNotifications(unittest.TestCase):
         self.assertIn('7-day phased rollout',notify.compose('appstore','success',self.fields))
         self.assertIn('Bangladesh, 99%',notify.compose('playstore','success',self.fields))
 
+    def test_prepared_app_store_version_is_not_reported_as_submitted(self):
+        result=notify.compose('appstore-prepared','success',self.fields)
+        self.assertIn('App Store version prepared, not submitted',result)
+        self.assertIn('submit for review there',result);self.assertIn('View release',result)
+        self.assertNotIn('Submitted for App Store review',result)
+        self.assertEqual(notify.KINDS['appstore-prepared']['jobs'],('publish',))
+        self.assertIn('App Store preparation failed',notify.compose('appstore-prepared','failure',self.fields))
+
 
 if __name__=='__main__':unittest.main()

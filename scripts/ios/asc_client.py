@@ -17,6 +17,17 @@ import zipfile
 
 API = 'https://api.appstoreconnect.apple.com/v1/'
 CREDENTIALS = ('APPSTORE_API_KEY_ID', 'APPSTORE_ISSUER_ID', 'APPSTORE_API_PRIVATE_KEY')
+# App Store Connect rejects these in whatsNew, both TestFlight's "What to Test" ("Text for whatsNew
+# contains invalid characters") and the App Store version's "What's New in This Version" ("can't contain
+# the following character(s)", 5.0.14, 2026-11-07, for U+1F4AC U+1F50A U+1F4CD U+1F4B3): every
+# supplementary-plane character (emoji, flags, ZWJ sequences), variation selectors, ZWJ, enclosing
+# keycaps, box drawing/blocks, misc symbols/dingbats, braille, misc symbols and arrows, private use
+# and U+FFFD. Source: third-party PATCH probe, https://github.com/rorkai/App-Store-Connect-CLI/issues/2754
+REJECTED_CLASS = ('[\U00010000-\U0010FFFF\uFE00-\uFE0F\u200D\u20DD-\u20E4\u2500-\u259F'
+                  '\u2600-\u27BF\u2800-\u28FF\u2B00-\u2BFF\uE000-\uF8FF\uFFFD]')
+REJECTED = re.compile(REJECTED_CLASS)
+# A removed symbol that began a line or word takes one following space with it.
+REJECTED_WORD = re.compile(r'(^|(?<= ))(?:' + REJECTED_CLASS + ')+ ', re.M)
 
 
 class ApiError(RuntimeError):
@@ -97,6 +108,11 @@ def resource(kind, attributes=None, relationships=None, identifier=None):
     if identifier:
         item['id'] = identifier
     return {'data': item}
+
+
+def strip_rejected(text):
+    """Remove the characters App Store Connect rejects in whatsNew; a leading symbol takes its space."""
+    return REJECTED.sub('', REJECTED_WORD.sub(r'\1', text))
 
 
 def find_app(client, bundle):

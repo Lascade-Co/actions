@@ -92,8 +92,49 @@ App-level age ratings are not changed; the source prerelease checklist requires 
 and [submission items](https://developer.apple.com/documentation/appstoreconnectapi/post-v1-reviewsubmissionitems)
 are used instead of the deprecated single-version submission endpoint. A newly created
 [phased release](https://developer.apple.com/documentation/appstoreconnectapi/phasedreleasestate)
-is INACTIVE until Apple's release process starts its standard seven-day schedule. Submission
-requests `AFTER_APPROVAL`; successful CI means submitted for review, not approved or live.
+is INACTIVE until Apple's release process starts its standard seven-day schedule. Successful CI
+means submitted for review, not approved or live.
+
+Release type: only a version the publisher creates requests `releaseType: AFTER_APPROVAL`. An
+existing editable version (for example one prepared by an earlier run or by hand) keeps its current
+release type; a `MANUAL` choice made in App Store Connect is never overwritten.
+
+What's New: the shared release notes keep their 1–500 UTF-16 unit validation and reach Google Play
+unchanged. App Store Connect rejects emoji in "What's New in This Version" (5.0.14, 2026-11-07:
+"can't contain the following character(s)"), so the App Store copy alone drops the characters in
+`asc_client.REJECTED` (emoji and other pictographs, their variation selectors and ZWJ, and one space
+that followed a leading symbol). Nothing is truncated: an empty result or one over 4000 characters
+fails before any App Store Connect call.
+
+### Retrigger only the App Store publish
+
+`publish-kmp` starts both `publish-playstore.yml` and `publish-appstore.yml`, and a rerun reuses the
+old central commit. To publish only to the App Store, with the current central scripts, dispatch
+`publish-appstore` (only `publish-appstore.yml` listens to it) with the same `client_payload` as
+`publish-kmp`, plus an optional JSON boolean `submit` (default `true`). `submit: false` uploads the IPA
+if Apple lacks the build, waits for processing, prepares the version, metadata, build and phased release,
+then stops before any review submission. The run log reads "prepared, not submitted for review", Telegram
+reports "App Store version prepared, not submitted" and no PostHog annotation is created. Enter
+the remaining details (for example App Privacy or review sign-in) in App Store Connect and submit the
+version there. A string such as `"false"` is rejected.
+
+```sh
+gh api repos/Lascade-Co/actions/dispatches --method POST --input - <<'JSON'
+{"event_type": "publish-appstore",
+ "client_payload": {"repo": "Lascade-Co/travel-animator-shared",
+                    "release_id": 123456789,
+                    "package_name": "com.travelanimator.routemap",
+                    "app_name": "TravelAnimator",
+                    "posthog_project_id": "107752",
+                    "submit": false}}
+JSON
+```
+
+Replace `release_id` with the published GitHub release's numeric ID
+(`gh api repos/Lascade-Co/travel-animator-shared/releases/tags/vX.Y.Z --jq .id`). Omit `submit` (or
+set `true`) to submit for review as `publish-kmp` does. Optional `ios_uploaded: true` skips the
+upload check. The token needs Contents write access on `Lascade-Co/actions`. The dispatch starts a
+macOS Actions run in this repository.
 
 Final offline validation, 2026-10-24: 51 central KMP tests, 20 App Store fake-client tests and
 7 existing release-note tests passed. All three affected central workflows passed actionlint
