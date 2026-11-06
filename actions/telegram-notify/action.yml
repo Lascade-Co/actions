@@ -2,7 +2,8 @@ name: Telegram notification
 description: >-
   Send one build notification from Linux or macOS; fail visibly on transport or Telegram errors.
   Structured inputs (kind/status) send escaped HTML with the run link and a failing job/step/error
-  pointer only on failure; a bare message sends plain text.
+  pointer only on failure; a bare message sends plain text. Store publishers whose store the dispatch
+  did not select send status skipped with the opt-out reason.
 inputs:
   token:
     description: Telegram bot token.
@@ -19,7 +20,9 @@ inputs:
     required: false
     default: ''
   status:
-    description: success, failure or withheld (lint auto-fix pushed).
+    description: >-
+      success, failure, withheld (lint auto-fix pushed) or skipped (kind appstore or playstore only:
+      the dispatch did not select this store; no failure lookup).
     required: false
     default: ''
   repo:
@@ -38,8 +41,14 @@ inputs:
     description: PR URL; the title links to it when present.
     required: false
     default: ''
+  pr-number:
+    description: >-
+      Source PR number for status skipped; the reason line names its no-ios/no-android label and links
+      the PR in repo. Empty means the store was not selected without a PR.
+    required: false
+    default: ''
   link:
-    description: Artifact link for a successful Android publish.
+    description: Artifact or release link shown on success and on a skipped store publish.
     required: false
     default: ''
   build-number:
@@ -73,6 +82,7 @@ runs:
         TELEGRAM_BRANCH: ${{ inputs.branch }}
         TELEGRAM_TITLE: ${{ inputs.title }}
         TELEGRAM_PR_URL: ${{ inputs.pr-url }}
+        TELEGRAM_PR_NUMBER: ${{ inputs.pr-number }}
         TELEGRAM_LINK: ${{ inputs.link }}
         TELEGRAM_BUILD_NUMBER: ${{ inputs.build-number }}
         TELEGRAM_RESULTS: ${{ inputs.results }}

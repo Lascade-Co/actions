@@ -1,6 +1,9 @@
 name: Publish Play Store
 run-name: "${{ github.event.client_payload.repo }} · ${{ github.event.client_payload.branch }}"
 
+# Either event's optional `stores` array must contain "android" (absent selects every store, as the
+# legacy publish-playstore callers send); otherwise the release is validated, nothing touches Google Play
+# or PostHog, and Telegram reports a skip. See docs/kmp-release-ci.md.
 on:
   repository_dispatch:
     types: [publish-playstore, publish-kmp]
@@ -52,6 +55,10 @@ jobs:
           with open(os.environ['GITHUB_OUTPUT'], 'a') as out:
               out.write(f'owner={repo.split("/")[0]}\nname={repo.split("/")[1]}\n')
           PYTHON
+
+      - name: Select store
+        id: stores
+        run: python3 scripts/kmp/publish_stores.py --event "$GITHUB_EVENT_PATH" --store android --output "$GITHUB_OUTPUT"
 
       - name: Mint GitHub App token (target repo)
         id: app-token
@@ -119,6 +126,7 @@ jobs:
             core.setOutput('locale', locale);
 
       - name: Download release assets
+        if: steps.stores.outputs.selected == 'true'
         uses: robinraju/release-downloader@v1
         with:
           repository: ${{ github.event.client_payload.repo }}
@@ -128,6 +136,7 @@ jobs:
           token: ${{ steps.app-token.outputs.token }}
 
       - name: Locate AAB + native debug symbols
+        if: steps.stores.outputs.selected == 'true'
         id: assets
         shell: bash
         run: |
@@ -146,11 +155,13 @@ jobs:
           PY
 
       - name: Set up Python
+        if: steps.stores.outputs.selected == 'true'
         uses: actions/setup-python@v6
         with:
           python-version: "3.11"
 
       - name: Publish rollout + write Telegram message (python)
+        if: steps.stores.outputs.selected == 'true'
         env:
           SA_B64: ${{ secrets.SUBSCRIPTION_PLAY_SERVICE_ACCOUNT_JSON_BASE64 }}
           PACKAGE_NAME: ${{ github.event.client_payload.package_name }}
@@ -183,7 +194,7 @@ jobs:
             --telegram-out "github_release_body.txt"
 
       - name: Create PostHog annotation
-        if: github.event.client_payload.posthog_project_id != ''
+        if: steps.stores.outputs.selected == 'true' && github.event.client_payload.posthog_project_id != ''
         shell: bash
         env:
           POSTHOG_API_KEY: ${{ secrets.POSTHOG_PERSONAL_API_KEY }}
@@ -208,9 +219,10 @@ jobs:
           token: ${{ secrets.SUBSCRIPTION_TELEGRAM_TOKEN }}
           chat-id: ${{ secrets.SUBSCRIPTION_TELEGRAM_TO }}
           kind: playstore
-          status: ${{ job.status == 'success' && 'success' || 'failure' }}
+          status: ${{ job.status != 'success' && 'failure' || steps.stores.outputs.selected == 'false' && 'skipped' || 'success' }}
           repo: ${{ github.event.client_payload.repo }}
           title: ${{ github.event.client_payload.app_name }} · ${{ steps.meta.outputs.tag }}
+          pr-number: ${{ steps.stores.outputs.pr_number }}
           link: ${{ steps.meta.outputs.gh_url }}
           run-url: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
           github-token: ${{ github.token }}

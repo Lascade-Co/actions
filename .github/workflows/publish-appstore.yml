@@ -4,6 +4,8 @@ run-name: "App Store · ${{ github.event.client_payload.repo }} · ${{ github.ev
 # publish-kmp: the source release trigger (Play Store listens too).
 # publish-appstore: App Store only, for retriggering after a failure; same client_payload plus an
 # optional boolean `submit` (false prepares the version without submitting it). See docs/kmp-release-ci.md.
+# Either event's optional `stores` array must contain "ios" (absent selects every store); otherwise the
+# release is validated, nothing touches App Store Connect or PostHog, and Telegram reports a skip.
 on:
   repository_dispatch:
     types: [publish-kmp, publish-appstore]
@@ -45,6 +47,10 @@ jobs:
               out.write(f'owner={repo.split("/")[0]}\nname={repo.split("/")[1]}\n')
           PY
 
+      - name: Select store
+        id: stores
+        run: python3 scripts/kmp/publish_stores.py --event "$GITHUB_EVENT_PATH" --store ios --output "$GITHUB_OUTPUT"
+
       - name: Mint source repository token
         id: token
         uses: actions/create-github-app-token@v3.3.0
@@ -67,6 +73,7 @@ jobs:
             --output "$GITHUB_OUTPUT" --notes release_notes.txt
 
       - name: Download IPA from GitHub release
+        if: steps.stores.outputs.selected == 'true'
         env:
           GH_TOKEN: ${{ steps.token.outputs.token }}
           SOURCE_REPO: ${{ github.event.client_payload.repo }}
@@ -74,12 +81,15 @@ jobs:
         run: gh release download "$RELEASE_TAG" --repo "$SOURCE_REPO" --pattern '*.ipa' --dir release-assets
 
       - uses: actions/setup-python@v6
+        if: steps.stores.outputs.selected == 'true'
         with:
           python-version: '3.13'
       - name: Install App Store JWT support
+        if: steps.stores.outputs.selected == 'true'
         run: pip install --quiet 'pyjwt[crypto]==2.15.1'
 
       - name: Upload exact build, wait for processing, and submit for review
+        if: steps.stores.outputs.selected == 'true'
         env:
           RELEASE_VERSION: ${{ steps.meta.outputs.version }}
           SUBMIT: ${{ steps.meta.outputs.submit }}
@@ -105,7 +115,7 @@ jobs:
           PY
 
       - name: Create PostHog annotation
-        if: github.event.client_payload.posthog_project_id != '' && steps.meta.outputs.submit == 'true'
+        if: steps.stores.outputs.selected == 'true' && github.event.client_payload.posthog_project_id != '' && steps.meta.outputs.submit == 'true'
         env:
           POSTHOG_API_KEY: ${{ secrets.POSTHOG_PERSONAL_API_KEY }}
           POSTHOG_PROJECT: ${{ github.event.client_payload.posthog_project_id }}
@@ -125,10 +135,11 @@ jobs:
         with:
           token: ${{ secrets.SUBSCRIPTION_TELEGRAM_TOKEN }}
           chat-id: ${{ secrets.SUBSCRIPTION_TELEGRAM_TO }}
-          kind: ${{ steps.meta.outputs.submit == 'false' && 'appstore-prepared' || 'appstore' }}
-          status: ${{ job.status == 'success' && 'success' || 'failure' }}
+          kind: ${{ steps.stores.outputs.selected == 'true' && steps.meta.outputs.submit == 'false' && 'appstore-prepared' || 'appstore' }}
+          status: ${{ job.status != 'success' && 'failure' || steps.stores.outputs.selected == 'false' && 'skipped' || 'success' }}
           repo: ${{ github.event.client_payload.repo }}
           title: ${{ github.event.client_payload.app_name }} · ${{ steps.meta.outputs.tag }}
+          pr-number: ${{ steps.stores.outputs.pr_number }}
           link: ${{ steps.meta.outputs.gh_url }}
           run-url: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
           github-token: ${{ github.token }}

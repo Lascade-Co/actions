@@ -3,7 +3,8 @@
 
 Structured mode (TELEGRAM_KIND set) composes the message here so every untrusted field (branch, PR
 title, error text) is HTML-escaped once. Success messages carry the artifact link only; the workflow
-run link and a pointer to the failing job, step and first error are added only to failures.
+run link and a pointer to the failing job, step and first error are added only to failures. A store publisher
+whose store the dispatch did not select reports `skipped` with the label/PR reason and no failure lookup.
 Legacy mode (TELEGRAM_MESSAGE only) still sends plain text.
 """
 import html
@@ -22,6 +23,8 @@ KINDS = {
     'android': {'label': 'Android debug APK', 'jobs': ('unit-tests', 'check', 'android', 'publish-android')},
     'testflight': {'label': 'TestFlight', 'jobs': ('unit-tests', 'check', 'ios-build', 'ios-publish')},
 }
+# status skipped: the publish-kmp dispatch left this store out (the source PR carried the opt-out label).
+SKIPPED = {'appstore': ('App Store skipped', 'no-ios'), 'playstore': ('Play Store skipped', 'no-android')}
 GENERIC_ERROR = re.compile(r'^Process completed with exit code \d+\.?$')
 # A pointer for where to look, not a log: one short annotation per failed job.
 MAX_ERRORS = 1
@@ -83,8 +86,11 @@ def failure_details(api, repository, run_id, token, jobs, opener=urllib.request.
 
 
 def compose(kind, status, fields, details=()):
-    """HTML message. status is success, failure or withheld (lint auto-fix pushed; CI retriggers)."""
+    """HTML message. status is success, failure, withheld (lint auto-fix pushed; CI retriggers) or skipped
+    (store publisher whose store was not selected; fields may carry pr_number)."""
     e = html.escape
+    if status == 'skipped' and kind not in SKIPPED:
+        raise ValueError('Only store publishers report skipped')
     label = KINDS[kind]['label']
     build = fields.get('build_number')
     name = f'{label} {build}' if kind == 'testflight' and build else label
@@ -92,7 +98,8 @@ def compose(kind, status, fields, details=()):
                'playstore': 'Play production rollout submitted'}.get(kind, name + ' ready')
     header = {'success': f'✅ <b>{e(success)}</b>',
               'failure': f'❌ <b>{e(name)} failed</b>',
-              'withheld': f'🔧 <b>{e(name)} withheld</b>'}[status]
+              'withheld': f'🔧 <b>{e(name)} withheld</b>',
+              'skipped': f'⏭️ <b>{e(SKIPPED.get(kind, ("",))[0])}</b>'}[status]
     source = ' · '.join(part for part in (
         f'<b>{e(fields["repo"])}</b>' if fields.get('repo') else '',
         f'<code>{e(fields["branch"])}</code>' if fields.get('branch') else '') if part)
@@ -115,6 +122,18 @@ def compose(kind, status, fields, details=()):
             lines.append(f'📦 <a href="{e(fields["link"], quote=True)}">Download APK</a>')
         elif kind == 'testflight':
             lines.append('Apple is processing it; internal testers get it automatically.')
+    elif status == 'skipped':
+        label = SKIPPED[kind][1]
+        pr_number = fields.get('pr_number', '')
+        if pr_number:
+            if not re.fullmatch(r'[1-9][0-9]*', pr_number) or not fields.get('repo'):
+                raise ValueError('A skipped notification needs a positive PR number and the source repository')
+            pr_url = f'https://github.com/{fields["repo"]}/pull/{pr_number}'
+            lines.append(f'Reason: <code>{e(label)}</code> on <a href="{e(pr_url, quote=True)}">#{e(pr_number)}</a>')
+        else:
+            lines.append('Reason: not selected for this release.')
+        if fields.get('link'):
+            lines.append(f'📦 <a href="{e(fields["link"], quote=True)}">View release</a>')
     elif status == 'withheld':
         lines.append('Claude pushed an Android Lint auto-fix. CI retriggers on the new commit.')
     else:
@@ -135,11 +154,11 @@ def main():
     if not kind:
         send(env['TELEGRAM_TOKEN'], env['TELEGRAM_CHAT'], env['TELEGRAM_MESSAGE'])
         return
-    if kind not in KINDS or env.get('TELEGRAM_STATUS') not in ('success', 'failure', 'withheld'):
+    if kind not in KINDS or env.get('TELEGRAM_STATUS') not in ('success', 'failure', 'withheld', 'skipped'):
         raise ValueError('Unknown Telegram notification kind or status')
     status = env['TELEGRAM_STATUS']
     fields = {key: env.get('TELEGRAM_' + key.upper(), '') for key in
-              ('repo', 'branch', 'title', 'pr_url', 'link', 'build_number', 'results', 'run_url')}
+              ('repo', 'branch', 'title', 'pr_url', 'pr_number', 'link', 'build_number', 'results', 'run_url')}
     details = []
     if status == 'failure' and env.get('GITHUB_RUN_ID') and env.get('TELEGRAM_GITHUB_TOKEN'):
         details = failure_details(env.get('GITHUB_API_URL', 'https://api.github.com'), env['GITHUB_REPOSITORY'],

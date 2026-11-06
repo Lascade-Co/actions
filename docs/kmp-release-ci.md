@@ -49,7 +49,8 @@ commit and annotated `vX.Y.Z` tag atomically with a lease on the original main S
 `gradle.properties` is staged. A concurrent source commit rejects the entire transaction.
 It then creates a draft GitHub release, uploads all six assets, and publishes the non-prerelease
 release last. Thus `release: published` sees all assets and the source trigger can dispatch
-`publish-kmp` to both store consumers. The release body contains only the shared English notes.
+`publish-kmp` to both store consumers, each of which publishes only when the dispatch selects its
+store (see [Publish dispatch payload and store selection](#publish-dispatch-payload-and-store-selection)). The release body contains only the shared English notes.
 
 Use **Re-run failed jobs** after a transient final publication failure. Finalization accepts
 an already-pushed transaction only when main and the tag point to the exact bot bump with
@@ -67,7 +68,8 @@ Offline validation:
 
 ```sh
 python3 -m unittest discover -s scripts/kmp -p 'test_*.py'
-actionlint .github/workflows/kmp-build-release.yml
+actionlint .github/workflows/kmp-build-release.yml .github/workflows/publish-appstore.yml \
+  .github/workflows/publish-playstore.yml
 ```
 
 Runtime/device performance pairs are not applicable: this change contains CI orchestration
@@ -106,6 +108,40 @@ unchanged. App Store Connect rejects emoji in "What's New in This Version" (5.0.
 that followed a leading symbol). Nothing is truncated: an empty result or one over 4000 characters
 fails before any App Store Connect call.
 
+### Publish dispatch payload and store selection
+
+`publish-kmp` (both publishers), `publish-appstore` (App Store only) and the legacy `publish-playstore`
+(Play only, other apps) carry one `client_payload`: `repo`, `release_id`, `package_name`, `app_name`,
+`play_console_production_url`, `release_notes_locale`, `posthog_project_id`, the App Store-only `submit`
+and `ios_uploaded` described below, and two optional selection fields:
+
+- `stores`: a JSON array of the distinct strings `"android"` and/or `"ios"`, possibly empty. An absent key
+  selects both stores, so older dispatches and the retrigger below keep publishing. `null`, a non-array,
+  a non-string or unknown entry (matching is exact and case-sensitive) and a repeated entry fail the job.
+- `pr_number`: the positive JSON integer of the source PR whose labels chose the stores. Any other
+  shape, including a string or `true`, fails the job.
+
+The source chooses the stores: a release PR labelled `no-ios` or `no-android` leaves that store out of
+`stores` and sends its `pr_number`; the source's manual publish button sends its own selection. The rule is
+the same for every event type and lives only in `scripts/kmp/publish_stores.py`: the App Store publisher
+asks for `ios`, the Play publisher for `android`.
+
+A publisher whose store is not selected still validates the payload and fetches and validates the release
+(tag, title and notes, as for a real publish). It skips every store and PostHog step (asset download,
+upload, App Store submission, Play edit, annotation), concludes successfully and sends Telegram status
+`skipped` without a failure lookup, for example:
+
+```text
+⏭️ App Store skipped            (Play: "Play Store skipped")
+Lascade-Co/travel-animator-shared
+TravelAnimator · v5.0.15
+Reason: no-ios on #57           (Play: no-android; without pr_number: "not selected for this release.")
+📦 View release
+```
+
+`no-ios`/`no-android` is code-formatted and `#57` links to `https://github.com/<repo>/pull/57`. All
+payload-derived text is HTML-escaped.
+
 ### Retrigger only the App Store publish
 
 `publish-kmp` starts both `publish-playstore.yml` and `publish-appstore.yml`, and a rerun reuses the
@@ -133,7 +169,8 @@ JSON
 Replace `release_id` with the published GitHub release's numeric ID
 (`gh api repos/Lascade-Co/travel-animator-shared/releases/tags/vX.Y.Z --jq .id`). Omit `submit` (or
 set `true`) to submit for review as `publish-kmp` does. Optional `ios_uploaded: true` skips the
-upload check. The token needs Contents write access on `Lascade-Co/actions`. The dispatch starts a
+upload check. Omit `stores` (or include `"ios"`): a `stores` array without `"ios"` makes this retrigger a
+reported skip. The token needs Contents write access on `Lascade-Co/actions`. The dispatch starts a
 macOS Actions run in this repository.
 
 Final offline validation, 2026-10-24: 51 central KMP tests, 20 App Store fake-client tests and
