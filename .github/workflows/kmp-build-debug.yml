@@ -754,7 +754,7 @@ jobs:
         run: |-
           test -x build/ci/ios/SourcePackages/checkouts/firebase-ios-sdk/Crashlytics/upload-symbols
           build/ci/ios/SourcePackages/checkouts/firebase-ios-sdk/Crashlytics/upload-symbols \
-            -gsp iosApp/iosApp/Config/Staging/GoogleService-Info.plist -p ios "$DSYM_PATH"
+            -gsp "${DSYM_PATH%/dSYMs}"/Products/Applications/*.app/GoogleService-Info.plist -p ios "$DSYM_PATH"
         env:
           DSYM_PATH: ${{ steps.build.outputs.dsym_path }}
       - name: Retain IPA for gated publishing
