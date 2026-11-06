@@ -100,7 +100,10 @@ def resource(kind, attributes=None, relationships=None, identifier=None):
 
 
 def find_app(client, bundle):
-    apps = client.list('apps', {'filter[bundleId]': bundle})
+    # Apple's bundleId filter also returns longer IDs that start with it (e.g. `<bundle>.debug`), so keep
+    # only the exact match.
+    apps = [app for app in client.list('apps', {'filter[bundleId]': bundle})
+            if app.get('attributes', {}).get('bundleId') == bundle]
     if len(apps) != 1:
         raise ValueError('Expected exactly one App Store Connect app matching the bundle ID')
     return apps[0]['id']

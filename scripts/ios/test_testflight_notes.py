@@ -109,7 +109,10 @@ class FakeAppStore:
         self.requests.append((request.get_method(), path, query, body, request.get_header('Authorization')))
         if request.get_method() == 'GET' and path == 'apps':
             assert query == {'filter[bundleId]': 'com.example.app.debug'}
-            return self.reply({'data': [{'type': 'apps', 'id': f'app{n}'} for n in range(self.apps)]})
+            # Apple's filter also returns a longer sibling ID; only exact matches count.
+            return self.reply({'data': [{'type': 'apps', 'id': 'sibling', 'attributes': {'bundleId': 'com.example.app.debug.extra'}}]
+                              + [{'type': 'apps', 'id': f'app{n}', 'attributes': {'bundleId': 'com.example.app.debug'}}
+                                 for n in range(self.apps)]})
         if request.get_method() == 'GET' and path == 'builds':
             assert query == {'filter[app]': 'app0', 'filter[version]': '410.57', 'filter[preReleaseVersion.version]': '5.1.0',
                              'filter[preReleaseVersion.platform]': 'IOS', 'limit': '200'}

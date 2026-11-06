@@ -16,7 +16,9 @@ def main():
     cli.add_argument('--limit', type=int, default=8)
     args = cli.parse_args()
     client = Client()
-    apps = client.request('GET', 'apps', {'filter[bundleId]': args.bundle_id})['data']
+    # The bundleId filter also matches longer IDs (e.g. `<bundle>.debug`); keep only the exact app.
+    apps = [app for app in client.request('GET', 'apps', {'filter[bundleId]': args.bundle_id})['data']
+            if app.get('attributes', {}).get('bundleId') == args.bundle_id]
     if not apps:
         print(f'No App Store Connect app has bundle ID {args.bundle_id}')
         return 1

@@ -46,7 +46,9 @@ class FakeClient:
         if path == 'apps/app/appStoreVersions':
             return copy.deepcopy(self.versions)
         if path == 'apps':
-            return [{'id': 'app'}]
+            # Apple's bundleId filter also returns longer IDs that share the prefix.
+            return [item('apps', 'debug-app', bundleId=params['filter[bundleId]'] + '.debug'),
+                    item('apps', 'app', bundleId=params['filter[bundleId]'])]
         if path.endswith('/appStoreVersionLocalizations'):
             return copy.deepcopy(self.locales[path.split('/')[1]])
         if path == 'apps/app/reviewSubmissions':
@@ -270,6 +272,21 @@ class MetadataTests(unittest.TestCase):
 
 
 class ClientTests(unittest.TestCase):
+    def test_find_app_ignores_prefix_matches_from_apples_bundle_filter(self):
+        from asc_client import find_app
+        class Apps:
+            def __init__(self, data): self.data = data
+            def list(self, path, params):
+                assert (path, params) == ('apps', {'filter[bundleId]': 'com.travelanimator.routemap'})
+                return self.data
+        exact = item('apps', '6462844561', bundleId='com.travelanimator.routemap')
+        debug = item('apps', '6826126545', bundleId='com.travelanimator.routemap.debug')
+        self.assertEqual(find_app(Apps([debug, exact]), 'com.travelanimator.routemap'), '6462844561')
+        with self.assertRaisesRegex(ValueError, 'exactly one'):
+            find_app(Apps([debug]), 'com.travelanimator.routemap')
+        with self.assertRaisesRegex(ValueError, 'exactly one'):
+            find_app(Apps([exact, copy.deepcopy(exact)]), 'com.travelanimator.routemap')
+
     def test_list_follows_apple_pagination(self):
         client = asc.Client()
         with patch.object(client, 'request', side_effect=[{'data': [1], 'links': {'next': asc.API + 'apps?page=2'}},
