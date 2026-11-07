@@ -704,9 +704,9 @@ def subject_of(model):
     e = early_of(model)
     if e:
         bits = [f"{t['label']} {early_rate(early_track(model, t))}" for t in model["tracks"]]
-        return f"TA install→paid · {day_label(e['day'])} (early): " + " · ".join(bits)
+        return f"TravelAnimator install→paid · {day_label(e['day'])} (early): " + " · ".join(bits)
     bits = [f"{t['label']} {'—' if t['empty'] else day_rate(t)}" for t in model["tracks"]]
-    return f"TA install→paid · {day_label(model['last_day'])}: " + " · ".join(bits)
+    return f"TravelAnimator install→paid · {day_label(model['last_day'])}: " + " · ".join(bits)
 
 
 def _text(model, subject, variant="A"):

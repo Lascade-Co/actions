@@ -84,7 +84,7 @@ class TestEditionDelivery:
         m["edition"] = edition
         subject, html, text, _ = render.render(m, "A", tmp_path)
         last, week, label = want
-        assert subject.startswith(f"TA install→paid · {last}:")
+        assert subject.startswith(f"TravelAnimator install→paid · {last}:")
         assert f"latest full day {last} · last 7 days {week}" in html and f"data to 05:00 {label}" in text
 
     def test_payload_is_immutable_and_edition_bound(self, tmp_path):

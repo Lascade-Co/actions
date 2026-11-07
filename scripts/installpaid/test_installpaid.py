@@ -251,7 +251,7 @@ def test_render_variant_a(tmp_path):
            "android": [row("4.0.155", LAST, 6000, paid=70), row("5.0.8", LAST, 200, paid=1)]}
     m = model(raw)
     subj, html, text, imgs = R.render(m, "A", tmp_path)
-    assert subj == "TA install→paid · Sun 18 Oct: iOS 6.0% · Android 5.x 0.50%"
+    assert subj == "TravelAnimator install→paid · Sun 18 Oct: iOS 6.0% · Android 5.x 0.50%"
     assert "4.0.x" not in subj + html + text
     assert "<img" not in html and not imgs
     assert "App Store · iOS" in html and "Play Store · Android 5.x" in text
@@ -285,7 +285,7 @@ def test_ist_edition_labels_its_cutoff(tmp_path):
                       ip_main.cutoff_for(dt.date(2026, 10, 20), "ist"), "2026-10-19", "test")
     m["edition"] = "ist"
     subj, html, text, _ = R.render(m, "A", tmp_path)
-    assert subj.startswith("TA install→paid · Sat 17 Oct:") and "data to 05:00 IST" in text
+    assert subj.startswith("TravelAnimator install→paid · Sat 17 Oct:") and "data to 05:00 IST" in text
     assert "last 7 days 11–17 Oct" in html
 
 
@@ -515,7 +515,7 @@ def test_gate_dedupe_matches_the_report_date_step():
 
 def test_subject_carries_the_latest_full_day():
     m = model({"ios": [row("4.1.0", LAST, 900, paid=45)], "android": []})
-    assert R.subject_of(m) == "TA install→paid · Sun 18 Oct: iOS 5.0% · Android 5.x —"
+    assert R.subject_of(m) == "TravelAnimator install→paid · Sun 18 Oct: iOS 5.0% · Android 5.x —"
 
 
 def test_dated_dedupe_counts_recovery_runs_of_any_event():
@@ -608,7 +608,7 @@ def test_early_model_counts_and_verdicts():
 def test_early_render_subject_dateline_grid_and_block(tmp_path):
     m = early_model(day_paid=3, day_n=100)
     subj, html, text, _ = R.render(m, "A", tmp_path)
-    assert subj.startswith("TA install→paid · Mon 19 Oct (early): iOS 3.0%")
+    assert subj.startswith("TravelAnimator install→paid · Mon 19 Oct (early): iOS 3.0%")
     assert "early Mon 19 Oct · latest full day Sun 18 Oct" in html
     assert "Early read, provisional: what Mon 19 Oct installs had done by 05:00 PT Tue 20 Oct" in html
     assert "Mon 19 Oct (early)" in html and "No installs yet on Mon 19 Oct." in html
@@ -620,7 +620,7 @@ def test_without_early_the_email_is_unchanged(tmp_path):
     m = early_model()
     m["early"] = None
     subj, html, text, _ = R.render(m, "A", tmp_path)
-    assert subj.startswith("TA install→paid · Sun 18 Oct: ")
+    assert subj.startswith("TravelAnimator install→paid · Sun 18 Oct: ")
     assert "Early read" not in html and "Verdicts are judged on the 7 days. The bars and their Mar/Aug colours show the latest full day only" in text
 
 
