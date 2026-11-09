@@ -4,5 +4,7 @@
   "Smart Ruler": {"rank": 3, "short": "SR", "prefixes": ["Smart Ruler", "SR", "AR", "Measure"]},
   "Mail AI": {"short": "Mail AI", "prefixes": ["Mail AI"]},
   "Pingee": {"short": "Pingee", "prefixes": ["Pingee"]},
-  "GeoAnimator": {"rank": 4, "short": "GEO", "prefixes": ["GeoAnimator", "Geo Animator", "GEO"], "tokens": ["geoanimator"]}
+  "GeoAnimator": {"rank": 4, "short": "GEO", "prefixes": ["GeoAnimator", "Geo Animator", "GEO"], "tokens": ["geoanimator"]},
+  "Patrol": {"short": "Patrol", "prefixes": ["Patrol"], "tokens": ["patrol"]},
+  "Treasure Hunch": {"short": "TH", "prefixes": ["Treasure Hunch", "TreasureHunch", "Hunch"], "tokens": ["treasurehunch", "hunch"]}
 }

@@ -889,6 +889,11 @@ def test_app_of_tokens_and_new_projects():
     assert m.app_of("GEOX - 1", APPS) == m.UNATTRIBUTED                      # prefix ends at a boundary
     assert m.app_of("PTW - ASA - Tier1 - Competitor", APPS) == m.UNATTRIBUTED   # not tracked
     assert m.app_of("C1WH - US - EN", APPS) == m.UNATTRIBUTED
+    assert m.app_of("PATROL - KOCHI EN - WEB - CUSTOM", APPS) == "Patrol"
+    assert m.app_of("HUNCH - WEB EN - KOCHI", APPS) == "Treasure Hunch"
+    assert m.app_of("TreasureHunch - IN - WEB", APPS) == "Treasure Hunch"
+    assert m.app_of("Kochi - web - patrol", APPS) == "Patrol"                  # whole-word fallback
+    assert m.app_of("PATROLX - 1", APPS) == m.UNATTRIBUTED
     model = m.build_model({"Meta": [row("GEO - WW EN - INST - ANDROID", AD, 16)], "Google": [],
                            "Apple Search Ads": []}, TABLE, AD, NOW, APPS)
     assert [p["name"] for p in model["projects"]] == ["GeoAnimator"]
