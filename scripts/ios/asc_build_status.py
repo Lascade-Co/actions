@@ -30,6 +30,19 @@ def main():
         print(f"App Store version {attrs['versionString']} (id {version['id']}): "
               f"{attrs.get('appVersionState') or attrs.get('appStoreState')}; "
               f"releaseType={attrs.get('releaseType')}")
+    version_names = {v['id']: v['attributes']['versionString'] for v in versions}
+    submissions = client.list(f"apps/{app['id']}/reviewSubmissions", {'limit': 200})
+    for submission in submissions:
+        attrs = submission['attributes']
+        if attrs.get('state') in ('COMPLETE', 'CANCELED'):
+            continue
+        print(f"Review submission {submission['id']}: state={attrs.get('state')} "
+              f"platform={attrs.get('platform')} submittedDate={attrs.get('submittedDate')}")
+        items = client.list(f"reviewSubmissions/{submission['id']}/items", {'limit': 200, 'include': 'appStoreVersion'})
+        for item in items:
+            linked = item.get('relationships', {}).get('appStoreVersion', {}).get('data') or {}
+            print(f"  Item {item['id']}: state={item['attributes'].get('state')} "
+                  f"version={version_names.get(linked.get('id'), linked.get('id'))}")
     groups = client.request('GET', f"apps/{app['id']}/betaGroups", {'limit': 50})['data']
     for group in groups:
         attrs = group['attributes']
