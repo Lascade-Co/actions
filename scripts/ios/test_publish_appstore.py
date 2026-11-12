@@ -462,6 +462,18 @@ class WorkflowTriggerTests(unittest.TestCase):
 
 
 class ClientTests(unittest.TestCase):
+    def test_api_error_reports_nested_review_blockers_with_the_failed_endpoint(self):
+        errors = [{'code': 'STATE_ERROR.ENTITY_STATE_INVALID', 'detail': 'This resource cannot be reviewed',
+                   'meta': {'associatedErrors': {'/v1/appStoreVersions/new': [
+                       {'code': 'ENTITY_ERROR.ATTRIBUTE.REQUIRED', 'detail': 'Review contact missing'}]}}}]
+        error = urllib.error.HTTPError(asc.API, 409, 'Conflict', {}, io.BytesIO(json.dumps({'errors': errors}).encode()))
+        client = asc.Client(opener=lambda *a, **kw: (_ for _ in ()).throw(error))
+        with patch('asc_client.token', return_value='token'):
+            with self.assertRaisesRegex(asc.ApiError, 'POST reviewSubmissionItems.*Review contact missing') as raised:
+                client.request('POST', 'reviewSubmissionItems', data={})
+        self.assertEqual(raised.exception.errors, errors)
+        self.assertIn('/v1/appStoreVersions/new', str(raised.exception))
+
     def test_find_app_ignores_prefix_matches_from_apples_bundle_filter(self):
         from asc_client import find_app
         class Apps:

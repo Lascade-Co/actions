@@ -37,6 +37,19 @@ class ApiError(RuntimeError):
         super().__init__(message)
 
 
+def error_details(errors):
+    """Apple nests actionable review blockers under meta.associatedErrors, keyed by resource path."""
+    messages = []
+    for error in errors:
+        if not isinstance(error, dict):
+            continue
+        messages.append(f'{error.get("code", "API_ERROR")}: {error.get("detail") or error.get("title", "")}')
+        associated = (error.get('meta') or {}).get('associatedErrors') or {}
+        for path, nested in associated.items():
+            messages.extend(f'{path}: {message}' for message in error_details(nested))
+    return messages
+
+
 def token():
     import jwt
     missing = [key for key in CREDENTIALS if not os.environ.get(key)]
@@ -72,13 +85,12 @@ class Client:
             errors = []
             try:
                 errors = json.loads(error.read()).get('errors', [])
-                message = '; '.join(f'{e.get("code", "API_ERROR")}: {e.get("detail") or e.get("title", "")}'
-                                    for e in errors)
+                message = '; '.join(error_details(errors))
             except (ValueError, TypeError, AttributeError):
                 errors, message = [], 'Unreadable App Store Connect error'
             finally:
                 error.close()
-            raise ApiError(error.code, f'App Store Connect HTTP {error.code}: {message}',
+            raise ApiError(error.code, f'App Store Connect HTTP {error.code} ({method} {path}): {message}',
                            [e for e in errors if isinstance(e, dict)] if isinstance(errors, list) else []) from None
 
     def list(self, path, params=None):
