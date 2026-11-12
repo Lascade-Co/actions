@@ -39,6 +39,8 @@ WHATS_NEW_LIMIT = 4000
 REVIEW_CAPACITY_ERROR = 'STATE_ERROR.MAX_IN_REVIEW_SUBMISSIONS_PER_PLATFORM_LIMIT_REACHED'
 IN_FLIGHT_REVIEW_STATES = {'WAITING_FOR_REVIEW', 'IN_REVIEW', 'UNRESOLVED_ISSUES'}
 REVIEW_ITEM_RELATIONSHIPS = ('appStoreVersion', 'appEvent', 'appCustomProductPageVersion', 'appStoreVersionExperiment')
+EDITABLE_VERSION_STATES = {'PREPARE_FOR_SUBMISSION', 'DEVELOPER_REJECTED', 'REJECTED', 'METADATA_REJECTED', 'INVALID_BINARY'}
+REPLACEABLE_VERSION_STATES = EDITABLE_VERSION_STATES | {'WAITING_FOR_REVIEW', 'IN_REVIEW'}
 
 
 def appstore_whats_new(notes):
@@ -64,6 +66,25 @@ def matching_version(versions, version):
     return matches[0] if matches else None
 
 
+def version_number(version):
+    parts = version.split('.')
+    if not 1 <= len(parts) <= 3 or not all(part.isascii() and part.isdigit() for part in parts):
+        raise ValueError(f'Cannot compare App Store version {version!r}')
+    return tuple(map(int, parts)) + (0,) * (3 - len(parts))
+
+
+def supplemental_review_items(items):
+    carry = []
+    for item in items:
+        linked = [(key, value.get('data')) for key, value in item.get('relationships', {}).items()
+                  if key in REVIEW_ITEM_RELATIONSHIPS and value.get('data')]
+        if len(linked) != 1:
+            raise ValueError(f'Cannot identify review item {item["id"]}; inspect it before replacing its submission')
+        if linked[0][0] != 'appStoreVersion' and item.get('attributes', {}).get('state') not in ('ACCEPTED', 'APPROVED'):
+            carry.append(linked[0])
+    return carry
+
+
 class Publisher:
     def __init__(self, client, sleep=time.sleep, monotonic=time.monotonic):
         self.client, self.sleep, self.monotonic = client, sleep, monotonic
@@ -72,6 +93,78 @@ class Publisher:
 
     def find_build(self, app, version, number):
         return find_build(self.client, app, version, number)
+
+    def review_items(self, identifier):
+        return self.client.list(f'reviewSubmissions/{identifier}/items',
+                                {'limit': 200, 'include': ','.join(REVIEW_ITEM_RELATIONSHIPS)})
+
+    def carry_review_items(self, submission, carry):
+        if not carry:
+            return
+        current = self.review_items(submission['id'])
+        existing = {(key, value['data']['id']) for item in current
+                    for key, value in item.get('relationships', {}).items() if value.get('data')}
+        for key, linked in carry:
+            if (key, linked['id']) not in existing:
+                self.client.request('POST', 'reviewSubmissionItems', data=resource('reviewSubmissionItems',
+                    relationships={'reviewSubmission': ('reviewSubmissions', submission['id']),
+                                   key: (linked['type'], linked['id'])}))
+                existing.add((key, linked['id']))
+                print(f'Carried {key} {linked["id"]} into review {submission["id"]}', flush=True)
+
+    def cancel_review(self, submission, timeout=300):
+        path = f'reviewSubmissions/{submission["id"]}'
+        if submission['attributes']['state'] != 'CANCELING':
+            self.client.request('PATCH', path, data=resource('reviewSubmissions', {'canceled': True},
+                                                           identifier=submission['id']))
+        deadline = self.monotonic() + timeout
+        while True:
+            current = self.client.request('GET', path)['data']
+            if current['attributes'].get('state') == 'COMPLETE':
+                return
+            if self.monotonic() >= deadline:
+                raise TimeoutError(f'Timed out waiting for cancellation of iOS review {submission["id"]}; retry to resume')
+            self.sleep(min(5, max(0, deadline - self.monotonic())))
+
+    def replace_blocking_version(self, app, versions, version, timeout=300):
+        """Withdraw the older version's own review, then reuse its metadata/screenshots for the new release."""
+        candidates = [v for v in versions if version_state(v) in REPLACEABLE_VERSION_STATES]
+        if len(candidates) != 1 or any(version_number(v['attributes']['versionString']) >= version_number(version)
+                                       for v in versions):
+            return None
+        target = candidates[0]
+        identifier, old_version = target['id'], target['attributes']['versionString']
+        submissions = self.client.list(f'apps/{app}/reviewSubmissions', {'limit': 200})
+        matching = []
+        for submission in submissions:
+            if (submission['attributes'].get('platform') != 'IOS' or
+                    submission['attributes'].get('state') not in IN_FLIGHT_REVIEW_STATES | {'CANCELING'}):
+                continue
+            items = self.review_items(submission['id'])
+            if any((i.get('relationships', {}).get('appStoreVersion', {}).get('data') or {}).get('id') == identifier
+                   for i in items):
+                supplemental_review_items(items)  # Validate every item before withdrawing its submission.
+                matching.append(submission)
+        if len(matching) > 1 or (version_state(target) not in EDITABLE_VERSION_STATES and not matching):
+            return None
+        for submission in matching:
+            print(f'Replacing App Store version {old_version} with {version}; withdrawing its iOS review '
+                  f'{submission["id"]}', flush=True)
+            self.cancel_review(submission, timeout)
+        deadline = self.monotonic() + timeout
+        while True:
+            target = self.client.request('GET', f'appStoreVersions/{identifier}')['data']
+            if target['attributes']['versionString'] != old_version:
+                raise ValueError('The blocking App Store version changed during replacement; retry to recheck it')
+            if version_state(target) in EDITABLE_VERSION_STATES:
+                break
+            if self.monotonic() >= deadline:
+                raise TimeoutError(f'Timed out waiting for App Store version {old_version} to become editable; retry to resume')
+            self.sleep(min(5, max(0, deadline - self.monotonic())))
+        target = self.client.request('PATCH', f'appStoreVersions/{identifier}', data=resource('appStoreVersions',
+            {'versionString': version}, identifier=identifier))['data']
+        print(f'Reused App Store version {identifier}: {old_version} -> {version}; preserved metadata and release type', flush=True)
+        return target
 
     def submit_review(self, app, submission, timeout=300):
         """Make room for this release by withdrawing one older iOS review only on Apple's capacity error."""
@@ -93,15 +186,7 @@ class Publisher:
         canceling = [candidate for candidate in older if candidate['attributes']['state'] == 'CANCELING']
         previous = min(canceling or older, key=lambda candidate: candidate['attributes']['submittedDate'])
         previous_path = f'reviewSubmissions/{previous["id"]}'
-        items = client.list(f'{previous_path}/items', {'limit': 200, 'include': ','.join(REVIEW_ITEM_RELATIONSHIPS)})
-        carry = []
-        for item in items:
-            linked = [(key, value.get('data')) for key, value in item.get('relationships', {}).items()
-                      if key in REVIEW_ITEM_RELATIONSHIPS and value.get('data')]
-            if len(linked) != 1:
-                raise ValueError(f'Cannot identify review item {item["id"]}; inspect it before replacing its submission')
-            if linked[0][0] != 'appStoreVersion':
-                carry.append(linked[0])
+        carry = supplemental_review_items(self.review_items(previous['id']))
         print(f'Apple review capacity is full; replacing previous iOS review {previous["id"]} '
               f'({previous["attributes"]["state"]}, submitted {previous["attributes"]["submittedDate"]}) '
               f'with {submission["id"]}', flush=True)
@@ -114,15 +199,7 @@ class Publisher:
             previous = client.request('GET', previous_path)['data']
             if previous['attributes'].get('state') == 'COMPLETE':
                 if carry and not carried:
-                    current = client.list(f'{path}/items', {'limit': 200, 'include': ','.join(REVIEW_ITEM_RELATIONSHIPS)})
-                    existing = {(key, value['data']['id']) for item in current
-                                for key, value in item.get('relationships', {}).items() if value.get('data')}
-                    for key, linked in carry:
-                        if (key, linked['id']) not in existing:
-                            client.request('POST', 'reviewSubmissionItems', data=resource('reviewSubmissionItems',
-                                relationships={'reviewSubmission': ('reviewSubmissions', submission['id']),
-                                               key: (linked['type'], linked['id'])}))
-                            print(f'Carried {key} {linked["id"]} into review {submission["id"]}', flush=True)
+                    self.carry_review_items(submission, carry)
                     carried = True
                 try:
                     client.request('PATCH', path, data=data)
@@ -212,8 +289,10 @@ class Publisher:
                 # Another publisher or App Store Connect may have created the version since our read.
                 versions = client.list(f'apps/{app}/appStoreVersions', {'filter[platform]': 'IOS', 'limit': 200})
                 target = matching_version(versions, version)
+                if not target and submit and 'You cannot create a new version of the App in the current state' in str(error):
+                    target = self.replace_blocking_version(app, versions, version)
                 if not target:
-                    states = ', '.join(f'{v["attributes"]["versionString"]}: {version_state(v)}' for v in versions)
+                    states = ', '.join(f'{v["attributes"]["versionString"]}: {version_state(v)}' for v in versions[:8])
                     raise ValueError(f'{error}; existing iOS versions: {states}; resolve the blocking '
                                      'version in App Store Connect before retrying') from error
                 print(f'Version creation conflicted; resuming existing App Store version {version} '
@@ -242,11 +321,18 @@ class Publisher:
         submissions = client.list(f'apps/{app}/reviewSubmissions', {'limit': 200})
         submission = None
         attached = False
+        carry = []
         for candidate in submissions:
-            items = client.list(f'reviewSubmissions/{candidate["id"]}/items', {'limit': 200, 'include': 'appStoreVersion'})
+            items = self.review_items(candidate['id'])
             if any((i.get('relationships', {}).get('appStoreVersion', {}).get('data') or {}).get('id') == identifier for i in items):
+                if candidate['attributes'].get('state') == 'COMPLETE':
+                    # The version resource is reused after withdrawal. Its old submission is historical;
+                    # recover ancillary items from it even if the previous run stopped after cancellation.
+                    carry.extend(supplemental_review_items(items))
+                    continue
+                if submission:
+                    raise ValueError('Multiple unfinished review submissions matched this App Store version')
                 submission, attached = candidate, True
-                break
         if submission and submission['attributes'].get('state') != 'READY_FOR_REVIEW':
             raise ValueError('Existing review submission is not editable; inspect App Store Connect')
         if not submission:
@@ -256,6 +342,7 @@ class Publisher:
             client.request('POST', 'reviewSubmissionItems', data=resource('reviewSubmissionItems', relationships={
                 'reviewSubmission': ('reviewSubmissions', submission['id']),
                 'appStoreVersion': ('appStoreVersions', identifier)}))
+        self.carry_review_items(submission, carry)
         self.submit_review(app, submission)
         self.outcome = 'submitted'
         return identifier

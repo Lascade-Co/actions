@@ -101,11 +101,19 @@ Release type: only a version the publisher creates requests `releaseType: AFTER_
 existing editable version (for example one prepared by an earlier run or by hand) keeps its current
 release type; a `MANUAL` choice made in App Store Connect is never overwritten.
 
-If version creation returns HTTP 409, the publisher refreshes the iOS versions and resumes only an
-exact version match. An already submitted version must also have the exact build attached. If the
-requested version still does not exist, the error includes the current version states so a blocked
-review or release can be resolved in App Store Connect. The publisher never cancels another review
-or renames an older draft. The read-only `asc-build-status.yml` workflow also reports version states.
+If version creation returns HTTP 409, the publisher refreshes the iOS versions and first resumes an
+exact version match. An already submitted version must also have the exact build attached. When
+Apple reports that the current app state prevents creation, a submitting run replaces the single
+older editable/in-review iOS version: it cancels only that version's own review, waits for it to
+become editable, then updates its `versionString` and attaches the new exact build. Reusing the
+version resource preserves screenshots, metadata and the existing release type. Numeric version
+comparison prevents an older release from withdrawing or renaming a newer one. Approved/live
+versions, ambiguous matches, other platforms and `submit: false` do not trigger replacement.
+Cancellation and the subsequent editable-state transition each have a five-minute timeout. A retry
+resumes cancellation or the renamed draft, ignores completed historical submissions and carries
+pending non-version items from the withdrawn review into the replacement without duplicates.
+Unresolved conflicts report the recent version states. The read-only `asc-build-status.yml`
+workflow also reports version states and review items.
 Retries reuse an existing exact build; `ios_uploaded: true` additionally skips uploading while that
 build is still becoming visible, then waits for Apple to finish processing it.
 

@@ -293,6 +293,179 @@ class PublisherTests(unittest.TestCase):
         self.assertEqual(release_types, [(('POST', 'appStoreVersions'), 'AFTER_APPROVAL')])
 
 
+class VersionReplacementClient(FakeClient):
+    """An in-review version occupies Apple's only editable version record until it is withdrawn."""
+    def __init__(self, state='WAITING_FOR_REVIEW'):
+        super().__init__()
+        self.versions[0]['attributes']['versionString'] = '5.0.7'
+        self.versions[1]['attributes'].update(versionString='5.0.8', appVersionState=state, releaseType='MANUAL')
+        self.submissions = [item('reviewSubmissions', 'prior-review', platform='IOS',
+                                 state='WAITING_FOR_REVIEW', submittedDate='2026-11-12T12:00:00Z'),
+                            item('reviewSubmissions', 'unrelated-review', platform='IOS',
+                                 state='WAITING_FOR_REVIEW', submittedDate='2026-11-11T12:00:00Z')]
+        self.page = {'id': 'page-item', 'attributes': {'state': 'READY_FOR_REVIEW'}, 'relationships': {
+            'appCustomProductPageVersion': {'data': {'type': 'appCustomProductPageVersions', 'id': 'page'}}}}
+        self.submission_items = {'prior-review': [{'id': 'prior-item', 'relationships': {
+            'appStoreVersion': {'data': {'type': 'appStoreVersions', 'id': 'new'}}}}, self.page],
+            'unrelated-review': []}
+        self.never_complete = False
+        self.fail_once = None
+
+    def request(self, method, path, params=None, data=None):
+        attrs = ((data or {}).get('data') or {}).get('attributes', {})
+        if self.fail_once == 'rename' and (method, path) == ('PATCH', 'appStoreVersions/new'):
+            self.fail_once = None
+            raise OSError('Interrupted before rename')
+        if self.fail_once == 'metadata' and method == 'PATCH' and path.startswith('appStoreVersionLocalizations/'):
+            self.fail_once = None
+            raise OSError('Interrupted after rename')
+        if (method, path) == ('POST', 'appStoreVersions'):
+            self.calls.append((method, path, copy.deepcopy(data)))
+            raise asc.ApiError(409, 'ENTITY_ERROR.RELATIONSHIP.INVALID: '
+                               'You cannot create a new version of the App in the current state.')
+        if (method, path) == ('PATCH', 'reviewSubmissions/prior-review') and attrs.get('canceled'):
+            self.calls.append((method, path, copy.deepcopy(data)))
+            self.submissions[0]['attributes']['state'] = 'CANCELING'
+            return {'data': copy.deepcopy(self.submissions[0])}
+        if (method, path) == ('GET', 'reviewSubmissions/prior-review'):
+            self.calls.append((method, path, None))
+            if not self.never_complete:
+                self.submissions[0]['attributes']['state'] = 'COMPLETE'
+                self.versions[1]['attributes']['appVersionState'] = 'DEVELOPER_REJECTED'
+            return {'data': copy.deepcopy(self.submissions[0])}
+        if (method, path) == ('GET', 'appStoreVersions/new'):
+            self.calls.append((method, path, None))
+            return {'data': copy.deepcopy(self.versions[1])}
+        if (method, path) == ('PATCH', 'appStoreVersions/new'):
+            self.calls.append((method, path, copy.deepcopy(data)))
+            assert asc.version_state(self.versions[1]) in asc.EDITABLE_VERSION_STATES
+            self.versions[1]['attributes'].update(attrs)
+            return {'data': copy.deepcopy(self.versions[1])}
+        if (method, path) == ('POST', 'reviewSubmissions'):
+            response = super().request(method, path, params, data)
+            submission = response['data']
+            submission['attributes']['state'] = 'READY_FOR_REVIEW'
+            self.submissions.append(copy.deepcopy(submission))
+            self.submission_items[submission['id']] = []
+            return response
+        if (method, path) == ('POST', 'reviewSubmissionItems'):
+            response = super().request(method, path, params, data)
+            submission = data['data']['relationships']['reviewSubmission']['data']['id']
+            self.submission_items[submission].append(copy.deepcopy(response['data']))
+            return response
+        if (method, path) == ('PATCH', 'reviewSubmissions/review') and attrs.get('submitted'):
+            self.versions[1]['attributes']['appVersionState'] = 'WAITING_FOR_REVIEW'
+        return super().request(method, path, params, data)
+
+
+class VersionReplacementTests(unittest.TestCase):
+    def test_new_release_withdraws_its_prior_version_review_reuses_metadata_and_upload_and_preserves_page(self):
+        for state in ('WAITING_FOR_REVIEW', 'IN_REVIEW'):
+            with self.subTest(state=state):
+                client = VersionReplacementClient(state)
+                result, uploads = IdentityTests().run_main(client)
+                self.assertEqual(result, 0)
+                self.assertEqual(uploads, [])
+                self.assertEqual(client.versions[1]['attributes']['versionString'], '5.0.9')
+                self.assertEqual(client.versions[1]['attributes']['releaseType'], 'MANUAL')
+                canceled = [c for c in client.calls if c[0] == 'PATCH' and
+                            (c[2] or {}).get('data', {}).get('attributes', {}).get('canceled')]
+                self.assertEqual([c[1] for c in canceled], ['reviewSubmissions/prior-review'])
+                self.assertIn(('PATCH', 'appStoreVersions/new/relationships/build',
+                               {'data': {'type': 'builds', 'id': 'exact-build'}}), client.calls)
+                relationships = [i['relationships'] for i in client.submission_items['review']]
+                self.assertTrue(any(r.get('appStoreVersion', {}).get('data', {}).get('id') == 'new' for r in relationships))
+                self.assertTrue(any(r.get('appCustomProductPageVersion', {}).get('data', {}).get('id') == 'page'
+                                    for r in relationships))
+                self.assertIn(('PATCH', 'reviewSubmissions/review'), [c[:2] for c in client.calls])
+
+    def test_retry_after_interruption_before_or_after_rename_recovers_page_from_completed_review(self):
+        for stage in ('rename', 'metadata'):
+            with self.subTest(stage=stage):
+                client = VersionReplacementClient()
+                client.fail_once = stage
+                with self.assertRaises(OSError):
+                    asc.Publisher(client).publish('app', '5.0.9', client.builds[0], 'Notes.')
+                publisher = asc.Publisher(client)
+                publisher.publish('app', '5.0.9', client.builds[0], 'Notes.')
+                self.assertEqual(publisher.outcome, 'submitted')
+                self.assertEqual(sum(c[:2] == ('PATCH', 'reviewSubmissions/prior-review') for c in client.calls), 1)
+                self.assertEqual(sum('appCustomProductPageVersion' in i['relationships']
+                                     for i in client.submission_items['review']), 1)
+
+    def test_pending_cancellation_is_resumed_without_duplicate_cancel(self):
+        client = VersionReplacementClient()
+        client.submissions[0]['attributes']['state'] = 'CANCELING'
+        asc.Publisher(client).publish('app', '5.0.9', client.builds[0], 'Notes.')
+        self.assertFalse(any(c[:2] == ('PATCH', 'reviewSubmissions/prior-review') for c in client.calls))
+
+    def test_successful_replacement_retry_is_noop_for_the_exact_build(self):
+        client = VersionReplacementClient()
+        asc.Publisher(client).publish('app', '5.0.9', client.builds[0], 'Notes.')
+        client.calls.clear()
+        publisher = asc.Publisher(client)
+        publisher.publish('app', '5.0.9', client.builds[0], 'Notes.')
+        self.assertEqual(publisher.outcome, 'WAITING_FOR_REVIEW')
+        self.assertFalse(any(c[0] in ('POST', 'PATCH') for c in client.calls))
+
+    def test_waits_for_editable_version_after_review_cancellation_completes(self):
+        client = VersionReplacementClient()
+        request, delayed, clock = client.request, [False], [0]
+        def lag(method, path, params=None, data=None):
+            response = request(method, path, params, data)
+            if (method, path) == ('GET', 'appStoreVersions/new') and not delayed[0]:
+                delayed[0] = True
+                response['data']['attributes']['appVersionState'] = 'WAITING_FOR_REVIEW'
+            return response
+        client.request = lag
+        def sleep(seconds): clock[0] += seconds
+        publisher = asc.Publisher(client, sleep=sleep, monotonic=lambda: clock[0])
+        publisher.publish('app', '5.0.9', client.builds[0], 'Notes.')
+        self.assertEqual(clock[0], 5)
+        self.assertEqual(publisher.outcome, 'submitted')
+
+    def test_cancellation_timeout_never_renames_or_submits(self):
+        client = VersionReplacementClient()
+        client.never_complete = True
+        with self.assertRaisesRegex(TimeoutError, 'cancellation of iOS review prior-review'):
+            asc.Publisher(client).replace_blocking_version('app', client.versions, '5.0.9', timeout=0)
+        self.assertEqual(client.versions[1]['attributes']['versionString'], '5.0.8')
+        self.assertFalse(any(c[:2] == ('POST', 'reviewSubmissions') for c in client.calls))
+
+    def test_prepare_only_never_withdraws_an_older_version(self):
+        client = VersionReplacementClient()
+        with self.assertRaisesRegex(ValueError, '5.0.8: WAITING_FOR_REVIEW'):
+            asc.Publisher(client).publish('app', '5.0.9', client.builds[0], 'Notes.', submit=False)
+        self.assertEqual(review_mutations(client), [])
+        self.assertEqual(client.versions[1]['attributes']['versionString'], '5.0.8')
+
+    def test_stale_release_or_approved_version_is_not_replaced(self):
+        for requested, state in (('5.0.6', 'WAITING_FOR_REVIEW'), ('5.0.9', 'PENDING_DEVELOPER_RELEASE'),
+                                 ('5.0.9', 'READY_FOR_DISTRIBUTION')):
+            with self.subTest(requested=requested, state=state):
+                client = VersionReplacementClient(state)
+                with self.assertRaises(ValueError):
+                    asc.Publisher(client).publish('app', requested, client.builds[0], 'Notes.')
+                self.assertEqual(review_mutations(client), [])
+                self.assertEqual(client.versions[1]['attributes']['versionString'], '5.0.8')
+
+    def test_unknown_item_or_wrong_platform_blocks_withdrawal(self):
+        for blocker in ('unknown-item', 'other-platform'):
+            with self.subTest(blocker=blocker):
+                client = VersionReplacementClient()
+                if blocker == 'unknown-item':
+                    client.submission_items['prior-review'].append({'id': 'unknown', 'relationships': {}})
+                else:
+                    client.submissions[0]['attributes']['platform'] = 'MAC_OS'
+                with self.assertRaises(ValueError):
+                    asc.Publisher(client).publish('app', '5.0.9', client.builds[0], 'Notes.')
+                self.assertEqual(review_mutations(client), [])
+
+    def test_version_comparison_is_numeric(self):
+        self.assertGreater(asc.version_number('5.0.10'), asc.version_number('5.0.9'))
+        self.assertEqual(asc.version_number('5.0'), asc.version_number('5.0.0'))
+
+
 class ReviewCapacityTests(unittest.TestCase):
     def client(self, failures=1, states=('COMPLETE',), code=asc.REVIEW_CAPACITY_ERROR):
         client = FakeClient()
