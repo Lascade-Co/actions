@@ -163,6 +163,59 @@ class PublisherTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'different build'):
             asc.Publisher(client).publish('app', '5.0.9', {'id': 'wrong'}, 'Notes.')
 
+    def conflict_client(self, state=None, status=409):
+        client = FakeClient(target=False)
+        request = client.request
+        def create(method, path, params=None, data=None):
+            if (method, path) == ('POST', 'appStoreVersions'):
+                client.calls.append((method, path, copy.deepcopy(data)))
+                if state:
+                    client.versions.append(item('appStoreVersions', 'new', versionString='5.0.9',
+                                                appVersionState=state, releaseType='MANUAL'))
+                raise asc.ApiError(status, 'You cannot create a new version of the App in the current state.')
+            return request(method, path, params, data)
+        client.request = create
+        return client
+
+    def test_creation_conflict_resumes_exact_editable_version_and_preserves_manual_release(self):
+        client = self.conflict_client('PREPARE_FOR_SUBMISSION')
+        publisher = asc.Publisher(client)
+        self.assertEqual(publisher.publish('app', '5.0.9', client.builds[0], 'Notes.'), 'new')
+        self.assertEqual(publisher.outcome, 'submitted')
+        self.assertEqual(sum(c[:2] == ('POST', 'appStoreVersions') for c in client.calls), 1)
+        self.assertFalse(any(c[:2] == ('PATCH', 'appStoreVersions/new') for c in client.calls))
+        self.assertIn(('PATCH', 'appStoreVersions/new/relationships/build',
+                       {'data': {'type': 'builds', 'id': 'exact-build'}}), client.calls)
+
+    def test_creation_conflict_with_submitted_version_rechecks_build_before_any_mutation(self):
+        for build_id in ('exact-build', 'wrong-build'):
+            with self.subTest(build_id=build_id):
+                client = self.conflict_client('WAITING_FOR_REVIEW')
+                publisher = asc.Publisher(client)
+                if build_id == 'exact-build':
+                    self.assertEqual(publisher.publish('app', '5.0.9', {'id': build_id}, 'Notes.'), 'new')
+                    self.assertEqual(publisher.outcome, 'WAITING_FOR_REVIEW')
+                else:
+                    with self.assertRaisesRegex(ValueError, 'different build'):
+                        publisher.publish('app', '5.0.9', {'id': build_id}, 'Notes.')
+                self.assertEqual([c[:2] for c in client.calls if c[0] in ('POST', 'PATCH')],
+                                 [('POST', 'appStoreVersions')])
+
+    def test_creation_conflict_without_exact_version_reports_states_and_does_not_mutate_other_versions(self):
+        client = self.conflict_client()
+        client.versions[0]['attributes']['appStoreState'] = 'IN_REVIEW'
+        with self.assertRaisesRegex(ValueError, '5.0.8: IN_REVIEW'):
+            asc.Publisher(client).publish('app', '5.0.9', client.builds[0], 'Notes.')
+        self.assertEqual([c[:2] for c in client.calls if c[0] in ('POST', 'PATCH')],
+                         [('POST', 'appStoreVersions')])
+
+    def test_non_conflict_creation_errors_are_not_recovered(self):
+        client = self.conflict_client('PREPARE_FOR_SUBMISSION', status=403)
+        with self.assertRaises(asc.ApiError) as error:
+            asc.Publisher(client).publish('app', '5.0.9', client.builds[0], 'Notes.')
+        self.assertEqual(error.exception.status, 403)
+        self.assertEqual(sum(c[:2] == ('LIST', 'apps/app/appStoreVersions') for c in client.calls), 1)
+
     def test_active_phased_release_fails_before_review_submission(self):
         client = FakeClient()
         client.phased = item('appStoreVersionPhasedReleases', 'phase', phasedReleaseState='ACTIVE')
@@ -296,9 +349,11 @@ class IdentityTests(unittest.TestCase):
         self.assertEqual(client.calls, [])
 
     def test_existing_build_skips_altool_on_retry(self):
-        result, calls = self.run_main(FakeClient())
+        out = io.StringIO()
+        result, calls = self.run_main(FakeClient(), stdout=out)
         self.assertEqual(result, 0)
         self.assertEqual(calls, [])
+        self.assertIn('Reusing existing build 5.0.9 (509); skipping IPA upload', out.getvalue())
 
     def test_absent_build_uploads_with_existing_control_command_before_processing(self):
         client = FakeClient()
@@ -322,10 +377,12 @@ class IdentityTests(unittest.TestCase):
     def test_already_uploaded_flag_skips_upload_even_before_build_is_visible(self):
         client = FakeClient()
         build = client.builds.pop()
+        out = io.StringIO()
         with patch.object(asc.Publisher, 'wait_build', return_value=build) as wait:
-            result, calls = self.run_main(client, ['--already-uploaded'])
+            result, calls = self.run_main(client, ['--already-uploaded'], stdout=out)
         self.assertEqual(result, 0)
         self.assertEqual(calls, [])
+        self.assertIn('Reusing already uploaded build 5.0.9 (509)', out.getvalue())
         wait.assert_called_once_with('app', '5.0.9', '509', 5400)
 
     def test_ipa_reads_only_main_app_info_not_extension(self):

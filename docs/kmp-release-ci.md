@@ -101,6 +101,14 @@ Release type: only a version the publisher creates requests `releaseType: AFTER_
 existing editable version (for example one prepared by an earlier run or by hand) keeps its current
 release type; a `MANUAL` choice made in App Store Connect is never overwritten.
 
+If version creation returns HTTP 409, the publisher refreshes the iOS versions and resumes only an
+exact version match. An already submitted version must also have the exact build attached. If the
+requested version still does not exist, the error includes the current version states so a blocked
+review or release can be resolved in App Store Connect. The publisher never cancels another review
+or renames an older draft. The read-only `asc-build-status.yml` workflow also reports version states.
+Retries reuse an existing exact build; `ios_uploaded: true` additionally skips uploading while that
+build is still becoming visible, then waits for Apple to finish processing it.
+
 What's New: the shared release notes keep their 1–500 UTF-16 unit validation and reach Google Play
 unchanged. App Store Connect rejects emoji in "What's New in This Version" (5.0.14, 2026-11-07:
 "can't contain the following character(s)"), so the App Store copy alone drops the characters in

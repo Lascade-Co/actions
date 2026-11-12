@@ -25,7 +25,7 @@ def main():
     app = apps[0]
     print(f"App: {app['attributes']['name']} ({app['attributes']['bundleId']}, id {app['id']})")
     versions = client.list(f"apps/{app['id']}/appStoreVersions", {'filter[platform]': 'IOS', 'limit': 200})
-    for version in versions:
+    for version in versions[:args.limit]:
         attrs = version['attributes']
         print(f"App Store version {attrs['versionString']} (id {version['id']}): "
               f"{attrs.get('appVersionState') or attrs.get('appStoreState')}; "

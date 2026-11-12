@@ -54,6 +54,13 @@ def version_state(version):
     return attrs.get('appVersionState') or attrs.get('appStoreState')
 
 
+def matching_version(versions, version):
+    matches = [v for v in versions if v['attributes']['versionString'] == version]
+    if len(matches) > 1:
+        raise ValueError('Multiple App Store versions matched')
+    return matches[0] if matches else None
+
+
 class Publisher:
     def __init__(self, client, sleep=time.sleep, monotonic=time.monotonic):
         self.client, self.sleep, self.monotonic = client, sleep, monotonic
@@ -121,29 +128,38 @@ class Publisher:
     def publish(self, app, version, build, notes, submit=True):
         client = self.client
         versions = client.list(f'apps/{app}/appStoreVersions', {'filter[platform]': 'IOS', 'limit': 200})
-        matches = [v for v in versions if v['attributes']['versionString'] == version]
-        if len(matches) > 1:
-            raise ValueError('Multiple App Store versions matched')
+        target = matching_version(versions, version)
         previous = next((v for v in sorted(versions, key=lambda v: v['attributes'].get('createdDate', ''), reverse=True)
                          if v['attributes']['versionString'] != version and
                          version_state(v) in ('READY_FOR_SALE', 'REPLACED_WITH_NEW_VERSION',
                                                                   'READY_FOR_DISTRIBUTION')), None)
-        if matches:
-            target = matches[0]
-            if version_state(target) in SUBMITTED_STATES:
-                linked = client.related(f'appStoreVersions/{target["id"]}/build')
-                if not linked or linked['id'] != build['id']:
-                    raise ValueError('Submitted version is attached to a different build')
-                self.outcome = version_state(target)
-                return target['id']
-            # Existing editable version: keep its release type (e.g. MANUAL chosen in App Store Connect).
-        else:
+        if not target:
             # Only a version created here gets the default automatic release after approval.
             attrs = {'platform': 'IOS', 'versionString': version, 'releaseType': 'AFTER_APPROVAL'}
             if previous and previous['attributes'].get('copyright'):
                 attrs['copyright'] = previous['attributes']['copyright']
-            target = client.request('POST', 'appStoreVersions', data=resource('appStoreVersions', attrs,
-                {'app': ('apps', app)}))['data']
+            try:
+                target = client.request('POST', 'appStoreVersions', data=resource('appStoreVersions', attrs,
+                    {'app': ('apps', app)}))['data']
+            except ApiError as error:
+                if error.status != 409:
+                    raise
+                # Another publisher or App Store Connect may have created the version since our read.
+                versions = client.list(f'apps/{app}/appStoreVersions', {'filter[platform]': 'IOS', 'limit': 200})
+                target = matching_version(versions, version)
+                if not target:
+                    states = ', '.join(f'{v["attributes"]["versionString"]}: {version_state(v)}' for v in versions)
+                    raise ValueError(f'{error}; existing iOS versions: {states}; resolve the blocking '
+                                     'version in App Store Connect before retrying') from error
+                print(f'Version creation conflicted; resuming existing App Store version {version} '
+                      f'({target["id"]}): {version_state(target)}', flush=True)
+        if version_state(target) in SUBMITTED_STATES:
+            linked = client.related(f'appStoreVersions/{target["id"]}/build')
+            if not linked or linked['id'] != build['id']:
+                raise ValueError('Submitted version is attached to a different build')
+            self.outcome = version_state(target)
+            return target['id']
+        # Existing editable version: keep its release type (e.g. MANUAL chosen in App Store Connect).
         identifier = target['id']
         self.carry_metadata(identifier, previous['id'] if previous else None, notes)
         client.request('PATCH', f'appStoreVersions/{identifier}/relationships/build',
@@ -203,7 +219,11 @@ def main(argv=None):
     client = Client()
     app = find_app(client, bundle)
     publisher = Publisher(client)
-    if not args.already_uploaded and not publisher.find_build(app, version, number):
+    if args.already_uploaded:
+        print(f'Reusing already uploaded build {version} ({number}); waiting for Apple processing', flush=True)
+    elif publisher.find_build(app, version, number):
+        print(f'Reusing existing build {version} ({number}); skipping IPA upload', flush=True)
+    else:
         subprocess.run([sys.executable, str(Path(__file__).resolve().parents[1] / 'kmp/control.py'),
                         'upload-ipa', args.ipa], check=True)
     build = publisher.wait_build(app, version, number, args.processing_timeout)
