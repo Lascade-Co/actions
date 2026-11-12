@@ -109,6 +109,13 @@ or renames an older draft. The read-only `asc-build-status.yml` workflow also re
 Retries reuse an existing exact build; `ios_uploaded: true` additionally skips uploading while that
 build is still becoming visible, then waits for Apple to finish processing it.
 
+When Apple rejects submission with `MAX_IN_REVIEW_SUBMISSIONS_PER_PLATFORM_LIMIT_REACHED`,
+the publisher cancels the oldest in-flight iOS review submission for this app to make room for
+the new release. It leaves other platforms, draft submissions and the target submission intact,
+waits up to five minutes for cancellation and capacity propagation, then submits the prepared
+release. Other review validation errors never trigger cancellation; `submit: false` never does
+either. A timeout fails explicitly, and a retry resumes the same prepared review submission.
+
 What's New: the shared release notes keep their 1–500 UTF-16 unit validation and reach Google Play
 unchanged. App Store Connect rejects emoji in "What's New in This Version" (5.0.14, 2026-11-07:
 "can't contain the following character(s)"), so the App Store copy alone drops the characters in

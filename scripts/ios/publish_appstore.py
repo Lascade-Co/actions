@@ -36,6 +36,8 @@ SUBMITTED_STATES = {'WAITING_FOR_REVIEW', 'IN_REVIEW', 'PENDING_APPLE_RELEASE',
                     'READY_FOR_DISTRIBUTION', 'PROCESSING_FOR_DISTRIBUTION', 'ACCEPTED'}
 # App Store Connect's limit for "What's New in This Version" (characters).
 WHATS_NEW_LIMIT = 4000
+REVIEW_CAPACITY_ERROR = 'STATE_ERROR.MAX_IN_REVIEW_SUBMISSIONS_PER_PLATFORM_LIMIT_REACHED'
+IN_FLIGHT_REVIEW_STATES = {'WAITING_FOR_REVIEW', 'IN_REVIEW', 'UNRESOLVED_ISSUES'}
 
 
 def appstore_whats_new(notes):
@@ -69,6 +71,47 @@ class Publisher:
 
     def find_build(self, app, version, number):
         return find_build(self.client, app, version, number)
+
+    def submit_review(self, app, submission, timeout=300):
+        """Make room for this release by withdrawing one older iOS review only on Apple's capacity error."""
+        client = self.client
+        path = f'reviewSubmissions/{submission["id"]}'
+        data = resource('reviewSubmissions', {'submitted': True}, identifier=submission['id'])
+        try:
+            client.request('PATCH', path, data=data)
+            return
+        except ApiError as error:
+            if error.status != 409 or REVIEW_CAPACITY_ERROR not in str(error):
+                raise
+        older = [candidate for candidate in client.list(f'apps/{app}/reviewSubmissions', {'limit': 200})
+                 if candidate['id'] != submission['id'] and candidate['attributes'].get('platform') == 'IOS'
+                 and candidate['attributes'].get('state') in IN_FLIGHT_REVIEW_STATES | {'CANCELING'}
+                 and candidate['attributes'].get('submittedDate')]
+        if not older:
+            raise ValueError('Apple review capacity is full, but no previous in-flight iOS review was found')
+        canceling = [candidate for candidate in older if candidate['attributes']['state'] == 'CANCELING']
+        previous = min(canceling or older, key=lambda candidate: candidate['attributes']['submittedDate'])
+        previous_path = f'reviewSubmissions/{previous["id"]}'
+        print(f'Apple review capacity is full; replacing previous iOS review {previous["id"]} '
+              f'({previous["attributes"]["state"]}, submitted {previous["attributes"]["submittedDate"]}) '
+              f'with {submission["id"]}', flush=True)
+        if previous['attributes']['state'] != 'CANCELING':
+            client.request('PATCH', previous_path, data=resource('reviewSubmissions', {'canceled': True},
+                                                              identifier=previous['id']))
+        deadline = self.monotonic() + timeout
+        while True:
+            previous = client.request('GET', previous_path)['data']
+            if previous['attributes'].get('state') == 'COMPLETE':
+                try:
+                    client.request('PATCH', path, data=data)
+                    return
+                except ApiError as error:
+                    if error.status != 409 or REVIEW_CAPACITY_ERROR not in str(error):
+                        raise
+            if self.monotonic() >= deadline:
+                raise TimeoutError('Timed out waiting for the previous iOS review to release its slot; '
+                                   f'retry to resume submission {submission["id"]}')
+            self.sleep(min(5, max(0, deadline - self.monotonic())))
 
     def wait_build(self, app, version, number, timeout):
         deadline = self.monotonic() + timeout
@@ -191,8 +234,7 @@ class Publisher:
             client.request('POST', 'reviewSubmissionItems', data=resource('reviewSubmissionItems', relationships={
                 'reviewSubmission': ('reviewSubmissions', submission['id']),
                 'appStoreVersion': ('appStoreVersions', identifier)}))
-        client.request('PATCH', f'reviewSubmissions/{submission["id"]}', data=resource('reviewSubmissions',
-            {'submitted': True}, identifier=submission['id']))
+        self.submit_review(app, submission)
         self.outcome = 'submitted'
         return identifier
 
@@ -243,7 +285,7 @@ def main(argv=None):
 if __name__ == '__main__':
     try:
         raise SystemExit(main())
-    except (ApiError, ValueError, OSError, zipfile.BadZipFile, subprocess.CalledProcessError) as exc:
+    except (ApiError, ValueError, OSError, TimeoutError, zipfile.BadZipFile, subprocess.CalledProcessError) as exc:
         message = str(exc).replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A')
         print(f'::error title=App Store submission::{message}', file=sys.stderr)
         raise SystemExit(1)

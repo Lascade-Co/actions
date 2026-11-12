@@ -293,6 +293,91 @@ class PublisherTests(unittest.TestCase):
         self.assertEqual(release_types, [(('POST', 'appStoreVersions'), 'AFTER_APPROVAL')])
 
 
+class ReviewCapacityTests(unittest.TestCase):
+    def client(self, failures=1, states=('COMPLETE',), code=asc.REVIEW_CAPACITY_ERROR):
+        client = FakeClient()
+        client.submissions = [item('reviewSubmissions', identifier, platform=platform, state='WAITING_FOR_REVIEW',
+                                   submittedDate=date) for identifier, platform, date in (
+            ('recent', 'IOS', '2026-11-12T08:00:00Z'), ('oldest', 'IOS', '2026-11-11T10:00:00Z'),
+            ('mac', 'MAC_OS', '2026-11-01T10:00:00Z'))]
+        client.submission_items = {submission['id']: [] for submission in client.submissions}
+        client.remaining_failures = failures
+        client.canceled = []
+        state_iter = iter(states)
+        request = client.request
+        def capacity(method, path, params=None, data=None):
+            attrs = ((data or {}).get('data') or {}).get('attributes', {})
+            if method == 'PATCH' and attrs.get('submitted') and client.remaining_failures:
+                client.calls.append((method, path, copy.deepcopy(data)))
+                client.remaining_failures -= 1
+                raise asc.ApiError(409, code)
+            if method == 'PATCH' and attrs.get('canceled'):
+                client.canceled.append(path.split('/')[1])
+            if method == 'GET' and path.startswith('reviewSubmissions/'):
+                client.calls.append((method, path, None))
+                return {'data': item('reviewSubmissions', path.split('/')[1], state=next(state_iter, states[-1]))}
+            return request(method, path, params, data)
+        client.request = capacity
+        return client
+
+    def test_full_review_capacity_replaces_only_oldest_ios_review_then_submits(self):
+        client = self.client()
+        publisher = asc.Publisher(client)
+        publisher.publish('app', '5.0.9', client.builds[0], 'Notes.')
+        self.assertEqual(client.canceled, ['oldest'])
+        self.assertEqual(publisher.outcome, 'submitted')
+        self.assertEqual(sum(c[:2] == ('PATCH', 'reviewSubmissions/review') for c in client.calls), 2)
+
+    def test_waits_for_cancellation_and_capacity_propagation_before_retry(self):
+        client = self.client(failures=2, states=('CANCELING', 'COMPLETE'))
+        clock = [0]
+        def sleep(seconds): clock[0] += seconds
+        publisher = asc.Publisher(client, sleep=sleep, monotonic=lambda: clock[0])
+        publisher.submit_review('app', {'id': 'review'}, timeout=30)
+        self.assertEqual(clock[0], 10)
+        self.assertEqual(client.canceled, ['oldest'])
+        self.assertEqual(sum(c[:2] == ('PATCH', 'reviewSubmissions/review') for c in client.calls), 3)
+
+    def test_retry_resumes_pending_cancellation_instead_of_withdrawing_another_review(self):
+        client = self.client()
+        client.submissions[0]['attributes']['state'] = 'CANCELING'
+        asc.Publisher(client).submit_review('app', {'id': 'review'})
+        self.assertEqual(client.canceled, [])
+        self.assertIn(('GET', 'reviewSubmissions/recent', None), client.calls)
+
+    def test_cancellation_timeout_never_reports_submission_success_or_cancels_another_review(self):
+        client = self.client(states=('CANCELING',))
+        publisher = asc.Publisher(client)
+        with self.assertRaisesRegex(TimeoutError, 'retry to resume submission review'):
+            publisher.submit_review('app', {'id': 'review'}, timeout=0)
+        self.assertEqual(client.canceled, ['oldest'])
+        self.assertIsNone(publisher.outcome)
+
+    def test_other_review_errors_never_cancel_previous_reviews(self):
+        client = self.client(code='ENTITY_ERROR.ATTRIBUTE.REQUIRED: Review contact missing')
+        with self.assertRaisesRegex(asc.ApiError, 'Review contact missing'):
+            asc.Publisher(client).publish('app', '5.0.9', client.builds[0], 'Notes.')
+        self.assertEqual(client.canceled, [])
+
+    def test_no_submit_never_withdraws_an_existing_review(self):
+        client = self.client()
+        publisher = asc.Publisher(client)
+        publisher.publish('app', '5.0.9', client.builds[0], 'Notes.', submit=False)
+        self.assertEqual(publisher.outcome, 'prepared')
+        self.assertEqual(client.canceled, [])
+        self.assertEqual(review_mutations(client), [])
+
+    def test_never_cancels_the_target_or_a_draft_or_another_platform(self):
+        client = self.client()
+        client.submissions = [item('reviewSubmissions', 'review', platform='IOS', state='WAITING_FOR_REVIEW',
+                                   submittedDate='2026-11-01T00:00:00Z'),
+                              item('reviewSubmissions', 'draft', platform='IOS', state='READY_FOR_REVIEW'),
+                              client.submissions[-1]]
+        with self.assertRaisesRegex(ValueError, 'no previous in-flight iOS review'):
+            asc.Publisher(client).submit_review('app', {'id': 'review'})
+        self.assertEqual(client.canceled, [])
+
+
 class WhatsNewTests(unittest.TestCase):
     def test_5_0_14_notes_lose_only_their_emoji(self):
         self.assertEqual(asc.appstore_whats_new(NOTES_5_0_14), WHATS_NEW_5_0_14)

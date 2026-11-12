@@ -39,7 +39,8 @@ def main():
         print(f"Review submission {submission['id']}: state={attrs.get('state')} "
               f"platform={attrs.get('platform')} submittedDate={attrs.get('submittedDate')} "
               f"versionForReview={submission.get('relationships', {}).get('appStoreVersionForReview', {}).get('data')}")
-        items = client.list(f"reviewSubmissions/{submission['id']}/items", {'limit': 200, 'include': 'appStoreVersion'})
+        items = client.list(f"reviewSubmissions/{submission['id']}/items", {'limit': 200,
+                            'include': 'appStoreVersion,appEvent,appCustomProductPageVersion,appStoreVersionExperiment'})
         for item in items:
             linked = item.get('relationships', {}).get('appStoreVersion', {}).get('data') or {}
             print(f"  Item {item['id']}: state={item['attributes'].get('state')} "
