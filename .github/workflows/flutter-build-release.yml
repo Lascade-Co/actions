@@ -494,6 +494,17 @@ jobs:
           dart pub global activate flutterfire_cli
           echo "$HOME/.pub-cache/bin" >> "$GITHUB_PATH"
 
+      # Resolve Swift packages up front, as ios-build-release.yml does. Left to
+      # `flutter build ipa`, Xcode resolves them mid-build and has been crashing
+      # with "count of array (50) differs from count of index set (49)" in
+      # IDEGroup/DependencyPackagesGroup (esim app, from 2026-11-12).
+      - name: Resolve SPM dependencies
+        run: |
+          flutter build ios --config-only --release --no-codesign ${{ steps.build-mode.outputs.dart_define_args }}
+          xcodebuild -resolvePackageDependencies \
+            -workspace ios/Runner.xcworkspace \
+            -scheme Runner
+
       - name: Build release IPA
         run: flutter build ipa --export-options-plist=ExportOptions.plist --no-pub ${{ steps.build-mode.outputs.dart_define_args }}
 
