@@ -115,6 +115,9 @@ the new release. It leaves other platforms, draft submissions and the target sub
 waits up to five minutes for cancellation and capacity propagation, then submits the prepared
 release. Other review validation errors never trigger cancellation; `submit: false` never does
 either. A timeout fails explicitly, and a retry resumes the same prepared review submission.
+Non-version items (custom product pages, events and experiments) from the withdrawn submission
+are attached to the new submission before it is submitted, without duplicates. Unknown item
+types block replacement before cancellation so their pending review is preserved.
 
 What's New: the shared release notes keep their 1–500 UTF-16 unit validation and reach Google Play
 unchanged. App Store Connect rejects emoji in "What's New in This Version" (5.0.14, 2026-11-07:

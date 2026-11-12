@@ -38,6 +38,7 @@ SUBMITTED_STATES = {'WAITING_FOR_REVIEW', 'IN_REVIEW', 'PENDING_APPLE_RELEASE',
 WHATS_NEW_LIMIT = 4000
 REVIEW_CAPACITY_ERROR = 'STATE_ERROR.MAX_IN_REVIEW_SUBMISSIONS_PER_PLATFORM_LIMIT_REACHED'
 IN_FLIGHT_REVIEW_STATES = {'WAITING_FOR_REVIEW', 'IN_REVIEW', 'UNRESOLVED_ISSUES'}
+REVIEW_ITEM_RELATIONSHIPS = ('appStoreVersion', 'appEvent', 'appCustomProductPageVersion', 'appStoreVersionExperiment')
 
 
 def appstore_whats_new(notes):
@@ -92,6 +93,15 @@ class Publisher:
         canceling = [candidate for candidate in older if candidate['attributes']['state'] == 'CANCELING']
         previous = min(canceling or older, key=lambda candidate: candidate['attributes']['submittedDate'])
         previous_path = f'reviewSubmissions/{previous["id"]}'
+        items = client.list(f'{previous_path}/items', {'limit': 200, 'include': ','.join(REVIEW_ITEM_RELATIONSHIPS)})
+        carry = []
+        for item in items:
+            linked = [(key, value.get('data')) for key, value in item.get('relationships', {}).items()
+                      if key in REVIEW_ITEM_RELATIONSHIPS and value.get('data')]
+            if len(linked) != 1:
+                raise ValueError(f'Cannot identify review item {item["id"]}; inspect it before replacing its submission')
+            if linked[0][0] != 'appStoreVersion':
+                carry.append(linked[0])
         print(f'Apple review capacity is full; replacing previous iOS review {previous["id"]} '
               f'({previous["attributes"]["state"]}, submitted {previous["attributes"]["submittedDate"]}) '
               f'with {submission["id"]}', flush=True)
@@ -99,9 +109,21 @@ class Publisher:
             client.request('PATCH', previous_path, data=resource('reviewSubmissions', {'canceled': True},
                                                               identifier=previous['id']))
         deadline = self.monotonic() + timeout
+        carried = False
         while True:
             previous = client.request('GET', previous_path)['data']
             if previous['attributes'].get('state') == 'COMPLETE':
+                if carry and not carried:
+                    current = client.list(f'{path}/items', {'limit': 200, 'include': ','.join(REVIEW_ITEM_RELATIONSHIPS)})
+                    existing = {(key, value['data']['id']) for item in current
+                                for key, value in item.get('relationships', {}).items() if value.get('data')}
+                    for key, linked in carry:
+                        if (key, linked['id']) not in existing:
+                            client.request('POST', 'reviewSubmissionItems', data=resource('reviewSubmissionItems',
+                                relationships={'reviewSubmission': ('reviewSubmissions', submission['id']),
+                                               key: (linked['type'], linked['id'])}))
+                            print(f'Carried {key} {linked["id"]} into review {submission["id"]}', flush=True)
+                    carried = True
                 try:
                     client.request('PATCH', path, data=data)
                     return

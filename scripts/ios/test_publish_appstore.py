@@ -72,7 +72,7 @@ class FakeClient:
         if path == 'apps/app/reviewSubmissions':
             return copy.deepcopy(self.submissions)
         if path.endswith('/items'):
-            assert params['include'] == 'appStoreVersion'
+            assert 'appStoreVersion' in params['include'].split(',')
             return copy.deepcopy(self.submission_items[path.split('/')[1]])
         if path == 'builds':
             assert params['filter[app]'] == 'app'
@@ -337,6 +337,37 @@ class ReviewCapacityTests(unittest.TestCase):
         self.assertEqual(clock[0], 10)
         self.assertEqual(client.canceled, ['oldest'])
         self.assertEqual(sum(c[:2] == ('PATCH', 'reviewSubmissions/review') for c in client.calls), 3)
+
+    def test_custom_product_page_moves_into_new_submission_without_reattaching_old_app_version(self):
+        client = self.client()
+        client.submission_items['oldest'] = [
+            {'id': 'page-item', 'relationships': {'appCustomProductPageVersion': {
+                'data': {'type': 'appCustomProductPageVersions', 'id': 'page-version'}}}},
+            {'id': 'old-version-item', 'relationships': {'appStoreVersion': {
+                'data': {'type': 'appStoreVersions', 'id': 'old'}}}}]
+        client.submission_items['review'] = []
+        asc.Publisher(client).submit_review('app', {'id': 'review'})
+        added = [c[2]['data']['relationships'] for c in client.calls if c[:2] == ('POST', 'reviewSubmissionItems')]
+        self.assertEqual(added, [{'reviewSubmission': {'data': {'type': 'reviewSubmissions', 'id': 'review'}},
+                                 'appCustomProductPageVersion': {
+                                     'data': {'type': 'appCustomProductPageVersions', 'id': 'page-version'}}}])
+        self.assertEqual(client.canceled, ['oldest'])
+
+    def test_carried_product_page_already_in_target_is_not_duplicated(self):
+        client = self.client()
+        page = {'id': 'page-item', 'relationships': {'appCustomProductPageVersion': {
+            'data': {'type': 'appCustomProductPageVersions', 'id': 'page-version'}}}}
+        client.submission_items['oldest'] = [page]
+        client.submission_items['review'] = [copy.deepcopy(page)]
+        asc.Publisher(client).submit_review('app', {'id': 'review'})
+        self.assertFalse(any(c[:2] == ('POST', 'reviewSubmissionItems') for c in client.calls))
+
+    def test_unknown_review_items_fail_before_withdrawing_previous_review(self):
+        client = self.client()
+        client.submission_items['oldest'] = [{'id': 'unknown-item', 'relationships': {}}]
+        with self.assertRaisesRegex(ValueError, 'Cannot identify review item unknown-item'):
+            asc.Publisher(client).submit_review('app', {'id': 'review'})
+        self.assertEqual(client.canceled, [])
 
     def test_retry_resumes_pending_cancellation_instead_of_withdrawing_another_review(self):
         client = self.client()
