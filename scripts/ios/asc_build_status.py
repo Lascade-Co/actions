@@ -24,6 +24,12 @@ def main():
         return 1
     app = apps[0]
     print(f"App: {app['attributes']['name']} ({app['attributes']['bundleId']}, id {app['id']})")
+    versions = client.list(f"apps/{app['id']}/appStoreVersions", {'filter[platform]': 'IOS', 'limit': 200})
+    for version in versions:
+        attrs = version['attributes']
+        print(f"App Store version {attrs['versionString']} (id {version['id']}): "
+              f"{attrs.get('appVersionState') or attrs.get('appStoreState')}; "
+              f"releaseType={attrs.get('releaseType')}")
     groups = client.request('GET', f"apps/{app['id']}/betaGroups", {'limit': 50})['data']
     for group in groups:
         attrs = group['attributes']
