@@ -37,12 +37,14 @@ def main():
         if attrs.get('state') in ('COMPLETE', 'CANCELED'):
             continue
         print(f"Review submission {submission['id']}: state={attrs.get('state')} "
-              f"platform={attrs.get('platform')} submittedDate={attrs.get('submittedDate')}")
+              f"platform={attrs.get('platform')} submittedDate={attrs.get('submittedDate')} "
+              f"versionForReview={submission.get('relationships', {}).get('appStoreVersionForReview', {}).get('data')}")
         items = client.list(f"reviewSubmissions/{submission['id']}/items", {'limit': 200, 'include': 'appStoreVersion'})
         for item in items:
             linked = item.get('relationships', {}).get('appStoreVersion', {}).get('data') or {}
             print(f"  Item {item['id']}: state={item['attributes'].get('state')} "
-                  f"version={version_names.get(linked.get('id'), linked.get('id'))}")
+                  f"version={version_names.get(linked.get('id'), linked.get('id'))} "
+                  f"resources={item.get('relationships', {})}")
     groups = client.request('GET', f"apps/{app['id']}/betaGroups", {'limit': 50})['data']
     for group in groups:
         attrs = group['attributes']
