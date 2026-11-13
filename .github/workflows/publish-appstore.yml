@@ -88,6 +88,13 @@ jobs:
         if: steps.stores.outputs.selected == 'true'
         run: pip install --quiet 'pyjwt[crypto]==2.15.1'
 
+      # What's New localisation is fail-soft: if this install fails the publish still runs and
+      # falls back to the English notes, so it must not block the release.
+      - name: Install What's New localisation support
+        if: steps.stores.outputs.selected == 'true'
+        continue-on-error: true
+        run: pip install --quiet -r scripts/ai/requirements.txt
+
       - name: Upload exact build, wait for processing, and submit for review
         if: steps.stores.outputs.selected == 'true'
         env:
@@ -97,6 +104,7 @@ jobs:
           APPSTORE_API_KEY_ID: ${{ secrets.APPSTORE_API_KEY_ID }}
           APPSTORE_ISSUER_ID: ${{ secrets.APPSTORE_ISSUER_ID }}
           APPSTORE_API_PRIVATE_KEY: ${{ secrets.APPSTORE_API_PRIVATE_KEY }}
+          CLAUDE_API_KEY: ${{ secrets.CLAUDE_API_KEY }}
         run: |
           python3 - <<'PY'
           import os, pathlib, subprocess, sys
@@ -104,7 +112,7 @@ jobs:
           if len(files) != 1:
               raise ValueError('Expected exactly one release IPA')
           command = [sys.executable, 'scripts/ios/publish_appstore.py', '--ipa', str(files[0]),
-                     '--version', os.environ['RELEASE_VERSION'], '--notes-file', 'release_notes.txt']
+                     '--version', os.environ['RELEASE_VERSION'], '--notes-file', 'release_notes.txt', '--localize-whats-new']
           if os.environ['ALREADY_UPLOADED'].lower() == 'true':
               command.append('--already-uploaded')
           if os.environ['SUBMIT'] == 'false':

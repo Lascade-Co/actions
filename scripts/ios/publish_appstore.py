@@ -14,6 +14,8 @@ whatever release type it already has (for example MANUAL set in App Store Connec
 --no-submit does everything up to and including the phased-release setup, then stops before any
 reviewSubmission/reviewSubmissionItem is created or changed, so privacy labels and review sign-in can be
 entered in App Store Connect and the version submitted there.
+--localize-whats-new: non-English locales get a Claude translation of What's New (scripts/ios/localize_whats_new.py);
+English locales and any locale whose translation fails keep the shared notes. Nothing else is localised.
 What's New: the shared notes are validated as before (1-500 UTF-16 units), then only the App Store copy has
 the characters App Store Connect rejects (emoji and other pictographs, with their variation selectors, ZWJ
 and one following space) removed; nothing is truncated. Google Play receives the shared notes unchanged.
@@ -25,8 +27,8 @@ import sys
 import time
 import zipfile
 
-from asc_client import (API, ApiError, Client, find_app, find_build, ipa_identity, resource,  # noqa: F401 (re-exported)
-                        strip_rejected)
+from asc_client import (API, ApiError, Client, WHATS_NEW_LIMIT, find_app, find_build,  # noqa: F401 (re-exported)
+                        ipa_identity, resource, strip_rejected, whats_new_too_long)
 
 LOCALIZATION_FIELDS = ('description', 'keywords', 'marketingUrl', 'promotionalText', 'supportUrl')
 REVIEW_FIELDS = ('contactEmail', 'contactFirstName', 'contactLastName', 'contactPhone',
@@ -34,8 +36,6 @@ REVIEW_FIELDS = ('contactEmail', 'contactFirstName', 'contactLastName', 'contact
 SUBMITTED_STATES = {'WAITING_FOR_REVIEW', 'IN_REVIEW', 'PENDING_APPLE_RELEASE',
                     'PENDING_DEVELOPER_RELEASE', 'READY_FOR_SALE', 'PROCESSING_FOR_APP_STORE',
                     'READY_FOR_DISTRIBUTION', 'PROCESSING_FOR_DISTRIBUTION', 'ACCEPTED'}
-# App Store Connect's limit for "What's New in This Version" (characters).
-WHATS_NEW_LIMIT = 4000
 REVIEW_CAPACITY_ERROR = 'STATE_ERROR.MAX_IN_REVIEW_SUBMISSIONS_PER_PLATFORM_LIMIT_REACHED'
 IN_FLIGHT_REVIEW_STATES = {'WAITING_FOR_REVIEW', 'IN_REVIEW', 'UNRESOLVED_ISSUES'}
 REVIEW_ITEM_RELATIONSHIPS = ('appStoreVersion', 'appEvent', 'appCustomProductPageVersion', 'appStoreVersionExperiment')
@@ -47,7 +47,7 @@ def appstore_whats_new(notes):
     """The App Store copy of the shared notes without the characters Apple rejects; never truncated."""
     lines = [line.rstrip() for line in strip_rejected(notes).split('\n')]
     text = '\n'.join(lines).strip()
-    if not text or len(text) > WHATS_NEW_LIMIT:
+    if not text or whats_new_too_long(text):
         raise ValueError(f"App Store What's New must contain 1-{WHATS_NEW_LIMIT} characters after removing "
                          'emoji/pictographs; edit the release notes instead of truncating')
     return text
@@ -86,8 +86,10 @@ def supplemental_review_items(items):
 
 
 class Publisher:
-    def __init__(self, client, sleep=time.sleep, monotonic=time.monotonic):
+    def __init__(self, client, sleep=time.sleep, monotonic=time.monotonic, localize=None):
         self.client, self.sleep, self.monotonic = client, sleep, monotonic
+        # Optional callable (locales, notes) -> {locale: translated What's New}; absent locales get `notes`.
+        self.localize = localize
         # After publish(): 'submitted', 'prepared' (--no-submit) or the state of an already submitted version.
         self.outcome = None
 
@@ -234,11 +236,13 @@ class Publisher:
         current = client.list(f'appStoreVersions/{version}/appStoreVersionLocalizations', {'limit': 200})
         old = client.list(f'appStoreVersions/{previous}/appStoreVersionLocalizations', {'limit': 200}) if previous else []
         by_locale = {loc['attributes']['locale']: loc for loc in current}
+        translated = self.localize(sorted(set(by_locale) | {loc['attributes']['locale'] for loc in old}), notes) \
+            if self.localize else {}
         for loc in old:
             attrs = loc['attributes']
             if attrs['locale'] not in by_locale:
                 copied = {key: attrs[key] for key in (*LOCALIZATION_FIELDS, 'locale') if attrs.get(key) is not None}
-                copied['whatsNew'] = notes
+                copied['whatsNew'] = translated.get(attrs['locale'], notes)
                 created = client.request('POST', 'appStoreVersionLocalizations', data=resource(
                     'appStoreVersionLocalizations', copied, {'appStoreVersion': ('appStoreVersions', version)}))['data']
                 by_locale[attrs['locale']] = created
@@ -247,7 +251,7 @@ class Publisher:
         old_by_locale = {loc['attributes']['locale']: loc['attributes'] for loc in old}
         for locale, loc in by_locale.items():
             # Never overwrite existing version metadata, except the requested What's New.
-            attrs = {'whatsNew': notes}
+            attrs = {'whatsNew': translated.get(locale, notes)}
             attrs.update({key: old_by_locale[locale][key] for key in LOCALIZATION_FIELDS
                           if locale in old_by_locale and not loc['attributes'].get(key)
                           and old_by_locale[locale].get(key) is not None})
@@ -356,6 +360,9 @@ def main(argv=None):
     parser.add_argument('--bundle-id', default='com.travelanimator.routemap')
     parser.add_argument('--notes-file', required=True)
     parser.add_argument('--already-uploaded', action='store_true')
+    parser.add_argument('--localize-whats-new', action='store_true',
+                        help="Translate What's New into every non-English locale (needs CLAUDE_API_KEY); "
+                             'falls back to the English notes per locale on any failure')
     parser.add_argument('--processing-timeout', type=int, default=5400)
     parser.add_argument('--no-submit', dest='submit', action='store_false',
                         help='Prepare the version (build, metadata, phased release) but do not submit it for review')
@@ -369,7 +376,11 @@ def main(argv=None):
     whats_new = appstore_whats_new(notes)
     client = Client()
     app = find_app(client, bundle)
-    publisher = Publisher(client)
+    localize = None
+    if args.localize_whats_new:
+        from localize_whats_new import translate
+        localize = translate
+    publisher = Publisher(client, localize=localize)
     if args.already_uploaded:
         print(f'Reusing already uploaded build {version} ({number}); waiting for Apple processing', flush=True)
     elif publisher.find_build(app, version, number):

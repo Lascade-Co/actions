@@ -29,6 +29,14 @@ REJECTED = re.compile(REJECTED_CLASS)
 # A removed symbol that began a line or word takes one following space with it.
 REJECTED_WORD = re.compile(r'(^|(?<= ))(?:' + REJECTED_CLASS + ')+ ', re.M)
 
+# App Store Connect's cap for "What's New in This Version", counted in UTF-16 code units.
+WHATS_NEW_LIMIT = 4000
+
+
+def whats_new_too_long(text):
+    """True when text exceeds the whatsNew cap by Apple's measure (UTF-16 units, not code points)."""
+    return len(text.encode('utf-16-le')) // 2 > WHATS_NEW_LIMIT
+
 
 class ApiError(RuntimeError):
     def __init__(self, status, message, errors=()):
