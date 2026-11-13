@@ -473,6 +473,13 @@ jobs:
       # `flutter build ipa`, Xcode resolves them mid-build and has been crashing
       # with "count of array (50) differs from count of index set (49)" in
       # IDEGroup/DependencyPackagesGroup (esim app, from 2026-11-12).
+      # Xcode 26.6 crashes in IDEGroup/DependencyPackagesGroup while registering
+      # SPM packages (esim app); 26.5 is on the same image.
+      - name: Select Xcode 26.5
+        run: |
+          sudo xcode-select -s /Applications/Xcode_26.5.app/Contents/Developer
+          xcodebuild -version
+
       - name: Resolve SPM dependencies
         run: |
           # Drop the Pods tree restored from an older Podfile.lock cache key.
