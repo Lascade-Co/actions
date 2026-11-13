@@ -86,7 +86,7 @@ jobs:
           python-version: '3.13'
       - name: Install App Store JWT support
         if: steps.stores.outputs.selected == 'true'
-        run: pip install --quiet 'pyjwt[crypto]==2.15.1'
+        run: pip install --quiet 'pyjwt[crypto]==2.15.1' -r scripts/ai/requirements.txt
 
       - name: Upload exact build, wait for processing, and submit for review
         if: steps.stores.outputs.selected == 'true'
@@ -97,6 +97,7 @@ jobs:
           APPSTORE_API_KEY_ID: ${{ secrets.APPSTORE_API_KEY_ID }}
           APPSTORE_ISSUER_ID: ${{ secrets.APPSTORE_ISSUER_ID }}
           APPSTORE_API_PRIVATE_KEY: ${{ secrets.APPSTORE_API_PRIVATE_KEY }}
+          CLAUDE_API_KEY: ${{ secrets.CLAUDE_API_KEY }}
         run: |
           python3 - <<'PY'
           import os, pathlib, subprocess, sys
@@ -104,7 +105,7 @@ jobs:
           if len(files) != 1:
               raise ValueError('Expected exactly one release IPA')
           command = [sys.executable, 'scripts/ios/publish_appstore.py', '--ipa', str(files[0]),
-                     '--version', os.environ['RELEASE_VERSION'], '--notes-file', 'release_notes.txt']
+                     '--version', os.environ['RELEASE_VERSION'], '--notes-file', 'release_notes.txt', '--localize-whats-new']
           if os.environ['ALREADY_UPLOADED'].lower() == 'true':
               command.append('--already-uploaded')
           if os.environ['SUBMIT'] == 'false':
