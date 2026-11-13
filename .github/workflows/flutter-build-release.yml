@@ -315,6 +315,24 @@ jobs:
           ref: ${{ needs.prepare.outputs.commit_sha }}
           token: ${{ steps.app-token.outputs.token }}
 
+      # Optional: a `.xcode-version` file in the app repo (e.g. `26.5`) selects
+      # /Applications/Xcode_<version>.app, like `.flutter-version` does for Flutter.
+      # Without the file the runner's default Xcode is used.
+      - name: Select Xcode from .xcode-version
+        shell: bash
+        run: |
+          if [ -f .xcode-version ]; then
+            v="$(tr -d '[:space:]' < .xcode-version)"
+            app="/Applications/Xcode_${v}.app"
+            if [ ! -d "$app" ]; then
+              echo "::error::.xcode-version asks for Xcode ${v}, but ${app} is not installed. Installed:"
+              ls -d /Applications/Xcode_*.app
+              exit 1
+            fi
+            sudo xcode-select -s "$app/Contents/Developer"
+            echo "Selected Xcode ${v}"
+          fi
+
       - name: Capture Xcode version
         id: xcode-version
         shell: bash
