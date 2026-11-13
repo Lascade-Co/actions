@@ -475,6 +475,8 @@ jobs:
       # IDEGroup/DependencyPackagesGroup (esim app, from 2026-11-12).
       - name: Resolve SPM dependencies
         run: |
+          # Drop the Pods tree restored from an older Podfile.lock cache key.
+          rm -rf ios/Pods ios/.symlinks
           flutter build ios --config-only --release --no-codesign ${{ steps.build-mode.outputs.dart_define_args }}
           xcodebuild -resolvePackageDependencies \
             -workspace ios/Runner.xcworkspace \
