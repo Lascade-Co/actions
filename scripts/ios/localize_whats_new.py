@@ -11,9 +11,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'ai'))
 
-from asc_client import strip_rejected  # noqa: E402
+from asc_client import strip_rejected, whats_new_too_long  # noqa: E402
 
-WHATS_NEW_LIMIT = 4000
+# One batched response must hold a translation for every non-English App Store locale (~40);
+# the default 8192 truncates that, and a truncated response drops *all* locales to English.
+TRANSLATION_MAX_TOKENS = 32000
 
 
 def is_english(locale):
@@ -33,14 +35,16 @@ def prompt(locales, notes):
 
 def clean(locales, raw):
     """Keep only valid, non-empty translations that Apple will accept; the rest fall back to English."""
+    # Match the model's keys case-insensitively so e.g. 'pt-br' still fills the requested 'pt-BR'.
+    by_lower = {key.lower(): value for key, value in raw.items() if isinstance(key, str)}
     result = {}
     for locale in locales:
-        text = raw.get(locale)
+        text = by_lower.get(locale.lower())
         if not isinstance(text, str):
             print(f"::warning title=What's New localisation::no translation for {locale}; using English")
             continue
         text = '\n'.join(line.rstrip() for line in strip_rejected(text).split('\n')).strip()
-        if not text or len(text) > WHATS_NEW_LIMIT:
+        if not text or whats_new_too_long(text):
             print(f"::warning title=What's New localisation::unusable translation for {locale}; using English")
             continue
         result[locale] = text
@@ -53,7 +57,8 @@ def translate(locales, notes, generate_json=None):
     if not targets:
         return {}
     if generate_json is None:
-        from claude_api import generate_json
+        from claude_api import generate_json as base
+        generate_json = lambda text: base(text, max_tokens=TRANSLATION_MAX_TOKENS)  # noqa: E731
     try:
         raw = generate_json(prompt(targets, notes))
     except Exception as exc:  # noqa: BLE001 - ClaudeError carries a safe, fixed reason; never block a release

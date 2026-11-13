@@ -86,7 +86,14 @@ jobs:
           python-version: '3.13'
       - name: Install App Store JWT support
         if: steps.stores.outputs.selected == 'true'
-        run: pip install --quiet 'pyjwt[crypto]==2.15.1' -r scripts/ai/requirements.txt
+        run: pip install --quiet 'pyjwt[crypto]==2.15.1'
+
+      # What's New localisation is fail-soft: if this install fails the publish still runs and
+      # falls back to the English notes, so it must not block the release.
+      - name: Install What's New localisation support
+        if: steps.stores.outputs.selected == 'true'
+        continue-on-error: true
+        run: pip install --quiet -r scripts/ai/requirements.txt
 
       - name: Upload exact build, wait for processing, and submit for review
         if: steps.stores.outputs.selected == 'true'

@@ -32,6 +32,11 @@ class TranslateTests(unittest.TestCase):
         result = quiet(loc.translate, ['fr-FR', 'de-DE', 'es-ES', 'ja'], 'Hi', generate_json=lambda _: raw)
         self.assertEqual(result, {'fr-FR': 'ok'})
 
+    def test_locale_matching_is_case_insensitive(self):
+        raw = {'pt-br': 'Olá', 'ZH-HANS': 'Nǐ hǎo'}
+        result = loc.translate(['pt-BR', 'zh-Hans'], 'Hi', generate_json=lambda _: raw)
+        self.assertEqual(result, {'pt-BR': 'Olá', 'zh-Hans': 'Nǐ hǎo'})
+
     def test_model_failure_is_fail_soft(self):
         def fail(_):
             raise RuntimeError('Claude API: auth')
@@ -54,7 +59,10 @@ class PublisherLocalisationTests(unittest.TestCase):
         self.assertIn('English notes.', texts)  # en locale keeps the shared notes
         self.assertEqual(len(calls), 1)
         self.assertEqual(calls[0][1], 'English notes.')
-        self.assertTrue(all('promotionalText' not in a or a['promotionalText'] == a.get('promotionalText') for a in patched.values()))
+        # The cloned en-US locale already has a description, so carry must touch only whatsNew
+        # and never overwrite existing metadata with the previous version's values.
+        self.assertEqual(set(patched['en-new']), {'whatsNew', 'supportUrl'})
+        self.assertNotIn('description', patched['en-new'])
 
 
 if __name__ == '__main__':

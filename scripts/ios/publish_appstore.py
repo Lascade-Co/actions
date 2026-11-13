@@ -27,8 +27,8 @@ import sys
 import time
 import zipfile
 
-from asc_client import (API, ApiError, Client, find_app, find_build, ipa_identity, resource,  # noqa: F401 (re-exported)
-                        strip_rejected)
+from asc_client import (API, ApiError, Client, WHATS_NEW_LIMIT, find_app, find_build,  # noqa: F401 (re-exported)
+                        ipa_identity, resource, strip_rejected, whats_new_too_long)
 
 LOCALIZATION_FIELDS = ('description', 'keywords', 'marketingUrl', 'promotionalText', 'supportUrl')
 REVIEW_FIELDS = ('contactEmail', 'contactFirstName', 'contactLastName', 'contactPhone',
@@ -36,8 +36,6 @@ REVIEW_FIELDS = ('contactEmail', 'contactFirstName', 'contactLastName', 'contact
 SUBMITTED_STATES = {'WAITING_FOR_REVIEW', 'IN_REVIEW', 'PENDING_APPLE_RELEASE',
                     'PENDING_DEVELOPER_RELEASE', 'READY_FOR_SALE', 'PROCESSING_FOR_APP_STORE',
                     'READY_FOR_DISTRIBUTION', 'PROCESSING_FOR_DISTRIBUTION', 'ACCEPTED'}
-# App Store Connect's limit for "What's New in This Version" (characters).
-WHATS_NEW_LIMIT = 4000
 REVIEW_CAPACITY_ERROR = 'STATE_ERROR.MAX_IN_REVIEW_SUBMISSIONS_PER_PLATFORM_LIMIT_REACHED'
 IN_FLIGHT_REVIEW_STATES = {'WAITING_FOR_REVIEW', 'IN_REVIEW', 'UNRESOLVED_ISSUES'}
 REVIEW_ITEM_RELATIONSHIPS = ('appStoreVersion', 'appEvent', 'appCustomProductPageVersion', 'appStoreVersionExperiment')
@@ -49,7 +47,7 @@ def appstore_whats_new(notes):
     """The App Store copy of the shared notes without the characters Apple rejects; never truncated."""
     lines = [line.rstrip() for line in strip_rejected(notes).split('\n')]
     text = '\n'.join(lines).strip()
-    if not text or len(text) > WHATS_NEW_LIMIT:
+    if not text or whats_new_too_long(text):
         raise ValueError(f"App Store What's New must contain 1-{WHATS_NEW_LIMIT} characters after removing "
                          'emoji/pictographs; edit the release notes instead of truncating')
     return text
