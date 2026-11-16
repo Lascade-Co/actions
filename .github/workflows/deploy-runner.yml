@@ -15,9 +15,9 @@ permissions:
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    # The Cloudflare Access service token for each environment lives in a GitHub environment,
-    # so only this job can read it, and only prod deploys get the prod token.
-    # If the environment has no token, the deploy uses the WireGuard VPN as before.
+    # Deploys reach the droplet over SSH through Cloudflare Tunnel with an Access service token.
+    # Each environment's token lives in a GitHub environment, so only this job can read it, and
+    # only prod deploys get the prod token.
     environment: ${{ github.event.client_payload.env_slug == 'prod' && 'cloudflare-prod' || 'cloudflare-staging' }}
     env:
       # cloudflared reads these; they never appear on a command line.
@@ -80,14 +80,6 @@ jobs:
             🏗️ Deploy started.
             Watch progress [here](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
 
-      - name: Install OSH
-        run: curl -sS https://rohittp.com/scripts/utils/installer.sh | bash -s osh
-
-      - name: Install doctl
-        uses: digitalocean/action-doctl@v2
-        with:
-          token: ${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }}
-
       - name: Create SSH key
         run: |
           mkdir -p ~/.ssh/
@@ -111,36 +103,24 @@ jobs:
       - name: Extract Env
         id: extract
         run: |
-          source .env
-          echo "host=$HOST" >> "$GITHUB_OUTPUT"
-          if [ -n "${TUNNEL_SERVICE_TOKEN_ID:-}" ] && [ -n "${TUNNEL_SERVICE_TOKEN_SECRET:-}" ]; then
-            # Cloudflare Tunnel: the infra-sync Worker publishes every droplet (named after its
-            # HOST) at ssh-<labels, dots as dashes>.<zone>, e.g. staging.esim.lascade.com ->
-            # ssh-staging-esim.lascade.com. Our zones are all two labels (lascade.com, ...).
-            zone=$(awk -F. '{print $(NF-1)"."$NF}' <<<"$HOST")
-            label="${HOST%."$zone"}"
-            if [ -z "$label" ] || [ "$label" = "$HOST" ]; then
-              echo "::error::HOST '$HOST' has no label under a zone"; exit 1
-            fi
-            echo "via=tunnel" >> "$GITHUB_OUTPUT"
-            echo "ssh_host=ssh-${label//./-}.$zone" >> "$GITHUB_OUTPUT"
-            echo "Deploying through Cloudflare Tunnel (ssh-${label//./-}.$zone)"
-          else
-            IP=$(osh "ubuntu@${HOST}" --ip)
-            echo "via=vpn" >> "$GITHUB_OUTPUT"
-            echo "ip=$IP" >> "$GITHUB_OUTPUT"
-            echo "No Cloudflare service token for this environment; deploying through the VPN"
+          if [ -z "${TUNNEL_SERVICE_TOKEN_ID:-}" ] || [ -z "${TUNNEL_SERVICE_TOKEN_SECRET:-}" ]; then
+            echo "::error::CF_ACCESS_CLIENT_ID / CF_ACCESS_CLIENT_SECRET are not set in the '${{ github.event.client_payload.env_slug == 'prod' && 'cloudflare-prod' || 'cloudflare-staging' }}' environment of this repo"
+            exit 1
           fi
-
-      - name: Wireguard
-        if: ${{ steps.extract.outputs.via == 'vpn' }}
-        uses: rohittp0/wiregaurd@v3
-        with:
-          config: ${{ secrets.WG_CONFIG_BASE64 }}
-          ips: "${{ steps.extract.outputs.ip }}"
+          source .env
+          # The infra-sync Worker publishes every droplet (named after its HOST) at
+          # ssh-<labels, dots as dashes>.<zone>, e.g. staging.esim.lascade.com ->
+          # ssh-staging-esim.lascade.com. Our zones are all two labels (lascade.com, ...).
+          zone=$(awk -F. '{print $(NF-1)"."$NF}' <<<"$HOST")
+          label="${HOST%."$zone"}"
+          if [ -z "$label" ] || [ "$label" = "$HOST" ]; then
+            echo "::error::HOST '$HOST' has no label under a zone"; exit 1
+          fi
+          echo "host=$HOST" >> "$GITHUB_OUTPUT"
+          echo "ssh_host=ssh-${label//./-}.$zone" >> "$GITHUB_OUTPUT"
+          echo "Deploying to $HOST through ssh-${label//./-}.$zone"
 
       - name: Install cloudflared
-        if: ${{ steps.extract.outputs.via == 'tunnel' }}
         run: |
           curl -fsSL -o /tmp/cloudflared.deb https://github.com/cloudflare/cloudflared/releases/download/2026.11.0/cloudflared-linux-amd64.deb
           sudo dpkg -i /tmp/cloudflared.deb
@@ -148,15 +128,12 @@ jobs:
 
       - name: Configure SSH
         env:
-          VIA: ${{ steps.extract.outputs.via }}
           HOST: ${{ steps.extract.outputs.host }}
-          IP: ${{ steps.extract.outputs.ip }}
           SSH_HOST: ${{ steps.extract.outputs.ssh_host }}
         run: |
-          if [ "$VIA" = tunnel ]; then
-            # The tunnel route ends at the droplet's own sshd, so this is the droplet's host key,
-            # stored under its name (first use on a fresh runner, as ssh-keyscan did before).
-            cat > ~/.ssh/config <<EOF
+          # The tunnel route ends at the droplet's own sshd, so this is the droplet's host key,
+          # stored under its name (first use on a fresh runner, as ssh-keyscan did before).
+          cat > ~/.ssh/config <<EOF
           Host deploy-target
             HostName $SSH_HOST
             HostKeyAlias $HOST
@@ -167,15 +144,6 @@ jobs:
             ConnectTimeout 30
             ProxyCommand cloudflared access ssh --hostname %h
           EOF
-          else
-            ssh-keyscan -H "$IP" >> ~/.ssh/known_hosts
-            cat > ~/.ssh/config <<EOF
-          Host deploy-target
-            HostName $IP
-            User ubuntu
-            IdentityFile ~/.ssh/private.key
-          EOF
-          fi
           chmod 600 ~/.ssh/config
 
       - name: Create SSH Script
