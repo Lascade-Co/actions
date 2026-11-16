@@ -15,6 +15,14 @@ permissions:
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    # The Cloudflare Access service token for each environment lives in a GitHub environment,
+    # so only this job can read it, and only prod deploys get the prod token.
+    # If the environment has no token, the deploy uses the WireGuard VPN as before.
+    environment: ${{ github.event.client_payload.env_slug == 'prod' && 'cloudflare-prod' || 'cloudflare-staging' }}
+    env:
+      # cloudflared reads these; they never appear on a command line.
+      TUNNEL_SERVICE_TOKEN_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
+      TUNNEL_SERVICE_TOKEN_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
     steps:
       - name: Extract owner/repo
         id: repo
@@ -104,31 +112,81 @@ jobs:
         id: extract
         run: |
           source .env
-          IP=$(osh "ubuntu@${HOST}" --ip)
           echo "host=$HOST" >> "$GITHUB_OUTPUT"
-          echo "ip=$IP" >> "$GITHUB_OUTPUT"
+          if [ -n "${TUNNEL_SERVICE_TOKEN_ID:-}" ] && [ -n "${TUNNEL_SERVICE_TOKEN_SECRET:-}" ]; then
+            # Cloudflare Tunnel: the infra-sync Worker publishes every droplet (named after its
+            # HOST) at ssh-<labels, dots as dashes>.<zone>, e.g. staging.esim.lascade.com ->
+            # ssh-staging-esim.lascade.com. Our zones are all two labels (lascade.com, ...).
+            zone=$(awk -F. '{print $(NF-1)"."$NF}' <<<"$HOST")
+            label="${HOST%."$zone"}"
+            if [ -z "$label" ] || [ "$label" = "$HOST" ]; then
+              echo "::error::HOST '$HOST' has no label under a zone"; exit 1
+            fi
+            echo "via=tunnel" >> "$GITHUB_OUTPUT"
+            echo "ssh_host=ssh-${label//./-}.$zone" >> "$GITHUB_OUTPUT"
+            echo "Deploying through Cloudflare Tunnel (ssh-${label//./-}.$zone)"
+          else
+            IP=$(osh "ubuntu@${HOST}" --ip)
+            echo "via=vpn" >> "$GITHUB_OUTPUT"
+            echo "ip=$IP" >> "$GITHUB_OUTPUT"
+            echo "No Cloudflare service token for this environment; deploying through the VPN"
+          fi
 
       - name: Wireguard
+        if: ${{ steps.extract.outputs.via == 'vpn' }}
         uses: rohittp0/wiregaurd@v3
         with:
           config: ${{ secrets.WG_CONFIG_BASE64 }}
           ips: "${{ steps.extract.outputs.ip }}"
 
-      - name: Add SSH key to known hosts
-        run: ssh-keyscan -H "${{ steps.extract.outputs.ip }}" >> ~/.ssh/known_hosts
+      - name: Install cloudflared
+        if: ${{ steps.extract.outputs.via == 'tunnel' }}
+        run: |
+          curl -fsSL -o /tmp/cloudflared.deb https://github.com/cloudflare/cloudflared/releases/download/2026.11.0/cloudflared-linux-amd64.deb
+          sudo dpkg -i /tmp/cloudflared.deb
+          cloudflared --version
+
+      - name: Configure SSH
+        env:
+          VIA: ${{ steps.extract.outputs.via }}
+          HOST: ${{ steps.extract.outputs.host }}
+          IP: ${{ steps.extract.outputs.ip }}
+          SSH_HOST: ${{ steps.extract.outputs.ssh_host }}
+        run: |
+          if [ "$VIA" = tunnel ]; then
+            # The tunnel route ends at the droplet's own sshd, so this is the droplet's host key,
+            # stored under its name (first use on a fresh runner, as ssh-keyscan did before).
+            cat > ~/.ssh/config <<EOF
+          Host deploy-target
+            HostName $SSH_HOST
+            HostKeyAlias $HOST
+            User ubuntu
+            IdentityFile ~/.ssh/private.key
+            IdentitiesOnly yes
+            StrictHostKeyChecking accept-new
+            ConnectTimeout 30
+            ProxyCommand cloudflared access ssh --hostname %h
+          EOF
+          else
+            ssh-keyscan -H "$IP" >> ~/.ssh/known_hosts
+            cat > ~/.ssh/config <<EOF
+          Host deploy-target
+            HostName $IP
+            User ubuntu
+            IdentityFile ~/.ssh/private.key
+          EOF
+          fi
+          chmod 600 ~/.ssh/config
 
       - name: Create SSH Script
         run: |
-          echo "ssh -i ~/.ssh/private.key \"ubuntu@$HOST\" \$@" > s.sh
+          echo 'ssh deploy-target "$@"' > s.sh
           chmod +x s.sh
-        env:
-          HOST: ${{ steps.extract.outputs.ip }}
 
       - name: Copy .env to droplet project folder
-        run: scp -i ~/.ssh/private.key .env "ubuntu@$HOST:$PROJECT_FOLDER/.env"
+        run: scp .env "deploy-target:$PROJECT_FOLDER/.env"
         env:
           PROJECT_FOLDER: ${{ steps.repo.outputs.name }}
-          HOST: ${{ steps.extract.outputs.ip }}
 
       - name: Deploy
         run: ./s.sh "deploy ${{ github.event.client_payload.branch }}"
@@ -238,6 +296,14 @@ jobs:
           interval=2
           elapsed=0
           url="https://$HOST/healthcheck/"
+
+          # A site behind Cloudflare Access answers with a redirect to the login page, which
+          # `curl --fail` would count as healthy. Treat that as a failure instead.
+          redirect=$(curl --silent --output /dev/null --write-out '%{redirect_url}' "$url" || true)
+          if [[ "$redirect" == *".cloudflareaccess.com/"* ]]; then
+            echo "::error::$url redirects to the Cloudflare Access login. Add an Access Bypass for /healthcheck/ on this site."
+            exit 1
+          fi
 
           until curl --fail --silent $url; do
             if [ $elapsed -ge $timeout ]; then
