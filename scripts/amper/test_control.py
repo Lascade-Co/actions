@@ -103,6 +103,16 @@ class SetVariantTests(Base):
         self.assertEqual(pbx.count('CODE_SIGN_IDENTITY = "Apple Distribution";'), 2)
         self.assertNotIn('Automatic', pbx)
 
+    def test_debug_signing_goes_on_target_build_settings(self):
+        # The debug variant is signed for TestFlight, so it takes the same manual signing as release.
+        with patch.dict(os.environ, {'APPCHECK_DEBUG_TOKEN': 'tok-123'}):
+            run('set-variant', '--source', self.src, '--variant', 'debug', '--team', 'ABCDE12345', '--profile', 'Hunch Staging')
+        pbx = self.read(PBX)
+        self.assertEqual(pbx.count('CODE_SIGN_STYLE = Manual;'), 2)
+        self.assertEqual(pbx.count('DEVELOPMENT_TEAM = ABCDE12345;'), 2)
+        self.assertEqual(pbx.count('PROVISIONING_PROFILE_SPECIFIER = "Hunch Staging";'), 2)
+        self.assertIn('APPCHECK_DEBUG_TOKEN = "tok-123"', self.read(KT))
+
     def test_debug_requires_token(self):
         with patch.dict(os.environ, {}, clear=False):
             os.environ.pop('APPCHECK_DEBUG_TOKEN', None)
@@ -178,6 +188,12 @@ class FindArtifactTests(Base):
         mp = self.put('build/tasks/_androidApp_bundleAndroid/gradle-project/build/outputs/mapping/release/mapping.txt')
         self.assertEqual(run('find-artifact', '--source', self.src, '--kind', 'aab')['path'], str(aab))
         self.assertEqual(run('find-artifact', '--source', self.src, '--kind', 'mapping')['path'], str(mp))
+
+    def test_ignores_gradle_intermediate_copy(self):
+        # The toolchain leaves a second copy of the APK inside its generated Gradle project.
+        apk = self.put('build/tasks/_androidApp_buildAndroidRelease/gradle-project-release.apk')
+        self.put('build/tasks/_androidApp_buildAndroidRelease/gradle-project/build/_androidApp/outputs/apk/release/gradle-project-release.apk')
+        self.assertEqual(run('find-artifact', '--source', self.src, '--kind', 'apk')['path'], str(apk))
 
     def test_fails_on_zero_or_many(self):
         with self.assertRaises(SystemExit):

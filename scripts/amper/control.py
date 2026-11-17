@@ -126,8 +126,6 @@ def cmd_set_variant(a):
     release = a.variant == 'release'
     if bool(a.team) != bool(a.profile):
         fail('--team and --profile go together')
-    if a.team and not release:
-        fail('--team/--profile apply to the release variant only')
     if a.team and not re.fullmatch(r'[A-Za-z0-9]+', a.team):
         fail('invalid team id')
 
@@ -188,8 +186,9 @@ def cmd_android_inputs(a):
 
 
 PATTERNS = {
-    'apk': 'build/tasks/**/*.apk',
-    'aab': 'build/tasks/**/*.aab',
+    # Top level of each task dir only: the toolchain keeps a second copy inside its generated gradle-project.
+    'apk': 'build/tasks/*/*.apk',
+    'aab': 'build/tasks/*/*.aab',
     'mapping': 'build/tasks/**/outputs/mapping/release/mapping.txt',
 }
 
