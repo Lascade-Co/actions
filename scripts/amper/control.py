@@ -104,14 +104,29 @@ def cmd_metadata(a):
     emit(version=yq_get('.settings.android.versionName', yml), build_number=build, toolchain=found.group(1))
 
 
+VERSION_LINES = {'versionCode': re.compile(r'^(\s+versionCode:)[ \t]*\S+[ \t]*$', re.M),
+                 'versionName': re.compile(r'^(\s+versionName:)[ \t]*\S+[ \t]*$', re.M)}
+
+
+def set_yaml_version(path, version, build):
+    """Rewrite only the versionCode and versionName lines (yq -i reflows the file, and release commits it)."""
+    text = path.read_text()
+    for key, value in (('versionCode', str(build)), ('versionName', f'"{version}"')):
+        if len(VERSION_LINES[key].findall(text)) != 1:
+            fail(f'expected exactly one {key} line in {path}')
+        text = VERSION_LINES[key].sub(lambda mm: f'{mm.group(1)} {value}', text)
+    path.write_text(text)
+    if (yq_get('.settings.android.versionName', path), yq_get('.settings.android.versionCode', path)) != (version, str(build)):
+        fail(f'{path}: settings.android version did not read back as {version} ({build})')
+
+
 def cmd_set_version(a):
     if not VERSION_RE.match(a.version):
         fail('invalid version: ' + a.version)
     src = Path(a.source)
     m = manifest(src)
     for rel in m['version_files']:
-        yq('.settings.android.versionName = strenv(V) | .settings.android.versionCode = (strenv(B) | tonumber)',
-           src / rel, {'V': a.version, 'B': str(a.build)})
+        set_yaml_version(src / rel, a.version, a.build)
     pbx = pbxproj(src, m)
     pbx.write_text(set_app_settings(pbx.read_text(), {'MARKETING_VERSION': a.version, 'CURRENT_PROJECT_VERSION': a.build}))
     emit(version=a.version, build_number=a.build)
@@ -193,15 +208,47 @@ PATTERNS = {
 }
 
 
+def task_dir(src, path):
+    return Path(path).relative_to(Path(src) / 'build/tasks').parts[0].lower()
+
+
 def cmd_find_artifact(a):
     matches = sorted(glob.glob(str(Path(a.source) / PATTERNS[a.kind]), recursive=True))
     if a.kind == 'apk':
         # A debug APK from an earlier task can sit next to the release one; the release variant wins.
         release = [m for m in matches if 'release' in Path(m).parent.name.lower()]
         matches = release or matches
+    if a.kind == 'mapping' and len(matches) > 1:
+        # `kotlin package` (AAB) and `kotlin build -v release` (APK) each run R8. Keep the AAB's mapping, which is
+        # what Play and Crashlytics see, and only when both runs agree, so one file deobfuscates both binaries.
+        if len({Path(m).read_bytes() for m in matches}) != 1:
+            fail(f'the R8 mapping files differ: {matches}')
+        matches = [m for m in matches if 'bundle' in task_dir(a.source, m)]
     if len(matches) != 1:
         fail(f'expected exactly one {a.kind} under build/tasks, found {len(matches)}: {matches}')
     emit(path=matches[0])
+
+
+FIREBASE_APP_ID = re.compile(r'1:[0-9]+:android:[0-9a-f]+')
+
+
+def cmd_firebase_app_id(a):
+    """Release Android app ID for Crashlytics: the manifest's firebase_android_app_id, else the
+    google-services.json client whose package is the release ID; empty when neither names one."""
+    src = Path(a.source)
+    m = manifest(src)
+    app = m.get('firebase_android_app_id')
+    if app is None:
+        services = src / m['android_module'] / 'google-services.json'
+        clients = json.loads(services.read_text()).get('client', []) if services.is_file() else []
+        found = [c['client_info']['mobilesdk_app_id'] for c in clients
+                 if c.get('client_info', {}).get('android_client_info', {}).get('package_name') == m['ids']['release']]
+        if len(found) > 1:
+            fail('google-services.json has more than one client for ' + m['ids']['release'])
+        app = found[0] if found else ''
+    if app and not (isinstance(app, str) and FIREBASE_APP_ID.fullmatch(app)):
+        fail('invalid Firebase Android app ID')
+    emit(app_id=app)
 
 
 FULL_GC = re.compile(r'GC\((\d+)\) Pause Full')
@@ -247,6 +294,7 @@ def parser():
     add('set-variant', cmd_set_variant, src, variant, ('--team', {}), ('--profile', {}))
     add('android-inputs', cmd_android_inputs, src)
     add('find-artifact', cmd_find_artifact, src, ('--kind', dict(required=True, choices=sorted(PATTERNS))))
+    add('firebase-app-id', cmd_firebase_app_id, src)
     add('kn-gc-guard', cmd_gc_guard, ('--log', dict(required=True)), ('--gc-dir', dict(required=True)),
         ('--max-full-gc', dict(type=int, default=20)))
     add('export-options', cmd_export_options, ('--team', dict(required=True)),

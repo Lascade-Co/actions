@@ -2,6 +2,7 @@ import base64
 import contextlib
 import importlib.util
 import io
+import json
 import os
 from pathlib import Path
 import re
@@ -67,6 +68,22 @@ class SetVersionTests(Base):
     def test_rejects_unsafe_version(self):
         with self.assertRaises(SystemExit):
             run('set-version', '--source', self.src, '--version', '1.0"; rm', '--build', 1)
+
+    def test_changes_only_the_two_version_lines(self):
+        # The release job commits this file to main, so formatting, blank lines and comments must survive.
+        before = self.read('androidApp/module.yaml').splitlines()
+        run('set-version', '--source', self.src, '--version', '1.2.3', '--build', 45)
+        after = self.read('androidApp/module.yaml').splitlines()
+        self.assertEqual(len(before), len(after))
+        changed = [(b, a) for b, a in zip(before, after) if b != a]
+        self.assertEqual(changed, [('    versionCode: 1', '    versionCode: 45'),
+                                   ('    versionName: "0.1.0"', '    versionName: "1.2.3"')])
+
+    def test_fails_without_exactly_one_version_line(self):
+        yml = self.src / 'androidApp/module.yaml'
+        yml.write_text(yml.read_text().replace('    versionCode: 1\n', ''))
+        with self.assertRaises(SystemExit):
+            run('set-version', '--source', self.src, '--version', '1.2.3', '--build', 45)
 
 
 @needs_yq
@@ -200,6 +217,19 @@ class FindArtifactTests(Base):
         apk = self.put('build/tasks/_androidApp_buildAndroidRelease/gradle-project-release.apk')
         self.assertEqual(run('find-artifact', '--source', self.src, '--kind', 'apk')['path'], str(apk))
 
+    def test_mapping_prefers_the_bundle_task_when_both_builds_ran(self):
+        # `kotlin package` (AAB) and `kotlin build -v release` (APK) each run R8; the AAB's mapping is the one Play uses.
+        mp = self.put('build/tasks/_androidApp_bundleAndroid/gradle-project/build/_androidApp/outputs/mapping/release/mapping.txt')
+        self.put('build/tasks/_androidApp_buildAndroidRelease/gradle-project/build/_androidApp/outputs/mapping/release/mapping.txt')
+        self.assertEqual(run('find-artifact', '--source', self.src, '--kind', 'mapping')['path'], str(mp))
+
+    def test_mapping_fails_when_the_two_r8_runs_differ(self):
+        self.put('build/tasks/_androidApp_bundleAndroid/gradle-project/build/_androidApp/outputs/mapping/release/mapping.txt')
+        other = self.put('build/tasks/_androidApp_buildAndroidRelease/gradle-project/build/_androidApp/outputs/mapping/release/mapping.txt')
+        other.write_text('different')
+        with self.assertRaises(SystemExit):
+            run('find-artifact', '--source', self.src, '--kind', 'mapping')
+
     def test_fails_on_zero_or_many(self):
         with self.assertRaises(SystemExit):
             run('find-artifact', '--source', self.src, '--kind', 'apk')
@@ -207,6 +237,38 @@ class FindArtifactTests(Base):
         self.put('build/tasks/b/app-debug.apk')
         with self.assertRaises(SystemExit):
             run('find-artifact', '--source', self.src, '--kind', 'apk')
+
+
+class FirebaseAppIdTests(Base):
+    RELEASE_ID = '1:100000000001:android:0123456789abcdef012345'
+
+    def services(self, clients):
+        (self.src / 'androidApp/google-services.json').write_text(json.dumps({'client': [
+            {'client_info': {'mobilesdk_app_id': app, 'android_client_info': {'package_name': pkg}}}
+            for app, pkg in clients]}))
+
+    def set_manifest(self, **extra):
+        path = self.src / '.ci/amper.json'
+        path.write_text(json.dumps({**json.loads(path.read_text()), **extra}))
+
+    def test_derives_release_client_from_google_services(self):
+        self.services([('1:100000000001:android:fedcba9876543210fedcba', 'com.lascade.hunch.debug'),
+                       (self.RELEASE_ID, 'com.lascade.hunch')])
+        self.assertEqual(run('firebase-app-id', '--source', self.src), {'app_id': self.RELEASE_ID})
+
+    def test_manifest_value_wins(self):
+        self.services([('1:1:android:aaaa', 'com.lascade.hunch')])
+        self.set_manifest(firebase_android_app_id=self.RELEASE_ID)
+        self.assertEqual(run('firebase-app-id', '--source', self.src), {'app_id': self.RELEASE_ID})
+
+    def test_rejects_malformed_app_id(self):
+        self.set_manifest(firebase_android_app_id='1:2:android:x"; rm -rf /')
+        with self.assertRaises(SystemExit):
+            run('firebase-app-id', '--source', self.src)
+
+    def test_empty_when_nothing_names_the_release_app(self):
+        self.services([('1:1:android:aaaa', 'com.lascade.hunch.debug')])
+        self.assertEqual(run('firebase-app-id', '--source', self.src), {'app_id': ''})
 
 
 class GcGuardTests(Base):
