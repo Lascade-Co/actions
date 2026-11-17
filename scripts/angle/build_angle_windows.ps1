@@ -1,7 +1,7 @@
 <#
 .SYNOPSIS
     Build ANGLE's libEGL/libGLESv2 for Windows at a pinned revision and package them the way
-    travel-animator-shared's `third_party/angle/PROVENANCE.md` packages the iOS slices.
+    travel-animator's `shared/third_party/angle/PROVENANCE.md` packages the iOS slices.
 
 .DESCRIPTION
     RUN THIS BY HAND, ONCE PER REVISION, ON A WINDOWS BOX. Deliberately NOT wired to a workflow:
@@ -327,11 +327,11 @@ Next, by hand:
      produces a WRONG count from a correct revision), and a self-test through these DLLs
      must reach a gl_probe with backend=d3d11.
 
-  2. PUBLISH (travel-animator-shared is private; the release already exists if iOS/macOS
+  2. PUBLISH (travel-animator is private; the release already exists if iOS/macOS
      published theirs at this revision):
 
        gh release upload angle-$shortRevision "$zipPath" ``
-         --repo Lascade-Co/travel-animator-shared
+         --repo Lascade-Co/travel-animator
 
   3. PIN. In Lascade-Co/actions, .github/workflows/publish-tada-wheel.yml:
 

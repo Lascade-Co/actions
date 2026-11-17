@@ -73,13 +73,13 @@ removed again; this document is where its contents went.)
 | Expected version string | `ANGLE 2.1.28587 git hash: be80ce591a48` |
 | License | BSD-3-Clause (ANGLE's `LICENSE`, shipped at the zip root) |
 
-The same revision as the iOS xcframeworks (`travel-animator-shared`
-`third_party/angle/PROVENANCE.md`) and the macOS dylibs (`PROVENANCE-macos.md` beside it). **One
+The same revision as the iOS xcframeworks (`travel-animator`
+`shared/third_party/angle/PROVENANCE.md`) and the macOS dylibs (`PROVENANCE-macos.md` beside it). **One
 revision everywhere is the entire point.** Windows previously took ANGLE 2.1.25511 out of Skiko's
 Maven artifact while macOS took 2.1.28226 out of a Google Chrome install: two shader translators
 and two rasterisations of the same frame, which is a golden-frame parity problem the moment both
 platforms ship (risk R14). The revision is not a knob to turn casually — moving it means moving
-iOS, macOS, Windows, `travel-animator-shared`'s `angleRevision`/`angleSha256`/`angleAssetUrl`, and
+iOS, macOS, Windows, `travel-animator`'s `angleRevision`/`angleSha256`/`angleAssetUrl`, and
 the `ANGLE_*` constants in `publish-tada-wheel.yml`, in one change.
 
 `2.1.<N>` is just `git rev-list HEAD --count`, so a shallow clone produces a *wrong version string*
@@ -289,24 +289,24 @@ The release already exists at `angle-be80ce59` (the iOS asset created it), so th
 not a create:
 
 ```powershell
-$env:GH_TOKEN = "<token with repo scope on Lascade-Co/travel-animator-shared>"
+$env:GH_TOKEN = "<token with repo scope on Lascade-Co/travel-animator>"
 
 gh release upload angle-be80ce59 angle-out\angle-be80ce59-windows-x64.zip `
-  --repo Lascade-Co/travel-animator-shared
+  --repo Lascade-Co/travel-animator
 
 # ...or, if that release does not exist yet:
 gh release create angle-be80ce59 angle-out\angle-be80ce59-windows-x64.zip `
-  --repo Lascade-Co/travel-animator-shared `
+  --repo Lascade-Co/travel-animator `
   --title "ANGLE be80ce59" `
   --notes "GLES 3.0. One revision per release; one asset per platform."
 
 # The digest to pin, and the asset id for anything that resolves by id:
 Get-FileHash angle-out\angle-be80ce59-windows-x64.zip -Algorithm SHA256
-gh api repos/Lascade-Co/travel-animator-shared/releases/tags/angle-be80ce59 `
+gh api repos/Lascade-Co/travel-animator/releases/tags/angle-be80ce59 `
   --jq '.assets[] | {name, id, size}'
 ```
 
-`travel-animator-shared` is **private**, so the browser-facing
+`travel-animator` is **private**, so the browser-facing
 `github.com/.../releases/download/...` URL answers 404 to an unauthenticated client. Consumers must
 use the REST asset endpoint with `Accept: application/octet-stream` and a bearer token — which is
 what `scripts/angle/fetch_pinned_angle.py` and shared's `downloadAngle` task both do.

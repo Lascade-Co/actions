@@ -2,7 +2,7 @@
 """Download, verify and unpack ONE pinned ANGLE release asset.
 
 CI never builds ANGLE: it is built out of band, published as a release asset, and consumed
-here by digest. Hence the conventions, which match `travel-animator-shared`'s `downloadAngle`
+here by digest. Hence the conventions, which match `travel-animator`'s `downloadAngle`
 Gradle task:
 
   * the REST **asset** endpoint, because that repo is PRIVATE and the browser-facing
@@ -14,7 +14,7 @@ Gradle task:
 
 Usage:
 
-    python fetch_pinned_angle.py --repo Lascade-Co/travel-animator-shared \
+    python fetch_pinned_angle.py --repo Lascade-Co/travel-animator \
       --tag angle-be80ce59 --asset angle-be80ce59-macos.zip --sha256 dfe3d6... --out angle
 """
 from __future__ import annotations
@@ -39,10 +39,10 @@ USER_AGENT = "lascade-actions-fetch-pinned-angle"
 
 # Where a human goes when an asset is missing, keyed by the platform suffix of the asset name.
 PROVENANCE = {
-    "macos": "travel-animator-shared third_party/angle/PROVENANCE-macos.md",
+    "macos": "travel-animator shared/third_party/angle/PROVENANCE-macos.md",
     "windows": "Lascade-Co/actions scripts/angle/PROVENANCE-windows.md "
                "(built and published 2026-08-11; rebuild with build_angle_windows.ps1)",
-    "ios": "travel-animator-shared third_party/angle/PROVENANCE.md",
+    "ios": "travel-animator shared/third_party/angle/PROVENANCE.md",
 }
 
 
@@ -50,7 +50,7 @@ def provenance_hint(asset: str) -> str:
     for key, doc in PROVENANCE.items():
         if key in asset:
             return doc
-    return "travel-animator-shared third_party/angle/"
+    return "travel-animator shared/third_party/angle/"
 
 
 def fail(message: str) -> NoReturn:

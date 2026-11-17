@@ -41,7 +41,7 @@ jobs:
               raise ValueError('Source repository must belong to the central organization')
           if not os.environ['RELEASE_ID'].isdigit():
               raise ValueError('release_id must be numeric')
-          if repo != 'Lascade-Co/travel-animator-shared' or os.environ['PACKAGE_NAME'] != 'com.travelanimator.routemap':
+          if repo != 'Lascade-Co/travel-animator' or os.environ['PACKAGE_NAME'] != 'com.travelanimator.routemap':
               raise ValueError('Only the approved KMP source repository/package may publish')
           with open(os.environ['GITHUB_OUTPUT'], 'a') as out:
               out.write(f'owner={repo.split("/")[0]}\nname={repo.split("/")[1]}\n')

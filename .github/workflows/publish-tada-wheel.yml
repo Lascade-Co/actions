@@ -75,7 +75,7 @@ jobs:
           owner: ${{ steps.repo.outputs.owner }}
           repositories: |
             ${{ steps.repo.outputs.name }}
-            travel-animator-shared
+            travel-animator
 
       - name: Check out TADA @ dispatched commit
         uses: actions/checkout@v6
@@ -93,7 +93,7 @@ jobs:
       - name: Check out private shared protos
         uses: actions/checkout@v6
         with:
-          repository: Lascade-Co/travel-animator-shared
+          repository: Lascade-Co/travel-animator
           ref: ${{ steps.shared.outputs.revision }}
           path: shared
           token: ${{ steps.app-token.outputs.token }}
@@ -202,7 +202,7 @@ jobs:
           owner: ${{ steps.repo.outputs.owner }}
           repositories: |
             ${{ steps.repo.outputs.name }}
-            travel-animator-shared
+            travel-animator
 
       - name: Check out TADA @ dispatched commit
         uses: actions/checkout@v6
@@ -220,7 +220,7 @@ jobs:
       - name: Check out private shared protos
         uses: actions/checkout@v6
         with:
-          repository: Lascade-Co/travel-animator-shared
+          repository: Lascade-Co/travel-animator
           ref: ${{ steps.shared.outputs.revision }}
           path: shared
           token: ${{ steps.app-token.outputs.token }}
@@ -412,7 +412,7 @@ jobs:
           owner: ${{ steps.repo.outputs.owner }}
           repositories: |
             ${{ steps.repo.outputs.name }}
-            travel-animator-shared
+            travel-animator
 
       - name: Check out TADA @ dispatched commit
         uses: actions/checkout@v6
@@ -430,7 +430,7 @@ jobs:
       - name: Check out private shared protos
         uses: actions/checkout@v6
         with:
-          repository: Lascade-Co/travel-animator-shared
+          repository: Lascade-Co/travel-animator
           ref: ${{ steps.shared.outputs.revision }}
           path: shared
           token: ${{ steps.app-token.outputs.token }}

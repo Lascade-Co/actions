@@ -48,8 +48,8 @@ class ReleaseNotifications(unittest.TestCase):
 
 
 class SkippedStoreNotifications(unittest.TestCase):
-    fields={'repo':'Lascade-Co/travel-animator-shared','title':'Travel <Animator> · v5.0.15',
-            'link':'https://github.com/Lascade-Co/travel-animator-shared/releases/tag/v5.0.15?a=1&b=2',
+    fields={'repo':'Lascade-Co/travel-animator','title':'Travel <Animator> · v5.0.15',
+            'link':'https://github.com/Lascade-Co/travel-animator/releases/tag/v5.0.15?a=1&b=2',
             'run_url':'https://github.com/actions/runs/1'}
 
     def test_skip_names_the_pr_label_and_links_the_pr(self):
@@ -57,10 +57,10 @@ class SkippedStoreNotifications(unittest.TestCase):
             with self.subTest(kind=kind):
                 result=notify.compose(kind,'skipped',self.fields|{'pr_number':'57'})
                 self.assertEqual(result,'\n'.join([
-                    f'⏭️ <b>{header}</b>','<b>Lascade-Co/travel-animator-shared</b>',
+                    f'⏭️ <b>{header}</b>','<b>Lascade-Co/travel-animator</b>',
                     '<i>Travel &lt;Animator&gt; · v5.0.15</i>','',
-                    f'Reason: <code>{label}</code> on <a href="https://github.com/Lascade-Co/travel-animator-shared/pull/57">#57</a>',
-                    '📦 <a href="https://github.com/Lascade-Co/travel-animator-shared/releases/tag/v5.0.15?a=1&amp;b=2">View release</a>']))
+                    f'Reason: <code>{label}</code> on <a href="https://github.com/Lascade-Co/travel-animator/pull/57">#57</a>',
+                    '📦 <a href="https://github.com/Lascade-Co/travel-animator/releases/tag/v5.0.15?a=1&amp;b=2">View release</a>']))
 
     def test_skip_without_pr_says_not_selected_and_never_points_at_the_run(self):
         for kind,header in [('appstore','App Store skipped'),('playstore','Play Store skipped')]:
@@ -86,7 +86,7 @@ class SkippedStoreNotifications(unittest.TestCase):
 
     def test_main_sends_skipped_without_looking_up_failures(self):
         env={'TELEGRAM_TOKEN':'t','TELEGRAM_CHAT':'-1','TELEGRAM_KIND':'appstore','TELEGRAM_STATUS':'skipped',
-             'TELEGRAM_REPO':'Lascade-Co/travel-animator-shared','TELEGRAM_TITLE':'TA · v5.0.15','TELEGRAM_PR_NUMBER':'57',
+             'TELEGRAM_REPO':'Lascade-Co/travel-animator','TELEGRAM_TITLE':'TA · v5.0.15','TELEGRAM_PR_NUMBER':'57',
              'GITHUB_RUN_ID':'9','TELEGRAM_GITHUB_TOKEN':'gh','GITHUB_REPOSITORY':'Lascade-Co/actions'}
         sent=[]
         with patch.dict(notify.os.environ,env,clear=True),\
@@ -94,7 +94,7 @@ class SkippedStoreNotifications(unittest.TestCase):
              patch.object(notify,'send',lambda token,chat,message,html_mode=False:sent.append((message,html_mode))):
             notify.main()
         self.assertEqual(len(sent),1);self.assertTrue(sent[0][1])
-        self.assertIn('<code>no-ios</code> on <a href="https://github.com/Lascade-Co/travel-animator-shared/pull/57">#57</a>',sent[0][0])
+        self.assertIn('<code>no-ios</code> on <a href="https://github.com/Lascade-Co/travel-animator/pull/57">#57</a>',sent[0][0])
 
 
 if __name__=='__main__':unittest.main()

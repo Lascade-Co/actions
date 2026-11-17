@@ -4,7 +4,7 @@ name: TADA platform wheels
 # publish-tada-wheel.yml (GHCR bundle for TARS) and publish-tacli-pypi.yml (PyPI).
 #
 # It is reusable for one reason above the others: the ANGLE pins below. A revision bump must
-# move these constants, `travel-animator-shared`'s `angleRevision`/`angleSha256` (iOS) and the
+# move these constants, `travel-animator`'s `angleRevision`/`angleSha256` (iOS) and the
 # PROVENANCE documents in ONE change -- two ANGLE revisions means two shader translators and
 # two rasterisations of the same frame (risk R14). Duplicating this matrix per publishing path
 # would put the digests in two files and make that skew a matter of remembering.
@@ -33,10 +33,10 @@ permissions:
 # guarantee with a hope.
 env:
   ANGLE_REVISION: be80ce591a481c12d60c50d6040d40c035b40a2b
-  ANGLE_RELEASE_REPO: Lascade-Co/travel-animator-shared
+  ANGLE_RELEASE_REPO: Lascade-Co/travel-animator
   ANGLE_RELEASE_TAG: angle-be80ce59
   # Built on an M2, 2026-08-11; bit-identical 695-frame render to the previous reference.
-  # See travel-animator-shared third_party/angle/PROVENANCE-macos.md.
+  # See travel-animator shared/third_party/angle/PROVENANCE-macos.md.
   ANGLE_SHA256_MACOS: dfe3d633b280bf2479189716ad3ab14381260180bd5c5246c3d80913eb477e30
   # Do NOT replace this with Skiko's `skiko-awt-runtime-angle-windows-x64`: that is ANGLE
   # 2.1.25511 against our 2.1.28587, precisely the skew this pin exists to prevent. The digest
@@ -119,7 +119,7 @@ jobs:
           owner: ${{ steps.repo.outputs.owner }}
           repositories: |
             ${{ steps.repo.outputs.name }}
-            travel-animator-shared
+            travel-animator
 
       - name: Check out TADA @ requested commit
         if: steps.wheel-cache.outputs.cache-hit != 'true'
@@ -141,7 +141,7 @@ jobs:
         if: steps.wheel-cache.outputs.cache-hit != 'true'
         uses: actions/checkout@v6
         with:
-          repository: Lascade-Co/travel-animator-shared
+          repository: Lascade-Co/travel-animator
           ref: ${{ steps.shared.outputs.revision }}
           path: shared
           token: ${{ steps.app-token.outputs.token }}
@@ -222,7 +222,7 @@ jobs:
       # the digest is what makes the binaries in a published wheel the binaries that were
       # verified by hand. A mismatch FAILS the job; it is never a warning.
       #
-      # `travel-animator-shared` is private, so this needs the App token minted above and the
+      # `travel-animator` is private, so this needs the App token minted above and the
       # REST asset endpoint with `Accept: application/octet-stream` (the browser-facing
       # releases/download URL 404s unauthenticated). fetch_pinned_angle.py does both.
       - name: Fetch and verify the pinned ANGLE

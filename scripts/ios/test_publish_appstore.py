@@ -697,13 +697,13 @@ class IdentityTests(unittest.TestCase):
 
 class MetadataTests(unittest.TestCase):
     def test_published_release_shared_notes_and_safe_outputs(self):
-        outputs, notes = publish_metadata.validate({'repo': 'Lascade-Co/travel-animator-shared', 'release_id': 42, 'package_name': 'com.travelanimator.routemap'},
+        outputs, notes = publish_metadata.validate({'repo': 'Lascade-Co/travel-animator', 'release_id': 42, 'package_name': 'com.travelanimator.routemap'},
             {'id': 42, 'tag_name': 'v5.0.9', 'body': ' English notes. '}, 'Lascade-Co/actions')
         self.assertEqual(outputs['version'], '5.0.9')
         self.assertEqual(notes, 'English notes.')
 
     def test_optional_submit_must_be_a_json_boolean_and_becomes_an_output(self):
-        payload = {'repo': 'Lascade-Co/travel-animator-shared', 'release_id': 42, 'package_name': 'com.travelanimator.routemap'}
+        payload = {'repo': 'Lascade-Co/travel-animator', 'release_id': 42, 'package_name': 'com.travelanimator.routemap'}
         release = {'id': 42, 'tag_name': 'v5.0.14', 'body': NOTES_5_0_14}
         for extra, expected in (({}, 'true'), ({'submit': True}, 'true'), ({'submit': False}, 'false')):
             with self.subTest(extra=extra):
@@ -715,7 +715,7 @@ class MetadataTests(unittest.TestCase):
                 publish_metadata.validate(payload | {'submit': bad}, release, 'Lascade-Co/actions')
 
     def test_bad_releases_and_overlong_notes_rejected_without_truncation(self):
-        payload = {'repo': 'Lascade-Co/travel-animator-shared', 'release_id': 42, 'package_name': 'com.travelanimator.routemap'}
+        payload = {'repo': 'Lascade-Co/travel-animator', 'release_id': 42, 'package_name': 'com.travelanimator.routemap'}
         release = {'id': 42, 'tag_name': 'v5.0.9', 'body': 'Notes.'}
         for extra in ({'draft': True}, {'prerelease': True}, {'body': '🚀' * 251}, {'body': ''},
                       {'tag_name': 'v5.0.9\ncommand'}, {'id': 43}):

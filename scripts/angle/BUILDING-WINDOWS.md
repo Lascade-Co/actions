@@ -253,10 +253,10 @@ the first run.
 The release already exists (the iOS asset created it), so this is an upload:
 
 ```powershell
-$env:GH_TOKEN = "<token with repo scope on Lascade-Co/travel-animator-shared>"
+$env:GH_TOKEN = "<token with repo scope on Lascade-Co/travel-animator>"
 
 gh release upload angle-be80ce59 angle-out\angle-be80ce59-windows-x64.zip `
-  --repo Lascade-Co/travel-animator-shared
+  --repo Lascade-Co/travel-animator
 
 Get-FileHash angle-out\angle-be80ce59-windows-x64.zip -Algorithm SHA256
 ```
@@ -269,7 +269,7 @@ Then, **in the same change**:
    `windows-x64` leg fails at the fetch step rather than substituting a different ANGLE.
 2. Replace the STATUS banner at the top of `PROVENANCE-windows.md` with what was built and measured.
 
-`travel-animator-shared` is **private**, so the browser `releases/download/...` URL 404s for an
+`travel-animator` is **private**, so the browser `releases/download/...` URL 404s for an
 unauthenticated client. Consumers must use the REST asset endpoint with
 `Accept: application/octet-stream` and a bearer token — which is what `fetch_pinned_angle.py` and
 shared's `downloadAngle` task already do.
