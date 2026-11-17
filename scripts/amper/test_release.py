@@ -98,7 +98,9 @@ class WorkflowShape(unittest.TestCase):
             names = [step.get('name', '') for step in steps]
             scan = next(i for i, step in enumerate(steps) if step.get('id') == 'cache-scan')
             self.assertIn('check-cache', steps[scan]['run'])
-            self.assertNotIn('continue-on-error', steps[scan])
+            # A failed scan reports an error and skips the publishes; it never blocks the release itself.
+            self.assertIs(steps[scan]['continue-on-error'], True)
+            self.assertIn('::error::', steps[scan]['run'])
             # staging is read as a file: an env export would overwrite the prod KEYSTORE_* the scan searches for
             staging = names.index('Read /Build from Infisical staging for the cache secret scan')
             self.assertEqual(steps[staging]['with']['export-type'], 'file')
@@ -149,10 +151,46 @@ def assert_fresh_tokens_after_build(case, workflow, jobs):
 
 class FreshTokens(unittest.TestCase):
     def test_release_uploads_use_tokens_minted_after_the_build(self):
+        # amper-release builds main's code only, so minting again after the build is safe.
         assert_fresh_tokens_after_build(self, 'amper-release.yml', ('android', 'ios-build'))
 
-    def test_debug_uploads_use_tokens_minted_after_the_build(self):
-        assert_fresh_tokens_after_build(self, 'amper-debug.yml', ('android', 'ios-build'))
+    def test_debug_uses_no_secrets_after_pr_code_runs(self):
+        # Minting after PR code would hand CI_APP_PRIVATE_KEY to an action on a runner PR code controlled. After the
+        # first ./kotlin or xcodebuild step only github.token and earlier step outputs may appear.
+        jobs = yaml.safe_load((HERE.parents[1] / '.github/workflows/amper-debug.yml').read_text())['jobs']
+        checked = 0
+        for name, job in jobs.items():
+            steps = job.get('steps', [])
+            builds = [i for i, s in enumerate(steps) if BUILD_COMMAND.search(str(s.get('run', '')))]
+            if not builds:
+                continue
+            checked += 1
+            for step in steps[builds[0]:]:
+                with self.subTest(job=name, step=step.get('name')):
+                    self.assertNotRegex(yaml.safe_dump(step, width=10 ** 6), r'secrets\.')
+                    self.assertFalse(str(step.get('uses', '')).startswith('actions/create-github-app-token'))
+        self.assertEqual(checked, 2)  # android and ios-build
+
+    def test_debug_parking_fails_closed_on_an_aging_token(self):
+        steps = yaml.safe_load((HERE.parents[1] / '.github/workflows/amper-debug.yml').read_text())['jobs']['ios-build']['steps']
+        ids = [s.get('id') for s in steps]
+        names = [s.get('name') for s in steps]
+        self.assertEqual(ids.index('token-time'), ids.index('app-token') + 1)
+        guard = steps[names.index('Require an unexpired App token for parking')]
+        self.assertIn('-gt 3300', guard['run'])
+        self.assertIn('::error::App token likely expired', guard['run'])
+        self.assertEqual(names.index('Require an unexpired App token for parking') + 1, ids.index('park'))
+
+class ActionPins(unittest.TestCase):
+    def test_setup_xcode_is_pinned_to_a_commit(self):
+        for workflow in ('amper-debug.yml', 'amper-release.yml'):
+            jobs = yaml.safe_load((HERE.parents[1] / '.github/workflows' / workflow).read_text())['jobs']
+            uses = [s['uses'] for j in jobs.values() for s in j.get('steps', []) if 'setup-xcode' in str(s.get('uses', ''))]
+            self.assertTrue(uses)
+            for use in uses:
+                with self.subTest(workflow=workflow):
+                    self.assertRegex(use, r'@[0-9a-f]{40}$')
+
 
 class DebugWorkflowShape(unittest.TestCase):
     """amper-debug runs PR code (the source's kotlin wrapper, Xcode's Build Kotlin phase): it may not write GHCR,

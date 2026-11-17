@@ -316,8 +316,13 @@ jobs:
       - name: Scan the dependency cache for build secrets
         run: |-
           python3 "$GITHUB_WORKSPACE/control/scripts/amper/release.py" check-cache \
-            --secrets-file "$GITHUB_WORKSPACE/.amper-staging-build.env" "$HOME/.cache/JetBrains/Kotlin"
+            --secrets-file "$GITHUB_WORKSPACE/.amper-staging-build.env" "$HOME/.cache/JetBrains/Kotlin" || {
+            echo '::error::Cache secret scan failed (a build secret in the cache, or the scan could not run); bundles not published.'
+            exit 1
+          }
         id: cache-scan
+        # The release does not depend on the cache; the publish steps require this step's outcome to be success.
+        continue-on-error: true
         if: ${{ !cancelled() && steps.aab.outcome != 'skipped' && steps.kotlin-cache.outputs.hit != 'true' }}
       - name: Delete the staging secrets file
         run: rm -f "$GITHUB_WORKSPACE/.amper-staging-build.env"
@@ -378,7 +383,7 @@ jobs:
           path: source
           persist-credentials: false
       - name: Pin Xcode 26.6
-        uses: maxim-lobanov/setup-xcode@v1
+        uses: maxim-lobanov/setup-xcode@ed7a3b1fda3918c0306d1b724322adc0b8cc0a90  # v1.7.0
         with:
           xcode-version: '26.6'
       - name: Read /Build from Infisical prod
@@ -591,8 +596,13 @@ jobs:
         run: |-
           python3 "$GITHUB_WORKSPACE/control/scripts/amper/release.py" check-cache \
             --secrets-file "$GITHUB_WORKSPACE/.amper-staging-build.env" \
-            "$HOME/Library/Caches/JetBrains/Kotlin" "$HOME/.konan/dependencies" "$RUNNER_TEMP/dd/SourcePackages"
+            "$HOME/Library/Caches/JetBrains/Kotlin" "$HOME/.konan/dependencies" "$RUNNER_TEMP/dd/SourcePackages" || {
+            echo '::error::Cache secret scan failed (a build secret in the cache, or the scan could not run); bundles not published.'
+            exit 1
+          }
         id: cache-scan
+        # The release does not depend on the cache; the publish steps require this step's outcome to be success.
+        continue-on-error: true
         if: ${{ !cancelled() && steps.warm.outcome != 'skipped' && (steps.kotlin-cache.outputs.hit != 'true' || steps.konan-cache.outputs.hit != 'true' || steps.spm-cache.outputs.hit != 'true') }}
       - name: Delete the staging secrets file
         run: rm -f "$GITHUB_WORKSPACE/.amper-staging-build.env"
