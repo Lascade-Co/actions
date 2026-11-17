@@ -357,7 +357,7 @@ def main(argv=None):
     parser.add_argument('--ipa', required=True)
     parser.add_argument('--version', required=True)
     parser.add_argument('--build-number')
-    parser.add_argument('--bundle-id', default='com.travelanimator.routemap')
+    parser.add_argument('--bundle-id', required=True, help='from config/apps.json via scripts/kmp/apps.py')
     parser.add_argument('--notes-file', required=True)
     parser.add_argument('--already-uploaded', action='store_true')
     parser.add_argument('--localize-whats-new', action='store_true',

@@ -14,7 +14,7 @@ stores = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(stores)
 
 ROOT = Path(__file__).resolve().parents[2]
-BASE = {'repo': 'Lascade-Co/travel-animator-shared', 'release_id': 42, 'package_name': 'com.travelanimator.routemap'}
+BASE = {'repo': 'Lascade-Co/travel-animator', 'release_id': 42, 'package_name': 'com.travelanimator.routemap'}
 
 
 class SelectionRule(unittest.TestCase):

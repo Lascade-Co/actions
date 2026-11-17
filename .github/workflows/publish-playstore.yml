@@ -24,8 +24,6 @@ jobs:
 
     env:
       TRACK: production
-      TARGET_COUNTRY: BD
-      TARGET_FRACTION: "0.99"
 
     steps:
       - name: Checkout central repo (for scripts)
@@ -48,13 +46,25 @@ jobs:
                   raise ValueError('Missing publish payload field: ' + key)
           if not str(payload['release_id']).isdigit():
               raise ValueError('Invalid release ID')
-          if os.environ['EVENT_TYPE'] == 'publish-kmp' and payload['package_name'] != 'com.travelanimator.routemap':
-              raise ValueError('KMP package must be com.travelanimator.routemap')
-          if os.environ['EVENT_TYPE'] == 'publish-kmp' and repo != 'Lascade-Co/travel-animator-shared':
-              raise ValueError('Only the approved KMP source repository may publish')
           with open(os.environ['GITHUB_OUTPUT'], 'a') as out:
               out.write(f'owner={repo.split("/")[0]}\nname={repo.split("/")[1]}\n')
           PYTHON
+
+      # Runs before any token or download. publish-kmp must come from a registered repo whose package matches
+      # config/apps.json; legacy publish-playstore callers need not be registered (they keep the original
+      # BD / 0.99 rollout).
+      - name: Check app registry
+        id: app
+        env:
+          SOURCE_REPO: ${{ github.event.client_payload.repo }}
+          PACKAGE_NAME: ${{ github.event.client_payload.package_name }}
+          EVENT_TYPE: ${{ github.event.action }}
+        run: |
+          if [ "$EVENT_TYPE" = publish-kmp ]; then
+            python3 scripts/kmp/apps.py --repo "$SOURCE_REPO" --package-name "$PACKAGE_NAME" --output "$GITHUB_OUTPUT"
+          else
+            python3 scripts/kmp/apps.py --repo "$SOURCE_REPO" --allow-unregistered --output "$GITHUB_OUTPUT"
+          fi
 
       - name: Select store
         id: stores
@@ -189,8 +199,8 @@ jobs:
             --app-name "$APP_NAME" \
             --github-release-url "$RELEASE_URL" \
             --play-console-production-url "$PLAY_URL" \
-            --country "${{ env.TARGET_COUNTRY }}" \
-            --user-fraction "${{ env.TARGET_FRACTION }}" \
+            --country "${{ steps.app.outputs.rollout_country }}" \
+            --user-fraction "${{ steps.app.outputs.rollout_fraction }}" \
             --telegram-out "github_release_body.txt"
 
       - name: Create PostHog annotation
