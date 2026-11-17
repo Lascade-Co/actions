@@ -145,10 +145,14 @@ jobs:
           out-file-path: release-assets
           token: ${{ steps.app-token.outputs.token }}
 
+      # publish-kmp releases may omit native-debug-symbols.zip (Kotlin Toolchain apps build none); when one is
+      # present there must be exactly one. Legacy publish-playstore releases still require exactly one.
       - name: Locate AAB + native debug symbols
         if: steps.stores.outputs.selected == 'true'
         id: assets
         shell: bash
+        env:
+          EVENT_TYPE: ${{ github.event.action }}
         run: |
           set -euo pipefail
           python3 - <<'PY'
@@ -157,8 +161,12 @@ jobs:
           files = list(Path('release-assets').iterdir())
           selected = {'aab': [p for p in files if p.name.lower().endswith('.aab')],
                       'symbols': [p for p in files if 'native-debug-symbols' in p.name.lower() and p.name.lower().endswith('.zip')]}
+          optional = {'symbols'} if os.environ['EVENT_TYPE'] == 'publish-kmp' else set()
           with open(os.environ['GITHUB_OUTPUT'], 'a') as out:
               for key, paths in selected.items():
+                  if key in optional and not paths:
+                      out.write(f'{key}=\n')
+                      continue
                   if len(paths) != 1 or any(c in str(paths[0]) for c in '\r\n'):
                       raise ValueError('Expected exactly one release artifact: ' + key)
                   out.write(f'{key}={paths[0]}\n')
