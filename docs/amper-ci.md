@@ -41,7 +41,7 @@ unless noted. Failures exit non-zero with an `error:` message.
 | `set-version --version X --build N` | Patches `module.yaml` (via `yq`) and every `MARKETING_VERSION` / `CURRENT_PROJECT_VERSION` in the pbxproj. |
 | `set-variant --variant debug\|release [--team T --profile NAME]` | Writes the IDs; for release also swaps the plist, sets the App Attest entitlement and blanks the token; for debug writes `$APPCHECK_DEBUG_TOKEN` into `BuildSecrets.kt`. With `--team` and `--profile` (both variants; debug is signed for TestFlight) it puts manual signing (`CODE_SIGN_STYLE`, `DEVELOPMENT_TEAM`, `PROVISIONING_PROFILE_SPECIFIER`, `CODE_SIGN_IDENTITY = "Apple Distribution"`) on the app target's build settings. Command-line signing overrides did not work in the spike. |
 | `android-inputs` | Decodes `KEYSTORE_BASE64` to `androidApp/ci.jks` and writes `keystore.properties` from `KEYSTORE_PASSWORD`, `KEY_ALIAS`, `KEY_PASSWORD`. |
-| `find-artifact --kind apk\|aab\|mapping` | Globs `build/tasks/*/*.apk` or `*.aab` (the top of each task dir; the toolchain keeps a second copy inside its generated `gradle-project`) or `build/tasks/**/outputs/mapping/release/mapping.txt`; fails unless exactly one match; prints `path`. |
+| `find-artifact --kind apk\|aab\|mapping` | Globs `build/tasks/*/*.apk` or `*.aab` (the top of each task dir; the toolchain keeps a second copy inside its generated `gradle-project`) or `build/tasks/**/outputs/mapping/release/mapping.txt`. For `apk`, a task dir whose name contains `release` (any case) wins over others. Fails unless exactly one match; prints `path`. |
 | `kn-gc-guard --log F --gc-dir D --max-full-gc 20` | Fails if the build log lacks `Picked up JAVA_TOOL_OPTIONS` or any `D/gc-*.log` has more than 20 `Pause Full` lines. |
 | `export-options --team T --profile NAME --bundle-id ID [--out FILE]` | Writes `ExportOptions.plist` (`app-store-connect`, manual signing). |
 
@@ -99,12 +99,25 @@ build, the PR comments `<!-- central-build-debug -->` and `<!-- central-ios-test
 | Job | Does |
 | --- | --- |
 | `prepare` | Validates the payload, checks `config/apps.json` before minting a token, pins the source SHA, runs `metadata` (build number = run number) and hashes the dependency cache key once. |
-| `android` (ubuntu, 45 min) | Staging `/Build`, `set-variant debug`, `set-version`, `android-inputs`, `./kotlin test -p android`, then `./kotlin build -m androidApp -v release`: an R8 APK signed with the debug keystore. `KOTLIN_CLI_JAVA_OPTIONS=-Xmx1536m`. No lint (the toolchain has no Android Lint). |
-| `ios-build` (macos-26, Xcode 26.6, 90 min) | Reads the team, name and UUID from the staging profile, `set-variant debug --team --profile` (manual signing on the app target), `set-version`, `apple-signing`, `./kotlin build -p iosArm64` (cache warm-up, may fail without failing the job), `xcodebuild` resolve and archive with ADR 0004's `JAVA_TOOL_OPTIONS`, `kn-gc-guard`, `export-options` and `-exportArchive`, then Crashlytics `upload-symbols`. Uploads `xcodebuild.log`, the GC logs and a memory sample log as `ios-diagnostics`. |
-| `publish-android`, `ios-publish`, `testflight-notes`, `notify` | As in `kmp-debug`. TestFlight upload waits for the `android` job, which runs the unit tests. |
+| `android` (ubuntu, 45 min) | Staging `/Build`, `set-variant debug`, `set-version`, `android-inputs`, `./kotlin test -p android`, then `./kotlin build -m androidApp -v release`: an R8 APK signed with the debug keystore. Publishes it straight to the source repo's prerelease, then deletes it and the keystore. `KOTLIN_CLI_JAVA_OPTIONS=-Xmx1536m`. No lint (the toolchain has no Android Lint). |
+| `ios-build` (macos-26, Xcode 26.6, 90 min) | Reads the team, name and UUID from the staging profile, `set-variant debug --team --profile` (manual signing on the app target), `set-version`, `apple-signing`. A resolve-only warm-up (`./kotlin task` on every `:module:resolveDependenciesIosArm64` and `:module:cinteropIosArm64`, 25 min, ADR 0004 flags). Then `xcodebuild` resolve and archive with ADR 0004's `JAVA_TOOL_OPTIONS`, `kn-gc-guard`, `export-options`, `-exportArchive` and Crashlytics `upload-symbols`. It waits for the `android` job (unit tests) to succeed, uploads to TestFlight, and deletes the IPA, archive and build products. |
+| `testflight-notes`, `notify` | As in `kmp-debug`, driven by job outputs (`android.url`, `ios-build.uploaded` and the IPA identity). |
 
 Caches (`gh-bundle-cache`, keyed on the hash of `kotlin`, `project.yaml`, `**/module.yaml`, `libs.versions.toml`
 and `**/Package.resolved`): the Kotlin shared cache (`~/.cache/JetBrains/Kotlin` on Linux,
 `~/Library/Caches/JetBrains/Kotlin` on macOS; toolchain 0.14 keeps its Maven downloads in `.m2.cache` inside it, not
 in `~/.m2`), `~/.konan/dependencies`, and `$RUNNER_TEMP/dd/SourcePackages` (resolve and archive share
-`-derivedDataPath "$RUNNER_TEMP/dd"`).
+`-derivedDataPath "$RUNNER_TEMP/dd"`). These hold third-party downloads only, never project build output.
+Only `android` and `ios-build` get `packages: write`.
+
+## Rule: no secret-bearing binaries or raw logs as Actions artifacts
+
+Lascade-Co/actions is public, so anyone can download its run artifacts. The debug APK and IPA embed the App Check
+debug token, which bypasses App Check for the `.debug` apps, including the paid WhatsApp OTP callables. Therefore:
+
+- The job that builds a binary also delivers it: the APK goes to the private source repo's prerelease and the IPA to
+  TestFlight, in the same job. Binaries never pass between jobs as artifacts, and they are deleted from the runner afterwards.
+- `ios-diagnostics` never holds the raw `xcodebuild.log`. It holds only the GC logs, the `kn-gc-guard` summary,
+  memory samples, and a filtered log of lines matching `error:|warning:|Picked up JAVA_TOOL_OPTIONS|(BUILD|ARCHIVE)
+  (SUCCEEDED|FAILED)`, with any line containing `KEY`, `TOKEN`, `PASSWORD` or `SECRET` (any case) dropped.
+- The same applies to `amper-release` and any future workflow here that handles signed or secret-bearing builds.

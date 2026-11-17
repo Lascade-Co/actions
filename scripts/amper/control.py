@@ -195,6 +195,10 @@ PATTERNS = {
 
 def cmd_find_artifact(a):
     matches = sorted(glob.glob(str(Path(a.source) / PATTERNS[a.kind]), recursive=True))
+    if a.kind == 'apk':
+        # A debug APK from an earlier task can sit next to the release one; the release variant wins.
+        release = [m for m in matches if 'release' in Path(m).parent.name.lower()]
+        matches = release or matches
     if len(matches) != 1:
         fail(f'expected exactly one {a.kind} under build/tasks, found {len(matches)}: {matches}')
     emit(path=matches[0])

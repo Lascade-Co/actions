@@ -195,6 +195,11 @@ class FindArtifactTests(Base):
         self.put('build/tasks/_androidApp_buildAndroidRelease/gradle-project/build/_androidApp/outputs/apk/release/gradle-project-release.apk')
         self.assertEqual(run('find-artifact', '--source', self.src, '--kind', 'apk')['path'], str(apk))
 
+    def test_prefers_release_variant_apk(self):
+        self.put('build/tasks/_androidApp_buildAndroidDebug/gradle-project-debug.apk')
+        apk = self.put('build/tasks/_androidApp_buildAndroidRelease/gradle-project-release.apk')
+        self.assertEqual(run('find-artifact', '--source', self.src, '--kind', 'apk')['path'], str(apk))
+
     def test_fails_on_zero_or_many(self):
         with self.assertRaises(SystemExit):
             run('find-artifact', '--source', self.src, '--kind', 'apk')
