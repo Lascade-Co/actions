@@ -19,7 +19,6 @@ MANIFEST = '.ci/amper.json'
 APPATTEST_KEY = 'com.apple.developer.devicecheck.appattest-environment'
 VERSION_RE = re.compile(r'^[0-9A-Za-z][0-9A-Za-z.+-]{0,63}$')
 TOKEN_LINE = re.compile(r'^(\s*const val APPCHECK_DEBUG_TOKEN\s*=\s*)".*"\s*$', re.M)
-SETTINGS_BLOCK = re.compile(r'buildSettings = \{.*?\n\t\t\t\};', re.S)
 
 
 def fail(message):
@@ -63,25 +62,34 @@ def pbxproj(src, m):
     return Path(src) / m['ios_project'] / 'project.pbxproj'
 
 
-def set_setting(text, key, value, only_blocks_with=None):
-    """Rewrite `KEY = value;` in every buildSettings block (optionally only those containing a marker)."""
-    def block(match):
-        body = match.group(0)
-        if only_blocks_with and only_blocks_with not in body:
-            return body
-        return re.sub(rf'^(\s*){key} = [^;\n]*;', lambda m: f'{m.group(1)}{key} = {value};', body, flags=re.M)
-    return SETTINGS_BLOCK.sub(block, text)
+def app_config_ids(text):
+    """Build configuration ids of the application target(s), via PBXNativeTarget -> XCConfigurationList."""
+    ids = []
+    for target in re.finditer(r'isa = PBXNativeTarget;.*?\n\t\t\};', text, re.S):
+        body = target.group(0)
+        if not re.search(r'productType = "?com\.apple\.product-type\.application"?;', body):
+            continue
+        lst = re.search(r'buildConfigurationList = (\w+)', body).group(1)
+        cfgs = re.search(rf'\n\t\t{lst}[^\n]*= \{{.*?buildConfigurations = \((.*?)\);', text, re.S)
+        ids += re.findall(r'(\w{12,})', cfgs.group(1))
+    if not ids:
+        fail('no application target found in the pbxproj')
+    return ids
 
 
-def add_setting_after(text, after_key, key, value, marker):
-    def block(match):
-        body = match.group(0)
-        if marker not in body:
-            return body
-        body = re.sub(rf'^\s*{key} = [^;\n]*;\n', '', body, flags=re.M)
-        return re.sub(rf'^(\s*){after_key} = [^;\n]*;\n',
-                      lambda m: f'{m.group(0)}{m.group(1)}{key} = {value};\n', body, count=1, flags=re.M)
-    return SETTINGS_BLOCK.sub(block, text)
+def set_app_settings(text, settings):
+    """Set KEY = value; (replace or add) in the app target's build configurations only."""
+    for cid in app_config_ids(text):
+        match = re.search(rf'(\n\t\t{cid}[^\n]*= \{{\n\t\t\tisa = XCBuildConfiguration;\n\t\t\tbuildSettings = \{{)(.*?)(\n\t\t\t\}};)', text, re.S)
+        if not match:
+            fail('build configuration not found: ' + cid)
+        body = match.group(2)
+        for key, value in settings.items():
+            line = f'\t\t\t\t{key} = {value};'
+            pattern = re.compile(rf'^\t\t\t\t{key} = [^;\n]*;', re.M)
+            body = pattern.sub(lambda m: line, body, count=1) if pattern.search(body) else body + '\n' + line
+        text = text[:match.start(2)] + body + text[match.end(2):]
+    return text
 
 
 def cmd_metadata(a):
@@ -105,9 +113,7 @@ def cmd_set_version(a):
         yq('.settings.android.versionName = strenv(V) | .settings.android.versionCode = (strenv(B) | tonumber)',
            src / rel, {'V': a.version, 'B': str(a.build)})
     pbx = pbxproj(src, m)
-    text = set_setting(pbx.read_text(), 'MARKETING_VERSION', a.version)
-    text = set_setting(text, 'CURRENT_PROJECT_VERSION', a.build)
-    pbx.write_text(text)
+    pbx.write_text(set_app_settings(pbx.read_text(), {'MARKETING_VERSION': a.version, 'CURRENT_PROJECT_VERSION': a.build}))
     emit(version=a.version, build_number=a.build)
 
 
@@ -127,15 +133,12 @@ def cmd_set_variant(a):
 
     yq('.settings.android.applicationId = strenv(ID)', module_yaml(src, m), {'ID': ident})
     pbx = pbxproj(src, m)
-    text = set_setting(pbx.read_text(), 'PRODUCT_BUNDLE_IDENTIFIER', ident)
+    settings = {'PRODUCT_BUNDLE_IDENTIFIER': ident}
     if a.team:
         # Manual signing must live on the target's build settings; command-line overrides did not take.
-        marker = 'PRODUCT_BUNDLE_IDENTIFIER'
-        text = set_setting(text, 'CODE_SIGN_STYLE', 'Manual', marker)
-        text = set_setting(text, 'CODE_SIGN_IDENTITY', '"Apple Distribution"', marker)
-        text = set_setting(text, 'DEVELOPMENT_TEAM', a.team, marker)
-        text = add_setting_after(text, 'DEVELOPMENT_TEAM', 'PROVISIONING_PROFILE_SPECIFIER',
-                                 '"' + a.profile.replace('"', '').replace('\\', '') + '"', marker)
+        settings.update(CODE_SIGN_STYLE='Manual', CODE_SIGN_IDENTITY='"Apple Distribution"', DEVELOPMENT_TEAM=a.team,
+                        PROVISIONING_PROFILE_SPECIFIER='"' + a.profile.replace('"', '').replace('\\', '') + '"')
+    text = set_app_settings(pbx.read_text(), settings)
     pbx.write_text(text)
 
     if release:
@@ -150,6 +153,8 @@ def cmd_set_variant(a):
             print(f'warning: {ent} not found; skipping App Attest entitlement', file=sys.stderr)
 
     token = '' if release else os.environ.get('APPCHECK_DEBUG_TOKEN', '')
+    if not release and not token:
+        fail('APPCHECK_DEBUG_TOKEN is unset or empty for the debug variant')
     if re.search(r'["\\$\n\r]', token):
         fail('APPCHECK_DEBUG_TOKEN contains characters unsafe for a Kotlin string')
     kt = src / m['build_secrets_kt']
@@ -160,19 +165,25 @@ def cmd_set_variant(a):
     emit(variant=a.variant, bundle_id=ident)
 
 
+def write_private(path, data):
+    path.unlink(missing_ok=True)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, 'wb') as stream:
+        stream.write(data)
+
+
 def cmd_android_inputs(a):
     src = Path(a.source)
     m = manifest(src)
     mod = src / m['android_module']
-    (mod / 'ci.jks').write_bytes(base64.b64decode(os.environ['KEYSTORE_BASE64'], validate=True))
+    write_private(mod / 'ci.jks', base64.b64decode(os.environ['KEYSTORE_BASE64'], validate=True))
     props = {'storeFile': 'ci.jks', 'storePassword': os.environ['KEYSTORE_PASSWORD'],
              'keyAlias': os.environ['KEY_ALIAS'], 'keyPassword': os.environ['KEY_PASSWORD']}
     for key, value in props.items():
         if '\n' in value or '\r' in value:
             fail('multiline value for ' + key)
     path = mod / 'keystore.properties'
-    path.write_text(''.join(f'{k}={v}\n' for k, v in props.items()))
-    path.chmod(0o600)
+    write_private(path, ''.join(f'{k}={v}\n' for k, v in props.items()).encode())
     emit(keystore='ci.jks')
 
 
@@ -235,7 +246,7 @@ def parser():
     add('find-artifact', cmd_find_artifact, src, ('--kind', dict(required=True, choices=sorted(PATTERNS))))
     add('kn-gc-guard', cmd_gc_guard, ('--log', dict(required=True)), ('--gc-dir', dict(required=True)),
         ('--max-full-gc', dict(type=int, default=20)))
-    add('export-options', cmd_export_options, variant, ('--team', dict(required=True)),
+    add('export-options', cmd_export_options, ('--team', dict(required=True)),
         ('--profile', dict(required=True)), ('--bundle-id', dict(required=True)),
         ('--out', dict(default='ExportOptions.plist')))
     return p

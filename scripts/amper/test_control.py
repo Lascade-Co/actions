@@ -28,6 +28,9 @@ def run(*argv):
     return dict(line.split('=', 1) for line in out.getvalue().splitlines() if '=' in line)
 
 
+needs_yq = unittest.skipUnless(shutil.which('yq'), 'yq not installed')
+
+
 class Base(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
@@ -39,6 +42,7 @@ class Base(unittest.TestCase):
         return (self.src / rel).read_text()
 
 
+@needs_yq
 class MetadataTests(Base):
     def test_reads_version_build_and_toolchain(self):
         out = run('metadata', '--source', self.src)
@@ -48,6 +52,7 @@ class MetadataTests(Base):
         self.assertEqual(run('metadata', '--source', self.src, '--suffix', 77)['build_number'], '77')
 
 
+@needs_yq
 class SetVersionTests(Base):
     def test_patches_module_yaml_and_every_pbxproj_configuration(self):
         run('set-version', '--source', self.src, '--version', '1.2.3', '--build', 45)
@@ -64,6 +69,7 @@ class SetVersionTests(Base):
             run('set-version', '--source', self.src, '--version', '1.0"; rm', '--build', 1)
 
 
+@needs_yq
 class SetVariantTests(Base):
     def test_debug_writes_token_from_env_and_debug_ids(self):
         with patch.dict(os.environ, {'APPCHECK_DEBUG_TOKEN': 'tok-123'}):
@@ -97,12 +103,53 @@ class SetVariantTests(Base):
         self.assertEqual(pbx.count('CODE_SIGN_IDENTITY = "Apple Distribution";'), 2)
         self.assertNotIn('Automatic', pbx)
 
+    def test_debug_requires_token(self):
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop('APPCHECK_DEBUG_TOKEN', None)
+            with self.assertRaises(SystemExit):
+                run('set-variant', '--source', self.src, '--variant', 'debug')
+
     def test_missing_entitlements_is_skipped_with_warning(self):
         (self.src / ENT).unlink()
         err = io.StringIO()
         with contextlib.redirect_stderr(err):
             run('set-variant', '--source', self.src, '--variant', 'release')
         self.assertIn('warning', err.getvalue().lower())
+
+
+@needs_yq
+class AppTargetOnlyTests(Base):
+    def setUp(self):
+        super().setUp()
+        shutil.copy(FIX / 'pbxproj-multitarget', self.src / PBX)
+
+    def test_ids_versions_and_signing_leave_test_target_untouched(self):
+        run('set-version', '--source', self.src, '--version', '1.2.3', '--build', 45)
+        run('set-variant', '--source', self.src, '--variant', 'release', '--team', 'ABCDE12345', '--profile', 'P')
+        pbx = self.read(PBX)
+        self.assertEqual(re.findall(r'PRODUCT_BUNDLE_IDENTIFIER = ([^;]+);', pbx).count('com.lascade.hunch'), 2)
+        self.assertEqual(re.findall(r'PRODUCT_BUNDLE_IDENTIFIER = ([^;]+);', pbx).count('com.lascade.hunch.tests'), 2)
+        self.assertEqual(re.findall(r'MARKETING_VERSION = ([^;]+);', pbx).count('9.9'), 2)
+        self.assertEqual(re.findall(r'CURRENT_PROJECT_VERSION = ([^;]+);', pbx).count('9'), 2)
+        self.assertEqual(pbx.count('CODE_SIGN_STYLE = Manual;'), 2)
+        self.assertEqual(pbx.count('CODE_SIGN_STYLE = Automatic;'), 2)  # test target only
+        self.assertEqual(pbx.count('PROVISIONING_PROFILE_SPECIFIER'), 2)
+
+    def test_missing_signing_keys_are_added(self):
+        pbx = self.src / PBX
+        text = re.sub(r'^\t+(CODE_SIGN_STYLE|CODE_SIGN_IDENTITY|DEVELOPMENT_TEAM) = [^;]*;\n', '', pbx.read_text(), flags=re.M)
+        pbx.write_text(text)
+        run('set-variant', '--source', self.src, '--variant', 'release', '--team', 'ABCDE12345', '--profile', 'P')
+        out = self.read(PBX)
+        self.assertEqual(out.count('CODE_SIGN_STYLE = Manual;'), 2)
+        self.assertEqual(out.count('DEVELOPMENT_TEAM = ABCDE12345;'), 2)
+        self.assertEqual(out.count('CODE_SIGN_IDENTITY = "Apple Distribution";'), 2)
+
+    def test_no_application_target_fails(self):
+        pbx = self.src / PBX
+        pbx.write_text(pbx.read_text().replace('product-type.application', 'product-type.tool'))
+        with self.assertRaises(SystemExit):
+            run('set-version', '--source', self.src, '--version', '1.0.0', '--build', 1)
 
 
 class AndroidInputsTests(Base):
@@ -112,6 +159,8 @@ class AndroidInputsTests(Base):
         with patch.dict(os.environ, env):
             run('android-inputs', '--source', self.src)
         self.assertEqual((self.src / 'androidApp/ci.jks').read_bytes(), b'jks-bytes')
+        for name in ('ci.jks', 'keystore.properties'):
+            self.assertEqual((self.src / 'androidApp' / name).stat().st_mode & 0o777, 0o600)
         props = self.read('androidApp/keystore.properties')
         for line in ['storeFile=ci.jks', 'storePassword=sp', 'keyAlias=al', 'keyPassword=kp']:
             self.assertIn(line, props.splitlines())
@@ -163,7 +212,7 @@ class ExportOptionsTests(Base):
         import plistlib
         self.addCleanup(os.chdir, os.getcwd())
         os.chdir(self.tmp)
-        run('export-options', '--variant', 'release', '--team', 'T1', '--profile', 'Prof', '--bundle-id', 'com.x.y')
+        run('export-options', '--team', 'T1', '--profile', 'Prof', '--bundle-id', 'com.x.y')
         files = list(Path(self.tmp).glob('ExportOptions*.plist'))
         self.assertEqual(len(files), 1)
         d = plistlib.loads(files[0].read_bytes())

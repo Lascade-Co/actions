@@ -43,18 +43,24 @@ unless noted. Failures exit non-zero with an `error:` message.
 | `android-inputs` | Decodes `KEYSTORE_BASE64` to `androidApp/ci.jks` and writes `keystore.properties` from `KEYSTORE_PASSWORD`, `KEY_ALIAS`, `KEY_PASSWORD`. |
 | `find-artifact --kind apk\|aab\|mapping` | Globs `build/tasks/**`; fails unless exactly one match; prints `path`. |
 | `kn-gc-guard --log F --gc-dir D --max-full-gc 20` | Fails if the build log lacks `Picked up JAVA_TOOL_OPTIONS` or any `D/gc-*.log` has more than 20 `Pause Full` lines. |
-| `export-options --variant V --team T --profile NAME --bundle-id ID [--out FILE]` | Writes `ExportOptions.plist` (`app-store-connect`, manual signing). |
+| `export-options --team T --profile NAME --bundle-id ID [--out FILE]` | Writes `ExportOptions.plist` (`app-store-connect`, manual signing). |
 
-Tests: `python -m pytest scripts/amper` (needs `yq` on PATH; fixtures are in `scripts/amper/fixtures/`).
+All pbxproj edits (IDs, versions, signing) touch only the application target's build configurations, found through its `PBXNativeTarget`; missing keys are added.
+
+Tests: `python -m pytest scripts/amper` (yq tests skip without `yq` on PATH; fixtures are in `scripts/amper/fixtures/`).
 
 ## Infisical names
 
 One Infisical project per app (slug passed as `project_slug`), read by the shared machine identity.
 
-- `APPCHECK_DEBUG_TOKEN` for debug builds.
-- Android signing: `KEYSTORE_BASE64`, `KEYSTORE_PASSWORD`, `KEY_ALIAS`, `KEY_PASSWORD`.
-- iOS signing (certificate, profile names, team ID) follows the same `/Build` folder convention as
-  `docs/kmp-debug-ci.md`; the exact names are fixed by the workflow tasks that consume them.
+Environment `staging`, path `/Build`:
+
+`KEYSTORE_BASE64`, `KEYSTORE_PASSWORD`, `KEY_ALIAS`, `KEY_PASSWORD`, `APPCHECK_DEBUG_TOKEN`,
+`IOS_CERTIFICATE_BASE64`, `IOS_CERTIFICATE_PASSWORD`, `IOS_STAGING_PROFILE_APP_BASE64`, `TELEGRAM_CHAT_ID`.
+
+Environment `prod`, path `/Build`: the same names, but `IOS_PROD_PROFILE_APP_BASE64` replaces the staging profile.
+
+`set-variant --variant debug` fails when `APPCHECK_DEBUG_TOKEN` is unset or empty; release always writes `""`.
 
 Shared GitHub secrets (`CI_APP_CLIENT_ID`, `CI_APP_PRIVATE_KEY`, `INFISICAL_CLIENT_ID`,
 `INFISICAL_CLIENT_SECRET`, `INFISICAL_DOMAIN`, store and Telegram secrets) are the ones already
