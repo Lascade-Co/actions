@@ -13,7 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import control
 
 BOT_SUBJECT = re.compile(r'^chore\(release\): v\d+\.\d+\.\d+ \([1-9]\d*\) \[skip ci\]$')
-SOURCE_REPO = 'Lascade-Co/travel-animator-shared'
+SOURCE_REPO = 'Lascade-Co/travel-animator'
 
 
 def validate(payload, central_repo):
