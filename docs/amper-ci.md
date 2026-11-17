@@ -88,4 +88,23 @@ Copy these into the app repo once the central workflows are live:
 - `triggers/amper-release.yml`: pushes to `main` dispatch `amper-release` (skip `chore(release): v*`).
 - `triggers/amper-publish.yml`: store-publish trigger.
 
-These templates are added with their workflows (Tasks 3 and 5 of the central CI plan).
+`amper-debug.yml` exists; the release and publish templates are added with `amper-release` (Task 5 of the central CI plan).
+
+## `amper-debug` workflow
+
+Payload `{repo, pr, branch, title, project_slug}`, the same as `kmp-debug`. Runs are grouped per repo plus PR
+(or branch), with cancel-in-progress. Outputs: a `debug-pr-N` prerelease with the debug APK, a staging TestFlight
+build, the PR comments `<!-- central-build-debug -->` and `<!-- central-ios-testflight -->`, and Telegram messages.
+
+| Job | Does |
+| --- | --- |
+| `prepare` | Validates the payload, checks `config/apps.json` before minting a token, pins the source SHA, runs `metadata` (build number = run number) and hashes the dependency cache key once. |
+| `android` (ubuntu, 45 min) | Staging `/Build`, `set-variant debug`, `set-version`, `android-inputs`, `./kotlin test -p android`, then `./kotlin build -m androidApp -v release`: an R8 APK signed with the debug keystore. `KOTLIN_CLI_JAVA_OPTIONS=-Xmx1536m`. No lint (the toolchain has no Android Lint). |
+| `ios-build` (macos-26, Xcode 26.6, 90 min) | Reads the team, name and UUID from the staging profile, `set-variant debug --team --profile` (manual signing on the app target), `set-version`, `apple-signing`, `./kotlin build -p iosArm64` (cache warm-up, may fail without failing the job), `xcodebuild` resolve and archive with ADR 0004's `JAVA_TOOL_OPTIONS`, `kn-gc-guard`, `export-options` and `-exportArchive`, then Crashlytics `upload-symbols`. Uploads `xcodebuild.log`, the GC logs and a memory sample log as `ios-diagnostics`. |
+| `publish-android`, `ios-publish`, `testflight-notes`, `notify` | As in `kmp-debug`. TestFlight upload waits for the `android` job, which runs the unit tests. |
+
+Caches (`gh-bundle-cache`, keyed on the hash of `kotlin`, `project.yaml`, `**/module.yaml`, `libs.versions.toml`
+and `**/Package.resolved`): the Kotlin shared cache (`~/.cache/JetBrains/Kotlin` on Linux,
+`~/Library/Caches/JetBrains/Kotlin` on macOS; toolchain 0.14 keeps its Maven downloads in `.m2.cache` inside it, not
+in `~/.m2`), `~/.konan/dependencies`, and `$RUNNER_TEMP/dd/SourcePackages` (resolve and archive share
+`-derivedDataPath "$RUNNER_TEMP/dd"`).
