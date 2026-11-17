@@ -1,0 +1,4 @@
+#!/bin/sh
+# fixture wrapper
+kotlin_cli_version=0.14.0
+kotlin_cli_sha256=abc

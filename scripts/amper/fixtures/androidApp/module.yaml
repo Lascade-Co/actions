@@ -1,0 +1,20 @@
+product: android/app
+
+dependencies:
+  - //shared
+  - $libs.androidx.activity.compose
+  - $compose.preview
+  - $compose.uiTooling
+
+settings:
+  compose: enabled
+  android:
+    namespace: com.lascade.hunch
+    applicationId: com.lascade.hunch.debug
+    minSdk: 26
+    versionCode: 1
+    versionName: "0.1.0"
+    # Signs the release AAB produced by `kotlin package`. Reads ./keystore.properties (default
+    # propertiesFile), which is NOT committed; CI writes it (and the keystore) from secrets.
+    # https://kotlin-toolchain.org/0.14/user-guide/product-types/android-app/#signing
+    signing: enabled

@@ -1,0 +1,6 @@
+{ "android_module": "androidApp", "ios_project": "iosApp/module.xcodeproj", "ios_scheme": "app",
+  "ids": { "debug": "com.lascade.hunch.debug", "release": "com.lascade.hunch" },
+  "ios_plist": { "debug": "iosApp/src/GoogleService-Info.plist", "release": "iosApp/firebase/release/GoogleService-Info.plist" },
+  "ios_entitlements": "iosApp/src/iosApp.entitlements",
+  "build_secrets_kt": "shared/src/com/lascade/hunch/platform/BuildSecrets.kt",
+  "version_files": ["androidApp/module.yaml"] }
