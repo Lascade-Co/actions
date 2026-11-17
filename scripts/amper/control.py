@@ -183,7 +183,46 @@ def cmd_set_variant(a):
     if not TOKEN_LINE.search(body):
         fail('APPCHECK_DEBUG_TOKEN line not found in ' + m['build_secrets_kt'])
     kt.write_text(TOKEN_LINE.sub(lambda mm: f'{mm.group(1)}"{token}"', body))
+    set_meta(src, m)
     emit(variant=a.variant, bundle_id=ident)
+
+
+META_STRING = r'(<string\s+name="{}"[^>]*>)[^<]*(</string>)'
+
+
+def set_meta(src, m):
+    """Writes the Meta (Facebook) app ID and client token from Infisical /Build into the app's config.
+
+    The token ships inside the app, but it is kept out of the repository. Without it the app runs with Meta off."""
+    conf = m.get('meta_config')
+    if not conf:
+        return
+    token = os.environ.get('META_CLIENT_TOKEN', '').strip()
+    app_id = os.environ.get('META_APP_ID', '').strip()
+    if not token:
+        print('warning: META_CLIENT_TOKEN is unset; the app is built with Meta off', file=sys.stderr)
+        return
+    if not re.fullmatch(r'[A-Za-z0-9]+', token):
+        fail('META_CLIENT_TOKEN has unexpected characters')
+    if app_id and not re.fullmatch(r'[0-9]+', app_id):
+        fail('META_APP_ID must be numeric')
+    values = {'meta_client_token': token, **({'meta_app_id': app_id} if app_id else {})}
+    if conf.get('android_strings'):
+        res = src / conf['android_strings']
+        body = res.read_text()
+        for name, value in values.items():
+            pattern = re.compile(META_STRING.format(name))
+            if not pattern.search(body):
+                fail(f'<string name="{name}"> not found in ' + conf['android_strings'])
+            body = pattern.sub(lambda mm: mm.group(1) + value + mm.group(2), body)
+        res.write_text(body)
+    if conf.get('ios_info_plist'):
+        plist = src / conf['ios_info_plist']
+        data = plistlib.loads(plist.read_bytes())
+        data['FacebookClientToken'] = token
+        if app_id:
+            data['FacebookAppID'] = app_id
+        plist.write_bytes(plistlib.dumps(data))
 
 
 def write_private(path, data):

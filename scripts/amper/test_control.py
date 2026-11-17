@@ -161,6 +161,29 @@ class SetVariantTests(Base):
             run('set-variant', '--source', self.src, '--variant', 'debug')
         self.assertEqual((self.src / ENT).read_bytes(), before)
 
+    def test_meta_token_and_app_id_written_for_both_platforms(self):
+        import plistlib
+        env = {'APPCHECK_DEBUG_TOKEN': 'tok-123', 'META_CLIENT_TOKEN': 'abc123def', 'META_APP_ID': '42'}
+        with patch.dict(os.environ, env):
+            run('set-variant', '--source', self.src, '--variant', 'release')
+        res = self.read('androidApp/res/values/meta.xml')
+        self.assertIn('<string name="meta_client_token" translatable="false">abc123def</string>', res)
+        self.assertIn('<string name="meta_app_id" translatable="false">42</string>', res)
+        data = plistlib.loads((self.src / 'iosApp/src/Info.plist').read_bytes())
+        self.assertEqual((data['FacebookClientToken'], data['FacebookAppID']), ('abc123def', '42'))
+
+    def test_meta_left_off_without_token(self):
+        before = self.read('androidApp/res/values/meta.xml'), self.read('iosApp/src/Info.plist')
+        with patch.dict(os.environ, {'APPCHECK_DEBUG_TOKEN': 'tok-123'}):
+            os.environ.pop('META_CLIENT_TOKEN', None)
+            run('set-variant', '--source', self.src, '--variant', 'debug')
+        self.assertEqual((self.read('androidApp/res/values/meta.xml'), self.read('iosApp/src/Info.plist')), before)
+
+    def test_meta_rejects_unsafe_token(self):
+        with patch.dict(os.environ, {'APPCHECK_DEBUG_TOKEN': 'tok-123', 'META_CLIENT_TOKEN': 'a</string>'}):
+            with self.assertRaises(SystemExit):
+                run('set-variant', '--source', self.src, '--variant', 'debug')
+
     def test_debug_requires_token(self):
         with patch.dict(os.environ, {}, clear=False):
             os.environ.pop('APPCHECK_DEBUG_TOKEN', None)
