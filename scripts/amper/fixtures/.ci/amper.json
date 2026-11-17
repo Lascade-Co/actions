@@ -18,5 +18,14 @@
   "meta_config": {
     "android_strings": "androidApp/res/values/meta.xml",
     "ios_info_plist": "iosApp/src/Info.plist"
+  },
+  "ios_app_icon": {
+    "debug": "AppIconDebug",
+    "release": "AppIcon"
+  },
+  "variant_files": {
+    "release": {
+      "androidApp/res/drawable/ic_launcher_foreground.xml": "androidApp/variants/release/ic_launcher_foreground.xml"
+    }
   }
 }

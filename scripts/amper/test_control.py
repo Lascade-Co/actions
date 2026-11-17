@@ -184,6 +184,29 @@ class SetVariantTests(Base):
             with self.assertRaises(SystemExit):
                 run('set-variant', '--source', self.src, '--variant', 'debug')
 
+    def test_variant_icon_and_files(self):
+        with patch.dict(os.environ, {'APPCHECK_DEBUG_TOKEN': 'tok-123'}):
+            run('set-variant', '--source', self.src, '--variant', 'release')
+        self.assertEqual(self.read('androidApp/res/drawable/ic_launcher_foreground.xml'), 'release-icon\n')
+        pbx = self.read(PBX)
+        self.assertEqual(pbx.count('ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;'), 2)
+
+    def test_debug_variant_keeps_default_files_and_uses_debug_icon(self):
+        with patch.dict(os.environ, {'APPCHECK_DEBUG_TOKEN': 'tok-123'}):
+            run('set-variant', '--source', self.src, '--variant', 'debug')
+        self.assertEqual(self.read('androidApp/res/drawable/ic_launcher_foreground.xml'), 'debug-icon\n')
+        self.assertEqual(self.read(PBX).count('ASSETCATALOG_COMPILER_APPICON_NAME = AppIconDebug;'), 2)
+
+    def test_variant_files_cannot_escape_source(self):
+        import json
+        path = self.src / '.ci/amper.json'
+        data = json.loads(path.read_text())
+        data['variant_files'] = {'release': {'../outside.txt': 'androidApp/variants/release/ic_launcher_foreground.xml'}}
+        path.write_text(json.dumps(data))
+        with patch.dict(os.environ, {'APPCHECK_DEBUG_TOKEN': 'tok-123'}):
+            with self.assertRaises(SystemExit):
+                run('set-variant', '--source', self.src, '--variant', 'release')
+
     def test_debug_requires_token(self):
         with patch.dict(os.environ, {}, clear=False):
             os.environ.pop('APPCHECK_DEBUG_TOKEN', None)

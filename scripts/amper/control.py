@@ -149,6 +149,12 @@ def cmd_set_variant(a):
     yq('.settings.android.applicationId = strenv(ID)', module_yaml(src, m), {'ID': ident})
     pbx = pbxproj(src, m)
     settings = {'PRODUCT_BUNDLE_IDENTIFIER': ident}
+    icon = m.get('ios_app_icon', {}).get(a.variant)
+    if icon:
+        if not re.fullmatch(r'[A-Za-z0-9_-]+', icon):
+            fail('invalid ios_app_icon name: ' + icon)
+        # Both variants archive with the Release configuration, so the icon follows the variant, not the configuration.
+        settings['ASSETCATALOG_COMPILER_APPICON_NAME'] = icon
     if a.team:
         # Manual signing must live on the target's build settings; command-line overrides did not take.
         settings.update(CODE_SIGN_STYLE='Manual', CODE_SIGN_IDENTITY='"Apple Distribution"', DEVELOPMENT_TEAM=a.team,
@@ -184,7 +190,21 @@ def cmd_set_variant(a):
         fail('APPCHECK_DEBUG_TOKEN line not found in ' + m['build_secrets_kt'])
     kt.write_text(TOKEN_LINE.sub(lambda mm: f'{mm.group(1)}"{token}"', body))
     set_meta(src, m)
+    copy_variant_files(src, m, a.variant)
     emit(variant=a.variant, bundle_id=ident)
+
+
+def copy_variant_files(src, m, variant):
+    """Copies variant-specific files (destination: source, repo-relative) over the committed defaults."""
+    root = src.resolve()
+    for dest, source in m.get('variant_files', {}).get(variant, {}).items():
+        d, s = (src / dest).resolve(), (src / source).resolve()
+        if root not in d.parents or root not in s.parents:
+            fail(f'variant_files path escapes the source: {dest} <- {source}')
+        if not s.is_file():
+            fail('variant file not found: ' + source)
+        d.parent.mkdir(parents=True, exist_ok=True)
+        d.write_bytes(s.read_bytes())
 
 
 META_STRING = r'(<string\s+name="{}"[^>]*>)[^<]*(</string>)'
