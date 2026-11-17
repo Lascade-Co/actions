@@ -192,6 +192,88 @@ class AndroidInputsTests(Base):
         for line in ['storeFile=ci.jks', 'storePassword=sp', 'keyAlias=al', 'keyPassword=kp']:
             self.assertIn(line, props.splitlines())
 
+    def test_line_wrapped_keystore_base64_decodes(self):
+        # `base64` and Infisical pastes wrap at 76 columns; the profile decode already strips whitespace.
+        keystore = bytes(range(256)) * 2
+        wrapped = base64.encodebytes(keystore).decode().replace('\n', '\r\n', 3)
+        self.assertGreater(wrapped.count('\n'), 5)
+        env = {'KEYSTORE_BASE64': ' ' + wrapped, 'KEYSTORE_PASSWORD': 'sp', 'KEY_ALIAS': 'al', 'KEY_PASSWORD': 'kp'}
+        with patch.dict(os.environ, env):
+            run('android-inputs', '--source', self.src)
+        self.assertEqual((self.src / 'androidApp/ci.jks').read_bytes(), keystore)
+
+
+FAKE_TOOL = '''#!/usr/bin/env python3
+import json, os, shutil, sys
+from pathlib import Path
+log = Path(__file__).with_name('calls.jsonl')
+env = {k: os.environ.get(k) for k in ('KEYSTORE_PASSWORD', 'KEY_PASSWORD')}
+with log.open('a') as f:
+    f.write(json.dumps({'tool': Path(__file__).name, 'argv': sys.argv[1:], 'env': env}) + '\\n')
+args = sys.argv[1:]
+if Path(__file__).name == 'zipalign':
+    shutil.copyfile(args[-2], args[-1])
+elif args[0] == 'sign':
+    shutil.copyfile(args[-1], args[args.index('--out') + 1])
+else:
+    print('Signer #1 certificate SHA-1 digest: 474127fe')
+'''
+
+
+class SignApkTests(Base):
+    SECRETS = {'KEYSTORE_PASSWORD': 'store-secret-1', 'KEY_ALIAS': 'ci', 'KEY_PASSWORD': 'key-secret-2'}
+
+    def setUp(self):
+        super().setUp()
+        self.tools = Path(self.tmp) / 'build-tools' / '36.0.0'
+        self.tools.mkdir(parents=True)
+        for name in ('zipalign', 'apksigner'):
+            (self.tools / name).write_text(FAKE_TOOL)
+            (self.tools / name).chmod(0o755)
+        (self.src / 'androidApp/ci.jks').write_bytes(b'jks')
+        self.unsigned = self.src / 'build/tasks/_androidApp_buildAndroidRelease/gradle-project-release-unsigned.apk'
+        self.unsigned.parent.mkdir(parents=True)
+        self.unsigned.write_bytes(b'PK-apk')
+
+    def calls(self):
+        return [json.loads(line) for line in (self.tools / 'calls.jsonl').read_text().splitlines()]
+
+    def test_aligns_signs_and_verifies_with_passwords_only_in_the_environment(self):
+        with patch.dict(os.environ, self.SECRETS):
+            out = run('sign-apk', '--source', self.src, '--build-tools', self.tools)
+        signed = self.src / 'build/signed/gradle-project-release-signed.apk'
+        self.assertEqual(out['path'], str(signed))
+        self.assertEqual(signed.read_bytes(), b'PK-apk')
+        calls = self.calls()
+        self.assertEqual([(c['tool'], c['argv'][0]) for c in calls], [('zipalign', '-f'), ('apksigner', 'sign'), ('apksigner', 'verify')])
+        self.assertEqual(calls[0]['argv'][:3], ['-f', '-p', '4'])
+        sign = calls[1]['argv']
+        self.assertEqual(sign[sign.index('--ks') + 1], str(self.src / 'androidApp/ci.jks'))
+        self.assertEqual(sign[sign.index('--ks-pass') + 1], 'env:KEYSTORE_PASSWORD')
+        self.assertEqual(sign[sign.index('--key-pass') + 1], 'env:KEY_PASSWORD')
+        self.assertEqual(sign[sign.index('--ks-key-alias') + 1], 'ci')
+        self.assertEqual(calls[1]['env'], {'KEYSTORE_PASSWORD': 'store-secret-1', 'KEY_PASSWORD': 'key-secret-2'})
+        self.assertEqual(calls[2]['argv'], ['verify', '--print-certs', str(signed)])
+        for call in calls:
+            self.assertFalse({'store-secret-1', 'key-secret-2'} & set(call['argv']))
+        self.assertEqual(run('find-artifact', '--source', self.src, '--kind', 'apk')['path'], str(signed))
+
+    def test_picks_the_newest_build_tools_from_android_home(self):
+        older = Path(self.tmp) / 'build-tools' / '9.0.0'
+        older.mkdir()
+        (older / 'zipalign').write_text('')
+        (older / 'apksigner').write_text('')
+        with patch.dict(os.environ, {'ANDROID_HOME': self.tmp}):
+            self.assertEqual(control.build_tools(), self.tools)
+
+    def test_fails_without_keystore_or_passwords(self):
+        with patch.dict(os.environ, dict(self.SECRETS, KEY_PASSWORD='')), self.assertRaises(SystemExit):
+            run('sign-apk', '--source', self.src, '--build-tools', self.tools)
+        (self.src / 'androidApp/ci.jks').unlink()
+        with patch.dict(os.environ, self.SECRETS), self.assertRaises(SystemExit):
+            run('sign-apk', '--source', self.src, '--build-tools', self.tools)
+        self.assertFalse((self.tools / 'calls.jsonl').exists())
+
 
 class FindArtifactTests(Base):
     def put(self, rel):
@@ -210,11 +292,19 @@ class FindArtifactTests(Base):
         # The toolchain leaves a second copy of the APK inside its generated Gradle project.
         apk = self.put('build/tasks/_androidApp_buildAndroidRelease/gradle-project-release.apk')
         self.put('build/tasks/_androidApp_buildAndroidRelease/gradle-project/build/_androidApp/outputs/apk/release/gradle-project-release.apk')
-        self.assertEqual(run('find-artifact', '--source', self.src, '--kind', 'apk')['path'], str(apk))
+        self.assertEqual(run('find-artifact', '--source', self.src, '--kind', 'unsigned-apk')['path'], str(apk))
 
     def test_prefers_release_variant_apk(self):
         self.put('build/tasks/_androidApp_buildAndroidDebug/gradle-project-debug.apk')
-        apk = self.put('build/tasks/_androidApp_buildAndroidRelease/gradle-project-release.apk')
+        apk = self.put('build/tasks/_androidApp_buildAndroidRelease/gradle-project-release-unsigned.apk')
+        self.assertEqual(run('find-artifact', '--source', self.src, '--kind', 'unsigned-apk')['path'], str(apk))
+
+    def test_apk_is_only_the_signed_output(self):
+        # `kotlin build` leaves its APK unsigned; only sign-apk's output under build/signed counts as the APK.
+        self.put('build/tasks/_androidApp_buildAndroidRelease/gradle-project-release-unsigned.apk')
+        with self.assertRaises(SystemExit):
+            run('find-artifact', '--source', self.src, '--kind', 'apk')
+        apk = self.put('build/signed/gradle-project-release-signed.apk')
         self.assertEqual(run('find-artifact', '--source', self.src, '--kind', 'apk')['path'], str(apk))
 
     def test_mapping_prefers_the_bundle_task_when_both_builds_ran(self):
@@ -236,7 +326,7 @@ class FindArtifactTests(Base):
         self.put('build/tasks/a/app-debug.apk')
         self.put('build/tasks/b/app-debug.apk')
         with self.assertRaises(SystemExit):
-            run('find-artifact', '--source', self.src, '--kind', 'apk')
+            run('find-artifact', '--source', self.src, '--kind', 'unsigned-apk')
 
 
 class FirebaseAppIdTests(Base):

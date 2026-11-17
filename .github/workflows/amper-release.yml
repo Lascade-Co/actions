@@ -70,7 +70,7 @@ jobs:
           persist-credentials: false
           fetch-depth: 0
         if: ${{ steps.source.outputs.skip != 'true' }}
-      # Same content hash as amper-debug, but the release jobs use release-only bundle names.
+      # Same content hash as amper-debug, which restores (never publishes) the release-only bundles keyed on it.
       - name: Compute dependency cache key
         run: echo "key=deps-$DEPS_HASH" >> "$GITHUB_OUTPUT"
         id: deps
@@ -214,8 +214,8 @@ jobs:
       - name: Warn that Crashlytics mapping upload is off
         run: echo '::warning::The manifest opts out with crashlytics_mapping false; mapping.txt is not uploaded to Crashlytics.'
         if: ${{ steps.firebase.outputs.app_id == '' }}
-      # Release-only bundle names (and their own latest): never restore bundles published by PR (amper-debug) builds.
-      # Only this workflow, which runs on main, publishes them; a miss cold-starts.
+      # Release-only bundle names (and their own latest). Only this workflow, which runs on main, publishes bundles;
+      # amper-debug (PR code) restores these read-only and publishes nothing. A miss cold-starts.
       - name: Restore Kotlin toolchain OCI bundle
         uses: ./control/actions/gh-bundle-cache
         with:
@@ -231,11 +231,14 @@ jobs:
         id: aab
         env:
           MODULE: ${{ steps.manifest.outputs.module }}
-      # `kotlin package` makes only the AAB.
-      - name: Build the signed release APK
+      # `kotlin package` makes only the AAB, and `kotlin build` leaves the APK unsigned (module.yaml signing applies to
+      # `kotlin package` only): sign-apk zipaligns it, apksigns it with the upload keystore and verifies it.
+      - name: Build the release APK
         run: ./kotlin build -m "$MODULE" -v release
         env:
           MODULE: ${{ steps.manifest.outputs.module }}
+      - name: Sign the release APK with the upload keystore
+        run: python3 "$GITHUB_WORKSPACE/control/scripts/amper/control.py" sign-apk --source "$GITHUB_WORKSPACE/source"
       - name: Locate, check and name the AAB, APK and R8 mapping
         run: |-
           control="$GITHUB_WORKSPACE/control/scripts/amper/control.py"
@@ -283,8 +286,32 @@ jobs:
           RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
       - name: Delete binaries, signing inputs and Firebase credentials from the runner
         run: |-
-          rm -rf "$RUNNER_TEMP/android" "$RUNNER_TEMP/firebase-service-account.json" build/tasks
+          rm -rf "$RUNNER_TEMP/android" "$RUNNER_TEMP/firebase-service-account.json" build/tasks build/signed
           find . -maxdepth 2 \( -name ci.jks -o -name keystore.properties \) -type f -delete
+        if: ${{ always() }}
+      # Bundles are public GHCR packages: prove neither the staging App Check debug token nor the prod keystore
+      # password is in the cache paths first. Read after the build, so the source's build never sees the file.
+      - name: Read /Build from Infisical staging for the cache secret scan
+        uses: Infisical/secrets-action@v1.0.18
+        with:
+          method: universal
+          client-id: ${{ secrets.INFISICAL_CLIENT_ID }}
+          client-secret: ${{ secrets.INFISICAL_CLIENT_SECRET }}
+          project-slug: ${{ needs.prepare.outputs.project_slug }}
+          env-slug: staging
+          domain: ${{ secrets.INFISICAL_DOMAIN }}
+          secret-path: /Build
+          export-type: file
+          file-output-path: /.amper-staging-build.env
+        if: ${{ !cancelled() && steps.aab.outcome != 'skipped' && steps.kotlin-cache.outputs.hit != 'true' }}
+      - name: Scan the dependency cache for build secrets
+        run: |-
+          python3 "$GITHUB_WORKSPACE/control/scripts/amper/release.py" check-cache \
+            --secrets-file "$GITHUB_WORKSPACE/.amper-staging-build.env" "$HOME/.cache/JetBrains/Kotlin"
+        id: cache-scan
+        if: ${{ !cancelled() && steps.aab.outcome != 'skipped' && steps.kotlin-cache.outputs.hit != 'true' }}
+      - name: Delete the staging secrets file
+        run: rm -f "$GITHUB_WORKSPACE/.amper-staging-build.env"
         if: ${{ always() }}
       - name: Publish Kotlin toolchain OCI bundle
         uses: ./control/actions/gh-bundle-cache
@@ -296,7 +323,7 @@ jobs:
           paths: ~/.cache/JetBrains/Kotlin
           token: ${{ github.token }}
         continue-on-error: true
-        if: ${{ !cancelled() && steps.aab.outcome != 'skipped' && steps.kotlin-cache.outputs.hit != 'true' }}
+        if: ${{ !cancelled() && steps.cache-scan.outcome == 'success' && steps.kotlin-cache.outputs.hit != 'true' }}
   ios-build:
     # Free 7-GB arm64 image. ADR 0004: K/N's fixed 3 GB heap needs compact object headers here; expect 25-35 min cold.
     runs-on: macos-26
@@ -402,8 +429,8 @@ jobs:
         uses: ./control/actions/apple-signing
         with:
           profiles: IOS_PROD_PROFILE_APP_BASE64
-      # Release-only bundle names (and their own latest): never restore bundles published by PR (amper-debug) builds.
-      # Only this workflow, which runs on main, publishes them; a miss cold-starts.
+      # Release-only bundle names (and their own latest). Only this workflow, which runs on main, publishes bundles;
+      # amper-debug (PR code) restores these read-only and publishes nothing. A miss cold-starts.
       - name: Restore Kotlin toolchain OCI bundle
         uses: ./control/actions/gh-bundle-cache
         with:
@@ -527,6 +554,31 @@ jobs:
       - name: Delete the IPA, archive and build products from the runner
         run: rm -rf "$RUNNER_TEMP/ios" "$RUNNER_TEMP/export" "$RUNNER_TEMP/app.xcarchive" "$RUNNER_TEMP/dd/Build" "$RUNNER_TEMP/ExportOptions.plist" build
         if: ${{ always() }}
+      # Bundles are public GHCR packages: prove neither the staging App Check debug token nor the prod keystore
+      # password is in any cache path first. Read after the build, so the source's build never sees the file.
+      - name: Read /Build from Infisical staging for the cache secret scan
+        uses: Infisical/secrets-action@v1.0.18
+        with:
+          method: universal
+          client-id: ${{ secrets.INFISICAL_CLIENT_ID }}
+          client-secret: ${{ secrets.INFISICAL_CLIENT_SECRET }}
+          project-slug: ${{ needs.prepare.outputs.project_slug }}
+          env-slug: staging
+          domain: ${{ secrets.INFISICAL_DOMAIN }}
+          secret-path: /Build
+          export-type: file
+          file-output-path: /.amper-staging-build.env
+        if: ${{ !cancelled() && steps.warm.outcome != 'skipped' && (steps.kotlin-cache.outputs.hit != 'true' || steps.konan-cache.outputs.hit != 'true' || steps.spm-cache.outputs.hit != 'true') }}
+      - name: Scan the dependency caches for build secrets
+        run: |-
+          python3 "$GITHUB_WORKSPACE/control/scripts/amper/release.py" check-cache \
+            --secrets-file "$GITHUB_WORKSPACE/.amper-staging-build.env" \
+            "$HOME/Library/Caches/JetBrains/Kotlin" "$HOME/.konan/dependencies" "$RUNNER_TEMP/dd/SourcePackages"
+        id: cache-scan
+        if: ${{ !cancelled() && steps.warm.outcome != 'skipped' && (steps.kotlin-cache.outputs.hit != 'true' || steps.konan-cache.outputs.hit != 'true' || steps.spm-cache.outputs.hit != 'true') }}
+      - name: Delete the staging secrets file
+        run: rm -f "$GITHUB_WORKSPACE/.amper-staging-build.env"
+        if: ${{ always() }}
       - name: Publish Kotlin toolchain OCI bundle
         uses: ./control/actions/gh-bundle-cache
         with:
@@ -537,7 +589,7 @@ jobs:
           paths: ~/Library/Caches/JetBrains/Kotlin
           token: ${{ github.token }}
         continue-on-error: true
-        if: ${{ !cancelled() && steps.warm.outcome != 'skipped' && steps.kotlin-cache.outputs.hit != 'true' }}
+        if: ${{ !cancelled() && steps.cache-scan.outcome == 'success' && steps.kotlin-cache.outputs.hit != 'true' }}
       - name: Publish konan OCI bundle
         uses: ./control/actions/gh-bundle-cache
         with:
@@ -548,7 +600,7 @@ jobs:
           paths: ~/.konan/dependencies
           token: ${{ github.token }}
         continue-on-error: true
-        if: ${{ !cancelled() && steps.warm.outcome != 'skipped' && steps.konan-cache.outputs.hit != 'true' }}
+        if: ${{ !cancelled() && steps.cache-scan.outcome == 'success' && steps.konan-cache.outputs.hit != 'true' }}
       - name: Publish swiftpm OCI bundle
         uses: ./control/actions/gh-bundle-cache
         with:
@@ -559,7 +611,7 @@ jobs:
           paths: $RUNNER_TEMP/dd/SourcePackages
           token: ${{ github.token }}
         continue-on-error: true
-        if: ${{ !cancelled() && steps.archive.outcome != 'skipped' && steps.spm-cache.outputs.hit != 'true' }}
+        if: ${{ !cancelled() && steps.cache-scan.outcome == 'success' && steps.archive.outcome != 'skipped' && steps.spm-cache.outputs.hit != 'true' }}
       - name: Remove temporary provisioning profiles
         uses: ./control/actions/apple-signing
         with:

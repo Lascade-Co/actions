@@ -14,6 +14,7 @@ import plistlib
 import re
 import subprocess
 import sys
+import tempfile
 
 MANIFEST = '.ci/amper.json'
 APPATTEST_KEY = 'com.apple.developer.devicecheck.appattest-environment'
@@ -189,7 +190,8 @@ def cmd_android_inputs(a):
     src = Path(a.source)
     m = manifest(src)
     mod = src / m['android_module']
-    write_private(mod / 'ci.jks', base64.b64decode(os.environ['KEYSTORE_BASE64'], validate=True))
+    # Infisical values may be line-wrapped base64 (`base64` wraps at 76 columns); strip whitespace like the profiles.
+    write_private(mod / 'ci.jks', base64.b64decode(''.join(os.environ['KEYSTORE_BASE64'].split()), validate=True))
     props = {'storeFile': 'ci.jks', 'storePassword': os.environ['KEYSTORE_PASSWORD'],
              'keyAlias': os.environ['KEY_ALIAS'], 'keyPassword': os.environ['KEY_PASSWORD']}
     for key, value in props.items():
@@ -200,9 +202,12 @@ def cmd_android_inputs(a):
     emit(keystore='ci.jks')
 
 
+SIGNED_DIR = 'build/signed'
 PATTERNS = {
+    # The APK sign-apk wrote: `kotlin build` leaves the APK unsigned (module.yaml signing applies to `kotlin package`).
+    'apk': SIGNED_DIR + '/*.apk',
     # Top level of each task dir only: the toolchain keeps a second copy inside its generated gradle-project.
-    'apk': 'build/tasks/*/*.apk',
+    'unsigned-apk': 'build/tasks/*/*.apk',
     'aab': 'build/tasks/*/*.aab',
     'mapping': 'build/tasks/**/outputs/mapping/release/mapping.txt',
 }
@@ -212,21 +217,74 @@ def task_dir(src, path):
     return Path(path).relative_to(Path(src) / 'build/tasks').parts[0].lower()
 
 
-def cmd_find_artifact(a):
-    matches = sorted(glob.glob(str(Path(a.source) / PATTERNS[a.kind]), recursive=True))
-    if a.kind == 'apk':
+def find_artifact(source, kind):
+    matches = sorted(glob.glob(str(Path(source) / PATTERNS[kind]), recursive=True))
+    if kind == 'unsigned-apk':
         # A debug APK from an earlier task can sit next to the release one; the release variant wins.
         release = [m for m in matches if 'release' in Path(m).parent.name.lower()]
         matches = release or matches
-    if a.kind == 'mapping' and len(matches) > 1:
+    if kind == 'mapping' and len(matches) > 1:
         # `kotlin package` (AAB) and `kotlin build -v release` (APK) each run R8. Keep the AAB's mapping, which is
         # what Play and Crashlytics see, and only when both runs agree, so one file deobfuscates both binaries.
         if len({Path(m).read_bytes() for m in matches}) != 1:
             fail(f'the R8 mapping files differ: {matches}')
-        matches = [m for m in matches if 'bundle' in task_dir(a.source, m)]
+        matches = [m for m in matches if 'bundle' in task_dir(source, m)]
     if len(matches) != 1:
-        fail(f'expected exactly one {a.kind} under build/tasks, found {len(matches)}: {matches}')
-    emit(path=matches[0])
+        fail(f'expected exactly one {kind} matching {PATTERNS[kind]}, found {len(matches)}: {matches}')
+    return matches[0]
+
+
+def cmd_find_artifact(a):
+    emit(path=find_artifact(a.source, a.kind))
+
+
+def build_tools(explicit=None):
+    """The newest $ANDROID_HOME/build-tools/<version> that has both zipalign and apksigner."""
+    if explicit:
+        return Path(explicit)
+    sdk = os.environ.get('ANDROID_HOME') or os.environ.get('ANDROID_SDK_ROOT')
+    if not sdk:
+        fail('ANDROID_HOME is unset; pass --build-tools')
+    found = [d for d in Path(sdk, 'build-tools').glob('*')
+             if (d / 'zipalign').is_file() and (d / 'apksigner').is_file()]
+    if not found:
+        fail(f'no build-tools with zipalign and apksigner under {sdk}')
+    return max(found, key=lambda d: tuple(int(n) for n in re.findall(r'[0-9]+', d.name)))
+
+
+def tool(*argv, **kwargs):
+    try:
+        return subprocess.run([str(a) for a in argv], check=True, **kwargs)
+    except (OSError, subprocess.CalledProcessError) as error:
+        detail = ''.join(filter(None, (getattr(error, 'stdout', None), getattr(error, 'stderr', None)))).strip()
+        fail(f'{Path(str(argv[0])).name} failed: {error}' + (f'\n{detail}' if detail else ''))
+
+
+def cmd_sign_apk(a):
+    """zipalign and apksigner the unsigned release APK with <android_module>/ci.jks (written by android-inputs).
+    The passwords reach apksigner as env:KEYSTORE_PASSWORD / env:KEY_PASSWORD, never as arguments."""
+    src = Path(a.source)
+    m = manifest(src)
+    for name in ('KEYSTORE_PASSWORD', 'KEY_ALIAS', 'KEY_PASSWORD'):
+        if not os.environ.get(name):
+            fail(f'{name} is unset or empty')
+    keystore = src / m['android_module'] / 'ci.jks'
+    if not keystore.is_file():
+        fail(f'{keystore} not found; run android-inputs first')
+    unsigned = Path(find_artifact(src, 'unsigned-apk'))
+    tools = build_tools(a.build_tools)
+    out = src / SIGNED_DIR
+    out.mkdir(parents=True, exist_ok=True)
+    signed = out / (re.sub(r'-?unsigned', '', unsigned.stem) + '-signed.apk')
+    with tempfile.TemporaryDirectory() as work:
+        aligned = Path(work) / 'aligned.apk'
+        tool(tools / 'zipalign', '-f', '-p', '4', unsigned, aligned)
+        tool(tools / 'apksigner', 'sign', '--ks', keystore, '--ks-pass', 'env:KEYSTORE_PASSWORD',
+             '--ks-key-alias', os.environ['KEY_ALIAS'], '--key-pass', 'env:KEY_PASSWORD', '--out', signed, aligned)
+    # Certificate digests are public; to stderr, because stdout is appended to $GITHUB_OUTPUT.
+    verified = tool(tools / 'apksigner', 'verify', '--print-certs', signed, capture_output=True, text=True)
+    print(verified.stdout, end='', file=sys.stderr)
+    emit(path=signed)
 
 
 FIREBASE_APP_ID = re.compile(r'1:[0-9]+:android:[0-9a-f]+')
@@ -301,6 +359,7 @@ def parser():
     add('set-variant', cmd_set_variant, src, variant, ('--team', {}), ('--profile', {}))
     add('android-inputs', cmd_android_inputs, src)
     add('find-artifact', cmd_find_artifact, src, ('--kind', dict(required=True, choices=sorted(PATTERNS))))
+    add('sign-apk', cmd_sign_apk, src, ('--build-tools', {}))
     add('firebase-app-id', cmd_firebase_app_id, src)
     add('kn-gc-guard', cmd_gc_guard, ('--log', dict(required=True)), ('--gc-dir', dict(required=True)),
         ('--max-full-gc', dict(type=int, default=20)))

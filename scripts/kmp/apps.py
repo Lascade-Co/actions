@@ -3,8 +3,8 @@
 
 `load_app(repo)` is the one place that decides which source repos may publish and what their store
 identifiers and Play rollout are. The bundle ID and package name come from the registry, never from a
-dispatch payload. As a CLI it validates `--repo` (and `--package-name`, when given) and writes the entry as
-workflow outputs.
+dispatch payload. As a CLI it validates `--repo` (and `--package-name` and `--project-slug`, when given) and
+writes the entry as workflow outputs.
 
 `--allow-unregistered` exists only for the legacy `publish-playstore` event, which other apps still send
 without registering: it keeps the original Play rollout (BD, 0.99) for them instead of failing.
@@ -36,6 +36,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('--repo', required=True)
     parser.add_argument('--package-name', help='payload package name; must equal the registry value')
+    parser.add_argument('--project-slug', help='payload Infisical project slug; must equal the registry value')
     parser.add_argument('--output', required=True, help='$GITHUB_OUTPUT')
     parser.add_argument('--allow-unregistered', action='store_true')
     args = parser.parse_args()
@@ -49,6 +50,9 @@ def main():
     else:
         if args.package_name is not None and args.package_name != app['package_name']:
             raise SystemExit(f'package_name {args.package_name} does not match the registry for {args.repo}')
+        # The workflow reads this Infisical project's secrets, so a payload may not pick another app's project.
+        if args.project_slug is not None and (not app.get('project_slug') or args.project_slug != app['project_slug']):
+            raise SystemExit(f'project_slug {args.project_slug} does not match the registry for {args.repo}')
         values = outputs(app)
     with Path(args.output).open('a') as stream:
         for key, value in values.items():

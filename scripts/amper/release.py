@@ -4,6 +4,7 @@
 Run from the central checkout (`control/scripts/amper/release.py`): it loads its siblings by path, because
 scripts/kmp and scripts/amper both have a control.py. Binaries go straight to a draft GitHub release in the
 private source repo; the release job verifies that draft, pushes the version commit and tag, then publishes it.
+amper-debug uses park/unpark/discard to hand its staging IPA from ios-build to ios-publish the same way.
 """
 import argparse
 import hashlib
@@ -15,6 +16,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -43,6 +45,7 @@ OPTIONAL = ('native-debug-symbols.zip',)
 VERSION_LINE = re.compile(r'^[+-]\s*(versionCode:|versionName:|MARKETING_VERSION = |CURRENT_PROJECT_VERSION = )')
 CHUNK = 1 << 20
 MIN_TOKEN = 16
+MIN_PASSWORD = 6  # keytool's minimum
 
 
 def validate(payload, central_repo):
@@ -154,6 +157,38 @@ def check_token(secrets_file, binaries):
     return counts
 
 
+def check_cache(secrets_file, paths):
+    """Fail if the staging APPCHECK_DEBUG_TOKEN or the prod $KEYSTORE_PASSWORD is anywhere under the dependency cache
+    paths about to become a public GHCR bundle (grep -rqF; the needles go through a 0600 file, never argv or output)."""
+    try:
+        token = kmp_control.parse_secret_file(Path(secrets_file).read_text()).get('APPCHECK_DEBUG_TOKEN', '')
+    finally:
+        Path(secrets_file).unlink(missing_ok=True)
+    password = os.environ.get('KEYSTORE_PASSWORD', '')
+    if len(token) < MIN_TOKEN:
+        raise ValueError('The staging APPCHECK_DEBUG_TOKEN is missing or too short to search for')
+    if len(password) < MIN_PASSWORD:
+        raise ValueError('The prod KEYSTORE_PASSWORD is missing or too short to search for')
+    if any(c in s for s in (token, password) for c in '\r\n'):
+        raise ValueError('A build secret spans lines; cannot search for it')
+    present = [str(p) for p in map(Path, paths) if p.exists()]
+    if not present:
+        print('No cache paths exist; nothing to scan')
+        return
+    with tempfile.TemporaryDirectory() as work:
+        needles = Path(work) / 'needles'
+        with os.fdopen(os.open(needles, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), 'w') as stream:
+            stream.write(f'{token}\n{password}\n')
+        found = subprocess.run(['grep', '-rqsF', '-f', str(needles), '--', *present],
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode
+    if found == 0:
+        raise ValueError('A build secret (App Check debug token or keystore password) is inside the cache paths; '
+                         'refusing to publish them')
+    if found != 1:
+        raise ValueError(f'grep could not scan the cache paths (exit {found}); refusing to publish them')
+    print(f'No build secret in {len(present)} cache paths')
+
+
 def mapping_id(resource):
     found = re.search(r'name="com\.google\.firebase\.crashlytics\.mapping_file_id"[^>]*>([0-9a-f]{16,})<',
                       Path(resource).read_text())
@@ -199,8 +234,13 @@ def not_found(error):
     return isinstance(error, urllib.error.HTTPError) and error.code == 404
 
 
-def check_target(repo, tag):
-    if not re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+', repo) or not re.fullmatch(r'v[0-9]+\.[0-9]+\.[0-9]+', tag):
+RELEASE_TAG = re.compile(r'v[0-9]+\.[0-9]+\.[0-9]+')
+# amper-debug parks its staging IPA for ios-publish under ci-testflight-<prepare's debug tag>: one draft per PR.
+PARK_TAG = re.compile(r'ci-testflight-debug-(pr|run)-[1-9][0-9]*')
+
+
+def check_target(repo, tag, kind=RELEASE_TAG):
+    if not re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+', repo) or not kind.fullmatch(tag):
         raise ValueError('Invalid release target')
 
 
@@ -243,8 +283,8 @@ def draft(repo, tag, sha, notes_path):
     return dict(release_id=str(result['id']))
 
 
-def get_draft(repo, release_id, tag):
-    check_target(repo, tag)
+def get_draft(repo, release_id, tag, kind=RELEASE_TAG):
+    check_target(repo, tag, kind)
     if not re.fullmatch('[1-9][0-9]*', str(release_id)):
         raise ValueError('Invalid release ID')
     found = http('GET', f'{API}repos/{repo}/releases/{release_id}')
@@ -261,9 +301,9 @@ def sha256(path):
     return digest.hexdigest()
 
 
-def upload(repo, release_id, tag, files):
+def upload(repo, release_id, tag, files, kind=RELEASE_TAG):
     """Upload (replacing same-named assets) to the draft by ID; returns name:sha256 pairs for the job outputs."""
-    found = get_draft(repo, release_id, tag)
+    found = get_draft(repo, release_id, tag, kind)
     sums = []
     for path in map(Path, files):
         if not SAFE_NAME.fullmatch(path.name):
@@ -277,6 +317,53 @@ def upload(repo, release_id, tag, files):
         sums.append(f'{path.name}:{sha256(path)}')
         print(sums[-1])
     return dict(checksums=' '.join(sums))
+
+
+def park(repo, tag, sha, ipa):
+    """amper-debug ios-build: replace this PR's parking draft with one holding only the staging IPA.
+    A draft (never a prerelease) creates no tag and fires no release event in the source repo."""
+    check_target(repo, tag, PARK_TAG)
+    if not re.fullmatch('[0-9a-f]{40}', sha) or not str(ipa).endswith('.ipa'):
+        raise ValueError('park takes a full source SHA and one .ipa')
+    for page in range(1, 11):
+        batch = http('GET', f'{API}repos/{repo}/releases?per_page=100&page={page}')
+        for stale in [r for r in batch if r.get('draft') and r.get('tag_name') == tag]:
+            http('DELETE', f'{API}repos/{repo}/releases/{stale["id"]}')
+        if len(batch) < 100:
+            break
+    created = api_json('POST', f'repos/{repo}/releases', dict(
+        tag_name=tag, target_commitish=sha, name=f'{tag} (CI hand-off; deleted after the TestFlight upload)',
+        body='Staging IPA parked by amper-debug for its ios-publish job. Do not publish.', draft=True, prerelease=False))
+    if not created.get('draft') or created.get('tag_name') != tag:
+        raise ValueError('GitHub did not return the expected parking draft')
+    release_id = str(created['id'])
+    digest = upload(repo, release_id, tag, [ipa], PARK_TAG)['checksums'].split(':', 1)[1]
+    return dict(release_id=release_id, sha256=digest)
+
+
+def unpark(repo, release_id, tag, expected, dest):
+    """amper-debug ios-publish: download the one parked IPA by ID, requiring the digest ios-build reported."""
+    found = get_draft(repo, release_id, tag, PARK_TAG)
+    if not re.fullmatch('[0-9a-f]{64}', expected):
+        raise ValueError('Malformed expected SHA-256')
+    assets = found.get('assets', [])
+    if len(assets) != 1 or not assets[0]['name'].endswith('.ipa') or not SAFE_NAME.fullmatch(assets[0]['name']):
+        raise ValueError(f'The parking draft must hold exactly one IPA; found {[a["name"] for a in assets]}')
+    dest = Path(dest)
+    dest.mkdir(parents=True, exist_ok=True)
+    target = dest / assets[0]['name']
+    with target.open('wb') as out:
+        http('GET', f'{API}repos/{repo}/releases/assets/{assets[0]["id"]}', headers={'Accept': 'application/octet-stream'}, out=out)
+    if sha256(target) != expected:
+        target.unlink()
+        raise ValueError(f'{target.name} does not match the SHA-256 ios-build uploaded')
+    return dict(ipa=str(target))
+
+
+def discard(repo, release_id, tag):
+    """Delete the parking draft, only after re-checking that the ID is a draft under this run's parking tag."""
+    get_draft(repo, release_id, tag, PARK_TAG)
+    http('DELETE', f'{API}repos/{repo}/releases/{release_id}')
 
 
 def parse_checksums(text):
@@ -388,6 +475,10 @@ def main(argv=None):
         'download': ('repo', 'release_id', 'tag', 'dest', 'expected', 'notes_out'),
         'verify-assets': ('assets', 'notes'),
         'check-token': ('secrets_file',),
+        'check-cache': ('secrets_file',),
+        'park': ('repo', 'tag', 'sha', 'ipa'),
+        'unpark': ('repo', 'release_id', 'tag', 'expected', 'dest'),
+        'discard': ('repo', 'release_id', 'tag'),
         'check-mapping-id': ('resource_file',),
         'publish': ('repo', 'release_id', 'tag', 'assets', 'notes'),
         'chat-id': ('secrets_file',),
@@ -397,6 +488,8 @@ def main(argv=None):
             item.add_argument('--' + option.replace('_', '-'), required=True)
         if name in ('upload', 'check-token', 'check-mapping-id'):
             item.add_argument('files', nargs='+')
+        if name == 'check-cache':
+            item.add_argument('files', nargs='*')
     args = parser.parse_args(argv)
     event = lambda: json.loads(Path(os.environ['GITHUB_EVENT_PATH']).read_text())['client_payload']
     out = kmp_control.output
@@ -422,6 +515,14 @@ def main(argv=None):
             print(f'{path.name}: {path.stat().st_size} bytes')
     elif args.command == 'check-token':
         check_token(args.secrets_file, args.files)
+    elif args.command == 'check-cache':
+        check_cache(args.secrets_file, args.files)
+    elif args.command == 'park':
+        out(park(args.repo, args.tag, args.sha, args.ipa))
+    elif args.command == 'unpark':
+        out(unpark(args.repo, args.release_id, args.tag, args.expected, args.dest))
+    elif args.command == 'discard':
+        discard(args.repo, args.release_id, args.tag)
     elif args.command == 'check-mapping-id':
         check_mapping_id(args.resource_file, args.files)
     elif args.command == 'push-version':

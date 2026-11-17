@@ -191,6 +191,8 @@ jobs:
           PLAY_URL: ${{ github.event.client_payload.play_console_production_url }}
           AAB_PATH: ${{ steps.assets.outputs.aab }}
           SYMBOLS_PATH: ${{ steps.assets.outputs.symbols }}
+          ROLLOUT_COUNTRY: ${{ steps.app.outputs.rollout_country }}
+          ROLLOUT_FRACTION: ${{ steps.app.outputs.rollout_fraction }}
         run: |
           set -euo pipefail
           trap 'rm -f play-sa.json' EXIT
@@ -199,7 +201,7 @@ jobs:
           python3 scripts/android/publish_playstore.py \
             --service-account-json play-sa.json \
             --package-name "$PACKAGE_NAME" \
-            --track "${{ env.TRACK }}" \
+            --track "$TRACK" \
             --aab "$AAB_PATH" \
             --native-symbols "$SYMBOLS_PATH" \
             --release-name "$RELEASE_TAG" \
@@ -208,8 +210,8 @@ jobs:
             --app-name "$APP_NAME" \
             --github-release-url "$RELEASE_URL" \
             --play-console-production-url "$PLAY_URL" \
-            --country "${{ steps.app.outputs.rollout_country }}" \
-            --user-fraction "${{ steps.app.outputs.rollout_fraction }}" \
+            --country "$ROLLOUT_COUNTRY" \
+            --user-fraction "$ROLLOUT_FRACTION" \
             --telegram-out "github_release_body.txt"
 
       - name: Create PostHog annotation

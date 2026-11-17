@@ -99,6 +99,21 @@ def test_cli_rejects_payload_package_that_differs_from_registry(tmp_path):
     assert result.returncode != 0 and out == ''
 
 
+def test_cli_checks_payload_project_slug_against_registry(tmp_path):
+    result, out = run_cli('--repo', 'Lascade-Co/TreasureHunch', '--project-slug', 'treasurehunch', tmp_path=tmp_path)
+    assert result.returncode == 0, result.stderr
+    for slug in ('travelanimator', ''):
+        (tmp_path / f'slug-{slug}').mkdir()
+        result, out = run_cli('--repo', 'Lascade-Co/TreasureHunch', '--project-slug', slug, tmp_path=tmp_path / f'slug-{slug}')
+        assert result.returncode != 0 and 'project_slug' in result.stderr and out == ''
+
+
+def test_amper_debug_binds_project_slug_before_minting_a_token():
+    debug = workflow('amper-debug.yml')
+    assert '--project-slug "$PROJECT_SLUG"' in debug
+    assert 'PROJECT_SLUG: ${{ steps.payload.outputs.project_slug }}' in debug
+    assert debug.index('--project-slug') < debug.index('create-github-app-token')
+
 def test_cli_rejects_unregistered_repo(tmp_path):
     result, out = run_cli('--repo', 'Lascade-Co/unknown', tmp_path=tmp_path)
     assert result.returncode != 0 and 'not registered' in result.stderr and out == ''
@@ -127,8 +142,10 @@ def test_workflows_take_identifiers_from_registry_not_literals():
         assert 'scripts/kmp/apps.py' in text
     assert "'--bundle-id', os.environ['BUNDLE_ID']" in appstore
     assert 'BUNDLE_ID: ${{ steps.app.outputs.bundle_id }}' in appstore
-    assert '${{ steps.app.outputs.rollout_country }}' in playstore
-    assert '${{ steps.app.outputs.rollout_fraction }}' in playstore
+    # through env, never interpolated into the run script
+    assert 'ROLLOUT_COUNTRY: ${{ steps.app.outputs.rollout_country }}' in playstore
+    assert 'ROLLOUT_FRACTION: ${{ steps.app.outputs.rollout_fraction }}' in playstore
+    assert '--country "$ROLLOUT_COUNTRY"' in playstore and '--user-fraction "$ROLLOUT_FRACTION"' in playstore
     assert 'TARGET_COUNTRY' not in playstore and 'TARGET_FRACTION' not in playstore
     # the registry check precedes the first download in each workflow
     assert appstore.index('apps.py') < appstore.index('gh release download')

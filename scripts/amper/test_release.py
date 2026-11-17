@@ -85,18 +85,102 @@ class WorkflowShape(unittest.TestCase):
         self.jobs = yaml.safe_load((HERE.parents[1] / '.github/workflows/amper-release.yml').read_text())['jobs']
 
     def test_release_restores_only_release_only_bundles(self):
-        # PR (amper-debug) builds publish the plain names; a release must never restore those.
+        # Release-only names; amper-debug may restore them but never publishes any bundle.
         names = [step['with']['name'] for job in self.jobs.values() for step in job['steps']
                  if step.get('uses') == './control/actions/gh-bundle-cache']
         self.assertTrue(names)
         for name in names:
             self.assertRegex(name, r"-release'\) \}\}$")
 
+    def test_every_bundle_publish_waits_for_a_successful_cache_secret_scan(self):
+        for name in ('android', 'ios-build'):
+            steps = self.jobs[name]['steps']
+            names = [step.get('name', '') for step in steps]
+            scan = next(i for i, step in enumerate(steps) if step.get('id') == 'cache-scan')
+            self.assertIn('check-cache', steps[scan]['run'])
+            self.assertNotIn('continue-on-error', steps[scan])
+            # staging is read as a file: an env export would overwrite the prod KEYSTORE_* the scan searches for
+            staging = names.index('Read /Build from Infisical staging for the cache secret scan')
+            self.assertEqual(steps[staging]['with']['export-type'], 'file')
+            self.assertLess(staging, scan)
+            publishes = [i for i, step in enumerate(steps) if step.get('with', {}).get('mode') == 'publish']
+            self.assertTrue(publishes)
+            for i in publishes:
+                with self.subTest(job=name, step=names[i]):
+                    self.assertGreater(i, scan)
+                    self.assertIn("steps.cache-scan.outcome == 'success'", steps[i]['if'])
+
+    def test_release_apk_is_signed_before_it_is_located(self):
+        names = [step.get('name', '') for step in self.jobs['android']['steps']]
+        sign = names.index('Sign the release APK with the upload keystore')
+        self.assertLess(names.index('Build the release APK'), sign)
+        self.assertLess(sign, names.index('Locate, check and name the AAB, APK and R8 mapping'))
+        self.assertIn('sign-apk', self.jobs['android']['steps'][sign]['run'])
+
     def test_firebase_cli_installs_before_any_prod_secret(self):
         steps = [step.get('name', '') for step in self.jobs['android']['steps']]
         install = steps.index('Install the Firebase CLI for Crashlytics mapping files')
         self.assertLess(install, steps.index('Read /Build from Infisical prod'))
         self.assertIn('--ignore-scripts', self.jobs['android']['steps'][install]['run'])
+
+
+class DebugWorkflowShape(unittest.TestCase):
+    """amper-debug runs PR code (the source's kotlin wrapper, Xcode's Build Kotlin phase): it may not write GHCR,
+    and the org-wide App Store Connect key stays out of every job that runs it."""
+    def setUp(self):
+        self.workflow = yaml.safe_load((HERE.parents[1] / '.github/workflows/amper-debug.yml').read_text())
+        self.jobs = self.workflow['jobs']
+
+    def test_no_job_has_packages_write(self):
+        top = self.workflow.get('permissions', {})
+        self.assertNotIn(top.get('packages'), ('write',))
+        for name, job in self.jobs.items():
+            effective = job.get('permissions', top)
+            with self.subTest(job=name):
+                self.assertIsInstance(effective, dict)  # never read-all / write-all
+                self.assertNotEqual(effective.get('packages'), 'write')
+        for name in ('android', 'ios-build'):
+            self.assertEqual(self.jobs[name]['permissions']['packages'], 'read')
+
+    def test_restores_only_release_bundles_and_publishes_none(self):
+        steps = [(name, step) for name, job in self.jobs.items() for step in job.get('steps', [])
+                 if step.get('uses') == './control/actions/gh-bundle-cache']
+        self.assertTrue(steps)
+        for name, step in steps:
+            with self.subTest(job=name, step=step['name']):
+                self.assertEqual(step['with']['mode'], 'restore')
+                self.assertRegex(step['with']['name'], r"-release'\) \}\}$")
+
+    def test_app_store_key_only_in_jobs_that_run_no_source_code(self):
+        for name, job in self.jobs.items():
+            text = yaml.safe_dump(job)
+            runs_source = any(step.get('with', {}).get('path') == 'source' for step in job.get('steps', []))
+            with self.subTest(job=name):
+                if 'APPSTORE_' in text:
+                    self.assertFalse(runs_source)
+        publish = self.jobs['ios-publish']
+        self.assertEqual(publish['needs'], ['prepare', 'android', 'ios-build'])
+        self.assertIn('APPSTORE_API_PRIVATE_KEY', yaml.safe_dump(publish))
+        self.assertNotIn('working-directory', yaml.safe_dump(publish.get('defaults', {})))
+        checkouts = [s for s in publish['steps'] if str(s.get('uses', '')).startswith('actions/checkout')]
+        self.assertEqual([s['with']['repository'] for s in checkouts], ['${{ github.repository }}'])
+        self.assertNotIn('APPSTORE_', yaml.safe_dump(self.jobs['ios-build']))
+        self.assertNotIn('actions', self.jobs['ios-build']['permissions'])
+
+    def test_testflight_consumers_read_ios_publish(self):
+        self.assertIn('ios-publish', self.jobs['testflight-notes']['needs'])
+        self.assertIn('ios-publish', self.jobs['notify']['needs'])
+        text = (HERE.parents[1] / '.github/workflows/amper-debug.yml').read_text()
+        self.assertNotIn("needs['ios-build'].outputs.uploaded", text)
+
+    def test_debug_apk_is_signed_and_built_from_the_manifest_module(self):
+        steps = self.jobs['android']['steps']
+        names = [step.get('name', '') for step in steps]
+        build = steps[names.index('Build the release APK')]
+        self.assertIn('-m "$MODULE"', build['run'])
+        self.assertNotIn('androidApp', build['run'])
+        self.assertLess(names.index('Build the release APK'), names.index('Sign the APK with the debug keystore'))
+        self.assertLess(names.index('Sign the APK with the debug keystore'), names.index('Locate and name the APK'))
 
 
 class Bump(unittest.TestCase):
@@ -340,6 +424,116 @@ class GitHubRelease(unittest.TestCase):
         self.assertEqual({k: json.loads(body)[k] for k in ('draft', 'prerelease', 'tag_name')},
                          {'draft': False, 'prerelease': False, 'tag_name': 'v0.1.1'})
 
+
+
+PARK = 'ci-testflight-debug-pr-12'
+PARKED = {'id': 88, 'tag_name': PARK, 'draft': True, 'assets': []}
+
+
+class TestFlightHandOff(unittest.TestCase):
+    """amper-debug: ios-build parks the staging IPA; ios-publish (no PR code, holds the ASC key) takes it."""
+    fake, temp = GitHubRelease.fake, GitHubRelease.temp
+
+    def ipa(self, data=b'ipa-bytes'):
+        path = self.temp() / 'TreasureHunch-0.1.0-5-staging.ipa'
+        path.write_bytes(data)
+        return path
+
+    def test_park_replaces_this_prs_draft_and_reports_id_and_digest(self):
+        ipa = self.ipa()
+        stale = dict(PARKED, id=60)
+        fake = self.fake({('GET', API + '/releases?per_page=100&page=1'): [stale, DRAFT],
+                          ('DELETE', API + '/releases/60'): None,
+                          ('POST', API + '/releases'): lambda body: dict(PARKED),
+                          ('GET', API + '/releases/88'): PARKED,
+                          ('POST', f'https://uploads.github.com/repos/{REPO}/releases/88/assets'): {'id': 1}})
+        self.assertEqual(release.park(REPO, PARK, 'a' * 40, ipa),
+                         {'release_id': '88', 'sha256': hashlib.sha256(b'ipa-bytes').hexdigest()})
+        self.assertIn(('DELETE', API + '/releases/60', None), fake.calls)
+        self.assertNotIn(('DELETE', API + '/releases/77', None), fake.calls)  # the version draft is untouched
+        created = json.loads(next(c[2] for c in fake.calls if c[:2] == ('POST', API + '/releases')))
+        self.assertEqual((created['tag_name'], created['draft'], created['prerelease']), (PARK, True, False))
+
+    def test_park_tags_never_collide_with_release_or_debug_prerelease_tags(self):
+        for tag in ('v0.1.0', 'debug-pr-12', 'ci-testflight-v0.1.0', 'ci-testflight-debug-pr-0'):
+            with self.subTest(tag=tag), self.assertRaises(ValueError):
+                release.park(REPO, tag, 'a' * 40, self.ipa())
+        with self.assertRaises(ValueError):
+            release.upload(REPO, '88', PARK, [])  # the release path keeps its vX.Y.Z-only check
+
+    def test_unpark_requires_one_ipa_with_the_reported_digest(self):
+        good = hashlib.sha256(b'ipa-bytes').hexdigest()
+        routes = {('GET', API + '/releases/88'): dict(PARKED, assets=[{'id': 3, 'name': 'a.ipa'}]),
+                  ('GET', API + '/releases/assets/3'): b'ipa-bytes'}
+        self.fake(routes)
+        dest = self.temp()
+        self.assertEqual(release.unpark(REPO, '88', PARK, good, dest), {'ipa': str(dest / 'a.ipa')})
+        self.assertEqual((dest / 'a.ipa').read_bytes(), b'ipa-bytes')
+        with self.assertRaisesRegex(ValueError, 'SHA-256'):
+            release.unpark(REPO, '88', PARK, hashlib.sha256(b'other').hexdigest(), self.temp())
+        for assets in ([], [{'id': 3, 'name': 'a.ipa'}, {'id': 4, 'name': 'b.ipa'}], [{'id': 3, 'name': 'a.apk'}]):
+            self.fake({**routes, ('GET', API + '/releases/88'): dict(PARKED, assets=assets)})
+            with self.subTest(assets=assets), self.assertRaisesRegex(ValueError, 'exactly one IPA'):
+                release.unpark(REPO, '88', PARK, good, self.temp())
+
+    def test_discard_deletes_only_a_draft_under_the_expected_parking_tag(self):
+        fake = self.fake({('GET', API + '/releases/88'): PARKED, ('DELETE', API + '/releases/88'): None})
+        release.discard(REPO, '88', PARK)
+        self.assertEqual(fake.calls[-1][:2], ('DELETE', API + '/releases/88'))
+        # The ID comes from a job that ran PR code: a published release or another tag is never deleted.
+        for found in (dict(PARKED, draft=False), dict(PARKED, tag_name='ci-testflight-debug-pr-13'), dict(DRAFT, id=88)):
+            fake = self.fake({('GET', API + '/releases/88'): found, ('DELETE', API + '/releases/88'): None})
+            with self.subTest(found=found), self.assertRaises(ValueError):
+                release.discard(REPO, '88', PARK)
+            self.assertNotIn('DELETE', [c[0] for c in fake.calls])
+        with self.assertRaises(ValueError):
+            release.discard(REPO, '88', 'v0.1.1')
+
+
+class CacheSecrets(unittest.TestCase):
+    """amper-release scans each dependency cache for build secrets before it becomes a public GHCR bundle."""
+    TOKEN = '0F1E2D3C-4B5A-6978-8796-A5B4C3D2E1F0'
+    PASSWORD = 'prod-store-pass'
+
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.dir = Path(temp.name)
+        self.secrets = self.dir / '.staging.env'
+        self.secrets.write_text(f"KEY_ALIAS='debug'\nAPPCHECK_DEBUG_TOKEN='{self.TOKEN}'")
+        self.cache = self.dir / 'cache'
+        (self.cache / 'deep/er').mkdir(parents=True)
+        (self.cache / 'deep/er/lib.jar').write_bytes(b'PK\x03\x04 third-party bytes')
+        # Toolchain caches hold directory links and dangling links; grep must not treat them as errors.
+        (self.cache / 'linked').symlink_to('deep', target_is_directory=True)
+        (self.cache / 'dangling').symlink_to('nowhere')
+        env = patch.dict(os.environ, {'KEYSTORE_PASSWORD': self.PASSWORD})
+        env.start()
+        self.addCleanup(env.stop)
+
+    def test_clean_cache_passes_missing_paths_are_skipped_and_the_secrets_file_is_deleted(self):
+        release.check_cache(self.secrets, [self.cache, self.dir / 'absent'])
+        self.assertFalse(self.secrets.exists())
+
+    def test_either_secret_anywhere_in_the_tree_fails_without_printing_it(self):
+        for secret in (self.TOKEN, self.PASSWORD):
+            with self.subTest(secret=secret):
+                self.setUp()
+                (self.cache / 'deep/er/leak.bin').write_bytes(b'\x00\x01' + secret.encode() + b'\x00')
+                with self.assertRaisesRegex(ValueError, 'inside the cache paths') as caught:
+                    release.check_cache(self.secrets, [self.dir / 'absent', self.cache])
+                self.assertNotIn(secret, str(caught.exception))
+                self.assertFalse(self.secrets.exists())
+
+    def test_missing_or_short_secrets_fail_instead_of_passing_vacuously(self):
+        self.secrets.write_text("APPCHECK_DEBUG_TOKEN='abc'")
+        with self.assertRaisesRegex(ValueError, 'APPCHECK_DEBUG_TOKEN'):
+            release.check_cache(self.secrets, [self.cache])
+        for password in ('', '12345'):
+            self.secrets.write_text(f"APPCHECK_DEBUG_TOKEN='{self.TOKEN}'")
+            with self.subTest(password=password), patch.dict(os.environ, {'KEYSTORE_PASSWORD': password}), \
+                    self.assertRaisesRegex(ValueError, 'KEYSTORE_PASSWORD'):
+                release.check_cache(self.secrets, [self.cache])
 
 @needs_yq
 class VersionCommit(unittest.TestCase):
