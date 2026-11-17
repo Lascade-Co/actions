@@ -416,8 +416,19 @@ jobs:
           ./kotlin task "${tasks[@]}"
         id: warm
         timeout-minutes: 25
+      # Every ./kotlin run deletes the committed Package.resolved and shared scheme ("no scheme named app" otherwise).
+      # Restore both; resolve and archive then read the pins and the scheme before Xcode's Build Kotlin phase runs.
+      - name: Restore the pinned Package.resolved and shared scheme
+        run: |-
+          git -C "$GITHUB_WORKSPACE/source" checkout -- "$IOS_PROJECT/xcshareddata/xcschemes/$IOS_SCHEME.xcscheme" \
+            "$IOS_PROJECT/project.xcworkspace/xcshareddata/swiftpm/Package.resolved"
+        env:
+          IOS_PROJECT: ${{ steps.manifest.outputs.project }}
+          IOS_SCHEME: ${{ steps.manifest.outputs.scheme }}
       - name: Resolve Swift packages
-        run: xcodebuild -resolvePackageDependencies -project "$IOS_PROJECT" -scheme "$IOS_SCHEME" -derivedDataPath "$RUNNER_TEMP/dd"
+        run: |-
+          xcodebuild -resolvePackageDependencies -project "$IOS_PROJECT" -scheme "$IOS_SCHEME" -derivedDataPath "$RUNNER_TEMP/dd" \
+            -onlyUsePackageVersionsFromResolvedFile
         env:
           IOS_PROJECT: ${{ steps.manifest.outputs.project }}
           IOS_SCHEME: ${{ steps.manifest.outputs.scheme }}
@@ -432,7 +443,7 @@ jobs:
           sampler=$!
           trap 'kill "$sampler" 2>/dev/null || true' EXIT
           xcodebuild -project "$IOS_PROJECT" -scheme "$IOS_SCHEME" -configuration Release -derivedDataPath "$RUNNER_TEMP/dd" \
-            -jobs 3 -archivePath "$RUNNER_TEMP/app.xcarchive" archive 2>&1 | tee xcodebuild.log
+            -onlyUsePackageVersionsFromResolvedFile -jobs 3 -archivePath "$RUNNER_TEMP/app.xcarchive" archive 2>&1 | tee xcodebuild.log
         id: archive
         env:
           IOS_PROJECT: ${{ steps.manifest.outputs.project }}
