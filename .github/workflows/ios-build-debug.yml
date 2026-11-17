@@ -1,637 +1,464 @@
-name: Central Build & Debug iOS (TestFlight)
-run-name: "${{ github.event.client_payload.repo }} · ${{ github.event.client_payload.branch || format('PR #{0}', github.event.client_payload.pr) }}"
-
+# Native iOS TestFlight, restructured like kmp-build-debug.yml.
+# Same file name and event (debug-ios) on purpose: ADR 0008 ties build numbers to this file's run_number,
+# and existing triggers (triggers/ios-pr-testflight.yml, D1 apps' testflight.yml) keep working.
+#
+# Payload: repo, branch | pr, title, project_slug (required), spm_repos (optional),
+#   fetch_secrets "true"  -> run the app's scripts/fetch-secrets.sh (needs INFISICAL_PROJECT_ID in /Build)
+#   version "auto" | "X.Y.Z" -> auto = scripts/ios/next_version.py
+#   debug_flag "false"    -> archive without DEBUG (default on, ADR 0009)
+#   patch_rollover "false" -> plain +1 patch (2.4.9 -> 2.4.10); default rolls a 9 into the next minor
+#                            (2.4.9 -> 2.5.0). The major never changes automatically (apps force-update on it).
+#   force_update "true"   -> next major X.0.0 above the highest App Store version (2.0.2 -> 3.0.0).
+#                            Rebuilds reuse X.0.0 until it is on the App Store. Needs version "auto".
+# Apple key: Infisical /Build APPSTORE_API_* when all three exist, otherwise the org secrets.
+name: Central Native iOS TestFlight
+run-name: "${{ format('{0} · {1}', github.event.client_payload.repo, github.event.client_payload.branch || format('PR #{0}', github.event.client_payload.pr)) }}"
 on:
   repository_dispatch:
     types: [debug-ios]
-
 permissions:
   contents: read
-  pull-requests: write
-  issues: write
   packages: write
-
 concurrency:
-  group: debug-ios-${{ github.event.client_payload.repo }}-${{ github.event.client_payload.pr || github.event.client_payload.branch }}
+  group: ${{ format('debug-ios-{0}-{1}', github.event.client_payload.repo, github.event.client_payload.pr || github.event.client_payload.branch) }}
   cancel-in-progress: true
+defaults:
+  run:
+    shell: bash
 
 jobs:
-  build:
-    runs-on: macos-latest
-    # A cold SwiftPM cache means fetching ~7 GB of package history before the
-    # archive starts, and the cache key changes on every Xcode bump, so cold
-    # runs recur. 60 minutes killed the job before it could populate the cache,
-    # which meant the next run started cold too — the loop never broke.
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      repo: ${{ steps.source.outputs.repo }}
+      owner: ${{ steps.source.outputs.owner }}
+      name: ${{ steps.source.outputs.name }}
+      pr: ${{ steps.source.outputs.pr }}
+      branch: ${{ steps.source.outputs.branch }}
+      sha: ${{ steps.source.outputs.sha }}
+      title: ${{ steps.source.outputs.title }}
+      pr_url: ${{ steps.source.outputs.pr_url }}
+      project_slug: ${{ steps.source.outputs.project_slug }}
+      token_repos: ${{ steps.scope.outputs.list }}
+      project: ${{ steps.meta.outputs.project }}
+      scheme: ${{ steps.meta.outputs.scheme }}
+      project_version: ${{ steps.meta.outputs.project_version }}
+      build_number: ${{ steps.meta.outputs.build_number }}
+      xcode_version: ${{ steps.meta.outputs.xcode_version }}
+      fetch_secrets: ${{ steps.meta.outputs.fetch_secrets }}
+      manual_version: ${{ steps.meta.outputs.manual_version }}
+      debug_flag: ${{ steps.meta.outputs.debug_flag }}
+      force_update: ${{ steps.meta.outputs.force_update }}
+    steps:
+      - name: Fetch trusted helpers
+        run: |-
+          for f in kmp/control.py ios/native_testflight.py; do
+            curl -fsSL --retry 3 --retry-delay 2 --retry-all-errors --connect-timeout 10 --max-time 60 \
+              "$BASE/$f" -o "$RUNNER_TEMP/$(basename "$f").tmp"
+            test -s "$RUNNER_TEMP/$(basename "$f").tmp" && mv "$RUNNER_TEMP/$(basename "$f").tmp" "$RUNNER_TEMP/$(basename "$f")"
+          done
+        env:
+          BASE: ${{ format('https://raw.githubusercontent.com/{0}/{1}/scripts', github.repository, github.sha) }}
+      - name: Validate dispatch scope before minting credentials
+        id: payload
+        run: python3 "$RUNNER_TEMP/control.py" validate
+      # Private SPM packages from the same org need the App token to reach them (see ios-pr-testflight.yml).
+      - name: Compute token repositories
+        id: scope
+        env:
+          NAME: ${{ steps.payload.outputs.name }}
+          EXTRA: ${{ github.event.client_payload.spm_repos }}
+        run: |-
+          if [ -n "$EXTRA" ] && [ "$EXTRA" != null ]; then echo "list=$NAME,$EXTRA" >> "$GITHUB_OUTPUT"
+          else echo "list=$NAME" >> "$GITHUB_OUTPUT"; fi
+      - name: Mint source-scoped GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v3.3.0
+        with:
+          client-id: ${{ secrets.CI_APP_CLIENT_ID }}
+          private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
+          owner: ${{ steps.payload.outputs.owner }}
+          repositories: ${{ steps.scope.outputs.list }}
+      - name: Reject fork PRs and pin source HEAD
+        id: source
+        run: python3 "$RUNNER_TEMP/control.py" resolve
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+      - name: Checkout pinned source commit
+        uses: actions/checkout@v7
+        with:
+          repository: ${{ steps.source.outputs.repo }}
+          ref: ${{ steps.source.outputs.sha }}
+          token: ${{ steps.app-token.outputs.token }}
+          path: source
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Read Xcode project, version and build number
+        id: meta
+        working-directory: source
+        run: python3 "$RUNNER_TEMP/native_testflight.py" metadata
+        env:
+          RUN_NUMBER: ${{ github.run_number }}
+          PR: ${{ steps.source.outputs.pr }}
+          FETCH_SECRETS: ${{ github.event.client_payload.fetch_secrets }}
+          VERSION_INPUT: ${{ github.event.client_payload.version }}
+          DEBUG_FLAG: ${{ github.event.client_payload.debug_flag }}
+          FORCE_UPDATE: ${{ github.event.client_payload.force_update }}
+      - name: Checkout trusted central controls
+        uses: actions/checkout@v7
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ github.sha }}
+          path: control
+          persist-credentials: false
+      - name: Update TestFlight PR status
+        uses: ./control/actions/pr-status-comment
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+          app-slug: ${{ steps.app-token.outputs.app-slug }}
+          repository: ${{ steps.source.outputs.repo }}
+          pr: ${{ steps.source.outputs.pr }}
+          marker: <!-- central-ios-testflight -->
+          mode: replace
+          body: |-
+            TestFlight build ${{ steps.meta.outputs.build_number }} started.
+            [Workflow run](${{ format('{0}/{1}/actions/runs/{2}', github.server_url, github.repository, github.run_id) }})
+
+  ios-build:
+    runs-on: macos-26
+    # A cold SwiftPM resolve can be large; the GHCR bundle makes warm runs fast.
     timeout-minutes: 120
+    needs: prepare
+    defaults:
+      run:
+        shell: bash
+        working-directory: source
     outputs:
       version: ${{ steps.marketing.outputs.version }}
       version_verified: ${{ steps.marketing.outputs.verified }}
-      app_name: ${{ steps.app_meta.outputs.app_name }}
-      build_number: ${{ steps.build_number.outputs.build }}
-      owner: ${{ steps.repo.outputs.owner }}
-      name: ${{ steps.repo.outputs.name }}
-      comment_id: ${{ steps.status.outputs.comment-id }}
     steps:
-      - name: Extract owner/repo
-        id: repo
-        shell: bash
-        env:
-          FULL: ${{ github.event.client_payload.repo }}
-        run: |
-          echo "owner=${FULL%%/*}" >> "$GITHUB_OUTPUT"
-          echo "name=${FULL#*/}"   >> "$GITHUB_OUTPUT"
-
-      # Scoping the App token is opt-in, because this job runs xcodebuild over
-      # unreviewed PR-head code and an owner-wide token there is a large blast
-      # radius. A dispatcher that names its private SPM package repos in spm_repos
-      # gets a token limited to the source repo plus that list; the PR trigger — the
-      # automatic path an outside branch name can reach — does exactly that.
-      #
-      # With the field absent we emit an EMPTY list, which is not "no repositories":
-      # create-github-app-token parses `repositories` with
-      #   getInput(...).split(/[\n,]+/).map(trim).filter(x => x !== "")
-      # so an empty value and an omitted input both yield [], and [] with `owner`
-      # set takes the "token for all repositories owned by <owner>" branch. That
-      # keeps the legacy workflow_dispatch payload resolving private SPM deps
-      # exactly as it does today.
-      - name: Compute token repositories
-        id: token_repos
-        shell: bash
-        env:
-          REPO_NAME: ${{ steps.repo.outputs.name }}
-          EXTRA: ${{ github.event.client_payload.spm_repos }}
-        run: |
-          if [ -n "$EXTRA" ] && [ "$EXTRA" != "null" ]; then
-            echo "spm_repos declared; scoping App token to $REPO_NAME,$EXTRA"
-            echo "list=$REPO_NAME,$EXTRA" >> "$GITHUB_OUTPUT"
-          else
-            echo "No spm_repos in payload; App token stays owner-wide"
-            echo "list=" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Mint GitHub App token
-        id: app-token
-        uses: actions/create-github-app-token@v3
-        with:
-          client-id: ${{ secrets.CI_APP_CLIENT_ID }}
-          private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
-          owner: ${{ steps.repo.outputs.owner }}
-          repositories: ${{ steps.token_repos.outputs.list }}
-
-      - name: Purge previous comments from this workflow
-        if: ${{ github.event.client_payload.pr && github.event.client_payload.pr != '' && github.event.client_payload.pr != 'null' }}
-        uses: actions/github-script@v9
-        env:
-          PAYLOAD_REPO: ${{ github.event.client_payload.repo }}
-          PAYLOAD_PR: ${{ github.event.client_payload.pr }}
-        with:
-          github-token: ${{ steps.app-token.outputs.token }}
-          script: |
-            const [owner, repo] = process.env.PAYLOAD_REPO.split("/");
-            const issue_number = Number(process.env.PAYLOAD_PR);
-            const marker = "<!-- central-ios-testflight -->";
-            const comments = await github.paginate(
-              github.rest.issues.listComments,
-              { owner, repo, issue_number, per_page: 100 }
-            );
-            let deleted = 0;
-            for (const c of comments) {
-              if ((c.body || "").includes(marker)) {
-                await github.rest.issues.deleteComment({ owner, repo, comment_id: c.id });
-                deleted++;
-              }
-            }
-            core.info(`Deleted ${deleted} prior central-ios-testflight comments`);
-
-      - name: Comment on PR that the build started
-        id: status
-        if: ${{ github.event.client_payload.pr && github.event.client_payload.pr != '' && github.event.client_payload.pr != 'null' }}
-        continue-on-error: true
-        uses: peter-evans/create-or-update-comment@v5
-        with:
-          edit-mode: replace
-          token: ${{ steps.app-token.outputs.token }}
-          repository: ${{ github.event.client_payload.repo }}
-          issue-number: ${{ github.event.client_payload.pr }}
-          body: |
-            <!-- central-ios-testflight -->
-            🏗️ TestFlight build started.
-            Watch progress [here](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
-
-      - name: Decide ref to checkout (PR HEAD or named branch)
-        id: ref
-        shell: bash
-        env:
-          PR: ${{ github.event.client_payload.pr }}
-          BR: ${{ github.event.client_payload.branch }}
-        run: |
-          if [ -n "$PR" ] && [ "$PR" != "null" ]; then
-            echo "ref=refs/pull/${PR}/head" >> "$GITHUB_OUTPUT"
-          elif [ -n "$BR" ]; then
-            echo "ref=refs/heads/${BR}" >> "$GITHUB_OUTPUT"
-          else
-            echo "No PR or branch in payload" >&2
-            exit 1
-          fi
-
-      - name: Checkout target repo at PR HEAD/branch
+      - name: Checkout trusted central controls
         uses: actions/checkout@v7
         with:
-          repository: ${{ github.event.client_payload.repo }}
-          ref: ${{ steps.ref.outputs.ref }}
-          token: ${{ steps.app-token.outputs.token }}
-          # This runner reads no git history — it only greps the working tree for
-          # MARKETING_VERSION and PRODUCT_NAME. travel-animator-ios is ~1.3 GB, so
-          # fetch-depth: 0 cost ~9 minutes per run for nothing.
-          fetch-depth: 1
-
-      # Scope the credential rewrite to this org only. The App token exists for
-      # the private Lascade SPM packages; rewriting all of github.com pushed
-      # every third-party fetch (33 of the 35 packages) through an installation
-      # token that has no grant on them, which at best adds an auth handshake
-      # per fetch and at worst gets throttled.
-      - name: Configure git for private SPM dependencies
-        env:
-          OWNER: ${{ steps.repo.outputs.owner }}
-        run: |
-          git config --global \
-            url."https://x-access-token:${{ steps.app-token.outputs.token }}@github.com/${OWNER}/".insteadOf \
-            "https://github.com/${OWNER}/"
-
-      - name: Extract version and app metadata
-        id: version
-        shell: bash
-        run: |
-          VERSION=$(grep 'MARKETING_VERSION' *.xcodeproj/project.pbxproj | grep -v '1.0' | head -1 | sed 's/.*= //;s/;//;s/ //g')
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-
-      - name: Capture Xcode version
-        id: xcode-version
-        shell: bash
-        run: |
-          version="$(xcodebuild -version | tr '\n' ' ' | sed 's/[[:space:]]\+/ /g; s/ $//')"
-          key="$(printf '%s' "$version" | shasum -a 256 | cut -d' ' -f1)"
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "cache-key=$key"   >> "$GITHUB_OUTPUT"
-
-      - name: Fetch build secrets from Infisical
-        uses: Infisical/secrets-action@v1.0.17
-        with:
-          method: universal
-          client-id: ${{ secrets.INFISICAL_CLIENT_ID }}
-          client-secret: ${{ secrets.INFISICAL_CLIENT_SECRET }}
-          project-slug: ${{ github.event.client_payload.project_slug }}
-          env-slug: "staging"
-          domain: ${{ secrets.INFISICAL_DOMAIN }}
-          secret-path: /Build
-          export-type: env
-
-      - name: Detect Xcode project
-        id: detect
-        shell: bash
-        run: |
-          XCODEPROJ=$(find . -maxdepth 1 -name "*.xcodeproj" | head -1 | sed 's|^\./||')
-          SCHEME=$(echo "$XCODEPROJ" | sed 's/.xcodeproj//')
-          echo "project=$XCODEPROJ" >> "$GITHUB_OUTPUT"
-          echo "scheme=$SCHEME"     >> "$GITHUB_OUTPUT"
-
-      - name: Extract app metadata
-        id: app_meta
-        shell: bash
-        run: |
-          APP_NAME=$(grep -m1 'PRODUCT_NAME' *.xcodeproj/project.pbxproj | sed 's/.*= //;s/;//;s/"//g;s/ //g' || true)
-          # PRODUCT_NAME is usually the literal $(TARGET_NAME), which is useless
-          # in a PR comment. Fall back to the scheme, which is the target name.
-          case "$APP_NAME" in ''|*\$*) APP_NAME="${{ steps.detect.outputs.scheme }}" ;; esac
-          echo "app_name=$APP_NAME" >> "$GITHUB_OUTPUT"
-
-      - name: Decode GoogleService-Info.plist
-        shell: bash
-        run: |
-          PLIST_PATH=$(find . -path "*/GoogleService-Info.plist" -not -path "*/Pods/*" -not -path "*/.build/*" 2>/dev/null | head -1)
-          if [ -z "$PLIST_PATH" ]; then
-            PLIST_PATH="${{ steps.detect.outputs.scheme }}/GoogleService-Info.plist"
-          fi
-          echo "${{ env.SERVICE_PLIST_BASE64 }}" | base64 --decode > "$PLIST_PATH"
-
-      - name: Install Apple certificate and provisioning profiles
-        run: curl -sSL https://raw.githubusercontent.com/Lascade-Co/actions/main/scripts/ios/install_apple_cert.sh | bash
-
-      - name: Resolve team and bundle identifiers
-        id: ids
-        shell: bash
-        run: |
-          TEAM="${IOS_TEAM_ID:-${APP_PROFILE_TEAM_ID:-}}"
-          BUNDLE="${IOS_BUNDLE_ID:-${APP_PROFILE_BUNDLE_ID:-}}"
-          : "${TEAM:?no IOS_TEAM_ID in Infisical and none derivable from the profile}"
-          : "${BUNDLE:?no IOS_BUNDLE_ID in Infisical and none derivable from the profile}"
-          echo "Team $TEAM, bundle $BUNDLE"
-          echo "team=$TEAM"     >> "$GITHUB_OUTPUT"
-          echo "bundle=$BUNDLE" >> "$GITHUB_OUTPUT"
-
-      - name: Switch Xcode project to manual signing
-        env:
-          PBXPROJ_PATH: ${{ steps.detect.outputs.project }}/project.pbxproj
-          IOS_TEAM_ID: ${{ steps.ids.outputs.team }}
-        run: curl -sSL https://raw.githubusercontent.com/Lascade-Co/actions/main/scripts/ios/fix_ios_signing.py | python3 -
-
-      - name: Generate ExportOptions.plist
-        shell: bash
-        run: |
-          /usr/libexec/PlistBuddy -c "Clear dict" ExportOptions.plist
-          /usr/libexec/PlistBuddy -c "Add :method string app-store-connect" ExportOptions.plist
-          /usr/libexec/PlistBuddy -c "Add :teamID string ${{ steps.ids.outputs.team }}" ExportOptions.plist
-          /usr/libexec/PlistBuddy -c "Add :signingStyle string manual" ExportOptions.plist
-          /usr/libexec/PlistBuddy -c "Add :uploadSymbols bool true" ExportOptions.plist
-          /usr/libexec/PlistBuddy -c "Add :provisioningProfiles dict" ExportOptions.plist
-          /usr/libexec/PlistBuddy -c "Add :provisioningProfiles:${{ steps.ids.outputs.bundle }} string ${{ env.APP_PROFILE_UUID }}" ExportOptions.plist
-          # Key each extension off the bundle id carried by its own profile rather
-          # than a hardcoded suffix — this runner serves every iOS app in the org.
-          if [ -n "${{ env.NSE_PROFILE_BUNDLE_ID }}" ] && [ -n "${{ env.NSE_PROFILE_UUID }}" ]; then
-            /usr/libexec/PlistBuddy -c "Add :provisioningProfiles:${{ env.NSE_PROFILE_BUNDLE_ID }} string ${{ env.NSE_PROFILE_UUID }}" ExportOptions.plist
-          fi
-          if [ -n "${{ env.SHARE_PROFILE_BUNDLE_ID }}" ] && [ -n "${{ env.SHARE_PROFILE_UUID }}" ]; then
-            /usr/libexec/PlistBuddy -c "Add :provisioningProfiles:${{ env.SHARE_PROFILE_BUNDLE_ID }} string ${{ env.SHARE_PROFILE_UUID }}" ExportOptions.plist
-          fi
-          if [ -n "${{ env.WIDGET_PROFILE_BUNDLE_ID }}" ] && [ -n "${{ env.WIDGET_PROFILE_UUID }}" ]; then
-            /usr/libexec/PlistBuddy -c "Add :provisioningProfiles:${{ env.WIDGET_PROFILE_BUNDLE_ID }} string ${{ env.WIDGET_PROFILE_UUID }}" ExportOptions.plist
-          fi
-
-      # A resolved SwiftPM cache is ~4 GB: too big for the Actions cache, whose
-      # 10 GB repo quota is already fully consumed by the Android pipeline.
-      # GHCR storage does not count against that quota and pulls from inside
-      # Actions are free bandwidth, so the bundle lives there instead. Keyed on
-      # Package.resolved so it invalidates exactly when dependencies change.
-      # macOS runners have no Docker, hence oras as a standalone binary.
-      - name: Restore SPM bundle from GHCR
-        id: spm_bundle
-        shell: bash
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          ACTOR: ${{ github.actor }}
-          BUNDLE: ghcr.io/lascade-co/ios-spm-cache:spm-${{ hashFiles('**/Package.resolved') }}
-          FALLBACK: ghcr.io/lascade-co/ios-spm-cache:${{ steps.repo.outputs.name }}-latest
-        run: |
-          set -uo pipefail
-          mkdir -p "$RUNNER_TEMP/bin"
-          curl -sSL "https://github.com/oras-project/oras/releases/download/v1.3.3/oras_1.3.3_darwin_arm64.tar.gz" \
-            | tar -xz -C "$RUNNER_TEMP/bin" oras
-          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
-          export PATH="$RUNNER_TEMP/bin:$PATH"
-
-          printf '%s' "$GH_TOKEN" | oras login ghcr.io -u "$ACTOR" --password-stdin
-
-          mkdir -p "$HOME/Library/Caches"
-          WORK=$(mktemp -d)
-          if oras pull "$BUNDLE" -o "$WORK" && [ -f "$WORK/spm-cache.tar" ]; then
-            tar -xf "$WORK/spm-cache.tar" -C "$HOME/Library/Caches"
-            echo "hit=true" >> "$GITHUB_OUTPUT"
-            echo "Restored exact bundle $BUNDLE"
-          elif oras pull "$FALLBACK" -o "$WORK" && [ -f "$WORK/spm-cache.tar" ]; then
-            # Package.resolved changed, but a dependency set rarely changes
-            # wholesale. Seeding from the previous bundle leaves SwiftPM to fetch
-            # only what actually moved, instead of all 35 packages. hit stays
-            # false so the new exact tag still gets published below.
-            tar -xf "$WORK/spm-cache.tar" -C "$HOME/Library/Caches"
-            echo "hit=false" >> "$GITHUB_OUTPUT"
-            echo "No exact bundle; seeded from $FALLBACK and resolving the delta"
-          else
-            echo "hit=false" >> "$GITHUB_OUTPUT"
-            echo "No bundle at $BUNDLE or $FALLBACK - resolving cold"
-          fi
-          rm -rf "$WORK"
-
-      # Let SwiftPM populate its own caches and DerivedData. Every previous
-      # attempt to pre-stage them by hand was dead weight -- see the commit
-      # message and docs/adr/0010.
-      - name: Resolve SPM dependencies
-        id: spm
-        run: |
-          xcodebuild -resolvePackageDependencies \
-            -project "${{ steps.detect.outputs.project }}" \
-            -scheme "${{ steps.detect.outputs.scheme }}"
-
-      # Publish as soon as the packages exist, not at end of job: whether the
-      # archive later succeeds is a separate question, and a cold resolve is
-      # expensive enough that it should never be paid twice. Best-effort — a
-      # registry hiccup must not fail a build that already has its packages.
-      - name: Publish SPM bundle to GHCR
-        if: steps.spm.outcome == 'success' && steps.spm_bundle.outputs.hit != 'true'
-        continue-on-error: true
-        shell: bash
-        env:
-          BUNDLE: ghcr.io/lascade-co/ios-spm-cache:spm-${{ hashFiles('**/Package.resolved') }}
-          FALLBACK: ghcr.io/lascade-co/ios-spm-cache:${{ steps.repo.outputs.name }}-latest
-        run: |
-          set -euo pipefail
-          WORK=$(mktemp -d)
-          tar -cf "$WORK/spm-cache.tar" -C "$HOME/Library/Caches" org.swift.swiftpm
-          du -h "$WORK/spm-cache.tar"
-          cd "$WORK"
-          # image.source links the package to this repo, so the repo's
-          # GITHUB_TOKEN inherits read access. Without it the package belongs to
-          # whoever pushed it and later runs get a 'not found'. The bundle must
-          # stay private regardless: it contains a mirror of the private
-          # travel-animator-shared repo.
-          oras push "$BUNDLE" \
-            --artifact-type application/vnd.lascade.ios-spm-cache.v1 \
-            --annotation "org.opencontainers.image.source=https://github.com/${{ github.repository }}" \
-            spm-cache.tar:application/octet-stream
-          # Move the per-repo pointer so the next Package.resolved change has
-          # something to seed from. Best-effort: the exact tag is what matters.
-          oras tag "$BUNDLE" "${FALLBACK##*:}" || echo "warning: could not move $FALLBACK"
-          echo "Published $BUNDLE and moved $FALLBACK"
-          rm -rf "$WORK"
-
-      # Reuse the latest iOS TestFlight train so every PR for one release
-      # candidate shares a marketing version and is distinguished by its build
-      # number. If the project is newer, its version opens the next train after
-      # the release workflow's post-release bump. This workflow never bumps the
-      # marketing version or commits to a contributor's branch.
-      - name: Determine TestFlight marketing version
-        id: marketing
-        shell: bash
-        env:
-          APPSTORE_API_KEY_ID: ${{ secrets.APPSTORE_API_KEY_ID }}
-          APPSTORE_ISSUER_ID: ${{ secrets.APPSTORE_ISSUER_ID }}
-          APPSTORE_API_PRIVATE_KEY: ${{ secrets.APPSTORE_API_PRIVATE_KEY }}
-          IOS_BUNDLE_ID: ${{ steps.ids.outputs.bundle }}
-          CURRENT_VERSION: ${{ steps.version.outputs.version }}
-        run: |
-          # The script writes its answer as GITHUB_OUTPUT key=value lines
-          # (version= and verified=), so a single tee both records them in the
-          # job log and sets the step outputs. The step runs under pipefail, so
-          # a failing script still fails the step even though tee succeeds.
-          echo "Project says marketing version ${CURRENT_VERSION}"
-          curl -sSL https://raw.githubusercontent.com/Lascade-Co/actions/main/scripts/ios/next_version.py \
-            | python3 - \
-            | tee -a "$GITHUB_OUTPUT"
-
-      - name: Compute build number
-        id: build_number
-        shell: bash
-        env:
-          PR: ${{ github.event.client_payload.pr }}
-        run: |
-          BUILD=$(( 1000 + ${{ github.run_number }} ))
-          if [ -n "$PR" ] && [ "$PR" != "null" ]; then BUILD="${BUILD}.${PR}"; fi
-          echo "Build number $BUILD"
-          echo "build=$BUILD" >> "$GITHUB_OUTPUT"
-
-      - name: Archive
-        id: archive
-        run: |
-          xcodebuild archive \
-            -project "${{ steps.detect.outputs.project }}" \
-            -scheme "${{ steps.detect.outputs.scheme }}" \
-            -configuration Release \
-            -destination "generic/platform=iOS" \
-            -archivePath build/App.xcarchive \
-            CURRENT_PROJECT_VERSION="${{ steps.build_number.outputs.build }}" \
-            MARKETING_VERSION="${{ steps.marketing.outputs.version }}" \
-            CODE_SIGN_STYLE=Manual \
-            SWIFT_ACTIVE_COMPILATION_CONDITIONS='DEBUG $(inherited)' \
-            GCC_PREPROCESSOR_DEFINITIONS='DEBUG=1 $(inherited)'
-
-      - name: Validate embedded framework metadata
-        run: |
-          curl -sSL https://raw.githubusercontent.com/Lascade-Co/actions/main/scripts/ios/normalize_framework_metadata.py |
-            python3 - --check build/App.xcarchive
-
-      - name: Export IPA
-        id: export
-        run: |
-          xcodebuild -exportArchive \
-            -archivePath build/App.xcarchive \
-            -exportPath build/ipa \
-            -exportOptionsPlist ExportOptions.plist \
-
-      - name: Upload dSYMs to Firebase Crashlytics
-        shell: bash
-        run: |
-          # firebase-ios-sdk now lives wherever SwiftPM put it, under DerivedData.
-          # The project's own Crashlytics build phase already uploads dSYMs during
-          # the archive; this step is a backstop and stays best-effort.
-          UPLOAD_SYMBOLS=$(find ~/Library/Developer/Xcode/DerivedData \
-            -path "*/SourcePackages/checkouts/firebase-ios-sdk/*" \
-            -name "upload-symbols" -type f 2>/dev/null | head -1)
-          if [ -z "$UPLOAD_SYMBOLS" ]; then
-            echo "Warning: upload-symbols not found, skipping dSYM upload"
-            exit 0
-          fi
-          chmod +x "$UPLOAD_SYMBOLS"
-
-          PLIST=$(find . -name "GoogleService-Info.plist" -not -path "*/Pods/*" -not -path "*/.build/*" | head -1)
-
-          "$UPLOAD_SYMBOLS" -gsp "$PLIST" -p ios build/App.xcarchive/dSYMs
-
-      - name: Upload IPA artifact
-        uses: actions/upload-artifact@v7
-        with:
-          name: ios-debug
-          path: build/ipa/*.ipa
-          if-no-files-found: error
-
-      - name: Comment on PR if the build failed
-        if: ${{ failure() && github.event.client_payload.pr && github.event.client_payload.pr != '' && github.event.client_payload.pr != 'null' && steps.app-token.outcome == 'success' }}
-        uses: actions/github-script@v9
-        env:
-          PAYLOAD_REPO: ${{ github.event.client_payload.repo }}
-          PAYLOAD_PR: ${{ github.event.client_payload.pr }}
-        with:
-          github-token: ${{ steps.app-token.outputs.token }}
-          script: |
-            const outcomes = {
-              "SPM resolution": "${{ steps.spm.outcome }}",
-              "Archive":        "${{ steps.archive.outcome }}",
-              "Export IPA":     "${{ steps.export.outcome }}",
-            };
-            const stage = Object.keys(outcomes).find(k => outcomes[k] === "failure") || "Build";
-            const [owner, repo] = process.env.PAYLOAD_REPO.split("/");
-            const issue_number = Number(process.env.PAYLOAD_PR);
-            const body = [
-              "<!-- central-ios-testflight -->",
-              `❌ **${stage}** failed.`,
-              `[Check logs](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})`,
-            ].join("\n");
-            const commentId = Number("${{ steps.status.outputs.comment-id }}");
-            if (commentId) {
-              await github.rest.issues.updateComment({ owner, repo, comment_id: commentId, body });
-            } else {
-              await github.rest.issues.createComment({ owner, repo, issue_number, body });
-            }
-
-  publish:
-    needs: build
-    runs-on: macos-latest
-    timeout-minutes: 25
-    steps:
-      - name: Mint GitHub App token
+          repository: ${{ github.repository }}
+          ref: ${{ github.sha }}
+          path: control
+          persist-credentials: false
+      - name: Mint source-scoped GitHub App token
         id: app-token
-        if: ${{ github.event.client_payload.pr && github.event.client_payload.pr != '' && github.event.client_payload.pr != 'null' }}
-        uses: actions/create-github-app-token@v3
+        uses: actions/create-github-app-token@v3.3.0
         with:
           client-id: ${{ secrets.CI_APP_CLIENT_ID }}
           private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
-          owner: ${{ needs.build.outputs.owner }}
-          repositories: ${{ needs.build.outputs.name }}
-
-      - name: Fetch build secrets from Infisical
-        uses: Infisical/secrets-action@v1.0.17
+          owner: ${{ needs.prepare.outputs.owner }}
+          repositories: ${{ needs.prepare.outputs.token_repos }}
+      - name: Checkout pinned source commit
+        uses: actions/checkout@v7
+        with:
+          repository: ${{ needs.prepare.outputs.repo }}
+          ref: ${{ needs.prepare.outputs.sha }}
+          token: ${{ steps.app-token.outputs.token }}
+          path: source
+          fetch-depth: 1
+          persist-credentials: false
+      # Only this org's URLs go through the App token; third-party packages fetch anonymously.
+      - name: Configure git for private SPM dependencies
+        env:
+          OWNER: ${{ needs.prepare.outputs.owner }}
+          TOKEN: ${{ steps.app-token.outputs.token }}
+        run: git config --global url."https://x-access-token:${TOKEN}@github.com/${OWNER}/".insteadOf "https://github.com/${OWNER}/"
+      - name: Select Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: ${{ needs.prepare.outputs.xcode_version }}
+      - name: Read /Build from Infisical staging
+        uses: Infisical/secrets-action@v1.0.18
         with:
           method: universal
           client-id: ${{ secrets.INFISICAL_CLIENT_ID }}
           client-secret: ${{ secrets.INFISICAL_CLIENT_SECRET }}
-          project-slug: ${{ github.event.client_payload.project_slug }}
-          env-slug: "staging"
+          project-slug: ${{ needs.prepare.outputs.project_slug }}
+          env-slug: staging
           domain: ${{ secrets.INFISICAL_DOMAIN }}
           secret-path: /Build
           export-type: env
+      - name: Fetch trusted helpers
+        working-directory: .
+        run: |-
+          for f in ios/native_testflight.py ios/fix_ios_signing.py ios/next_version.py ios/normalize_framework_metadata.py; do
+            # next_version.py: PATCH_ROLLOVER and FORCE_UPDATE are opt-in; this workflow sets them below.
+            curl -fsSL --retry 3 --retry-delay 2 --retry-all-errors --connect-timeout 10 --max-time 60 \
+              "$BASE/$f" -o "$RUNNER_TEMP/$(basename "$f").tmp"
+            test -s "$RUNNER_TEMP/$(basename "$f").tmp" && mv "$RUNNER_TEMP/$(basename "$f").tmp" "$RUNNER_TEMP/$(basename "$f")"
+          done
+        env:
+          BASE: ${{ format('https://raw.githubusercontent.com/{0}/{1}/scripts', github.repository, github.sha) }}
+      # Apps that keep config out of git (D1 series) generate it from their own Infisical project.
+      - name: Generate app config (scripts/fetch-secrets.sh)
+        if: ${{ needs.prepare.outputs.fetch_secrets == 'true' }}
+        env:
+          INFISICAL_CLIENT_ID: ${{ secrets.INFISICAL_CLIENT_ID }}
+          INFISICAL_CLIENT_SECRET: ${{ secrets.INFISICAL_CLIENT_SECRET }}
+          INFISICAL_DOMAIN: ${{ secrets.INFISICAL_DOMAIN }}
+        run: |-
+          test -f scripts/fetch-secrets.sh || { echo '::error::fetch_secrets=true but scripts/fetch-secrets.sh is missing'; exit 1; }
+          : "${INFISICAL_PROJECT_ID:?add INFISICAL_PROJECT_ID to the app Infisical staging /Build}"
+          brew install --quiet infisical/get-cli/infisical
+          export INFISICAL_API_URL="${INFISICAL_DOMAIN%/}/api"
+          INFISICAL_TOKEN="$(infisical login --method=universal-auth --client-id="$INFISICAL_CLIENT_ID" \
+            --client-secret="$INFISICAL_CLIENT_SECRET" --domain="$INFISICAL_API_URL" --plain --silent)"
+          echo "::add-mask::$INFISICAL_TOKEN"
+          INFISICAL_TOKEN="$INFISICAL_TOKEN" bash scripts/fetch-secrets.sh
+      # Legacy path (Travel Animator style): one committed-path GoogleService-Info.plist from /Build.
+      - name: Decode GoogleService-Info.plist
+        if: ${{ needs.prepare.outputs.fetch_secrets != 'true' && env.SERVICE_PLIST_BASE64 != '' }}
+        env:
+          SCHEME: ${{ needs.prepare.outputs.scheme }}
+        run: |-
+          plist=$(find . -path '*/GoogleService-Info.plist' -not -path '*/Pods/*' -not -path '*/.build/*' | head -1)
+          printf '%s' "$SERVICE_PLIST_BASE64" | base64 --decode > "${plist:-$SCHEME/GoogleService-Info.plist}"
+      - name: Choose App Store Connect key
+        id: asc
+        run: |-
+          if [ -n "${APPSTORE_API_KEY_ID:-}" ] && [ -n "${APPSTORE_ISSUER_ID:-}" ] && [ -n "${APPSTORE_API_PRIVATE_KEY:-}" ]; then
+            echo "source=infisical" >> "$GITHUB_OUTPUT"; echo 'Using the App Store Connect key from Infisical /Build'
+          else
+            echo "source=org" >> "$GITHUB_OUTPUT"; echo 'Using the org App Store Connect key'
+          fi
+      - name: List provisioning profiles
+        id: profiles
+        run: python3 "$RUNNER_TEMP/native_testflight.py" profiles
+      - name: Install temporary Apple distribution signing
+        uses: ./control/actions/apple-signing
+        with:
+          profiles: ${{ steps.profiles.outputs.list }}
+      - name: Read profiles and write ExportOptions.plist
+        id: ids
+        run: python3 "$RUNNER_TEMP/native_testflight.py" signing
+      - name: Switch Xcode project to manual signing
+        run: python3 "$RUNNER_TEMP/fix_ios_signing.py"
+        env:
+          PBXPROJ_PATH: ${{ format('{0}/project.pbxproj', needs.prepare.outputs.project) }}
+          IOS_TEAM_ID: ${{ steps.ids.outputs.team }}
+      # Hash once before resolve (which can rewrite Package.resolved) so restore and publish agree.
+      - name: Compute SwiftPM cache key
+        id: spm-key
+        working-directory: .
+        run: echo "key=spm-$(xcodebuild -version | shasum -a 256 | cut -c1-12)-${{ hashFiles('source/**/Package.resolved') }}" >> "$GITHUB_OUTPUT"
+      - name: Restore swiftpm OCI bundle
+        id: spm-cache
+        uses: ./control/actions/gh-bundle-cache
+        with:
+          mode: restore
+          name: ${{ format('{0}-{1}-{2}-swiftpm-native', needs.prepare.outputs.name, runner.os, runner.arch) }}
+          key: ${{ steps.spm-key.outputs.key }}
+          fallback-key: latest
+          paths: |-
+            ~/Library/Caches/org.swift.swiftpm
+            source/build/SourcePackages
+          token: ${{ github.token }}
+      - name: Resolve Swift packages
+        id: spm
+        run: |-
+          xcodebuild -resolvePackageDependencies -project "$PROJECT" -scheme "$SCHEME" \
+            -clonedSourcePackagesDirPath build/SourcePackages
+        env:
+          PROJECT: ${{ needs.prepare.outputs.project }}
+          SCHEME: ${{ needs.prepare.outputs.scheme }}
+      - name: Publish swiftpm OCI bundle
+        if: ${{ steps.spm.outcome == 'success' && steps.spm-cache.outputs.hit != 'true' }}
+        continue-on-error: true
+        uses: ./control/actions/gh-bundle-cache
+        with:
+          mode: publish
+          name: ${{ format('{0}-{1}-{2}-swiftpm-native', needs.prepare.outputs.name, runner.os, runner.arch) }}
+          key: ${{ steps.spm-key.outputs.key }}
+          fallback-key: latest
+          paths: |-
+            ~/Library/Caches/org.swift.swiftpm
+            source/build/SourcePackages
+          token: ${{ github.token }}
+      - name: Determine TestFlight marketing version
+        id: marketing
+        env:
+          MANUAL: ${{ needs.prepare.outputs.manual_version }}
+          CURRENT_VERSION: ${{ needs.prepare.outputs.project_version }}
+          PATCH_ROLLOVER: ${{ github.event.client_payload.patch_rollover != 'false' && 'true' || 'false' }}
+          FORCE_UPDATE: ${{ needs.prepare.outputs.force_update }}
+          IOS_BUNDLE_ID: ${{ steps.ids.outputs.bundle }}
+          APPSTORE_API_KEY_ID: ${{ steps.asc.outputs.source == 'infisical' && env.APPSTORE_API_KEY_ID || secrets.APPSTORE_API_KEY_ID }}
+          APPSTORE_ISSUER_ID: ${{ steps.asc.outputs.source == 'infisical' && env.APPSTORE_ISSUER_ID || secrets.APPSTORE_ISSUER_ID }}
+          APPSTORE_API_PRIVATE_KEY: ${{ steps.asc.outputs.source == 'infisical' && env.APPSTORE_API_PRIVATE_KEY || secrets.APPSTORE_API_PRIVATE_KEY }}
+        run: |-
+          if [ -n "$MANUAL" ]; then
+            echo "Manual version $MANUAL from the dispatch"
+            printf 'version=%s\nverified=false\n' "$MANUAL" | tee -a "$GITHUB_OUTPUT"
+          else
+            echo "Project says $CURRENT_VERSION"
+            python3 "$RUNNER_TEMP/next_version.py" | tee -a "$GITHUB_OUTPUT"
+          fi
+      - name: Archive
+        id: archive
+        env:
+          PROJECT: ${{ needs.prepare.outputs.project }}
+          SCHEME: ${{ needs.prepare.outputs.scheme }}
+          BUILD: ${{ needs.prepare.outputs.build_number }}
+          VERSION: ${{ steps.marketing.outputs.version }}
+          DEBUG_FLAG: ${{ needs.prepare.outputs.debug_flag }}
+        run: |-
+          extra=()
+          if [ "$DEBUG_FLAG" = true ]; then
+            extra=("SWIFT_ACTIVE_COMPILATION_CONDITIONS=DEBUG \$(inherited)" "GCC_PREPROCESSOR_DEFINITIONS=DEBUG=1 \$(inherited)")
+          fi
+          xcodebuild archive -project "$PROJECT" -scheme "$SCHEME" -configuration Release \
+            -destination generic/platform=iOS -archivePath build/App.xcarchive \
+            -clonedSourcePackagesDirPath build/SourcePackages -skipPackageUpdates \
+            CURRENT_PROJECT_VERSION="$BUILD" MARKETING_VERSION="$VERSION" CODE_SIGN_STYLE=Manual "${extra[@]}"
+      - name: Validate embedded framework metadata
+        run: python3 "$RUNNER_TEMP/normalize_framework_metadata.py" --check build/App.xcarchive
+      - name: Export IPA
+        id: export
+        run: xcodebuild -exportArchive -archivePath build/App.xcarchive -exportPath build/ipa -exportOptionsPlist ExportOptions.plist
+      # Best effort: the archived app's own plist is the one that ships (works for fetch-secrets apps too).
+      - name: Upload dSYMs to Crashlytics
+        continue-on-error: true
+        run: |-
+          tool=build/SourcePackages/checkouts/firebase-ios-sdk/Crashlytics/upload-symbols
+          plist=$(find build/App.xcarchive/Products/Applications -maxdepth 2 -name GoogleService-Info.plist | head -1)
+          if [ ! -x "$tool" ] || [ -z "$plist" ]; then echo 'No Crashlytics SDK or plist; skipping'; exit 0; fi
+          "$tool" -gsp "$plist" -p ios build/App.xcarchive/dSYMs
+      - name: Retain IPA for publishing
+        uses: actions/upload-artifact@v7
+        with:
+          name: ios-testflight-ipa
+          path: source/build/ipa/*.ipa
+          if-no-files-found: error
+          retention-days: 3
+          overwrite: true
+      - name: Remove temporary provisioning profiles
+        if: ${{ always() }}
+        uses: ./control/actions/apple-signing
+        with:
+          mode: cleanup
 
-      - name: Download IPA artifact
+  ios-publish:
+    runs-on: macos-26
+    timeout-minutes: 25
+    needs: [prepare, ios-build]
+    steps:
+      - name: Read /Build from Infisical staging
+        uses: Infisical/secrets-action@v1.0.18
+        with:
+          method: universal
+          client-id: ${{ secrets.INFISICAL_CLIENT_ID }}
+          client-secret: ${{ secrets.INFISICAL_CLIENT_SECRET }}
+          project-slug: ${{ needs.prepare.outputs.project_slug }}
+          env-slug: staging
+          domain: ${{ secrets.INFISICAL_DOMAIN }}
+          secret-path: /Build
+          export-type: env
+      - name: Fetch trusted helpers
+        run: |-
+          for f in kmp/control.py; do
+            curl -fsSL --retry 3 --retry-delay 2 --retry-all-errors --connect-timeout 10 --max-time 60 \
+              "$BASE/$f" -o "$RUNNER_TEMP/$(basename "$f").tmp"
+            test -s "$RUNNER_TEMP/$(basename "$f").tmp" && mv "$RUNNER_TEMP/$(basename "$f").tmp" "$RUNNER_TEMP/$(basename "$f")"
+          done
+        env:
+          BASE: ${{ format('https://raw.githubusercontent.com/{0}/{1}/scripts', github.repository, github.sha) }}
+      - name: Choose App Store Connect key
+        id: asc
+        run: |-
+          if [ -n "${APPSTORE_API_KEY_ID:-}" ] && [ -n "${APPSTORE_ISSUER_ID:-}" ] && [ -n "${APPSTORE_API_PRIVATE_KEY:-}" ]; then
+            echo "source=infisical" >> "$GITHUB_OUTPUT"
+          else
+            echo "source=org" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Download IPA
         uses: actions/download-artifact@v8
         with:
-          name: ios-debug
+          name: ios-testflight-ipa
+          path: artifacts/ios
+      - name: Upload package to TestFlight
+        run: |-
+          shopt -s nullglob
+          ipas=(artifacts/ios/*.ipa)
+          test "${#ipas[@]}" -eq 1
+          python3 "$RUNNER_TEMP/control.py" upload-ipa "${ipas[0]}"
+        env:
+          APPSTORE_API_KEY_ID: ${{ steps.asc.outputs.source == 'infisical' && env.APPSTORE_API_KEY_ID || secrets.APPSTORE_API_KEY_ID }}
+          APPSTORE_ISSUER_ID: ${{ steps.asc.outputs.source == 'infisical' && env.APPSTORE_ISSUER_ID || secrets.APPSTORE_ISSUER_ID }}
+          APPSTORE_API_PRIVATE_KEY: ${{ steps.asc.outputs.source == 'infisical' && env.APPSTORE_API_PRIVATE_KEY || secrets.APPSTORE_API_PRIVATE_KEY }}
 
-      - name: Locate IPA
-        id: assets
-        shell: bash
-        run: |
-          set -euo pipefail
-          IPA=$(find . -maxdepth 2 -name "*.ipa" | head -n 1)
-          : "${IPA:?Missing IPA}"
-          echo "ipa=$IPA" >> "$GITHUB_OUTPUT"
-
-      - name: Upload to App Store Connect (TestFlight)
-        run: |
-          mkdir -p ~/private_keys
-          echo "${{ secrets.APPSTORE_API_PRIVATE_KEY }}" > ~/private_keys/AuthKey_${{ secrets.APPSTORE_API_KEY_ID }}.p8
-          xcrun altool --upload-app \
-            -f "${{ steps.assets.outputs.ipa }}" \
-            --type ios \
-            --apiKey "${{ secrets.APPSTORE_API_KEY_ID }}" \
-            --apiIssuer "${{ secrets.APPSTORE_ISSUER_ID }}"
-
-      - name: Comment on PR with the TestFlight build
-        if: ${{ github.event.client_payload.pr && github.event.client_payload.pr != '' && github.event.client_payload.pr != 'null' && steps.app-token.outcome == 'success' }}
-        continue-on-error: true
-        uses: peter-evans/create-or-update-comment@v5
+  notify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # actions/checks read let the notifier point at the failing job, step and first error.
+    permissions:
+      contents: read
+      actions: read
+      checks: read
+    needs: [prepare, ios-build, ios-publish]
+    if: ${{ !cancelled() }}
+    steps:
+      - name: Checkout trusted central controls
+        uses: actions/checkout@v7
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ github.sha }}
+          path: control
+          persist-credentials: false
+      - name: Mint source-scoped GitHub App token
+        id: app-token
+        if: ${{ needs.prepare.outputs.repo != '' }}
+        uses: actions/create-github-app-token@v3.3.0
+        with:
+          client-id: ${{ secrets.CI_APP_CLIENT_ID }}
+          private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
+          owner: ${{ needs.prepare.outputs.owner }}
+          repositories: ${{ needs.prepare.outputs.name }}
+      # TELEGRAM_CHAT_ID lives in the app's Infisical /Build; the bot token is a GitHub secret.
+      - name: Read /Build from Infisical staging
+        if: ${{ needs.prepare.outputs.project_slug != '' }}
+        uses: Infisical/secrets-action@v1.0.18
+        with:
+          method: universal
+          client-id: ${{ secrets.INFISICAL_CLIENT_ID }}
+          client-secret: ${{ secrets.INFISICAL_CLIENT_SECRET }}
+          project-slug: ${{ needs.prepare.outputs.project_slug }}
+          env-slug: staging
+          domain: ${{ secrets.INFISICAL_DOMAIN }}
+          secret-path: /Build
+          export-type: env
+      - name: Update TestFlight PR status
+        if: ${{ needs.prepare.outputs.repo != '' }}
+        uses: ./control/actions/pr-status-comment
         with:
           token: ${{ steps.app-token.outputs.token }}
-          repository: ${{ github.event.client_payload.repo }}
-          issue-number: ${{ github.event.client_payload.pr }}
-          comment-id: ${{ needs.build.outputs.comment_id }}
-          edit-mode: replace
-          body: |
-            <!-- central-ios-testflight -->
-            ✅ Uploaded to TestFlight — **${{ needs.build.outputs.app_name }}**,
-            version `${{ needs.build.outputs.version }}`, build `${{ needs.build.outputs.build_number }}`.
-            ${{ needs.build.outputs.version_verified != 'true' && '⚠️ Marketing version was **not verified** against App Store Connect — the lookup failed and the project version was used as-is.' || '' }}
-
-            Find it in TestFlight under version ${{ needs.build.outputs.version }} → build ${{ needs.build.outputs.build_number }}.
-            Processing takes a few minutes after this comment appears.
-
-            Workflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-
-      # The heredoc below is unquoted so shell variables expand; it must therefore
-      # contain no ${{ }} interpolation of payload- or build-derived text, or a
-      # branch named `feat/x$(id)` would execute in the job that holds the App
-      # Store signing key. Every such value arrives via env: and is HTML-escaped.
-      - name: Notify Telegram (success)
-        continue-on-error: true
-        env:
-          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          PR_TITLE: ${{ github.event.client_payload.title }}
-          BRANCH: ${{ github.event.client_payload.branch }}
-          APP_NAME: ${{ needs.build.outputs.app_name }}
-          APP_VERSION: ${{ needs.build.outputs.version }}
-          VERSION_VERIFIED: ${{ needs.build.outputs.version_verified }}
-          BUILD_NUMBER: ${{ needs.build.outputs.build_number }}
-        run: |
-          # & first: escaping < and > introduces ampersands we must not re-escape.
-          html_escape() {
-            local s="${1//&/&amp;}"
-            s="${s//</&lt;}"
-            printf '%s' "${s//>/&gt;}"
-          }
-          ESCAPED_TITLE="$(html_escape "$PR_TITLE")"
-          ESCAPED_BRANCH="$(html_escape "$BRANCH")"
-          ESCAPED_APP="$(html_escape "$APP_NAME")"
-          ESCAPED_VERSION="$(html_escape "$APP_VERSION")"
-          ESCAPED_BUILD="$(html_escape "$BUILD_NUMBER")"
-          ESCAPED_VERIFIED="$(html_escape "$VERSION_VERIFIED")"
-          # Anything other than true means the version was never confirmed
-          # against App Store Connect and the train may already be closed. The
-          # warning itself is a fixed literal — the flag only decides whether the
-          # line appears, so no untrusted text reaches the heredoc.
-          VERIFIED_NOTE=""
-          if [ "$ESCAPED_VERIFIED" != "true" ]; then
-            VERIFIED_NOTE=$'\n<b>⚠️ Version NOT verified against App Store Connect</b>'
-          fi
-          curl -sf -X POST "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage" \
-            -d chat_id="${TELEGRAM_CHAT_ID}" \
-            -d parse_mode=html \
-            -d disable_web_page_preview=true \
-            -d text="$(cat <<MSG
-          <b>iOS build uploaded to TestFlight</b>
-
-          <b>App:</b> ${ESCAPED_APP}
-          <b>Version:</b> ${ESCAPED_VERSION}${VERIFIED_NOTE}
-          <b>Build:</b> ${ESCAPED_BUILD}
-          <b>Branch:</b> ${ESCAPED_BRANCH}
-          <b>PR:</b> ${ESCAPED_TITLE:-n/a}
-          MSG
-          )"
-
-      # Same rule as the success notifier: nothing payload- or build-derived may be
-      # interpolated straight into this unquoted heredoc.
-      - name: Notify Telegram (FAILURE)
-        if: failure()
-        continue-on-error: true
-        env:
-          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          PR_TITLE: ${{ github.event.client_payload.title }}
-          BRANCH: ${{ github.event.client_payload.branch }}
-          PAYLOAD_REPO: ${{ github.event.client_payload.repo }}
-          APP_NAME: ${{ needs.build.outputs.app_name }}
-        run: |
-          # & first: escaping < and > introduces ampersands we must not re-escape.
-          html_escape() {
-            local s="${1//&/&amp;}"
-            s="${s//</&lt;}"
-            printf '%s' "${s//>/&gt;}"
-          }
-          ESCAPED_TITLE="$(html_escape "$PR_TITLE")"
-          ESCAPED_BRANCH="$(html_escape "$BRANCH")"
-          ESCAPED_REPO="$(html_escape "$PAYLOAD_REPO")"
-          ESCAPED_APP="$(html_escape "$APP_NAME")"
-          curl -sf -X POST "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage" \
-            -d chat_id="${TELEGRAM_CHAT_ID}" \
-            -d parse_mode=html \
-            -d disable_web_page_preview=true \
-            -d text="$(cat <<MSG
-          <b>TestFlight upload failed</b>
-
-          <b>App:</b> ${ESCAPED_APP}
-          <b>Repo:</b> <code>${ESCAPED_REPO}</code>
-          <b>Branch:</b> ${ESCAPED_BRANCH}
-          <b>PR:</b> ${ESCAPED_TITLE:-n/a}
-
-          <a href="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}">View logs</a>
-          MSG
-          )"
-
-      - name: Comment on PR if the upload failed
-        if: ${{ failure() && github.event.client_payload.pr && github.event.client_payload.pr != '' && github.event.client_payload.pr != 'null' && steps.app-token.outcome == 'success' }}
-        uses: peter-evans/create-or-update-comment@v5
+          app-slug: ${{ steps.app-token.outputs.app-slug }}
+          repository: ${{ needs.prepare.outputs.repo }}
+          pr: ${{ needs.prepare.outputs.pr }}
+          marker: <!-- central-ios-testflight -->
+          mode: upsert
+          body: |-
+            ${{ needs['ios-publish'].result == 'success' && format('TestFlight {0} (version {1}) uploaded; Apple processing is pending.', needs.prepare.outputs.build_number, needs['ios-build'].outputs.version) || format('TestFlight {0} failed. Build: {1}; publish: {2}.', needs.prepare.outputs.build_number, needs['ios-build'].result, needs['ios-publish'].result) }}
+            ${{ needs['ios-build'].outputs.version_verified != 'true' && needs['ios-publish'].result == 'success' && 'Marketing version was not verified against App Store Connect (manual version or lookup failed).' || '' }}
+            [Workflow run](${{ format('{0}/{1}/actions/runs/{2}', github.server_url, github.repository, github.run_id) }})
+      - name: Notify Telegram of TestFlight result
+        if: ${{ env.TELEGRAM_CHAT_ID != '' }}
+        uses: ./control/actions/telegram-notify
         with:
-          token: ${{ steps.app-token.outputs.token }}
-          repository: ${{ github.event.client_payload.repo }}
-          issue-number: ${{ github.event.client_payload.pr }}
-          comment-id: ${{ needs.build.outputs.comment_id }}
-          edit-mode: replace
-          body: |
-            <!-- central-ios-testflight -->
-            ❌ **TestFlight upload** failed for build `${{ needs.build.outputs.build_number }}`.
-            ${{ needs.build.outputs.version_verified != 'true' && '⚠️ The marketing version was **not verified** against App Store Connect — it may target a closed TestFlight train, which is the likely cause of this rejection (`ITMS-90186`).' || '' }}
-            [Check logs](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
+          token: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          chat-id: ${{ env.TELEGRAM_CHAT_ID }}
+          kind: testflight
+          status: ${{ needs['ios-publish'].result == 'success' && 'success' || 'failure' }}
+          repo: ${{ needs.prepare.outputs.repo }}
+          branch: ${{ needs.prepare.outputs.branch }}
+          # Version first: the D1 series group needs to see which version went out (KMP's title has none).
+          title: "${{ needs['ios-build'].outputs.version != '' && format('Version {0}{1} · {2}', needs['ios-build'].outputs.version, needs.prepare.outputs.force_update == 'true' && ' · FORCE UPDATE' || '', needs.prepare.outputs.title) || needs.prepare.outputs.title }}"
+          pr-url: ${{ needs.prepare.outputs.pr_url }}
+          build-number: ${{ needs.prepare.outputs.build_number }}
+          results: "${{ format('Prepare: {0} · Build: {1} · Publish: {2}', needs.prepare.result, needs['ios-build'].result, needs['ios-publish'].result) }}"
+          run-url: ${{ format('{0}/{1}/actions/runs/{2}', github.server_url, github.repository, github.run_id) }}
+          github-token: ${{ github.token }}
