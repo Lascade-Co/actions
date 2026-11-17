@@ -274,6 +274,15 @@ jobs:
           APP_ID: ${{ steps.firebase.outputs.app_id }}
           MODULE: ${{ steps.manifest.outputs.module }}
         if: ${{ steps.firebase.outputs.app_id != '' }}
+      # Fresh: the job-start App token expires after one hour, and a cold build can outlast it.
+      - name: Mint source-scoped GitHub App token for the upload
+        uses: actions/create-github-app-token@v3.3.0
+        with:
+          client-id: ${{ secrets.CI_APP_CLIENT_ID }}
+          private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
+          owner: ${{ needs.prepare.outputs.owner }}
+          repositories: ${{ needs.prepare.outputs.name }}
+        id: upload-token
       - name: Upload the AAB, APK and mapping to the draft release
         run: |-
           python3 "$GITHUB_WORKSPACE/control/scripts/amper/release.py" upload --repo "$SOURCE_REPO" --release-id "$RELEASE_ID" \
@@ -281,7 +290,7 @@ jobs:
         id: upload
         env:
           RELEASE_ID: ${{ needs.prepare.outputs.release_id }}
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          GH_TOKEN: ${{ steps.upload-token.outputs.token }}
           SOURCE_REPO: ${{ needs.prepare.outputs.repo }}
           RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
       - name: Delete binaries, signing inputs and Firebase credentials from the runner
@@ -541,6 +550,15 @@ jobs:
           plists=("$RUNNER_TEMP"/app.xcarchive/Products/Applications/*.app/GoogleService-Info.plist)
           test "${#plists[@]}" -eq 1
           "$upload" -gsp "${plists[0]}" -p ios "$RUNNER_TEMP/app.xcarchive/dSYMs"
+      # Fresh: the job-start App token expires after one hour, and a cold build can outlast it.
+      - name: Mint source-scoped GitHub App token for the upload
+        uses: actions/create-github-app-token@v3.3.0
+        with:
+          client-id: ${{ secrets.CI_APP_CLIENT_ID }}
+          private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
+          owner: ${{ needs.prepare.outputs.owner }}
+          repositories: ${{ needs.prepare.outputs.name }}
+        id: upload-token
       - name: Upload the IPA and dSYMs to the draft release
         run: |-
           python3 "$GITHUB_WORKSPACE/control/scripts/amper/release.py" upload --repo "$SOURCE_REPO" --release-id "$RELEASE_ID" \
@@ -548,7 +566,7 @@ jobs:
         id: upload
         env:
           RELEASE_ID: ${{ needs.prepare.outputs.release_id }}
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          GH_TOKEN: ${{ steps.upload-token.outputs.token }}
           SOURCE_REPO: ${{ needs.prepare.outputs.repo }}
           RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
       - name: Delete the IPA, archive and build products from the runner

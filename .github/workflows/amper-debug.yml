@@ -239,12 +239,21 @@ jobs:
           NAME: ${{ needs.prepare.outputs.name }}
           VERSION: ${{ needs.prepare.outputs.version }}
           BUILD_NUMBER: ${{ needs.prepare.outputs.build_number }}
+      # Fresh: the job-start App token expires after one hour, and a cold build can outlast it.
+      - name: Mint source-scoped GitHub App token for the upload
+        uses: actions/create-github-app-token@v3.3.0
+        with:
+          client-id: ${{ secrets.CI_APP_CLIENT_ID }}
+          private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
+          owner: ${{ needs.prepare.outputs.owner }}
+          repositories: ${{ needs.prepare.outputs.name }}
+        id: upload-token
       # Straight to the private source repo: the APK embeds the App Check debug token and never becomes an artifact here.
       - name: Publish debug prerelease in source repository
         uses: softprops/action-gh-release@v3
         with:
           repository: ${{ needs.prepare.outputs.repo }}
-          token: ${{ steps.app-token.outputs.token }}
+          token: ${{ steps.upload-token.outputs.token }}
           tag_name: ${{ needs.prepare.outputs.tag }}
           target_commitish: ${{ needs.prepare.outputs.sha }}
           name: ${{ needs.prepare.outputs.title }}

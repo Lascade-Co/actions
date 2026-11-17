@@ -124,6 +124,36 @@ class WorkflowShape(unittest.TestCase):
         self.assertIn('--ignore-scripts', self.jobs['android']['steps'][install]['run'])
 
 
+
+BUILD_COMMAND = re.compile(r'(^|\s)(\./kotlin|xcodebuild) ', re.M)  # invocations, not xcodebuild.log
+TOKEN_USE = re.compile(r'steps\.([\w-]+)\.outputs\.token')
+
+
+def assert_fresh_tokens_after_build(case, workflow, jobs):
+    """Every App token a step uses after the job's last build step was minted after that build: the token lasts
+    one hour, and the iOS jobs run up to 90 minutes."""
+    loaded = yaml.safe_load((HERE.parents[1] / '.github/workflows' / workflow).read_text())['jobs']
+    for name in jobs:
+        steps = loaded[name]['steps']
+        last_build = max(i for i, s in enumerate(steps) if BUILD_COMMAND.search(str(s.get('run', ''))))
+        minted = {s['id']: i for i, s in enumerate(steps)
+                  if str(s.get('uses', '')).startswith('actions/create-github-app-token')}
+        uses = [(i, token) for i, s in enumerate(steps) if i > last_build for token in TOKEN_USE.findall(yaml.safe_dump(s))]
+        case.assertTrue(uses, f'{workflow} {name}: no source-repo step after the build')
+        for i, token in uses:
+            with case.subTest(workflow=workflow, job=name, step=steps[i].get('name')):
+                case.assertIn(token, minted)
+                case.assertGreater(minted[token], last_build)
+                case.assertLess(minted[token], i)
+
+
+class FreshTokens(unittest.TestCase):
+    def test_release_uploads_use_tokens_minted_after_the_build(self):
+        assert_fresh_tokens_after_build(self, 'amper-release.yml', ('android', 'ios-build'))
+
+    def test_debug_uploads_use_tokens_minted_after_the_build(self):
+        assert_fresh_tokens_after_build(self, 'amper-debug.yml', ('android', 'ios-build'))
+
 class DebugWorkflowShape(unittest.TestCase):
     """amper-debug runs PR code (the source's kotlin wrapper, Xcode's Build Kotlin phase): it may not write GHCR,
     and the org-wide App Store Connect key stays out of every job that runs it."""
