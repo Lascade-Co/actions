@@ -123,4 +123,7 @@ def test_workflows_take_identifiers_from_registry_not_literals():
 def test_registry_file_is_valid_and_complete():
     data = json.loads((ROOT / 'config/apps.json').read_text())
     for entry in data.values():
-        assert set(entry) == {'bundle_id', 'package_name', 'metadata_repo', 'rollout'}
+        assert set(entry) == {'bundle_id', 'package_name', 'metadata_repo', 'rollout', 'project_slug'}
+    # the release workflows read prod signing secrets from this Infisical project, so the payload must match it
+    assert data['Lascade-Co/TreasureHunch']['project_slug'] == 'treasurehunch'
+    assert data['Lascade-Co/travel-animator']['project_slug'] == 'travelanimator'

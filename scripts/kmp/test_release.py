@@ -37,13 +37,17 @@ class Dispatch(unittest.TestCase):
         resolved=release.resolve(self.payload, 'Lascade-Co/actions',
                                  lambda path: calls.append(path) or {'sha':'a'*40,'commit':{'message':'Merge reviewed release'}})
         self.assertEqual(resolved['skip'],'false')
-        self.assertEqual(calls,['repos/Lascade-Co/travel-animator-shared/commits/main'])
+        self.assertEqual(calls,['repos/Lascade-Co/travel-animator/commits/main'])
 
     def test_invalid_scope_does_not_use_credentials(self):
         for change in ({'repo':'attacker/repo'}, {'repo':'Lascade-Co/other'}, {'branch':'dev'},
                        {'sha':'a'*39}, {'project_slug':'other'}):
             with self.subTest(change=change),self.assertRaises(ValueError):
                 release.resolve(dict(self.payload,**change),'Lascade-Co/actions',lambda path:self.fail('API called'))
+
+    def test_repo_check_goes_through_the_app_registry(self):
+        with patch.object(release.apps,'load_app',side_effect=SystemExit('not registered')),self.assertRaisesRegex(ValueError,'registered'):
+            release.validate(self.payload,'Lascade-Co/actions')
 
     def test_stale_dispatch_fails_before_source_runs(self):
         with self.assertRaisesRegex(ValueError,'stale'):

@@ -10,6 +10,7 @@ import subprocess
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import apps
 import control
 
 BOT_SUBJECT = re.compile(r'^chore\(release\): v\d+\.\d+\.\d+ \([1-9]\d*\) \[skip ci\]$')
@@ -19,6 +20,11 @@ SOURCE_REPO = 'Lascade-Co/travel-animator'
 def validate(payload, central_repo):
     if central_repo.lower() != 'lascade-co/actions':
         raise ValueError('Unexpected orchestration repository')
+    try:
+        apps.load_app(payload.get('repo', ''))
+    except SystemExit as error:
+        raise ValueError(str(error)) from None
+    # Only travel-animator has the source-owned scripts/ci release scripts this workflow runs.
     if payload.get('repo', '').lower() != SOURCE_REPO.lower():
         raise ValueError('Only the approved KMP source repository may release')
     if payload.get('branch') != 'main' or payload.get('project_slug') != 'travelanimator':

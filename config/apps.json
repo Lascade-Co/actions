@@ -3,12 +3,14 @@
     "bundle_id": "com.travelanimator.routemap",
     "package_name": "com.travelanimator.routemap",
     "metadata_repo": "Lascade-Co/travel-animator",
-    "rollout": {"country": "BD", "fraction": 0.99}
+    "rollout": {"country": "BD", "fraction": 0.99},
+    "project_slug": "travelanimator"
   },
   "Lascade-Co/TreasureHunch": {
     "bundle_id": "com.lascade.hunch",
     "package_name": "com.lascade.hunch",
     "metadata_repo": null,
-    "rollout": {"country": "IN", "fraction": 0.2}
+    "rollout": {"country": "IN", "fraction": 0.2},
+    "project_slug": "treasurehunch"
   }
 }

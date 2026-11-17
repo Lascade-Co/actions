@@ -2,8 +2,8 @@
 
 The source `release.yml` dispatches `kmp-release` from pushes to `main` and manual runs.
 The trusted central `kmp-build-release.yml` accepts only
-`Lascade-Co/travel-animator-shared`, branch `main`, its immutable current SHA and project
-`travelanimator`. It validates before minting source-scoped GitHub App credentials.
+`Lascade-Co/travel-animator` (which must also be registered in `config/apps.json`, checked through
+`scripts/kmp/apps.py`), branch `main`, its immutable current SHA and project `travelanimator`. It validates before minting source-scoped GitHub App credentials.
 The entire release is serial (`kmp-release`, cancellation disabled). Stale requests fail;
 the exact release bump subject from the release bot skips the next run.
 
@@ -159,7 +159,7 @@ upload, App Store submission, Play edit, annotation), concludes successfully and
 
 ```text
 ⏭️ App Store skipped            (Play: "Play Store skipped")
-Lascade-Co/travel-animator-shared
+Lascade-Co/travel-animator
 TravelAnimator · v5.0.15
 Reason: no-ios on #57           (Play: no-android; without pr_number: "not selected for this release.")
 📦 View release
@@ -183,7 +183,7 @@ version there. A string such as `"false"` is rejected.
 ```sh
 gh api repos/Lascade-Co/actions/dispatches --method POST --input - <<'JSON'
 {"event_type": "publish-appstore",
- "client_payload": {"repo": "Lascade-Co/travel-animator-shared",
+ "client_payload": {"repo": "Lascade-Co/travel-animator",
                     "release_id": 123456789,
                     "package_name": "com.travelanimator.routemap",
                     "app_name": "TravelAnimator",
@@ -193,7 +193,7 @@ JSON
 ```
 
 Replace `release_id` with the published GitHub release's numeric ID
-(`gh api repos/Lascade-Co/travel-animator-shared/releases/tags/vX.Y.Z --jq .id`). Omit `submit` (or
+(`gh api repos/Lascade-Co/travel-animator/releases/tags/vX.Y.Z --jq .id`). Omit `submit` (or
 set `true`) to submit for review as `publish-kmp` does. Optional `ios_uploaded: true` skips the
 upload check. Omit `stores` (or include `"ios"`): a `stores` array without `"ios"` makes this retrigger a
 reported skip. The token needs Contents write access on `Lascade-Co/actions`. The dispatch starts a
