@@ -18,6 +18,7 @@ import tempfile
 
 MANIFEST = '.ci/amper.json'
 APPATTEST_KEY = 'com.apple.developer.devicecheck.appattest-environment'
+APS_KEY = 'aps-environment'
 VERSION_RE = re.compile(r'^[0-9A-Za-z][0-9A-Za-z.+-]{0,63}$')
 TOKEN_LINE = re.compile(r'^(\s*const val APPCHECK_DEBUG_TOKEN\s*=\s*)".*"\s*$', re.M)
 
@@ -158,13 +159,19 @@ def cmd_set_variant(a):
     if release:
         debug_plist, release_plist = (src / m['ios_plist'][k] for k in ('debug', 'release'))
         debug_plist.write_bytes(release_plist.read_bytes())
-        ent = src / m['ios_entitlements']
+    # Both variants ship through TestFlight/App Store with an Apple Distribution profile, whose
+    # aps-environment is production; release also attests against the production App Attest service.
+    ent = src / m['ios_entitlements']
+    if release or a.team:
         if ent.is_file():
             data = plistlib.loads(ent.read_bytes())
-            data[APPATTEST_KEY] = 'production'
+            if release:
+                data[APPATTEST_KEY] = 'production'
+            if a.team and APS_KEY in data:
+                data[APS_KEY] = 'production'
             ent.write_bytes(plistlib.dumps(data))
         else:
-            print(f'warning: {ent} not found; skipping App Attest entitlement', file=sys.stderr)
+            print(f'warning: {ent} not found; skipping entitlements', file=sys.stderr)
 
     token = '' if release else os.environ.get('APPCHECK_DEBUG_TOKEN', '')
     if not release and not token:

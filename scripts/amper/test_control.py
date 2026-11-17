@@ -130,6 +130,37 @@ class SetVariantTests(Base):
         self.assertEqual(pbx.count('PROVISIONING_PROFILE_SPECIFIER = "Hunch Staging";'), 2)
         self.assertIn('APPCHECK_DEBUG_TOKEN = "tok-123"', self.read(KT))
 
+    def _with_aps(self):
+        import plistlib
+        path = self.src / ENT
+        data = plistlib.loads(path.read_bytes())
+        data['aps-environment'] = 'development'
+        path.write_bytes(plistlib.dumps(data))
+
+    def test_signed_debug_uses_production_push_but_keeps_app_attest(self):
+        self._with_aps()
+        with patch.dict(os.environ, {'APPCHECK_DEBUG_TOKEN': 'tok-123'}):
+            run('set-variant', '--source', self.src, '--variant', 'debug', '--team', 'ABCDE12345', '--profile', 'Hunch Staging')
+        import plistlib
+        data = plistlib.loads((self.src / ENT).read_bytes())
+        self.assertEqual(data['aps-environment'], 'production')
+        self.assertEqual(data['com.apple.developer.devicecheck.appattest-environment'], 'development')
+
+    def test_signed_release_uses_production_push_and_app_attest(self):
+        self._with_aps()
+        run('set-variant', '--source', self.src, '--variant', 'release', '--team', 'ABCDE12345', '--profile', 'Hunch AppStore')
+        import plistlib
+        data = plistlib.loads((self.src / ENT).read_bytes())
+        self.assertEqual(data['aps-environment'], 'production')
+        self.assertEqual(data['com.apple.developer.devicecheck.appattest-environment'], 'production')
+
+    def test_unsigned_debug_leaves_entitlements_alone(self):
+        self._with_aps()
+        before = (self.src / ENT).read_bytes()
+        with patch.dict(os.environ, {'APPCHECK_DEBUG_TOKEN': 'tok-123'}):
+            run('set-variant', '--source', self.src, '--variant', 'debug')
+        self.assertEqual((self.src / ENT).read_bytes(), before)
+
     def test_debug_requires_token(self):
         with patch.dict(os.environ, {}, clear=False):
             os.environ.pop('APPCHECK_DEBUG_TOKEN', None)
