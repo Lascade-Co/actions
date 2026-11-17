@@ -1,0 +1,87 @@
+# Copy into the Kotlin Toolchain (Amper) app repository as .github/workflows/publish-kmp.yml, only after the central
+# workflows are live. A published vX.Y.Z release (amper-release publishes it) dispatches publish-kmp to the central
+# Play Store and App Store publishers, which accept only repos registered in config/apps.json. Replace:
+#   YOUR_PACKAGE_NAME   Android package / iOS bundle ID; must equal the registry's package_name (e.g. com.lascade.hunch)
+#   YOUR_APP_NAME       store-facing app name (e.g. TreasureHunch)
+#   YOUR_PLAY_CONSOLE_PRODUCTION_URL  the app's Play Console production track URL
+#   YOUR_POSTHOG_PROJECT_ID  numeric PostHog project for release annotations, or remove the field
+# Label the merged PR no-android or no-ios to skip a store. See docs/amper-ci.md.
+name: Publish KMP release to the selected stores
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Published production release tag (vX.Y.Z)
+        required: true
+        type: string
+      android:
+        description: Publish to Google Play
+        type: boolean
+        default: true
+      ios:
+        description: Publish to the App Store
+        type: boolean
+        default: true
+permissions:
+  contents: read
+  pull-requests: read
+concurrency:
+  group: publish-kmp-trigger-${{ github.repository }}-${{ github.event.release.id || inputs.tag }}
+  cancel-in-progress: false
+jobs:
+  dispatch:
+    if: >-
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
+      (github.event_name == 'release' && github.event.release.prerelease == false && github.event.release.draft == false)
+    runs-on: ubuntu-latest
+    steps:
+      # No source checkout or private inputs in this trigger. Stores: a release publishes to both unless
+      # the merged PR into main carries no-android / no-ios; a manual run publishes the ticked stores.
+      - name: Select stores from PR labels or manual inputs
+        id: select
+        uses: actions/github-script@v8
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+          PUBLISH_ANDROID: ${{ inputs.android }}
+          PUBLISH_IOS: ${{ inputs.ios }}
+        with:
+          script: |
+            const {owner, repo} = context.repo;
+            const manual = context.eventName === 'workflow_dispatch';
+            const tag = manual ? (process.env.RELEASE_TAG || '').trim() : context.payload.release.tag_name;
+            if (!/^v\d+\.\d+\.\d+$/.test(tag)) throw new Error(`Release tag must be vX.Y.Z, got "${tag}"`);
+            const release = manual ? (await github.rest.repos.getReleaseByTag({owner, repo, tag})).data : context.payload.release;
+            if (release.draft || release.prerelease) throw new Error(`${tag} is not a published production release`);
+            let stores, prNumber = null;
+            if (manual) {
+              stores = [['android', process.env.PUBLISH_ANDROID], ['ios', process.env.PUBLISH_IOS]]
+                .filter(([, on]) => on === 'true').map(([store]) => store);
+            } else {
+              // The tag names the release bot's bump commit; its parent is the merged source commit.
+              const {data: tagged} = await github.rest.repos.getCommit({owner, repo, ref: tag});
+              const bump = /^chore\(release\): v\d+\.\d+\.\d+ \(\d+\) \[skip ci\]$/.test(tagged.commit.message.split('\n', 1)[0]);
+              if (bump && tagged.parents.length !== 1) throw new Error(`Release bump ${tagged.sha} must have exactly one parent`);
+              const source = bump ? tagged.parents[0].sha : tagged.sha;
+              const {data: pulls} = await github.rest.repos.listPullRequestsAssociatedWithCommit({owner, repo, commit_sha: source});
+              const merged = pulls.filter(pull => pull.merged_at && pull.base.ref === 'main');
+              const labels = new Set(merged.flatMap(pull => pull.labels.map(label => label.name)));
+              stores = ['android', 'ios'].filter(store => !labels.has(`no-${store}`));
+              if (merged.length) prNumber = merged[0].number;
+              core.info(`Source ${source}; merged PRs: ${merged.map(pull => '#' + pull.number).join(', ') || 'none'}`);
+            }
+            core.info(`Stores for ${tag}: ${stores.join(', ') || 'none (each publisher reports skipped)'}`);
+            const payload = {repo: `${owner}/${repo}`, release_id: release.id,
+              package_name: 'YOUR_PACKAGE_NAME', app_name: 'YOUR_APP_NAME',
+              play_console_production_url: 'YOUR_PLAY_CONSOLE_PRODUCTION_URL',
+              release_notes_locale: 'en-US', posthog_project_id: 'YOUR_POSTHOG_PROJECT_ID', stores};
+            if (prNumber !== null) payload.pr_number = prNumber;
+            core.setOutput('payload', JSON.stringify(payload));
+      - name: Dispatch Play Store and App Store publishing
+        uses: peter-evans/repository-dispatch@v4.0.1
+        with:
+          token: ${{ secrets.CENTRAL_DISPATCH_TOKEN }}
+          repository: Lascade-Co/actions
+          event-type: publish-kmp
+          client-payload: ${{ steps.select.outputs.payload }}
