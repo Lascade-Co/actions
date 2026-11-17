@@ -76,7 +76,22 @@ def test_cli_writes_registry_outputs(tmp_path):
     result, out = run_cli('--repo', 'Lascade-Co/TreasureHunch', '--package-name', 'com.lascade.hunch', tmp_path=tmp_path)
     assert result.returncode == 0, result.stderr
     assert out.splitlines() == ['bundle_id=com.lascade.hunch', 'package_name=com.lascade.hunch', 'metadata_repo=',
-                                'rollout_country=IN', 'rollout_fraction=0.2']
+                                'rollout_country=IN', 'rollout_fraction=0.2', 'native_symbols=false']
+
+
+def test_native_symbols_required_unless_the_registry_opts_out(tmp_path):
+    # Kotlin Toolchain apps build no native-debug-symbols.zip; travel-animator keeps the strict rule on publish-kmp too.
+    assert apps.outputs(apps.load_app(TA))['native_symbols'] == 'true'
+    assert apps.outputs(apps.load_app('Lascade-Co/TreasureHunch'))['native_symbols'] == 'false'
+    result, out = run_cli('--repo', 'Lascade-Co/other-app', '--allow-unregistered', tmp_path=tmp_path)
+    assert 'native_symbols=true' in out.splitlines()
+
+
+def test_play_publisher_keys_optional_symbols_on_the_registry():
+    playstore = (ROOT / '.github/workflows/publish-playstore.yml').read_text()
+    assert 'NATIVE_SYMBOLS: ${{ steps.app.outputs.native_symbols }}' in playstore
+    assert "os.environ['NATIVE_SYMBOLS'] == 'false'" in playstore
+    assert "EVENT_TYPE'] == 'publish-kmp' else set()" not in playstore
 
 
 def test_cli_rejects_payload_package_that_differs_from_registry(tmp_path):
@@ -123,7 +138,9 @@ def test_workflows_take_identifiers_from_registry_not_literals():
 def test_registry_file_is_valid_and_complete():
     data = json.loads((ROOT / 'config/apps.json').read_text())
     for entry in data.values():
-        assert set(entry) == {'bundle_id', 'package_name', 'metadata_repo', 'rollout', 'project_slug'}
+        assert {'bundle_id', 'package_name', 'metadata_repo', 'rollout', 'project_slug'} <= set(entry)
+        assert set(entry) <= {'bundle_id', 'package_name', 'metadata_repo', 'rollout', 'project_slug', 'native_symbols'}
+        assert isinstance(entry.get('native_symbols', True), bool)
     # the release workflows read prod signing secrets from this Infisical project, so the payload must match it
     assert data['Lascade-Co/TreasureHunch']['project_slug'] == 'treasurehunch'
     assert data['Lascade-Co/travel-animator']['project_slug'] == 'travelanimator'

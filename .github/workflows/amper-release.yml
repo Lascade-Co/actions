@@ -33,6 +33,7 @@ jobs:
       build_number: ${{ steps.version.outputs.build_number }}
       tag: ${{ steps.version.outputs.tag }}
       bump: ${{ steps.version.outputs.bump }}
+      release_id: ${{ steps.draft.outputs.release_id }}
       deps_key: ${{ steps.deps.outputs.key }}
     steps:
       - name: Checkout trusted central controls
@@ -69,7 +70,7 @@ jobs:
           persist-credentials: false
           fetch-depth: 0
         if: ${{ steps.source.outputs.skip != 'true' }}
-      # Same key as amper-debug: both workflows share the third-party dependency bundles.
+      # Same content hash as amper-debug, but the release jobs use release-only bundle names.
       - name: Compute dependency cache key
         run: echo "key=deps-$DEPS_HASH" >> "$GITHUB_OUTPUT"
         id: deps
@@ -104,8 +105,10 @@ jobs:
       - name: Validate nonempty English release notes without truncation
         run: python3 control/scripts/amper/release.py check-notes --notes source/releasenotes.txt
         if: ${{ steps.source.outputs.skip != 'true' }}
-      # Created once here, so the two build jobs cannot race into duplicate drafts. The tag is pushed later.
+      # Created once here, so the two build jobs cannot race into duplicate drafts; every later job addresses it by
+      # its numeric ID (a draft has no tag yet, so tag lookups cannot find it). The tag is pushed by the release job.
       - name: Create or reuse the draft release in the source repository
+        id: draft
         run: |-
           python3 control/scripts/amper/release.py draft --repo "$SOURCE_REPO" --tag "$RELEASE_TAG" --sha "$SOURCE_SHA" \
             --notes source/releasenotes.txt
@@ -133,6 +136,9 @@ jobs:
     needs:
       - prepare
     if: ${{ needs.prepare.outputs.skip != 'true' }}
+    # name:sha256 pairs of what this job uploaded; the release job verifies its downloads against them.
+    outputs:
+      checksums: ${{ steps.upload.outputs.checksums }}
     steps:
       - name: Checkout trusted central controls
         uses: actions/checkout@v7
@@ -157,6 +163,20 @@ jobs:
           token: ${{ steps.app-token.outputs.token }}
           path: source
           persist-credentials: false
+      # Validated inside jq (whole-string anchor), one line, before anything reaches $GITHUB_OUTPUT.
+      - name: Read the Android module from the source manifest
+        run: |-
+          jq -er '.android_module | if type == "string" and test("\\A[A-Za-z0-9_.-]+\\z") and . != ".." then "module=\(.)" else error("invalid android_module") end' \
+            .ci/amper.json >> "$GITHUB_OUTPUT"
+        id: manifest
+      - name: Read the release Firebase Android app ID
+        run: python3 "$GITHUB_WORKSPACE/control/scripts/amper/control.py" firebase-app-id --source "$GITHUB_WORKSPACE/source" >> "$GITHUB_OUTPUT"
+        id: firebase
+      # Before any secret is in the environment: npm runs third-party code (lifecycle scripts are off as well).
+      - name: Install the Firebase CLI for Crashlytics mapping files
+        run: npm install --global --ignore-scripts --no-fund --no-audit firebase-tools@15.34.2
+        working-directory: .
+        if: ${{ steps.firebase.outputs.app_id != '' }}
       - name: Read /Build from Infisical prod
         uses: Infisical/secrets-action@v1.0.18
         with:
@@ -170,12 +190,6 @@ jobs:
           export-type: env
       - name: Require yq for module.yaml edits
         run: yq --version
-      # Validated inside jq (whole-string anchor), one line, before anything reaches $GITHUB_OUTPUT.
-      - name: Read the Android module from the source manifest
-        run: |-
-          jq -er '.android_module | if type == "string" and test("\\A[A-Za-z0-9_.-]+\\z") and . != ".." then "module=\(.)" else error("invalid android_module") end' \
-            .ci/amper.json >> "$GITHUB_OUTPUT"
-        id: manifest
       - name: Apply release variant (IDs, no App Check debug token)
         run: python3 "$GITHUB_WORKSPACE/control/scripts/amper/control.py" set-variant --source "$GITHUB_WORKSPACE/source" --variant release
       - name: Write release version and build number
@@ -185,13 +199,6 @@ jobs:
           BUILD_NUMBER: ${{ needs.prepare.outputs.build_number }}
       - name: Install upload keystore
         run: python3 "$GITHUB_WORKSPACE/control/scripts/amper/control.py" android-inputs --source "$GITHUB_WORKSPACE/source"
-      - name: Read the release Firebase Android app ID
-        run: python3 "$GITHUB_WORKSPACE/control/scripts/amper/control.py" firebase-app-id --source "$GITHUB_WORKSPACE/source" >> "$GITHUB_OUTPUT"
-        id: firebase
-      - name: Install the Firebase CLI for Crashlytics mapping files
-        run: npm install --global --no-fund --no-audit firebase-tools@15.34.2
-        working-directory: .
-        if: ${{ steps.firebase.outputs.app_id != '' }}
       # The Crashlytics Gradle plugin's per-build ID, done by hand: the toolchain packages <module>/res/values/*.xml, and
       # the AAB/APK check below proves it. The release build drops the source's RequireBuildId=false override (debug keeps it).
       - name: Generate the Crashlytics mapping file ID into the release resources
@@ -205,13 +212,15 @@ jobs:
           MODULE: ${{ steps.manifest.outputs.module }}
         if: ${{ steps.firebase.outputs.app_id != '' }}
       - name: Warn that Crashlytics mapping upload is off
-        run: echo "::warning::No release Firebase Android app ID (manifest firebase_android_app_id or google-services.json); mapping.txt is not uploaded to Crashlytics."
+        run: echo '::warning::The manifest opts out with crashlytics_mapping false; mapping.txt is not uploaded to Crashlytics.'
         if: ${{ steps.firebase.outputs.app_id == '' }}
+      # Release-only bundle names (and their own latest): never restore bundles published by PR (amper-debug) builds.
+      # Only this workflow, which runs on main, publishes them; a miss cold-starts.
       - name: Restore Kotlin toolchain OCI bundle
         uses: ./control/actions/gh-bundle-cache
         with:
           mode: restore
-          name: ${{ format('{0}-{1}-{2}-{3}', needs.prepare.outputs.name, runner.os, runner.arch, 'kotlin') }}
+          name: ${{ format('{0}-{1}-{2}-{3}', needs.prepare.outputs.name, runner.os, runner.arch, 'kotlin-release') }}
           key: ${{ needs.prepare.outputs.deps_key }}
           fallback-key: latest
           paths: ~/.cache/JetBrains/Kotlin
@@ -230,8 +239,8 @@ jobs:
       - name: Locate, check and name the AAB, APK and R8 mapping
         run: |-
           control="$GITHUB_WORKSPACE/control/scripts/amper/control.py"
-          find() { python3 "$control" find-artifact --source "$GITHUB_WORKSPACE/source" --kind "$1" | sed -n 's/^path=//p'; }
-          aab=$(find aab); apk=$(find apk); mapping=$(find mapping)
+          locate_artifact() { python3 "$control" find-artifact --source "$GITHUB_WORKSPACE/source" --kind "$1" | sed -n 's/^path=//p'; }
+          aab=$(locate_artifact aab); apk=$(locate_artifact apk); mapping=$(locate_artifact mapping)
           test -s "$aab"; test -s "$apk"; test -s "$mapping"
           case "$apk" in *unsigned*) echo "::error::The release APK is unsigned: $apk"; exit 1 ;; esac
           jarsigner -verify "$aab" | grep -q 'jar verified'
@@ -263,8 +272,12 @@ jobs:
           MODULE: ${{ steps.manifest.outputs.module }}
         if: ${{ steps.firebase.outputs.app_id != '' }}
       - name: Upload the AAB, APK and mapping to the draft release
-        run: python3 "$GITHUB_WORKSPACE/control/scripts/amper/release.py" upload --repo "$SOURCE_REPO" --tag "$RELEASE_TAG" "$RUNNER_TEMP"/android/*
+        run: |-
+          python3 "$GITHUB_WORKSPACE/control/scripts/amper/release.py" upload --repo "$SOURCE_REPO" --release-id "$RELEASE_ID" \
+            --tag "$RELEASE_TAG" "$RUNNER_TEMP"/android/*
+        id: upload
         env:
+          RELEASE_ID: ${{ needs.prepare.outputs.release_id }}
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           SOURCE_REPO: ${{ needs.prepare.outputs.repo }}
           RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
@@ -277,7 +290,7 @@ jobs:
         uses: ./control/actions/gh-bundle-cache
         with:
           mode: publish
-          name: ${{ format('{0}-{1}-{2}-{3}', needs.prepare.outputs.name, runner.os, runner.arch, 'kotlin') }}
+          name: ${{ format('{0}-{1}-{2}-{3}', needs.prepare.outputs.name, runner.os, runner.arch, 'kotlin-release') }}
           key: ${{ needs.prepare.outputs.deps_key }}
           fallback-key: latest
           paths: ~/.cache/JetBrains/Kotlin
@@ -301,6 +314,9 @@ jobs:
     needs:
       - prepare
     if: ${{ needs.prepare.outputs.skip != 'true' }}
+    # name:sha256 pairs of what this job uploaded; the release job verifies its downloads against them.
+    outputs:
+      checksums: ${{ steps.upload.outputs.checksums }}
     steps:
       - name: Checkout trusted central controls
         uses: actions/checkout@v7
@@ -386,11 +402,13 @@ jobs:
         uses: ./control/actions/apple-signing
         with:
           profiles: IOS_PROD_PROFILE_APP_BASE64
+      # Release-only bundle names (and their own latest): never restore bundles published by PR (amper-debug) builds.
+      # Only this workflow, which runs on main, publishes them; a miss cold-starts.
       - name: Restore Kotlin toolchain OCI bundle
         uses: ./control/actions/gh-bundle-cache
         with:
           mode: restore
-          name: ${{ format('{0}-{1}-{2}-{3}', needs.prepare.outputs.name, runner.os, runner.arch, 'kotlin') }}
+          name: ${{ format('{0}-{1}-{2}-{3}', needs.prepare.outputs.name, runner.os, runner.arch, 'kotlin-release') }}
           key: ${{ needs.prepare.outputs.deps_key }}
           fallback-key: latest
           paths: ~/Library/Caches/JetBrains/Kotlin
@@ -400,7 +418,7 @@ jobs:
         uses: ./control/actions/gh-bundle-cache
         with:
           mode: restore
-          name: ${{ format('{0}-{1}-{2}-{3}', needs.prepare.outputs.name, runner.os, runner.arch, 'konan') }}
+          name: ${{ format('{0}-{1}-{2}-{3}', needs.prepare.outputs.name, runner.os, runner.arch, 'konan-release') }}
           key: ${{ needs.prepare.outputs.deps_key }}
           fallback-key: latest
           paths: ~/.konan/dependencies
@@ -411,7 +429,7 @@ jobs:
         uses: ./control/actions/gh-bundle-cache
         with:
           mode: restore
-          name: ${{ format('{0}-{1}-{2}-{3}', needs.prepare.outputs.name, runner.os, runner.arch, 'swiftpm') }}
+          name: ${{ format('{0}-{1}-{2}-{3}', needs.prepare.outputs.name, runner.os, runner.arch, 'swiftpm-release') }}
           key: ${{ needs.prepare.outputs.deps_key }}
           fallback-key: latest
           paths: $RUNNER_TEMP/dd/SourcePackages
@@ -497,8 +515,12 @@ jobs:
           test "${#plists[@]}" -eq 1
           "$upload" -gsp "${plists[0]}" -p ios "$RUNNER_TEMP/app.xcarchive/dSYMs"
       - name: Upload the IPA and dSYMs to the draft release
-        run: python3 "$GITHUB_WORKSPACE/control/scripts/amper/release.py" upload --repo "$SOURCE_REPO" --tag "$RELEASE_TAG" "$RUNNER_TEMP"/ios/*
+        run: |-
+          python3 "$GITHUB_WORKSPACE/control/scripts/amper/release.py" upload --repo "$SOURCE_REPO" --release-id "$RELEASE_ID" \
+            --tag "$RELEASE_TAG" "$RUNNER_TEMP"/ios/*
+        id: upload
         env:
+          RELEASE_ID: ${{ needs.prepare.outputs.release_id }}
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           SOURCE_REPO: ${{ needs.prepare.outputs.repo }}
           RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
@@ -509,7 +531,7 @@ jobs:
         uses: ./control/actions/gh-bundle-cache
         with:
           mode: publish
-          name: ${{ format('{0}-{1}-{2}-{3}', needs.prepare.outputs.name, runner.os, runner.arch, 'kotlin') }}
+          name: ${{ format('{0}-{1}-{2}-{3}', needs.prepare.outputs.name, runner.os, runner.arch, 'kotlin-release') }}
           key: ${{ needs.prepare.outputs.deps_key }}
           fallback-key: latest
           paths: ~/Library/Caches/JetBrains/Kotlin
@@ -520,7 +542,7 @@ jobs:
         uses: ./control/actions/gh-bundle-cache
         with:
           mode: publish
-          name: ${{ format('{0}-{1}-{2}-{3}', needs.prepare.outputs.name, runner.os, runner.arch, 'konan') }}
+          name: ${{ format('{0}-{1}-{2}-{3}', needs.prepare.outputs.name, runner.os, runner.arch, 'konan-release') }}
           key: ${{ needs.prepare.outputs.deps_key }}
           fallback-key: latest
           paths: ~/.konan/dependencies
@@ -531,7 +553,7 @@ jobs:
         uses: ./control/actions/gh-bundle-cache
         with:
           mode: publish
-          name: ${{ format('{0}-{1}-{2}-{3}', needs.prepare.outputs.name, runner.os, runner.arch, 'swiftpm') }}
+          name: ${{ format('{0}-{1}-{2}-{3}', needs.prepare.outputs.name, runner.os, runner.arch, 'swiftpm-release') }}
           key: ${{ needs.prepare.outputs.deps_key }}
           fallback-key: latest
           paths: $RUNNER_TEMP/dd/SourcePackages
@@ -584,6 +606,7 @@ jobs:
       SOURCE_REPO: ${{ needs.prepare.outputs.repo }}
       SOURCE_SHA: ${{ needs.prepare.outputs.sha }}
       RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+      RELEASE_ID: ${{ needs.prepare.outputs.release_id }}
       VERSION: ${{ needs.prepare.outputs.version }}
       BUILD_NUMBER: ${{ needs.prepare.outputs.build_number }}
     steps:
@@ -617,12 +640,16 @@ jobs:
       # Only set-version runs here (never set-variant), so only the four version lines can reach main.
       - name: Write release version and build number
         run: python3 "$GITHUB_WORKSPACE/control/scripts/amper/control.py" set-version --source "$GITHUB_WORKSPACE/source" --version "$VERSION" --build "$BUILD_NUMBER"
+      # By release ID; exactly the files the build jobs uploaded, each matching the SHA-256 they reported.
       - name: Download the draft release assets and notes
         run: |-
-          gh release download "$RELEASE_TAG" --repo "$SOURCE_REPO" --dir "$RUNNER_TEMP/release-assets"
-          gh release view "$RELEASE_TAG" --repo "$SOURCE_REPO" --json body --jq .body > "$RUNNER_TEMP/releasenotes.txt"
+          python3 "$GITHUB_WORKSPACE/control/scripts/amper/release.py" download --repo "$SOURCE_REPO" --release-id "$RELEASE_ID" \
+            --tag "$RELEASE_TAG" --dest "$RUNNER_TEMP/release-assets" --expected "$ANDROID_SUMS $IOS_SUMS" \
+            --notes-out "$RUNNER_TEMP/releasenotes.txt"
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          ANDROID_SUMS: ${{ needs.android.outputs.checksums }}
+          IOS_SUMS: ${{ needs['ios-build'].outputs.checksums }}
       - name: Validate every asset and the notes before changing main or tags
         run: python3 "$GITHUB_WORKSPACE/control/scripts/amper/release.py" verify-assets --assets "$RUNNER_TEMP/release-assets" --notes "$RUNNER_TEMP/releasenotes.txt"
       # Written to a file, read and deleted by the next step only; the token is never printed.
@@ -653,8 +680,8 @@ jobs:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
       - name: Publish the draft release now that its tag exists
         run: |-
-          python3 "$GITHUB_WORKSPACE/control/scripts/amper/release.py" publish --repo "$SOURCE_REPO" --tag "$RELEASE_TAG" \
-            --assets "$RUNNER_TEMP/release-assets" --notes "$RUNNER_TEMP/releasenotes.txt"
+          python3 "$GITHUB_WORKSPACE/control/scripts/amper/release.py" publish --repo "$SOURCE_REPO" --release-id "$RELEASE_ID" \
+            --tag "$RELEASE_TAG" --assets "$RUNNER_TEMP/release-assets" --notes "$RUNNER_TEMP/releasenotes.txt"
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
       - name: Delete downloaded assets from the runner
@@ -698,6 +725,9 @@ jobs:
       - name: Read the Telegram chat ID
         run: python3 control/scripts/amper/release.py chat-id --secrets-file .amper-prod-build.env
         id: chat
+      - name: Delete the prod secrets file
+        run: rm -f .amper-prod-build.env
+        if: ${{ always() }}
       - name: Notify release result with failure pointers
         uses: ./control/actions/telegram-notify
         with:

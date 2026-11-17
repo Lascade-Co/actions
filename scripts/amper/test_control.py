@@ -266,8 +266,13 @@ class FirebaseAppIdTests(Base):
         with self.assertRaises(SystemExit):
             run('firebase-app-id', '--source', self.src)
 
-    def test_empty_when_nothing_names_the_release_app(self):
+    def test_fails_when_nothing_names_the_release_app(self):
         self.services([('1:1:android:aaaa', 'com.lascade.hunch.debug')])
+        with self.assertRaises(SystemExit):
+            run('firebase-app-id', '--source', self.src)
+
+    def test_explicit_opt_out_skips_the_mapping_upload(self):
+        self.set_manifest(crashlytics_mapping=False)
         self.assertEqual(run('firebase-app-id', '--source', self.src), {'app_id': ''})
 
 

@@ -26,7 +26,8 @@ SHA-pinned raw URL (`https://raw.githubusercontent.com/Lascade-Co/actions/<sha>/
 | `ios_entitlements` | Entitlements file. Release sets App Attest to `production`. If the file is missing, the step is skipped with a warning (the app repo adds it later). |
 | `build_secrets_kt` | Kotlin file with `const val APPCHECK_DEBUG_TOKEN = "..."`. |
 | `version_files` | `module.yaml` files that receive `versionName` / `versionCode`. The release commit may change only these and the pbxproj. |
-| `firebase_android_app_id` | Optional. Release Firebase Android app ID (`1:<number>:android:<hex>`) for the Crashlytics mapping upload. Without it, `amper-release` takes the `<android_module>/google-services.json` client whose package is `ids.release`; with neither, the mapping upload is skipped with a warning. |
+| `firebase_android_app_id` | Optional. Release Firebase Android app ID (`1:<number>:android:<hex>`) for the Crashlytics mapping upload. Without it, `amper-release` takes the `<android_module>/google-services.json` client whose package is `ids.release`; with neither, the release fails. |
+| `crashlytics_mapping` | Optional; only `false` has an effect: the release skips the Crashlytics mapping ID and upload (with a warning) instead of failing when no app ID is found. |
 
 The repo root also needs the Kotlin wrapper `kotlin` containing `kotlin_cli_version=X.Y.Z`;
 that line selects the toolchain version.
@@ -43,7 +44,7 @@ unless noted. Failures exit non-zero with an `error:` message.
 | `set-variant --variant debug\|release [--team T --profile NAME]` | Writes the IDs; for release also swaps the plist, sets the App Attest entitlement and blanks the token; for debug writes `$APPCHECK_DEBUG_TOKEN` into `BuildSecrets.kt`. With `--team` and `--profile` (both variants; debug is signed for TestFlight) it puts manual signing (`CODE_SIGN_STYLE`, `DEVELOPMENT_TEAM`, `PROVISIONING_PROFILE_SPECIFIER`, `CODE_SIGN_IDENTITY = "Apple Distribution"`) on the app target's build settings. Command-line signing overrides did not work in the spike. |
 | `android-inputs` | Decodes `KEYSTORE_BASE64` to `androidApp/ci.jks` and writes `keystore.properties` from `KEYSTORE_PASSWORD`, `KEY_ALIAS`, `KEY_PASSWORD`. |
 | `find-artifact --kind apk\|aab\|mapping` | Globs `build/tasks/*/*.apk` or `*.aab` (the top of each task dir; the toolchain keeps a second copy inside its generated `gradle-project`) or `build/tasks/**/outputs/mapping/release/mapping.txt`. For `apk`, a task dir whose name contains `release` (any case) wins over others. For `mapping`, when both the AAB (`kotlin package`) and the APK (`kotlin build -v release`) ran R8, the two files must be identical and the bundle task's copy wins. Fails unless exactly one match; prints `path`. |
-| `firebase-app-id` | Prints `app_id`: the manifest's `firebase_android_app_id`, else the release client in `google-services.json`, else empty. Fails on a malformed ID. |
+| `firebase-app-id` | Prints `app_id`: the manifest's `firebase_android_app_id`, else the release client in `google-services.json`. Fails on a malformed or missing ID; prints an empty `app_id` only when the manifest sets `"crashlytics_mapping": false`. |
 | `kn-gc-guard --log F --gc-dir D --max-full-gc 20` | Fails if the build log lacks `Picked up JAVA_TOOL_OPTIONS` or any `D/gc-*.log` has more than 20 `Pause Full` lines. |
 | `export-options --team T --profile NAME --bundle-id ID [--out FILE]` | Writes `ExportOptions.plist` (`app-store-connect`, manual signing). |
 
@@ -95,7 +96,10 @@ Copy these into the app repo once the central workflows are live:
   registry-aware Play Store and App Store publishers.
 
 The repo must also be in `config/apps.json` with its `project_slug`: `amper-release` refuses a payload whose
-`project_slug` differs from the registry, because it reads that project's prod signing keys.
+`project_slug` differs from the registry, because it reads that project's prod signing keys. Kotlin Toolchain apps
+also set `"native_symbols": false` there: they build no `native-debug-symbols.zip`, and only that registry flag lets
+`publish-playstore` publish without one (every other app, including travel-animator on `publish-kmp`, still needs
+exactly one).
 
 ## `amper-debug` workflow
 
@@ -140,13 +144,22 @@ when an app builds one; Kotlin Toolchain apps do not), which fires the source's 
 
 | Job | Does |
 | --- | --- |
-| `prepare` | `release.py validate` before any token (registered repo, registry `project_slug`, `main`, full SHA). `resolve` pins main, rejects stale dispatches and skips the bot's own bump head. `bump`: patch +1 and build +1, or minor/major when a PR merged into main for that commit carries the `minor` or `major` label. Release notes as in `kmp-release` (reuse an updated `releasenotes.txt`, else Claude over the diff since the last tag), `check-notes`, then `draft` creates (or reuses) the draft release `vX.Y.Z` targeting the SHA. The tag does not exist yet. |
-| `android` (ubuntu, 60 min) | Prod `/Build`, `set-variant release`, `set-version`, `android-inputs` (upload keystore). With a Firebase app ID: drops the source's `com.crashlytics.RequireBuildId` override file from `<module>/res/values/` and runs `firebase crashlytics:mappingfile:generateid` into `<module>/res/values/crashlytics_mapping_file_id.xml` (firebase-tools pinned). `./kotlin package -m <module> -f aab` and `./kotlin build -m <module> -v release`; rejects an unsigned APK and an AAB that `jarsigner` does not verify; `check-mapping-id` proves the ID is packaged in both; uploads `mapping.txt` with `crashlytics:mappingfile:upload` using `FIREBASE_SERVICE_ACCOUNT_BASE64` (written 0600, deleted in `always()`); uploads AAB, APK and mapping to the draft. |
-| `ios-build` (macos-26, Xcode 26.6, 90 min) | As `amper-debug`, with prod `/Build`, the `IOS_PROD_PROFILE_APP_BASE64` identity and `set-variant release --team --profile` (release IDs and plist, App Attest `production`, blank debug token). Exports the IPA, uploads dSYMs to Crashlytics, zips them, and uploads IPA and zip to the draft. No TestFlight upload: `publish-appstore` takes the IPA from the release. |
-| `release` | Runs only `set-version` on a fresh checkout, downloads the draft's assets and body, `verify-assets` (exactly one nonempty file per required suffix, at most one native-symbols zip, nothing else), then `check-token` with staging `APPCHECK_DEBUG_TOKEN` read from an Infisical file that the step deletes: every zip entry of the AAB, APK and IPA is searched for the token in UTF-8 and UTF-16 (Kotlin/Native string literals), and only counts are printed. `push-version` commits `chore(release): vX.Y.Z (N) [skip ci]` and the annotated tag in one atomic push leased on the pinned SHA; the diff may touch only `version_files` and the pbxproj, and only their four version lines. `publish` then publishes the draft (`--verify-tag`). |
+| `prepare` | `release.py validate` before any token (registered repo, registry `project_slug`, `main`, full SHA). `resolve` pins main, rejects stale dispatches and skips the bot's own bump head. `bump`: patch +1 and build +1, or minor/major when a PR merged into main for that commit carries the `minor` or `major` label. Release notes as in `kmp-release` (reuse an updated `releasenotes.txt`, else Claude over the diff since the last tag), `check-notes`, then `draft` creates (or reuses) the draft release `vX.Y.Z` targeting the SHA and outputs its numeric `release_id`. The tag does not exist yet, so every later job addresses the draft by ID (REST API; any lookup error other than 404 fails). |
+| `android` (ubuntu, 60 min) | Prod `/Build`, `set-variant release`, `set-version`, `android-inputs` (upload keystore). With a Firebase app ID: drops the source's `com.crashlytics.RequireBuildId` override file from `<module>/res/values/` and runs `firebase crashlytics:mappingfile:generateid` into `<module>/res/values/crashlytics_mapping_file_id.xml` (firebase-tools pinned). `./kotlin package -m <module> -f aab` and `./kotlin build -m <module> -v release`; rejects an unsigned APK and an AAB that `jarsigner` does not verify; `check-mapping-id` proves the ID is packaged in both; uploads `mapping.txt` with `crashlytics:mappingfile:upload` using `FIREBASE_SERVICE_ACCOUNT_BASE64` (written 0600, deleted in `always()`); uploads AAB, APK and mapping to the draft by ID (`uploads.github.com/.../releases/{id}/assets`, replacing same-named assets) and outputs their `name:sha256` pairs. The Firebase CLI (`firebase-tools@15.34.2`, `--ignore-scripts`) is installed before any prod secret is in the environment. |
+| `ios-build` (macos-26, Xcode 26.6, 90 min) | As `amper-debug`, with prod `/Build`, the `IOS_PROD_PROFILE_APP_BASE64` identity and `set-variant release --team --profile` (release IDs and plist, App Attest `production`, blank debug token). Exports the IPA, uploads dSYMs to Crashlytics, zips them, and uploads IPA and zip to the draft by ID, with their `name:sha256` pairs as job outputs. No TestFlight upload: `publish-appstore` takes the IPA from the release. |
+| `release` | Runs only `set-version` on a fresh checkout, downloads the draft's assets (asset API, `Accept: application/octet-stream`) and body by ID, requiring exactly the uploaded names with matching SHA-256, `verify-assets` (exactly one nonempty file per required suffix, at most one native-symbols zip, nothing else), then `check-token` with staging `APPCHECK_DEBUG_TOKEN` read from an Infisical file that the step deletes: every zip entry of the AAB, APK and IPA is searched for the token in UTF-8 and UTF-16 (Kotlin/Native string literals), and only counts are printed. `push-version` commits `chore(release): vX.Y.Z (N) [skip ci]` and the annotated tag in one atomic push leased on the pinned SHA; the diff may touch only `version_files` and the pbxproj, and only their four version lines. `publish` checks the tag ref exists, then PATCHes the draft by ID to `draft: false`. |
 | `notify` | Telegram `release` message (`TELEGRAM_BOT_TOKEN`, chat from prod `/Build`). |
 
-`scripts/amper/release.py` subcommands: `validate`, `resolve`, `bump`, `notes`, `check-notes`, `draft`, `upload`,
+Caches: the release jobs restore and publish release-only bundle names (`<name>-<os>-<arch>-kotlin-release`,
+`-konan-release`, `-swiftpm-release`, each with its own `latest`), never the bundles amper-debug publishes from PR
+builds. Only this workflow publishes them, and it only runs for main; a miss cold-starts.
+
+**Resuming a failed release: use "Re-run failed jobs" only.** It keeps `prepare`'s outputs (version, `release_id`), so
+a re-run `release` job resumes: `push-version` recognises its own already-pushed commit and tag, and `publish` finishes
+the same draft. "Re-run all jobs" re-runs `prepare`, which then sees the bot's bump commit on main and skips, leaving
+the draft unpublished. If the build jobs failed, re-running them re-uploads to the same draft.
+
+`scripts/amper/release.py` subcommands: `validate`, `resolve`, `bump`, `notes`, `check-notes`, `draft`, `upload`, `download`,
 `verify-assets`, `check-token`, `check-mapping-id`, `push-version`, `publish`, `chat-id`. It loads `scripts/kmp/apps.py`,
 `scripts/kmp/control.py`, `scripts/kmp/release.py` and `scripts/amper/control.py` by path, so run it from the central
 checkout. Tests: `cd scripts/amper && python -m pytest` (run `scripts/amper` and `scripts/kmp` separately: both have

@@ -27,7 +27,9 @@ def load_app(repo):
 def outputs(app):
     return {'bundle_id': app['bundle_id'], 'package_name': app['package_name'],
             'metadata_repo': app['metadata_repo'] or '',
-            'rollout_country': app['rollout']['country'], 'rollout_fraction': app['rollout']['fraction']}
+            'rollout_country': app['rollout']['country'], 'rollout_fraction': app['rollout']['fraction'],
+            # Play native-debug-symbols.zip; only apps that build none (Kotlin Toolchain) set false.
+            'native_symbols': 'false' if app.get('native_symbols') is False else 'true'}
 
 
 def main():
@@ -42,7 +44,8 @@ def main():
     except SystemExit:
         if not args.allow_unregistered:
             raise
-        values = {'rollout_country': LEGACY_ROLLOUT['country'], 'rollout_fraction': LEGACY_ROLLOUT['fraction']}
+        values = {'rollout_country': LEGACY_ROLLOUT['country'], 'rollout_fraction': LEGACY_ROLLOUT['fraction'],
+                  'native_symbols': 'true'}
     else:
         if args.package_name is not None and args.package_name != app['package_name']:
             raise SystemExit(f'package_name {args.package_name} does not match the registry for {args.repo}')

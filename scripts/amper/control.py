@@ -234,9 +234,13 @@ FIREBASE_APP_ID = re.compile(r'1:[0-9]+:android:[0-9a-f]+')
 
 def cmd_firebase_app_id(a):
     """Release Android app ID for Crashlytics: the manifest's firebase_android_app_id, else the
-    google-services.json client whose package is the release ID; empty when neither names one."""
+    google-services.json client whose package is the release ID. Neither fails, unless the manifest opts out
+    with "crashlytics_mapping": false (then app_id is empty and the mapping upload is skipped)."""
     src = Path(a.source)
     m = manifest(src)
+    if m.get('crashlytics_mapping', True) is False:
+        emit(app_id='')
+        return
     app = m.get('firebase_android_app_id')
     if app is None:
         services = src / m['android_module'] / 'google-services.json'
@@ -248,6 +252,9 @@ def cmd_firebase_app_id(a):
         app = found[0] if found else ''
     if app and not (isinstance(app, str) and FIREBASE_APP_ID.fullmatch(app)):
         fail('invalid Firebase Android app ID')
+    if not app:
+        fail('no release Firebase Android app ID (set firebase_android_app_id, add the release client to '
+             'google-services.json, or opt out with "crashlytics_mapping": false)')
     emit(app_id=app)
 
 

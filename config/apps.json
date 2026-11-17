@@ -11,6 +11,7 @@
     "package_name": "com.lascade.hunch",
     "metadata_repo": null,
     "rollout": {"country": "IN", "fraction": 0.2},
-    "project_slug": "treasurehunch"
+    "project_slug": "treasurehunch",
+    "native_symbols": false
   }
 }

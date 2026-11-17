@@ -1,5 +1,6 @@
 """Offline gates for the Amper release: dispatch trust, bump policy, assets, token absence and the version commit."""
 from contextlib import contextmanager
+import hashlib
 import importlib.util
 import json
 import os
@@ -10,6 +11,7 @@ import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
+import urllib.error
 import zipfile
 
 import yaml
@@ -76,6 +78,25 @@ class Concurrency(unittest.TestCase):
     def test_two_repos_get_different_keys(self):
         self.assertEqual(self.group(REPO), 'amper-release-Lascade-Co/TreasureHunch')
         self.assertNotEqual(self.group(REPO), self.group('Lascade-Co/OtherApp'))
+
+
+class WorkflowShape(unittest.TestCase):
+    def setUp(self):
+        self.jobs = yaml.safe_load((HERE.parents[1] / '.github/workflows/amper-release.yml').read_text())['jobs']
+
+    def test_release_restores_only_release_only_bundles(self):
+        # PR (amper-debug) builds publish the plain names; a release must never restore those.
+        names = [step['with']['name'] for job in self.jobs.values() for step in job['steps']
+                 if step.get('uses') == './control/actions/gh-bundle-cache']
+        self.assertTrue(names)
+        for name in names:
+            self.assertRegex(name, r"-release'\) \}\}$")
+
+    def test_firebase_cli_installs_before_any_prod_secret(self):
+        steps = [step.get('name', '') for step in self.jobs['android']['steps']]
+        install = steps.index('Install the Firebase CLI for Crashlytics mapping files')
+        self.assertLess(install, steps.index('Read /Build from Infisical prod'))
+        self.assertIn('--ignore-scripts', self.jobs['android']['steps'][install]['run'])
 
 
 class Bump(unittest.TestCase):
@@ -198,57 +219,126 @@ class MappingId(unittest.TestCase):
                 release.check_mapping_id(resource, [folder / 'ok.aab', folder / 'bad.aab'])
 
 
+class FakeGitHub:
+    """Routes release.http calls; records them; 404s anything unknown."""
+    def __init__(self, routes):
+        self.routes, self.calls = routes, []
+
+    def __call__(self, method, url, body=None, headers=None, out=None):
+        self.calls.append((method, url, body))
+        key = (method, url.split('?')[0] if method != 'GET' or 'releases?' not in url else url)
+        if key not in self.routes:
+            raise urllib.error.HTTPError(url, 404, 'Not Found', {}, None)
+        value = self.routes[key]
+        if isinstance(value, Exception):
+            raise value
+        if out is not None:
+            out.write(value)
+            return None
+        return value(body) if callable(value) else value
+
+
+API = 'https://api.github.com/repos/' + REPO
+DRAFT = {'id': 77, 'tag_name': 'v0.1.1', 'draft': True, 'assets': []}
+
+
 class GitHubRelease(unittest.TestCase):
-    def run_with(self, view):
-        patcher = patch.object(release.subprocess, 'run')
-        run = patcher.start()
+    def fake(self, routes):
+        fake = FakeGitHub(routes)
+        patcher = patch.object(release, 'http', fake)
+        patcher.start()
         self.addCleanup(patcher.stop)
-        run.return_value = view
-        return run
+        return fake
 
-    def commands(self, run):
-        return [call.args[0] for call in run.call_args_list]
-
-    def test_draft_created_once_without_requiring_the_tag(self):
-        run = self.run_with(subprocess.CompletedProcess([], 1, '', 'release not found'))
-        release.draft(REPO, 'v0.1.1', 'a' * 40, 'notes.txt')
-        create = self.commands(run)[1]
-        self.assertEqual(create[:4], ['gh', 'release', 'create', 'v0.1.1'])
-        self.assertIn('--draft', create)
-        self.assertNotIn('--verify-tag', create)
-        self.assertEqual(create[create.index('--target') + 1], 'a' * 40)
-
-    def test_existing_draft_is_reused_and_published_release_never_touched(self):
-        run = self.run_with(subprocess.CompletedProcess([], 0, json.dumps({'isDraft': True})))
-        release.draft(REPO, 'v0.1.1', 'a' * 40, 'notes.txt')
-        self.assertEqual(self.commands(run)[1][:3], ['gh', 'release', 'edit'])
-        run.return_value = subprocess.CompletedProcess([], 0, json.dumps({'isDraft': False}))
-        for call in (lambda: release.draft(REPO, 'v0.1.1', 'a' * 40, 'n'),
-                     lambda: release.upload(REPO, 'v0.1.1', ['x.aab'])):
-            run.reset_mock()
-            with self.assertRaisesRegex(ValueError, 'already published'):
-                call()
-            self.assertEqual(run.call_count, 1)
-
-    def test_upload_goes_to_the_draft(self):
-        run = self.run_with(subprocess.CompletedProcess([], 0, json.dumps({'isDraft': True})))
-        release.upload(REPO, 'v0.1.1', ['a.aab', 'a.apk'])
-        self.assertEqual(self.commands(run)[1], ['gh', 'release', 'upload', 'v0.1.1', '--repo', REPO, '--clobber', 'a.aab', 'a.apk'])
-
-    def test_publish_requires_the_pushed_tag_and_a_draft(self):
+    def temp(self):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
-        folder, notes = Path(temp.name) / 'assets', Path(temp.name) / 'notes.txt'
-        folder.mkdir()
+        return Path(temp.name)
+
+    def notes(self):
+        path = self.temp() / 'notes.txt'
+        path.write_text('Fixed hunts.')
+        return path
+
+    def test_draft_is_created_once_and_its_id_returned(self):
+        fake = self.fake({('GET', API + '/releases?per_page=100&page=1'): [],
+                          ('POST', API + '/releases'): lambda body: dict(DRAFT)})
+        self.assertEqual(release.draft(REPO, 'v0.1.1', 'a' * 40, self.notes()), {'release_id': '77'})
+        created = json.loads(fake.calls[-1][2])
+        self.assertEqual((created['tag_name'], created['target_commitish'], created['draft']), ('v0.1.1', 'a' * 40, True))
+        self.assertEqual(created['body'], 'Fixed hunts.')
+
+    def test_existing_draft_is_reused_and_published_release_refused(self):
+        fake = self.fake({('GET', API + '/releases?per_page=100&page=1'): [DRAFT, dict(DRAFT, id=5, tag_name='v0.1.0')],
+                          ('GET', API + '/releases?per_page=100&page=2'): [],
+                          ('PATCH', API + '/releases/77'): lambda body: DRAFT})
+        self.assertEqual(release.draft(REPO, 'v0.1.1', 'a' * 40, self.notes())['release_id'], '77')
+        self.assertEqual(fake.calls[-1][0], 'PATCH')
+        self.fake({('GET', API + '/releases/tags/v0.1.1'): dict(DRAFT, draft=False)})
+        with self.assertRaisesRegex(ValueError, 'already published'):
+            release.draft(REPO, 'v0.1.1', 'a' * 40, self.notes())
+
+    def test_lookup_errors_other_than_404_fail_instead_of_meaning_no_draft(self):
+        boom = urllib.error.HTTPError('u', 502, 'Bad Gateway', {}, None)
+        fake = self.fake({('GET', API + '/releases/tags/v0.1.1'): boom})
+        with self.assertRaises(urllib.error.HTTPError):
+            release.draft(REPO, 'v0.1.1', 'a' * 40, self.notes())
+        self.assertNotIn('POST', [c[0] for c in fake.calls])
+        self.fake({('GET', API + '/releases/77'): boom})
+        with self.assertRaises(urllib.error.HTTPError):
+            release.upload(REPO, '77', 'v0.1.1', [])
+
+    def test_upload_replaces_same_named_asset_on_the_draft_and_reports_sha256(self):
+        folder = self.temp()
+        aab = folder / 'TreasureHunch-0.1.1-2.aab'
+        aab.write_bytes(b'aab-bytes')
+        fake = self.fake({('GET', API + '/releases/77'): dict(DRAFT, assets=[{'id': 9, 'name': aab.name}]),
+                          ('DELETE', API + '/releases/assets/9'): None,
+                          ('POST', f'https://uploads.github.com/repos/{REPO}/releases/77/assets'): {'id': 10}})
+        sums = release.upload(REPO, '77', 'v0.1.1', [aab])
+        self.assertEqual(sums, {'checksums': f'{aab.name}:{hashlib.sha256(b"aab-bytes").hexdigest()}'})
+        method, url, _ = fake.calls[-1]
+        self.assertEqual((method, url), ('POST', f'https://uploads.github.com/repos/{REPO}/releases/77/assets?name={aab.name}'))
+        self.assertIn(('DELETE', API + '/releases/assets/9', None), fake.calls)
+
+    def test_upload_refuses_a_published_release_or_another_tag(self):
+        for found in (dict(DRAFT, draft=False), dict(DRAFT, tag_name='v9.9.9')):
+            self.fake({('GET', API + '/releases/77'): found})
+            with self.subTest(found=found), self.assertRaises(ValueError):
+                release.upload(REPO, '77', 'v0.1.1', [])
+
+    def test_download_verifies_every_sha256_and_the_asset_set(self):
+        assets = [{'id': 1, 'name': 'a.aab'}, {'id': 2, 'name': 'a.ipa'}]
+        routes = {('GET', API + '/releases/77'): dict(DRAFT, assets=assets, body='Notes.'),
+                  ('GET', API + '/releases/assets/1'): b'aab', ('GET', API + '/releases/assets/2'): b'ipa'}
+        sha = lambda data: hashlib.sha256(data).hexdigest()
+        good = f'a.aab:{sha(b"aab")} a.ipa:{sha(b"ipa")}'
+        self.fake(routes)
+        dest = self.temp() / 'assets'
+        release.download(REPO, '77', 'v0.1.1', dest, good, dest.parent / 'notes.txt')
+        self.assertEqual((dest / 'a.ipa').read_bytes(), b'ipa')
+        self.assertEqual((dest.parent / 'notes.txt').read_text(), 'Notes.')
+        for expected in (f'a.aab:{sha(b"aab")} a.ipa:{sha(b"tampered")}', f'a.aab:{sha(b"aab")}'):
+            with self.subTest(expected=expected), self.assertRaises(ValueError):
+                release.download(REPO, '77', 'v0.1.1', self.temp() / 'x', expected, self.temp() / 'n.txt')
+
+    def test_publish_patches_the_draft_by_id_only_after_the_tag_exists(self):
+        folder = self.temp()
         for name in Assets.NAMES:
             (folder / name).write_bytes(b'asset')
-        notes.write_text('Fixed hunts.')
-        run = self.run_with(subprocess.CompletedProcess([], 0, json.dumps({'isDraft': True})))
-        release.publish(REPO, 'v0.1.1', folder, notes)
-        edit = self.commands(run)[1]
-        self.assertEqual(edit[:4], ['gh', 'release', 'edit', 'v0.1.1'])
-        for flag in ('--verify-tag', '--draft=false', '--prerelease=false'):
-            self.assertIn(flag, edit)
+        notes = self.notes()
+        routes = {('GET', API + '/releases/77'): DRAFT, ('PATCH', API + '/releases/77'): lambda body: DRAFT}
+        fake = self.fake(routes)
+        with self.assertRaisesRegex(ValueError, 'tag'):
+            release.publish(REPO, '77', 'v0.1.1', folder, notes)
+        self.assertNotIn('PATCH', [c[0] for c in fake.calls])
+        routes[('GET', API + '/git/ref/tags/v0.1.1')] = {'ref': 'refs/tags/v0.1.1'}
+        fake = self.fake(routes)
+        release.publish(REPO, '77', 'v0.1.1', folder, notes)
+        method, url, body = fake.calls[-1]
+        self.assertEqual((method, url), ('PATCH', API + '/releases/77'))
+        self.assertEqual({k: json.loads(body)[k] for k in ('draft', 'prerelease', 'tag_name')},
+                         {'draft': False, 'prerelease': False, 'tag_name': 'v0.1.1'})
 
 
 @needs_yq
