@@ -236,8 +236,11 @@ class Publisher:
         current = client.list(f'appStoreVersions/{version}/appStoreVersionLocalizations', {'limit': 200})
         old = client.list(f'appStoreVersions/{previous}/appStoreVersionLocalizations', {'limit': 200}) if previous else []
         by_locale = {loc['attributes']['locale']: loc for loc in current}
+        # Apple locks What's New until a version of the app has been on sale (409 STATE_ERROR), so a first release
+        # leaves it out, and skips its translation.
+        first_release = previous is None
         translated = self.localize(sorted(set(by_locale) | {loc['attributes']['locale'] for loc in old}), notes) \
-            if self.localize else {}
+            if self.localize and not first_release else {}
         for loc in old:
             attrs = loc['attributes']
             if attrs['locale'] not in by_locale:
@@ -251,12 +254,13 @@ class Publisher:
         old_by_locale = {loc['attributes']['locale']: loc['attributes'] for loc in old}
         for locale, loc in by_locale.items():
             # Never overwrite existing version metadata, except the requested What's New.
-            attrs = {'whatsNew': translated.get(locale, notes)}
+            attrs = {} if first_release else {'whatsNew': translated.get(locale, notes)}
             attrs.update({key: old_by_locale[locale][key] for key in LOCALIZATION_FIELDS
                           if locale in old_by_locale and not loc['attributes'].get(key)
                           and old_by_locale[locale].get(key) is not None})
-            client.request('PATCH', f'appStoreVersionLocalizations/{loc["id"]}',
-                           data=resource('appStoreVersionLocalizations', attrs, identifier=loc['id']))
+            if attrs:
+                client.request('PATCH', f'appStoreVersionLocalizations/{loc["id"]}',
+                               data=resource('appStoreVersionLocalizations', attrs, identifier=loc['id']))
         review = client.related(f'appStoreVersions/{version}/appStoreReviewDetail')
         if previous:
             old_review = client.related(f'appStoreVersions/{previous}/appStoreReviewDetail')

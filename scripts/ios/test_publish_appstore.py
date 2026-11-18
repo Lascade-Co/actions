@@ -103,6 +103,20 @@ class FakeClient:
 
 
 class PublisherTests(unittest.TestCase):
+    def test_first_release_skips_whats_new_but_still_attaches_and_submits(self):
+        # Apple locks What's New until a version has been on sale (409 STATE_ERROR on the PATCH); TreasureHunch 0.1.1.
+        client = FakeClient()
+        client.versions = [v for v in client.versions if v['id'] == 'new']
+        translations = []
+        publisher = asc.Publisher(client, localize=lambda locales, notes: translations.append(locales) or {})
+        self.assertEqual(publisher.publish('app', '5.0.9', client.builds[0], 'Shared English notes.'), 'new')
+        localizations = [c for c in client.calls if c[0] in ('PATCH', 'POST') and c[1].startswith('appStoreVersionLocalizations')]
+        self.assertEqual(localizations, [])
+        self.assertEqual(translations, [])
+        self.assertIn(('PATCH', 'appStoreVersions/new/relationships/build'), [c[:2] for c in client.calls])
+        submit = next(c for c in client.calls if c[:2] == ('PATCH', 'reviewSubmissions/review'))
+        self.assertEqual(submit[2]['data']['attributes'], {'submitted': True})
+
     def test_create_version_attach_build_notes_every_locale_and_submit_after_phased_setup(self):
         client = FakeClient(target=False)
         self.assertEqual(asc.Publisher(client).publish('app', '5.0.9', client.builds[0], 'Shared English notes.'), 'new')
