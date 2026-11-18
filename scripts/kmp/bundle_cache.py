@@ -143,39 +143,47 @@ def main():
     paths = paths_from_env()
     run_oras('login', 'ghcr.io', '-u', os.environ['GITHUB_ACTOR'], '--password-stdin',
              input=os.environ['GH_TOKEN'], text=True, stdout=subprocess.DEVNULL)
-    with tempfile.TemporaryDirectory(prefix='bundle-cache-') as work:
-        work = Path(work)
-        if args.mode == 'restore':
-            for tag in dict.fromkeys([key, fallback]):
-                if not tag:
-                    continue
-                download = work / tag
-                download.mkdir()
-                try:
-                    run_oras('pull', f'{registry}:{tag}', '-o', str(download))
-                    bundle = download / 'cache.tar'
-                    size = bundle.stat().st_size
-                    unpack(bundle, paths)
-                except (subprocess.CalledProcessError, OSError, ValueError, tarfile.TarError) as error:
-                    print(f'::warning::Cache {tag} unavailable ({type(error).__name__}); trying next key')
-                    continue
-                output(hit=tag == key, restored_key=tag, bytes=size)
-                print(f'Restored {size} bytes from {registry}:{tag}')
-                return
-            output(hit=False, restored_key='', bytes=0)
-            print('No usable cache bundle; dependencies will resolve cold')
-        else:
-            bundle = work / 'cache.tar'
-            pack(paths, bundle)
-            size = bundle.stat().st_size
-            run_oras('push', f'{registry}:{key}', '--artifact-type',
-                     'application/vnd.lascade.dependency-cache.v1', '--annotation',
-                     f'org.opencontainers.image.source=https://github.com/{repository}',
-                     'cache.tar:application/octet-stream', cwd=work)
-            if fallback and fallback != key:
-                run_oras('tag', f'{registry}:{key}', fallback)
-            output(bytes=size)
-            print(f'Published {size} bytes to {registry}:{key}')
+    # Logged out before returning: later steps in the job (which may run untrusted build code) must not find
+    # a GHCR credential in ~/.docker/config.json.
+    try:
+        with tempfile.TemporaryDirectory(prefix='bundle-cache-') as work:
+            work = Path(work)
+            if args.mode == 'restore':
+                for tag in dict.fromkeys([key, fallback]):
+                    if not tag:
+                        continue
+                    download = work / tag
+                    download.mkdir()
+                    try:
+                        run_oras('pull', f'{registry}:{tag}', '-o', str(download))
+                        bundle = download / 'cache.tar'
+                        size = bundle.stat().st_size
+                        unpack(bundle, paths)
+                    except (subprocess.CalledProcessError, OSError, ValueError, tarfile.TarError) as error:
+                        print(f'::warning::Cache {tag} unavailable ({type(error).__name__}); trying next key')
+                        continue
+                    output(hit=tag == key, restored_key=tag, bytes=size)
+                    print(f'Restored {size} bytes from {registry}:{tag}')
+                    return
+                output(hit=False, restored_key='', bytes=0)
+                print('No usable cache bundle; dependencies will resolve cold')
+            else:
+                bundle = work / 'cache.tar'
+                pack(paths, bundle)
+                size = bundle.stat().st_size
+                run_oras('push', f'{registry}:{key}', '--artifact-type',
+                         'application/vnd.lascade.dependency-cache.v1', '--annotation',
+                         f'org.opencontainers.image.source=https://github.com/{repository}',
+                         'cache.tar:application/octet-stream', cwd=work)
+                if fallback and fallback != key:
+                    run_oras('tag', f'{registry}:{key}', fallback)
+                output(bytes=size)
+                print(f'Published {size} bytes to {registry}:{key}')
+    finally:
+        try:
+            run_oras('logout', 'ghcr.io', stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except (subprocess.CalledProcessError, OSError):
+            print('::warning::oras logout failed')
 
 
 if __name__ == '__main__':

@@ -45,6 +45,10 @@ class Dispatch(unittest.TestCase):
             with self.subTest(change=change),self.assertRaises(ValueError):
                 release.resolve(dict(self.payload,**change),'Lascade-Co/actions',lambda path:self.fail('API called'))
 
+    def test_repo_check_goes_through_the_app_registry(self):
+        with patch.object(release.apps,'load_app',side_effect=SystemExit('not registered')),self.assertRaisesRegex(ValueError,'registered'):
+            release.validate(self.payload,'Lascade-Co/actions')
+
     def test_stale_dispatch_fails_before_source_runs(self):
         with self.assertRaisesRegex(ValueError,'stale'):
             release.resolve(self.payload,'Lascade-Co/actions',lambda path:{'sha':'b'*40,'commit':{'message':'New work'}})

@@ -190,7 +190,9 @@ def upload_bundle_and_symbols(token, edit_id_b, pkg, aab, native_symbols) -> str
             raise
         version_code = str(max(codes))
 
-    # Upload native debug symbols (nativeCode)
+    # Upload native debug symbols (nativeCode); Kotlin Toolchain apps (publish-kmp) may have none.
+    if not native_symbols:
+        return version_code
     try:
         http_upload_octet(
             "POST",
@@ -212,7 +214,7 @@ def main() -> int:
     ap.add_argument("--package-name", required=True)
     ap.add_argument("--track", required=True)
     ap.add_argument("--aab", required=True)
-    ap.add_argument("--native-symbols", required=True)
+    ap.add_argument("--native-symbols", default="")
     ap.add_argument("--release-name", required=True)
     ap.add_argument("--notes-file", required=True)
 

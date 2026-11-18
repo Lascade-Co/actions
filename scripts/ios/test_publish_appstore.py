@@ -607,7 +607,7 @@ class IdentityTests(unittest.TestCase):
             with patch.object(asc, 'Client', return_value=client), patch.object(asc, 'ipa_identity',
                     return_value=('com.travelanimator.routemap', '5.0.9', '509')), patch.object(
                     asc.subprocess, 'run', side_effect=upload) as run, contextlib.redirect_stdout(stdout or io.StringIO()):
-                result = asc.main(['--ipa', 'release.ipa', '--version', '5.0.9', '--notes-file', str(notes), *extra])
+                result = asc.main(['--ipa', 'release.ipa', '--version', '5.0.9', '--bundle-id', 'com.travelanimator.routemap', '--notes-file', str(notes), *extra])
                 return result, run.call_args_list
 
     def test_no_submit_flag_prepares_and_says_so(self):

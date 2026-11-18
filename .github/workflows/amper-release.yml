@@ -1,0 +1,824 @@
+# Signed store release for Kotlin Toolchain (Amper) apps; see docs/amper-ci.md.
+# Mirrors kmp-build-release.yml with amper-debug.yml's plumbing; scripts/amper/release.py and control.py do the work.
+# This repo is PUBLIC: release binaries, mapping.txt and dSYMs never become Actions artifacts here. prepare creates a
+# draft release in the private source repo, each build job uploads its own files to it, and the release job verifies
+# the draft, pushes the version commit and tag atomically, then publishes it (which fires the source's publish-kmp).
+name: Central Amper Release
+run-name: "${{ format('Amper release \xB7 {0} \xB7 {1}', github.event.client_payload.repo, github.event.client_payload.sha) }}"
+'on':
+  repository_dispatch:
+    types:
+      - amper-release
+permissions:
+  contents: read
+# Per source repo, never cancelled: a release run is a version transaction.
+concurrency:
+  group: amper-release-${{ github.event.client_payload.repo }}
+  cancel-in-progress: false
+defaults:
+  run:
+    shell: bash
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      repo: ${{ steps.payload.outputs.repo }}
+      owner: ${{ steps.payload.outputs.owner }}
+      name: ${{ steps.payload.outputs.name }}
+      project_slug: ${{ steps.payload.outputs.project_slug }}
+      sha: ${{ steps.source.outputs.sha }}
+      skip: ${{ steps.source.outputs.skip }}
+      version: ${{ steps.version.outputs.version }}
+      build_number: ${{ steps.version.outputs.build_number }}
+      tag: ${{ steps.version.outputs.tag }}
+      bump: ${{ steps.version.outputs.bump }}
+      release_id: ${{ steps.draft.outputs.release_id }}
+      deps_key: ${{ steps.deps.outputs.key }}
+    steps:
+      - name: Checkout trusted central controls
+        uses: actions/checkout@v7
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ github.sha }}
+          path: control
+          persist-credentials: false
+      # Registered repo (config/apps.json), its registered Infisical project, main and a full SHA; before any token.
+      - name: Validate release scope before minting credentials
+        run: python3 control/scripts/amper/release.py validate
+        id: payload
+      - name: Mint source-scoped GitHub App token
+        uses: actions/create-github-app-token@v3.3.0
+        with:
+          client-id: ${{ secrets.CI_APP_CLIENT_ID }}
+          private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
+          owner: ${{ steps.payload.outputs.owner }}
+          repositories: ${{ steps.payload.outputs.name }}
+        id: app-token
+      - name: Pin main and reject stale dispatches or bot bump loops
+        run: python3 control/scripts/amper/release.py resolve
+        id: source
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+      - name: Checkout pinned source commit
+        uses: actions/checkout@v7
+        with:
+          repository: ${{ steps.payload.outputs.repo }}
+          ref: ${{ steps.source.outputs.sha }}
+          token: ${{ steps.app-token.outputs.token }}
+          path: source
+          persist-credentials: false
+          fetch-depth: 0
+        if: ${{ steps.source.outputs.skip != 'true' }}
+      # Same content hash as amper-debug, which restores (never publishes) the release-only bundles keyed on it.
+      - name: Compute dependency cache key
+        run: echo "key=deps-$DEPS_HASH" >> "$GITHUB_OUTPUT"
+        id: deps
+        env:
+          DEPS_HASH: ${{ hashFiles('source/kotlin', 'source/project.yaml', 'source/**/module.yaml', 'source/libs.versions.toml', 'source/**/Package.resolved') }}
+        if: ${{ steps.source.outputs.skip != 'true' }}
+      - name: Require yq for module.yaml reads
+        run: yq --version
+        if: ${{ steps.source.outputs.skip != 'true' }}
+      # Patch and build +1; a merged PR labelled minor or major bumps that part instead.
+      - name: Compute the version bump from merged PR labels
+        run: python3 control/scripts/amper/release.py bump --source source --repo "$SOURCE_REPO" --sha "$SOURCE_SHA"
+        id: version
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          SOURCE_REPO: ${{ steps.payload.outputs.repo }}
+          SOURCE_SHA: ${{ steps.source.outputs.sha }}
+        if: ${{ steps.source.outputs.skip != 'true' }}
+      - name: Select updated release notes or construct Claude diff prompt
+        run: python3 ../control/scripts/amper/release.py notes --template ../control/data/RELEASE_NOTES.md --prompt ../release-prompt.md
+        id: notes
+        working-directory: source
+        if: ${{ steps.source.outputs.skip != 'true' }}
+      - name: Install release-notes generator dependencies
+        run: python3 -m pip install -r control/scripts/ai/requirements.txt
+        if: ${{ steps.source.outputs.skip != 'true' && steps.notes.outputs.outdated == 'true' }}
+      - name: Generate complete release notes within Play limit
+        run: python3 control/scripts/android/release_notes.py --prompt release-prompt.md --out source/releasenotes.txt
+        env:
+          CLAUDE_API_KEY: ${{ secrets.CLAUDE_API_KEY }}
+        if: ${{ steps.source.outputs.skip != 'true' && steps.notes.outputs.outdated == 'true' }}
+      - name: Validate nonempty English release notes without truncation
+        run: python3 control/scripts/amper/release.py check-notes --notes source/releasenotes.txt
+        if: ${{ steps.source.outputs.skip != 'true' }}
+      # Created once here, so the two build jobs cannot race into duplicate drafts; every later job addresses it by
+      # its numeric ID (a draft has no tag yet, so tag lookups cannot find it). The tag is pushed by the release job.
+      - name: Create or reuse the draft release in the source repository
+        id: draft
+        run: |-
+          python3 control/scripts/amper/release.py draft --repo "$SOURCE_REPO" --tag "$RELEASE_TAG" --sha "$SOURCE_SHA" \
+            --notes source/releasenotes.txt
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          SOURCE_REPO: ${{ steps.payload.outputs.repo }}
+          SOURCE_SHA: ${{ steps.source.outputs.sha }}
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}
+        if: ${{ steps.source.outputs.skip != 'true' }}
+  android:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    # packages: write only for the GHCR dependency bundles.
+    permissions:
+      contents: read
+      packages: write
+    defaults:
+      run:
+        shell: bash
+        working-directory: source
+    env:
+      CI: 'true'
+      # ADR 0004: the CLI's default 1 GB heap was 83% full after GC.
+      KOTLIN_CLI_JAVA_OPTIONS: -Xmx1536m
+    needs:
+      - prepare
+    if: ${{ needs.prepare.outputs.skip != 'true' }}
+    # name:sha256 pairs of what this job uploaded; the release job verifies its downloads against them.
+    outputs:
+      checksums: ${{ steps.upload.outputs.checksums }}
+    steps:
+      - name: Checkout trusted central controls
+        uses: actions/checkout@v7
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ github.sha }}
+          path: control
+          persist-credentials: false
+      - name: Mint source-scoped GitHub App token
+        uses: actions/create-github-app-token@v3.3.0
+        with:
+          client-id: ${{ secrets.CI_APP_CLIENT_ID }}
+          private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
+          owner: ${{ needs.prepare.outputs.owner }}
+          repositories: ${{ needs.prepare.outputs.name }}
+        id: app-token
+      - name: Checkout pinned source commit
+        uses: actions/checkout@v7
+        with:
+          repository: ${{ needs.prepare.outputs.repo }}
+          ref: ${{ needs.prepare.outputs.sha }}
+          token: ${{ steps.app-token.outputs.token }}
+          path: source
+          persist-credentials: false
+      # Validated inside jq (whole-string anchor), one line, before anything reaches $GITHUB_OUTPUT.
+      - name: Read the Android module from the source manifest
+        run: |-
+          jq -er '.android_module | if type == "string" and test("\\A[A-Za-z0-9_.-]+\\z") and . != ".." then "module=\(.)" else error("invalid android_module") end' \
+            .ci/amper.json >> "$GITHUB_OUTPUT"
+        id: manifest
+      - name: Read the release Firebase Android app ID
+        run: python3 "$GITHUB_WORKSPACE/control/scripts/amper/control.py" firebase-app-id --source "$GITHUB_WORKSPACE/source" >> "$GITHUB_OUTPUT"
+        id: firebase
+      # Before any secret is in the environment: npm runs third-party code (lifecycle scripts are off as well).
+      - name: Install the Firebase CLI for Crashlytics mapping files
+        run: npm install --global --ignore-scripts --no-fund --no-audit firebase-tools@15.34.2
+        working-directory: .
+        if: ${{ steps.firebase.outputs.app_id != '' }}
+      - name: Read /Build from Infisical prod
+        uses: Infisical/secrets-action@v1.0.18
+        with:
+          method: universal
+          client-id: ${{ secrets.INFISICAL_CLIENT_ID }}
+          client-secret: ${{ secrets.INFISICAL_CLIENT_SECRET }}
+          project-slug: ${{ needs.prepare.outputs.project_slug }}
+          env-slug: prod
+          domain: ${{ secrets.INFISICAL_DOMAIN }}
+          secret-path: /Build
+          export-type: env
+      - name: Require yq for module.yaml edits
+        run: yq --version
+      - name: Apply release variant (IDs, no App Check debug token)
+        run: python3 "$GITHUB_WORKSPACE/control/scripts/amper/control.py" set-variant --source "$GITHUB_WORKSPACE/source" --variant release
+      - name: Write release version and build number
+        run: python3 "$GITHUB_WORKSPACE/control/scripts/amper/control.py" set-version --source "$GITHUB_WORKSPACE/source" --version "$VERSION" --build "$BUILD_NUMBER"
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+          BUILD_NUMBER: ${{ needs.prepare.outputs.build_number }}
+      - name: Install upload keystore
+        run: python3 "$GITHUB_WORKSPACE/control/scripts/amper/control.py" android-inputs --source "$GITHUB_WORKSPACE/source"
+      # The Crashlytics Gradle plugin's per-build ID, done by hand: the toolchain packages <module>/res/values/*.xml, and
+      # the AAB/APK check below proves it. The release build drops the source's RequireBuildId=false override (debug keeps it).
+      - name: Generate the Crashlytics mapping file ID into the release resources
+        run: |-
+          shopt -s nullglob
+          for xml in "$MODULE"/res/values/*.xml; do
+            if grep -q 'name="com.crashlytics.RequireBuildId"' "$xml"; then echo "Release build drops $xml"; rm -f -- "$xml"; fi
+          done
+          firebase crashlytics:mappingfile:generateid --resource-file="$MODULE/res/values/crashlytics_mapping_file_id.xml"
+        env:
+          MODULE: ${{ steps.manifest.outputs.module }}
+        if: ${{ steps.firebase.outputs.app_id != '' }}
+      - name: Warn that Crashlytics mapping upload is off
+        run: echo '::warning::The manifest opts out with crashlytics_mapping false; mapping.txt is not uploaded to Crashlytics.'
+        if: ${{ steps.firebase.outputs.app_id == '' }}
+      # Release-only bundle names (and their own latest). Only this workflow, which runs on main, publishes bundles;
+      # amper-debug (PR code) restores these read-only and publishes nothing. A miss cold-starts.
+      - name: Restore Kotlin toolchain OCI bundle
+        uses: ./control/actions/gh-bundle-cache
+        with:
+          mode: restore
+          name: ${{ format('{0}-{1}-{2}-{3}', needs.prepare.outputs.name, runner.os, runner.arch, 'kotlin-release') }}
+          key: ${{ needs.prepare.outputs.deps_key }}
+          fallback-key: latest
+          paths: ~/.cache/JetBrains/Kotlin
+          token: ${{ github.token }}
+        id: kotlin-cache
+      - name: Build the signed release AAB
+        run: ./kotlin package -m "$MODULE" -f aab
+        id: aab
+        env:
+          MODULE: ${{ steps.manifest.outputs.module }}
+      # `kotlin package` makes only the AAB, and `kotlin build` leaves the APK unsigned (module.yaml signing applies to
+      # `kotlin package` only): sign-apk zipaligns it, apksigns it with the upload keystore and verifies it.
+      - name: Build the release APK
+        run: ./kotlin build -m "$MODULE" -v release
+        env:
+          MODULE: ${{ steps.manifest.outputs.module }}
+      - name: Sign the release APK with the upload keystore
+        run: python3 "$GITHUB_WORKSPACE/control/scripts/amper/control.py" sign-apk --source "$GITHUB_WORKSPACE/source"
+      - name: Locate, check and name the AAB, APK and R8 mapping
+        run: |-
+          control="$GITHUB_WORKSPACE/control/scripts/amper/control.py"
+          locate_artifact() { python3 "$control" find-artifact --source "$GITHUB_WORKSPACE/source" --kind "$1" | sed -n 's/^path=//p'; }
+          aab=$(locate_artifact aab); apk=$(locate_artifact apk); mapping=$(locate_artifact mapping)
+          test -s "$aab"; test -s "$apk"; test -s "$mapping"
+          case "$apk" in *unsigned*) echo "::error::The release APK is unsigned: $apk"; exit 1 ;; esac
+          jarsigner -verify "$aab" | grep -q 'jar verified'
+          out="$RUNNER_TEMP/android"
+          mkdir -p "$out"
+          cp "$aab" "$out/$NAME-$VERSION-$BUILD_NUMBER.aab"
+          cp "$apk" "$out/$NAME-$VERSION-$BUILD_NUMBER.apk"
+          cp "$mapping" "$out/$NAME-$VERSION-$BUILD_NUMBER-mapping.txt"
+        env:
+          NAME: ${{ needs.prepare.outputs.name }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+          BUILD_NUMBER: ${{ needs.prepare.outputs.build_number }}
+      - name: Check the mapping file ID was packaged into the AAB and APK
+        run: |-
+          python3 "$GITHUB_WORKSPACE/control/scripts/amper/release.py" check-mapping-id \
+            --resource-file "$MODULE/res/values/crashlytics_mapping_file_id.xml" "$RUNNER_TEMP"/android/*.aab "$RUNNER_TEMP"/android/*.apk
+        env:
+          MODULE: ${{ steps.manifest.outputs.module }}
+        if: ${{ steps.firebase.outputs.app_id != '' }}
+      - name: Upload the R8 mapping to Crashlytics
+        run: |-
+          creds="$RUNNER_TEMP/firebase-service-account.json"
+          test -n "$FIREBASE_SERVICE_ACCOUNT_BASE64"
+          (umask 077; tr -d '[:space:]' <<<"$FIREBASE_SERVICE_ACCOUNT_BASE64" | base64 --decode > "$creds")
+          GOOGLE_APPLICATION_CREDENTIALS="$creds" firebase crashlytics:mappingfile:upload --app="$APP_ID" \
+            --resource-file="$MODULE/res/values/crashlytics_mapping_file_id.xml" "$RUNNER_TEMP"/android/*-mapping.txt
+        env:
+          APP_ID: ${{ steps.firebase.outputs.app_id }}
+          MODULE: ${{ steps.manifest.outputs.module }}
+        if: ${{ steps.firebase.outputs.app_id != '' }}
+      # Fresh: the job-start App token expires after one hour, and a cold build can outlast it.
+      - name: Mint source-scoped GitHub App token for the upload
+        uses: actions/create-github-app-token@v3.3.0
+        with:
+          client-id: ${{ secrets.CI_APP_CLIENT_ID }}
+          private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
+          owner: ${{ needs.prepare.outputs.owner }}
+          repositories: ${{ needs.prepare.outputs.name }}
+        id: upload-token
+      - name: Upload the AAB, APK and mapping to the draft release
+        run: |-
+          python3 "$GITHUB_WORKSPACE/control/scripts/amper/release.py" upload --repo "$SOURCE_REPO" --release-id "$RELEASE_ID" \
+            --tag "$RELEASE_TAG" "$RUNNER_TEMP"/android/*
+        id: upload
+        env:
+          RELEASE_ID: ${{ needs.prepare.outputs.release_id }}
+          GH_TOKEN: ${{ steps.upload-token.outputs.token }}
+          SOURCE_REPO: ${{ needs.prepare.outputs.repo }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+      - name: Delete binaries, signing inputs and Firebase credentials from the runner
+        run: |-
+          rm -rf "$RUNNER_TEMP/android" "$RUNNER_TEMP/firebase-service-account.json" build/tasks build/signed
+          find . -maxdepth 2 \( -name ci.jks -o -name keystore.properties \) -type f -delete
+        if: ${{ always() }}
+      # Bundles are public GHCR packages: prove neither the staging App Check debug token nor the prod keystore
+      # password is in the cache paths first. Read after the build, so the source's build never sees the file.
+      - name: Read /Build from Infisical staging for the cache secret scan
+        uses: Infisical/secrets-action@v1.0.18
+        with:
+          method: universal
+          client-id: ${{ secrets.INFISICAL_CLIENT_ID }}
+          client-secret: ${{ secrets.INFISICAL_CLIENT_SECRET }}
+          project-slug: ${{ needs.prepare.outputs.project_slug }}
+          env-slug: staging
+          domain: ${{ secrets.INFISICAL_DOMAIN }}
+          secret-path: /Build
+          export-type: file
+          file-output-path: /.amper-staging-build.env
+        if: ${{ !cancelled() && steps.aab.outcome != 'skipped' && steps.kotlin-cache.outputs.hit != 'true' }}
+      - name: Scan the dependency cache for build secrets
+        run: |-
+          python3 "$GITHUB_WORKSPACE/control/scripts/amper/release.py" check-cache \
+            --secrets-file "$GITHUB_WORKSPACE/.amper-staging-build.env" "$HOME/.cache/JetBrains/Kotlin" || {
+            echo '::error::Cache secret scan failed (a build secret in the cache, or the scan could not run); bundles not published.'
+            exit 1
+          }
+        id: cache-scan
+        # The release does not depend on the cache; the publish steps require this step's outcome to be success.
+        continue-on-error: true
+        if: ${{ !cancelled() && steps.aab.outcome != 'skipped' && steps.kotlin-cache.outputs.hit != 'true' }}
+      - name: Delete the staging secrets file
+        run: rm -f "$GITHUB_WORKSPACE/.amper-staging-build.env"
+        if: ${{ always() }}
+      - name: Publish Kotlin toolchain OCI bundle
+        uses: ./control/actions/gh-bundle-cache
+        with:
+          mode: publish
+          name: ${{ format('{0}-{1}-{2}-{3}', needs.prepare.outputs.name, runner.os, runner.arch, 'kotlin-release') }}
+          key: ${{ needs.prepare.outputs.deps_key }}
+          fallback-key: latest
+          paths: ~/.cache/JetBrains/Kotlin
+          token: ${{ github.token }}
+        continue-on-error: true
+        if: ${{ !cancelled() && steps.cache-scan.outcome == 'success' && steps.kotlin-cache.outputs.hit != 'true' }}
+  ios-build:
+    # Free 7-GB arm64 image. ADR 0004: K/N's fixed 3 GB heap needs compact object headers here; expect 25-35 min cold.
+    runs-on: macos-26
+    timeout-minutes: 90
+    # packages: write only for the GHCR dependency bundles.
+    permissions:
+      contents: read
+      packages: write
+    defaults:
+      run:
+        shell: bash
+        working-directory: source
+    env:
+      CI: 'true'
+    needs:
+      - prepare
+    if: ${{ needs.prepare.outputs.skip != 'true' }}
+    # name:sha256 pairs of what this job uploaded; the release job verifies its downloads against them.
+    outputs:
+      checksums: ${{ steps.upload.outputs.checksums }}
+    steps:
+      - name: Checkout trusted central controls
+        uses: actions/checkout@v7
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ github.sha }}
+          path: control
+          persist-credentials: false
+      - name: Mint source-scoped GitHub App token
+        uses: actions/create-github-app-token@v3.3.0
+        with:
+          client-id: ${{ secrets.CI_APP_CLIENT_ID }}
+          private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
+          owner: ${{ needs.prepare.outputs.owner }}
+          repositories: ${{ needs.prepare.outputs.name }}
+        id: app-token
+      - name: Checkout pinned source commit
+        uses: actions/checkout@v7
+        with:
+          repository: ${{ needs.prepare.outputs.repo }}
+          ref: ${{ needs.prepare.outputs.sha }}
+          token: ${{ steps.app-token.outputs.token }}
+          path: source
+          persist-credentials: false
+      - name: Pin Xcode 26.6
+        uses: maxim-lobanov/setup-xcode@ed7a3b1fda3918c0306d1b724322adc0b8cc0a90  # v1.7.0
+        with:
+          xcode-version: '26.6'
+      - name: Read /Build from Infisical prod
+        uses: Infisical/secrets-action@v1.0.18
+        with:
+          method: universal
+          client-id: ${{ secrets.INFISICAL_CLIENT_ID }}
+          client-secret: ${{ secrets.INFISICAL_CLIENT_SECRET }}
+          project-slug: ${{ needs.prepare.outputs.project_slug }}
+          env-slug: prod
+          domain: ${{ secrets.INFISICAL_DOMAIN }}
+          secret-path: /Build
+          export-type: env
+      - name: Require yq for module.yaml edits
+        run: command -v yq >/dev/null || brew install yq; yq --version
+      # Validated inside jq (whole-string anchors, no ".."), and exactly two lines, before anything reaches $GITHUB_OUTPUT.
+      - name: Read Xcode project and scheme from the source manifest
+        run: |-
+          jq -er '
+            def ok(re): if type == "string" and test(re) and (contains("..") | not) then . else error("invalid manifest value: \(tojson)") end;
+            "project=\(.ios_project | ok("\\A[A-Za-z0-9_./-]+\\.xcodeproj\\z"))",
+            "scheme=\(.ios_scheme | ok("\\A[A-Za-z0-9_.-]+\\z"))"' .ci/amper.json > "$RUNNER_TEMP/ios-manifest.txt"
+          test "$(wc -l < "$RUNNER_TEMP/ios-manifest.txt")" -eq 2
+          cat "$RUNNER_TEMP/ios-manifest.txt" >> "$GITHUB_OUTPUT"
+        id: manifest
+      # set-variant writes this identity onto the app target; command-line signing overrides did not take.
+      - name: Read production app profile identity
+        run: |-
+          python3 - <<'PY'
+          import base64, os, plistlib, re, subprocess, tempfile
+          from pathlib import Path
+          with tempfile.NamedTemporaryFile(suffix='.mobileprovision') as raw:
+              raw.write(base64.b64decode(''.join(os.environ['IOS_PROD_PROFILE_APP_BASE64'].split()), validate=True)); raw.flush()
+              p = plistlib.loads(subprocess.run(['security', 'cms', '-D', '-i', raw.name], check=True, capture_output=True).stdout)
+          values = {'uuid': p['UUID'], 'name': p['Name'], 'team': p['TeamIdentifier'][0]}
+          if not re.fullmatch(r'[A-Za-z0-9]+', values['team']) or any(re.search(r'[\r\n";\\]', v) for v in values.values()):
+              raise SystemExit('error: unexpected characters in the production profile identity')
+          Path(os.environ['GITHUB_OUTPUT']).open('a').writelines(f'{k}={v}\n' for k, v in values.items())
+          print(f"Production profile {values['name']} ({values['uuid']}), team {values['team']}")
+          PY
+        id: profile
+      # Release IDs, release Firebase plist, App Attest production, blank App Check debug token, manual signing.
+      - name: Apply release variant and manual app-target signing
+        run: |-
+          python3 "$GITHUB_WORKSPACE/control/scripts/amper/control.py" set-variant --source "$GITHUB_WORKSPACE/source" \
+            --variant release --team "$TEAM_ID" --profile "$PROFILE_NAME" >> "$GITHUB_OUTPUT"
+        id: variant
+        env:
+          TEAM_ID: ${{ steps.profile.outputs.team }}
+          PROFILE_NAME: ${{ steps.profile.outputs.name }}
+      - name: Write release version and build number
+        run: python3 "$GITHUB_WORKSPACE/control/scripts/amper/control.py" set-version --source "$GITHUB_WORKSPACE/source" --version "$VERSION" --build "$BUILD_NUMBER"
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+          BUILD_NUMBER: ${{ needs.prepare.outputs.build_number }}
+      - name: Install temporary Apple distribution signing
+        uses: ./control/actions/apple-signing
+        with:
+          profiles: IOS_PROD_PROFILE_APP_BASE64
+      # Release-only bundle names (and their own latest). Only this workflow, which runs on main, publishes bundles;
+      # amper-debug (PR code) restores these read-only and publishes nothing. A miss cold-starts.
+      - name: Restore Kotlin toolchain OCI bundle
+        uses: ./control/actions/gh-bundle-cache
+        with:
+          mode: restore
+          name: ${{ format('{0}-{1}-{2}-{3}', needs.prepare.outputs.name, runner.os, runner.arch, 'kotlin-release') }}
+          key: ${{ needs.prepare.outputs.deps_key }}
+          fallback-key: latest
+          paths: ~/Library/Caches/JetBrains/Kotlin
+          token: ${{ github.token }}
+        id: kotlin-cache
+      - name: Restore konan OCI bundle
+        uses: ./control/actions/gh-bundle-cache
+        with:
+          mode: restore
+          name: ${{ format('{0}-{1}-{2}-{3}', needs.prepare.outputs.name, runner.os, runner.arch, 'konan-release') }}
+          key: ${{ needs.prepare.outputs.deps_key }}
+          fallback-key: latest
+          paths: ~/.konan/dependencies
+          token: ${{ github.token }}
+        id: konan-cache
+      # Resolve and archive share -derivedDataPath, so SwiftPM checkouts live in one known directory.
+      - name: Restore swiftpm OCI bundle
+        uses: ./control/actions/gh-bundle-cache
+        with:
+          mode: restore
+          name: ${{ format('{0}-{1}-{2}-{3}', needs.prepare.outputs.name, runner.os, runner.arch, 'swiftpm-release') }}
+          key: ${{ needs.prepare.outputs.deps_key }}
+          fallback-key: latest
+          paths: $RUNNER_TEMP/dd/SourcePackages
+          token: ${{ github.token }}
+        id: spm-cache
+      # Resolution only, as in amper-debug: Maven dependencies, the K/N compiler and ~/.konan, and the SwiftPM import
+      # behind cinterop. No compile, link or app signing.
+      - name: Warm the Kotlin toolchain and K/N caches
+        run: |-
+          mkdir -p "$RUNNER_TEMP/kn-gc"
+          export JAVA_TOOL_OPTIONS="-XX:+UseCompactObjectHeaders -Xlog:gc:file=$RUNNER_TEMP/kn-gc/gc-%p.log:uptime,level,tags"
+          tasks=()
+          while IFS= read -r task; do tasks+=("$task"); done < <(./kotlin show tasks | sed -nE 's/^task (:[A-Za-z0-9_-]+:(resolveDependencies|cinterop)IosArm64)( .*)?$/\1/p')
+          test "${#tasks[@]}" -gt 0
+          ./kotlin task "${tasks[@]}"
+        id: warm
+        timeout-minutes: 25
+      # Every ./kotlin run deletes the committed Package.resolved and shared scheme ("no scheme named app" otherwise).
+      # Restore both; resolve and archive then read the pins and the scheme before Xcode's Build Kotlin phase runs.
+      - name: Restore the pinned Package.resolved and shared scheme
+        run: |-
+          git -C "$GITHUB_WORKSPACE/source" checkout -- "$IOS_PROJECT/xcshareddata/xcschemes/$IOS_SCHEME.xcscheme" \
+            "$IOS_PROJECT/project.xcworkspace/xcshareddata/swiftpm/Package.resolved"
+        env:
+          IOS_PROJECT: ${{ steps.manifest.outputs.project }}
+          IOS_SCHEME: ${{ steps.manifest.outputs.scheme }}
+      - name: Resolve Swift packages
+        run: |-
+          xcodebuild -resolvePackageDependencies -project "$IOS_PROJECT" -scheme "$IOS_SCHEME" -derivedDataPath "$RUNNER_TEMP/dd" \
+            -onlyUsePackageVersionsFromResolvedFile
+        env:
+          IOS_PROJECT: ${{ steps.manifest.outputs.project }}
+          IOS_SCHEME: ${{ steps.manifest.outputs.scheme }}
+      # ADR 0004: xcodebuild passes JAVA_TOOL_OPTIONS through to the forked K/N compiler JVM (undocumented),
+      # so the guard below checks the log for it and caps full GCs.
+      - name: Archive production Release
+        run: |-
+          mkdir -p "$RUNNER_TEMP/kn-gc"
+          export JAVA_TOOL_OPTIONS="-XX:+UseCompactObjectHeaders -Xlog:gc:file=$RUNNER_TEMP/kn-gc/gc-%p.log:uptime,level,tags"
+          ( while :; do date -u +%T; sysctl -n vm.swapusage || true; memory_pressure -Q 2>&1 | tail -1 || true; sleep 30; done ) \
+            > "$RUNNER_TEMP/memory.log" 2>&1 &
+          sampler=$!
+          trap 'kill "$sampler" 2>/dev/null || true' EXIT
+          xcodebuild -project "$IOS_PROJECT" -scheme "$IOS_SCHEME" -configuration Release -derivedDataPath "$RUNNER_TEMP/dd" \
+            -onlyUsePackageVersionsFromResolvedFile -jobs 3 -archivePath "$RUNNER_TEMP/app.xcarchive" archive 2>&1 | tee xcodebuild.log
+        id: archive
+        env:
+          IOS_PROJECT: ${{ steps.manifest.outputs.project }}
+          IOS_SCHEME: ${{ steps.manifest.outputs.scheme }}
+      - name: Guard K/N heap flags and full GCs
+        run: |-
+          python3 "$GITHUB_WORKSPACE/control/scripts/amper/control.py" kn-gc-guard --log xcodebuild.log --gc-dir "$RUNNER_TEMP/kn-gc" 2>&1 \
+            | tee "$RUNNER_TEMP/gc-summary.txt"
+      - name: Write export options
+        run: |-
+          python3 "$GITHUB_WORKSPACE/control/scripts/amper/control.py" export-options --team "$TEAM_ID" --profile "$PROFILE_NAME" \
+            --bundle-id "$BUNDLE_ID" --out "$RUNNER_TEMP/ExportOptions.plist"
+        env:
+          TEAM_ID: ${{ steps.profile.outputs.team }}
+          PROFILE_NAME: ${{ steps.profile.outputs.name }}
+          BUNDLE_ID: ${{ steps.variant.outputs.bundle_id }}
+      - name: Export the App Store IPA and zip the dSYMs
+        run: |-
+          xcodebuild -exportArchive -archivePath "$RUNNER_TEMP/app.xcarchive" \
+            -exportOptionsPlist "$RUNNER_TEMP/ExportOptions.plist" -exportPath "$RUNNER_TEMP/export"
+          shopt -s nullglob
+          ipas=("$RUNNER_TEMP"/export/*.ipa)
+          test "${#ipas[@]}" -eq 1
+          out="$RUNNER_TEMP/ios"
+          mkdir -p "$out"
+          cp "${ipas[0]}" "$out/$NAME-$VERSION-$BUILD_NUMBER.ipa"
+          ditto -c -k --keepParent "$RUNNER_TEMP/app.xcarchive/dSYMs" "$out/$NAME-$VERSION-$BUILD_NUMBER-dSYMs.zip"
+        env:
+          NAME: ${{ needs.prepare.outputs.name }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+          BUILD_NUMBER: ${{ needs.prepare.outputs.build_number }}
+      - name: Upload production dSYMs to Crashlytics
+        run: |-
+          upload="$RUNNER_TEMP/dd/SourcePackages/checkouts/firebase-ios-sdk/Crashlytics/upload-symbols"
+          test -x "$upload"
+          shopt -s nullglob
+          plists=("$RUNNER_TEMP"/app.xcarchive/Products/Applications/*.app/GoogleService-Info.plist)
+          test "${#plists[@]}" -eq 1
+          "$upload" -gsp "${plists[0]}" -p ios "$RUNNER_TEMP/app.xcarchive/dSYMs"
+      # Fresh: the job-start App token expires after one hour, and a cold build can outlast it.
+      - name: Mint source-scoped GitHub App token for the upload
+        uses: actions/create-github-app-token@v3.3.0
+        with:
+          client-id: ${{ secrets.CI_APP_CLIENT_ID }}
+          private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
+          owner: ${{ needs.prepare.outputs.owner }}
+          repositories: ${{ needs.prepare.outputs.name }}
+        id: upload-token
+      - name: Upload the IPA and dSYMs to the draft release
+        run: |-
+          python3 "$GITHUB_WORKSPACE/control/scripts/amper/release.py" upload --repo "$SOURCE_REPO" --release-id "$RELEASE_ID" \
+            --tag "$RELEASE_TAG" "$RUNNER_TEMP"/ios/*
+        id: upload
+        env:
+          RELEASE_ID: ${{ needs.prepare.outputs.release_id }}
+          GH_TOKEN: ${{ steps.upload-token.outputs.token }}
+          SOURCE_REPO: ${{ needs.prepare.outputs.repo }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+      - name: Delete the IPA, archive and build products from the runner
+        run: rm -rf "$RUNNER_TEMP/ios" "$RUNNER_TEMP/export" "$RUNNER_TEMP/app.xcarchive" "$RUNNER_TEMP/dd/Build" "$RUNNER_TEMP/ExportOptions.plist" build
+        if: ${{ always() }}
+      # Bundles are public GHCR packages: prove neither the staging App Check debug token nor the prod keystore
+      # password is in any cache path first. Read after the build, so the source's build never sees the file.
+      - name: Read /Build from Infisical staging for the cache secret scan
+        uses: Infisical/secrets-action@v1.0.18
+        with:
+          method: universal
+          client-id: ${{ secrets.INFISICAL_CLIENT_ID }}
+          client-secret: ${{ secrets.INFISICAL_CLIENT_SECRET }}
+          project-slug: ${{ needs.prepare.outputs.project_slug }}
+          env-slug: staging
+          domain: ${{ secrets.INFISICAL_DOMAIN }}
+          secret-path: /Build
+          export-type: file
+          file-output-path: /.amper-staging-build.env
+        if: ${{ !cancelled() && steps.warm.outcome != 'skipped' && (steps.kotlin-cache.outputs.hit != 'true' || steps.konan-cache.outputs.hit != 'true' || steps.spm-cache.outputs.hit != 'true') }}
+      - name: Scan the dependency caches for build secrets
+        run: |-
+          python3 "$GITHUB_WORKSPACE/control/scripts/amper/release.py" check-cache \
+            --secrets-file "$GITHUB_WORKSPACE/.amper-staging-build.env" \
+            "$HOME/Library/Caches/JetBrains/Kotlin" "$HOME/.konan/dependencies" "$RUNNER_TEMP/dd/SourcePackages" || {
+            echo '::error::Cache secret scan failed (a build secret in the cache, or the scan could not run); bundles not published.'
+            exit 1
+          }
+        id: cache-scan
+        # The release does not depend on the cache; the publish steps require this step's outcome to be success.
+        continue-on-error: true
+        if: ${{ !cancelled() && steps.warm.outcome != 'skipped' && (steps.kotlin-cache.outputs.hit != 'true' || steps.konan-cache.outputs.hit != 'true' || steps.spm-cache.outputs.hit != 'true') }}
+      - name: Delete the staging secrets file
+        run: rm -f "$GITHUB_WORKSPACE/.amper-staging-build.env"
+        if: ${{ always() }}
+      - name: Publish Kotlin toolchain OCI bundle
+        uses: ./control/actions/gh-bundle-cache
+        with:
+          mode: publish
+          name: ${{ format('{0}-{1}-{2}-{3}', needs.prepare.outputs.name, runner.os, runner.arch, 'kotlin-release') }}
+          key: ${{ needs.prepare.outputs.deps_key }}
+          fallback-key: latest
+          paths: ~/Library/Caches/JetBrains/Kotlin
+          token: ${{ github.token }}
+        continue-on-error: true
+        if: ${{ !cancelled() && steps.cache-scan.outcome == 'success' && steps.kotlin-cache.outputs.hit != 'true' }}
+      - name: Publish konan OCI bundle
+        uses: ./control/actions/gh-bundle-cache
+        with:
+          mode: publish
+          name: ${{ format('{0}-{1}-{2}-{3}', needs.prepare.outputs.name, runner.os, runner.arch, 'konan-release') }}
+          key: ${{ needs.prepare.outputs.deps_key }}
+          fallback-key: latest
+          paths: ~/.konan/dependencies
+          token: ${{ github.token }}
+        continue-on-error: true
+        if: ${{ !cancelled() && steps.cache-scan.outcome == 'success' && steps.konan-cache.outputs.hit != 'true' }}
+      - name: Publish swiftpm OCI bundle
+        uses: ./control/actions/gh-bundle-cache
+        with:
+          mode: publish
+          name: ${{ format('{0}-{1}-{2}-{3}', needs.prepare.outputs.name, runner.os, runner.arch, 'swiftpm-release') }}
+          key: ${{ needs.prepare.outputs.deps_key }}
+          fallback-key: latest
+          paths: $RUNNER_TEMP/dd/SourcePackages
+          token: ${{ github.token }}
+        continue-on-error: true
+        if: ${{ !cancelled() && steps.cache-scan.outcome == 'success' && steps.archive.outcome != 'skipped' && steps.spm-cache.outputs.hit != 'true' }}
+      - name: Remove temporary provisioning profiles
+        uses: ./control/actions/apple-signing
+        with:
+          mode: cleanup
+        if: ${{ always() }}
+      # Public repo: no raw xcodebuild.log. Only GC logs, the guard summary, memory samples and a filtered log
+      # (errors, warnings, the JVM flag line, build result) with any line naming a key, token, password or secret dropped.
+      - name: Collect redacted iOS diagnostics
+        run: |-
+          out="$RUNNER_TEMP/ios-diagnostics"
+          mkdir -p "$out"
+          if [ -d "$RUNNER_TEMP/kn-gc" ]; then cp -R "$RUNNER_TEMP/kn-gc" "$out/"; fi
+          for f in gc-summary.txt memory.log; do if [ -f "$RUNNER_TEMP/$f" ]; then cp "$RUNNER_TEMP/$f" "$out/"; fi; done
+          if [ -f xcodebuild.log ]; then
+            grep -E 'error:|warning:|Picked up JAVA_TOOL_OPTIONS|(BUILD|ARCHIVE) (SUCCEEDED|FAILED)' xcodebuild.log \
+              | grep -Eiv 'KEY|TOKEN|PASSWORD|SECRET' > "$out/xcodebuild-filtered.log" || true
+          fi
+          rm -f xcodebuild.log
+        if: ${{ always() }}
+      - name: Retain iOS diagnostics
+        uses: actions/upload-artifact@v7
+        with:
+          name: ios-diagnostics
+          path: ${{ format('{0}/ios-diagnostics', runner.temp) }}
+          if-no-files-found: warn
+          retention-days: 7
+          overwrite: true
+        if: ${{ always() }}
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    defaults:
+      run:
+        shell: bash
+        working-directory: source
+    needs:
+      - prepare
+      - android
+      - ios-build
+    if: ${{ needs.prepare.outputs.skip != 'true' }}
+    env:
+      SOURCE_REPO: ${{ needs.prepare.outputs.repo }}
+      SOURCE_SHA: ${{ needs.prepare.outputs.sha }}
+      RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+      RELEASE_ID: ${{ needs.prepare.outputs.release_id }}
+      VERSION: ${{ needs.prepare.outputs.version }}
+      BUILD_NUMBER: ${{ needs.prepare.outputs.build_number }}
+    steps:
+      - name: Checkout trusted central controls
+        uses: actions/checkout@v7
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ github.sha }}
+          path: control
+          persist-credentials: false
+      - name: Mint source-scoped GitHub App token
+        uses: actions/create-github-app-token@v3.3.0
+        with:
+          client-id: ${{ secrets.CI_APP_CLIENT_ID }}
+          private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
+          owner: ${{ needs.prepare.outputs.owner }}
+          repositories: ${{ needs.prepare.outputs.name }}
+        id: app-token
+      # Credentials persist only here, for the atomic version push.
+      - name: Checkout pinned source commit
+        uses: actions/checkout@v7
+        with:
+          repository: ${{ needs.prepare.outputs.repo }}
+          ref: ${{ needs.prepare.outputs.sha }}
+          token: ${{ steps.app-token.outputs.token }}
+          path: source
+          persist-credentials: true
+          fetch-depth: 0
+      - name: Require yq for module.yaml edits
+        run: yq --version
+      # Only set-version runs here (never set-variant), so only the four version lines can reach main.
+      - name: Write release version and build number
+        run: python3 "$GITHUB_WORKSPACE/control/scripts/amper/control.py" set-version --source "$GITHUB_WORKSPACE/source" --version "$VERSION" --build "$BUILD_NUMBER"
+      # By release ID; exactly the files the build jobs uploaded, each matching the SHA-256 they reported.
+      - name: Download the draft release assets and notes
+        run: |-
+          python3 "$GITHUB_WORKSPACE/control/scripts/amper/release.py" download --repo "$SOURCE_REPO" --release-id "$RELEASE_ID" \
+            --tag "$RELEASE_TAG" --dest "$RUNNER_TEMP/release-assets" --expected "$ANDROID_SUMS $IOS_SUMS" \
+            --notes-out "$RUNNER_TEMP/releasenotes.txt"
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          ANDROID_SUMS: ${{ needs.android.outputs.checksums }}
+          IOS_SUMS: ${{ needs['ios-build'].outputs.checksums }}
+      - name: Validate every asset and the notes before changing main or tags
+        run: python3 "$GITHUB_WORKSPACE/control/scripts/amper/release.py" verify-assets --assets "$RUNNER_TEMP/release-assets" --notes "$RUNNER_TEMP/releasenotes.txt"
+      # Written to a file, read and deleted by the next step only; the token is never printed.
+      - name: Read /Build from Infisical staging for the token check
+        uses: Infisical/secrets-action@v1.0.18
+        with:
+          method: universal
+          client-id: ${{ secrets.INFISICAL_CLIENT_ID }}
+          client-secret: ${{ secrets.INFISICAL_CLIENT_SECRET }}
+          project-slug: ${{ needs.prepare.outputs.project_slug }}
+          env-slug: staging
+          domain: ${{ secrets.INFISICAL_DOMAIN }}
+          secret-path: /Build
+          export-type: file
+          file-output-path: /.amper-staging-build.env
+      # UTF-8 (dex) and UTF-16 (Kotlin/Native string literals) in every entry of the AAB, APK and IPA.
+      - name: Assert the App Check debug token is absent from the AAB, APK and IPA
+        run: |-
+          python3 "$GITHUB_WORKSPACE/control/scripts/amper/release.py" check-token --secrets-file "$GITHUB_WORKSPACE/.amper-staging-build.env" \
+            "$RUNNER_TEMP"/release-assets/*.aab "$RUNNER_TEMP"/release-assets/*.apk "$RUNNER_TEMP"/release-assets/*.ipa
+      - name: Delete the staging secrets file
+        run: rm -f "$GITHUB_WORKSPACE/.amper-staging-build.env"
+        if: ${{ always() }}
+      - name: Atomically commit the version bump and tag with a main source-SHA lease
+        run: python3 "$GITHUB_WORKSPACE/control/scripts/amper/release.py" push-version
+        id: push
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+      - name: Publish the draft release now that its tag exists
+        run: |-
+          python3 "$GITHUB_WORKSPACE/control/scripts/amper/release.py" publish --repo "$SOURCE_REPO" --release-id "$RELEASE_ID" \
+            --tag "$RELEASE_TAG" --assets "$RUNNER_TEMP/release-assets" --notes "$RUNNER_TEMP/releasenotes.txt"
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+      - name: Delete downloaded assets from the runner
+        run: rm -rf "$RUNNER_TEMP/release-assets"
+        if: ${{ always() }}
+  notify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # actions/checks read let the notifier point at the failing job, step and first error.
+    permissions:
+      contents: read
+      actions: read
+      checks: read
+    needs:
+      - prepare
+      - android
+      - ios-build
+      - release
+    if: ${{ !cancelled() && needs.prepare.outputs.skip != 'true' && needs.prepare.outputs.project_slug != '' }}
+    steps:
+      - name: Checkout trusted central controls
+        uses: actions/checkout@v7
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ github.sha }}
+          path: control
+          persist-credentials: false
+      # TELEGRAM_CHAT_ID lives in Infisical /Build; only it leaves the file, which the next step deletes.
+      - name: Read /Build from Infisical prod for the Telegram chat
+        uses: Infisical/secrets-action@v1.0.18
+        with:
+          method: universal
+          client-id: ${{ secrets.INFISICAL_CLIENT_ID }}
+          client-secret: ${{ secrets.INFISICAL_CLIENT_SECRET }}
+          project-slug: ${{ needs.prepare.outputs.project_slug }}
+          env-slug: prod
+          domain: ${{ secrets.INFISICAL_DOMAIN }}
+          secret-path: /Build
+          export-type: file
+          file-output-path: /.amper-prod-build.env
+      - name: Read the Telegram chat ID
+        run: python3 control/scripts/amper/release.py chat-id --secrets-file .amper-prod-build.env
+        id: chat
+      - name: Delete the prod secrets file
+        run: rm -f .amper-prod-build.env
+        if: ${{ always() }}
+      - name: Notify release result with failure pointers
+        uses: ./control/actions/telegram-notify
+        with:
+          token: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          chat-id: ${{ steps.chat.outputs.chat_id }}
+          kind: release
+          status: ${{ needs.release.result == 'success' && 'success' || 'failure' }}
+          repo: ${{ needs.prepare.outputs.repo }}
+          branch: main
+          title: ${{ format('{0} ({1})', needs.prepare.outputs.tag, needs.prepare.outputs.build_number) }}
+          link: ${{ format('{0}/{1}/releases/tag/{2}', github.server_url, needs.prepare.outputs.repo, needs.prepare.outputs.tag) }}
+          results: "${{ format('prepare: {0} · Android: {1} · iOS: {2} · release: {3}', needs.prepare.result, needs.android.result, needs['ios-build'].result, needs.release.result) }}"
+          run-url: ${{ format('{0}/{1}/actions/runs/{2}', github.server_url, github.repository, github.run_id) }}
+          github-token: ${{ github.token }}

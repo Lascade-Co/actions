@@ -32,7 +32,6 @@ jobs:
         env:
           SOURCE_REPO: ${{ github.event.client_payload.repo }}
           RELEASE_ID: ${{ github.event.client_payload.release_id }}
-          PACKAGE_NAME: ${{ github.event.client_payload.package_name }}
         run: |
           python3 - <<'PY'
           import os, re
@@ -41,11 +40,17 @@ jobs:
               raise ValueError('Source repository must belong to the central organization')
           if not os.environ['RELEASE_ID'].isdigit():
               raise ValueError('release_id must be numeric')
-          if repo != 'Lascade-Co/travel-animator' or os.environ['PACKAGE_NAME'] != 'com.travelanimator.routemap':
-              raise ValueError('Only the approved KMP source repository/package may publish')
           with open(os.environ['GITHUB_OUTPUT'], 'a') as out:
               out.write(f'owner={repo.split("/")[0]}\nname={repo.split("/")[1]}\n')
           PY
+
+      # Runs before any token or download. The bundle ID comes from config/apps.json, never the payload.
+      - name: Check app registry
+        id: app
+        env:
+          SOURCE_REPO: ${{ github.event.client_payload.repo }}
+          PACKAGE_NAME: ${{ github.event.client_payload.package_name }}
+        run: python3 scripts/kmp/apps.py --repo "$SOURCE_REPO" --package-name "$PACKAGE_NAME" --output "$GITHUB_OUTPUT"
 
       - name: Select store
         id: stores
@@ -100,6 +105,7 @@ jobs:
         env:
           RELEASE_VERSION: ${{ steps.meta.outputs.version }}
           SUBMIT: ${{ steps.meta.outputs.submit }}
+          BUNDLE_ID: ${{ steps.app.outputs.bundle_id }}
           ALREADY_UPLOADED: ${{ github.event.client_payload.ios_uploaded }}
           APPSTORE_API_KEY_ID: ${{ secrets.APPSTORE_API_KEY_ID }}
           APPSTORE_ISSUER_ID: ${{ secrets.APPSTORE_ISSUER_ID }}
@@ -112,7 +118,7 @@ jobs:
           if len(files) != 1:
               raise ValueError('Expected exactly one release IPA')
           command = [sys.executable, 'scripts/ios/publish_appstore.py', '--ipa', str(files[0]),
-                     '--version', os.environ['RELEASE_VERSION'], '--notes-file', 'release_notes.txt', '--localize-whats-new']
+                     '--version', os.environ['RELEASE_VERSION'], '--bundle-id', os.environ['BUNDLE_ID'], '--notes-file', 'release_notes.txt', '--localize-whats-new']
           if os.environ['ALREADY_UPLOADED'].lower() == 'true':
               command.append('--already-uploaded')
           if os.environ['SUBMIT'] == 'false':

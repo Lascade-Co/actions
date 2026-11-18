@@ -24,8 +24,6 @@ jobs:
 
     env:
       TRACK: production
-      TARGET_COUNTRY: BD
-      TARGET_FRACTION: "0.99"
 
     steps:
       - name: Checkout central repo (for scripts)
@@ -48,13 +46,25 @@ jobs:
                   raise ValueError('Missing publish payload field: ' + key)
           if not str(payload['release_id']).isdigit():
               raise ValueError('Invalid release ID')
-          if os.environ['EVENT_TYPE'] == 'publish-kmp' and payload['package_name'] != 'com.travelanimator.routemap':
-              raise ValueError('KMP package must be com.travelanimator.routemap')
-          if os.environ['EVENT_TYPE'] == 'publish-kmp' and repo != 'Lascade-Co/travel-animator':
-              raise ValueError('Only the approved KMP source repository may publish')
           with open(os.environ['GITHUB_OUTPUT'], 'a') as out:
               out.write(f'owner={repo.split("/")[0]}\nname={repo.split("/")[1]}\n')
           PYTHON
+
+      # Runs before any token or download. publish-kmp must come from a registered repo whose package matches
+      # config/apps.json; legacy publish-playstore callers need not be registered (they keep the original
+      # BD / 0.99 rollout).
+      - name: Check app registry
+        id: app
+        env:
+          SOURCE_REPO: ${{ github.event.client_payload.repo }}
+          PACKAGE_NAME: ${{ github.event.client_payload.package_name }}
+          EVENT_TYPE: ${{ github.event.action }}
+        run: |
+          if [ "$EVENT_TYPE" = publish-kmp ]; then
+            python3 scripts/kmp/apps.py --repo "$SOURCE_REPO" --package-name "$PACKAGE_NAME" --output "$GITHUB_OUTPUT"
+          else
+            python3 scripts/kmp/apps.py --repo "$SOURCE_REPO" --allow-unregistered --output "$GITHUB_OUTPUT"
+          fi
 
       - name: Select store
         id: stores
@@ -135,10 +145,15 @@ jobs:
           out-file-path: release-assets
           token: ${{ steps.app-token.outputs.token }}
 
+      # Apps registered with "native_symbols": false (Kotlin Toolchain apps build none) may omit
+      # native-debug-symbols.zip; when one is present there must be exactly one. Every other app, registered or
+      # legacy, still requires exactly one.
       - name: Locate AAB + native debug symbols
         if: steps.stores.outputs.selected == 'true'
         id: assets
         shell: bash
+        env:
+          NATIVE_SYMBOLS: ${{ steps.app.outputs.native_symbols }}
         run: |
           set -euo pipefail
           python3 - <<'PY'
@@ -147,8 +162,12 @@ jobs:
           files = list(Path('release-assets').iterdir())
           selected = {'aab': [p for p in files if p.name.lower().endswith('.aab')],
                       'symbols': [p for p in files if 'native-debug-symbols' in p.name.lower() and p.name.lower().endswith('.zip')]}
+          optional = {'symbols'} if os.environ['NATIVE_SYMBOLS'] == 'false' else set()
           with open(os.environ['GITHUB_OUTPUT'], 'a') as out:
               for key, paths in selected.items():
+                  if key in optional and not paths:
+                      out.write(f'{key}=\n')
+                      continue
                   if len(paths) != 1 or any(c in str(paths[0]) for c in '\r\n'):
                       raise ValueError('Expected exactly one release artifact: ' + key)
                   out.write(f'{key}={paths[0]}\n')
@@ -172,6 +191,8 @@ jobs:
           PLAY_URL: ${{ github.event.client_payload.play_console_production_url }}
           AAB_PATH: ${{ steps.assets.outputs.aab }}
           SYMBOLS_PATH: ${{ steps.assets.outputs.symbols }}
+          ROLLOUT_COUNTRY: ${{ steps.app.outputs.rollout_country }}
+          ROLLOUT_FRACTION: ${{ steps.app.outputs.rollout_fraction }}
         run: |
           set -euo pipefail
           trap 'rm -f play-sa.json' EXIT
@@ -180,7 +201,7 @@ jobs:
           python3 scripts/android/publish_playstore.py \
             --service-account-json play-sa.json \
             --package-name "$PACKAGE_NAME" \
-            --track "${{ env.TRACK }}" \
+            --track "$TRACK" \
             --aab "$AAB_PATH" \
             --native-symbols "$SYMBOLS_PATH" \
             --release-name "$RELEASE_TAG" \
@@ -189,8 +210,8 @@ jobs:
             --app-name "$APP_NAME" \
             --github-release-url "$RELEASE_URL" \
             --play-console-production-url "$PLAY_URL" \
-            --country "${{ env.TARGET_COUNTRY }}" \
-            --user-fraction "${{ env.TARGET_FRACTION }}" \
+            --country "$ROLLOUT_COUNTRY" \
+            --user-fraction "$ROLLOUT_FRACTION" \
             --telegram-out "github_release_body.txt"
 
       - name: Create PostHog annotation

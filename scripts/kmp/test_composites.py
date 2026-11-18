@@ -192,6 +192,23 @@ class BundleTests(unittest.TestCase):
             self.assertIn('restored-key=latest', (root/'output').read_text())
             self.assertEqual((cache/'cached').read_text(), 'hit')
 
+    def test_logs_out_of_ghcr_after_restore_and_publish(self):
+        # Later steps may run untrusted build code; no GHCR credential may stay in the docker config.
+        for mode in ('restore', 'publish'):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                cache = root / 'dependency'
+                cache.mkdir()
+                (cache / 'cached').write_text('x')
+                calls = []
+                env = {'CACHE_NAME': 'example-Linux', 'CACHE_KEY': 'exact', 'CACHE_FALLBACK_KEY': 'latest',
+                       'CACHE_PATHS': str(cache), 'GITHUB_REPOSITORY': 'Lascade-Co/actions',
+                       'GITHUB_ACTOR': 'ci', 'GH_TOKEN': 'not-a-real-token', 'GITHUB_OUTPUT': str(root / 'output')}
+                with patch.dict(os.environ, env), patch('sys.argv', ['cache', mode]), \
+                        patch.object(bundle_cache, 'run_oras', side_effect=lambda *a, **k: calls.append(a[0])):
+                    bundle_cache.main()
+                self.assertEqual((calls[0], calls[-1]), ('login', 'logout'))
+
 
 class ProfileTests(unittest.TestCase):
     def profile(self, **kwargs):

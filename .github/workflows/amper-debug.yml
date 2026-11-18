@@ -1,0 +1,810 @@
+# Debug APK and staging TestFlight for Kotlin Toolchain (Amper) apps; see docs/amper-ci.md.
+# Mirrors kmp-build-debug.yml; scripts/amper/control.py does the file-level work.
+# This repo is PUBLIC: the APK and IPA embed the App Check debug token, so they never become Actions
+# artifacts. android publishes its APK to the private source repo. ios-build parks its IPA in a draft release there,
+# and ios-publish (which runs no source code) moves it to TestFlight with the App Store Connect key, then deletes it.
+# Jobs that run PR code hold packages: read only: they restore amper-release's bundles and never publish any.
+name: Central Amper Debug APK and Staging TestFlight
+run-name: "${{ format('{0} \xB7 {1}', github.event.client_payload.repo, github.event.client_payload.branch) }}"
+'on':
+  repository_dispatch:
+    types:
+      - amper-debug
+permissions:
+  contents: read
+concurrency:
+  group: ${{ format('amper-debug-{0}-{1}', github.event.client_payload.repo, github.event.client_payload.pr || github.event.client_payload.branch)
+    }}
+  cancel-in-progress: true
+defaults:
+  run:
+    shell: bash
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      repo: ${{ steps.source.outputs.repo }}
+      owner: ${{ steps.source.outputs.owner }}
+      name: ${{ steps.source.outputs.name }}
+      pr: ${{ steps.source.outputs.pr }}
+      branch: ${{ steps.source.outputs.branch }}
+      sha: ${{ steps.source.outputs.sha }}
+      project_slug: ${{ steps.source.outputs.project_slug }}
+      tag: ${{ steps.source.outputs.tag }}
+      title: ${{ steps.source.outputs.title }}
+      pr_url: ${{ steps.source.outputs.pr_url }}
+      version: ${{ steps.version.outputs.version }}
+      build_number: ${{ steps.version.outputs.build_number }}
+      toolchain: ${{ steps.version.outputs.toolchain }}
+      deps_key: ${{ steps.deps.outputs.key }}
+    steps:
+      - name: Checkout trusted central controls
+        uses: actions/checkout@v7
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ github.sha }}
+          path: control
+          persist-credentials: false
+      - name: Fetch trusted orchestration helpers
+        run: |-
+          for pair in "kmp/control.py:kmp-control.py" "amper/control.py:amper-control.py"; do
+            curl -fsSL --retry 3 --retry-delay 2 --retry-all-errors --connect-timeout 10 --max-time 60 \
+              "$CONTROL_BASE/${pair%%:*}" -o "$RUNNER_TEMP/${pair##*:}.tmp"
+            test -s "$RUNNER_TEMP/${pair##*:}.tmp"
+            mv "$RUNNER_TEMP/${pair##*:}.tmp" "$RUNNER_TEMP/${pair##*:}"
+          done
+        env:
+          CONTROL_BASE: ${{ format('https://raw.githubusercontent.com/{0}/{1}/scripts', github.repository, github.sha) }}
+      - name: Validate dispatch scope before minting credentials
+        run: python3 "$RUNNER_TEMP/kmp-control.py" validate
+        id: payload
+      # Runs before any token: only repos in config/apps.json may build.
+      # The jobs read this Infisical project's secrets, so the payload's project_slug must be the registered one.
+      - name: Check app registry
+        run: |-
+          python3 control/scripts/kmp/apps.py --repo "$SOURCE_REPO" --project-slug "$PROJECT_SLUG" --output "$GITHUB_OUTPUT"
+        id: app
+        env:
+          SOURCE_REPO: ${{ steps.payload.outputs.repo }}
+          PROJECT_SLUG: ${{ steps.payload.outputs.project_slug }}
+      - name: Mint source-scoped GitHub App token
+        uses: actions/create-github-app-token@v3.3.0
+        with:
+          client-id: ${{ secrets.CI_APP_CLIENT_ID }}
+          private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
+          owner: ${{ steps.payload.outputs.owner }}
+          repositories: ${{ steps.payload.outputs.name }}
+        id: app-token
+      - name: Reject fork PRs and pin source HEAD
+        run: python3 "$RUNNER_TEMP/kmp-control.py" resolve
+        id: source
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+      - name: Checkout pinned source commit
+        uses: actions/checkout@v7
+        with:
+          repository: ${{ steps.source.outputs.repo }}
+          ref: ${{ steps.source.outputs.sha }}
+          token: ${{ steps.app-token.outputs.token }}
+          path: source
+          persist-credentials: false
+      - name: Read source version, toolchain and CI build number
+        run: python3 "$RUNNER_TEMP/amper-control.py" metadata --source source --suffix "$RUN_NUMBER" >> "$GITHUB_OUTPUT"
+        id: version
+        env:
+          RUN_NUMBER: ${{ github.run_number }}
+      # Hashed once on the pristine checkout: set-version/set-variant rewrite module.yaml and xcodebuild
+      # writes Package.resolved, so restore and publish must share this key. The kotlin wrapper pins the toolchain.
+      - name: Compute dependency cache key
+        run: echo "key=deps-$DEPS_HASH" >> "$GITHUB_OUTPUT"
+        id: deps
+        env:
+          DEPS_HASH: ${{ hashFiles('source/kotlin', 'source/project.yaml', 'source/**/module.yaml', 'source/libs.versions.toml', 'source/**/Package.resolved') }}
+      - name: Update Android PR status
+        uses: ./control/actions/pr-status-comment
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+          app-slug: ${{ steps.app-token.outputs.app-slug }}
+          repository: ${{ steps.source.outputs.repo }}
+          pr: ${{ steps.source.outputs.pr }}
+          marker: <!-- central-build-debug -->
+          mode: replace
+          body: |-
+            Android tests and build started.
+            [Workflow run](${{ format('{0}/{1}/actions/runs/{2}', github.server_url, github.repository, github.run_id) }})
+      - name: Update TestFlight PR status
+        uses: ./control/actions/pr-status-comment
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+          app-slug: ${{ steps.app-token.outputs.app-slug }}
+          repository: ${{ steps.source.outputs.repo }}
+          pr: ${{ steps.source.outputs.pr }}
+          marker: <!-- central-ios-testflight -->
+          mode: replace
+          body: |-
+            Staging TestFlight build ${{ steps.version.outputs.build_number }} started.
+            [Workflow run](${{ format('{0}/{1}/actions/runs/{2}', github.server_url, github.repository, github.run_id) }})
+  android:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    # Runs PR code: packages: read restores amper-release's bundles; this workflow never publishes one.
+    permissions:
+      contents: read
+      packages: read
+    defaults:
+      run:
+        shell: bash
+        working-directory: source
+    env:
+      CI: 'true'
+      # ADR 0004: the CLI's default 1 GB heap was 83% full after GC.
+      KOTLIN_CLI_JAVA_OPTIONS: -Xmx1536m
+    needs:
+      - prepare
+    outputs:
+      url: ${{ steps.release.outputs.url }}
+    steps:
+      - name: Checkout trusted central controls
+        uses: actions/checkout@v7
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ github.sha }}
+          path: control
+          persist-credentials: false
+      - name: Fetch trusted Amper helper
+        run: |-
+          curl -fsSL --retry 3 --retry-delay 2 --retry-all-errors --connect-timeout 10 --max-time 60 \
+            "$CONTROL_URL" -o "$RUNNER_TEMP/amper-control.py.tmp"
+          test -s "$RUNNER_TEMP/amper-control.py.tmp"
+          mv "$RUNNER_TEMP/amper-control.py.tmp" "$RUNNER_TEMP/amper-control.py"
+        working-directory: .
+        env:
+          CONTROL_URL: ${{ format('https://raw.githubusercontent.com/{0}/{1}/scripts/amper/control.py', github.repository, github.sha) }}
+      - name: Mint source-scoped GitHub App token
+        uses: actions/create-github-app-token@v3.3.0
+        with:
+          client-id: ${{ secrets.CI_APP_CLIENT_ID }}
+          private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
+          owner: ${{ needs.prepare.outputs.owner }}
+          repositories: ${{ needs.prepare.outputs.name }}
+        id: app-token
+      - name: Checkout pinned source commit
+        uses: actions/checkout@v7
+        with:
+          repository: ${{ needs.prepare.outputs.repo }}
+          ref: ${{ needs.prepare.outputs.sha }}
+          token: ${{ steps.app-token.outputs.token }}
+          path: source
+          persist-credentials: false
+      # Validated inside jq (whole-string anchor), one line, before anything reaches $GITHUB_OUTPUT.
+      - name: Read the Android module from the source manifest
+        run: |-
+          jq -er '.android_module | if type == "string" and test("\\A[A-Za-z0-9_.-]+\\z") and . != ".." then "module=\(.)" else error("invalid android_module") end' \
+            .ci/amper.json >> "$GITHUB_OUTPUT"
+        id: manifest
+      - name: Read /Build from Infisical staging
+        uses: Infisical/secrets-action@v1.0.18
+        with:
+          method: universal
+          client-id: ${{ secrets.INFISICAL_CLIENT_ID }}
+          client-secret: ${{ secrets.INFISICAL_CLIENT_SECRET }}
+          project-slug: ${{ needs.prepare.outputs.project_slug }}
+          env-slug: staging
+          domain: ${{ secrets.INFISICAL_DOMAIN }}
+          secret-path: /Build
+          export-type: env
+      - name: Require yq for module.yaml edits
+        run: yq --version
+      - name: Apply debug variant (IDs and App Check debug token)
+        run: python3 "$RUNNER_TEMP/amper-control.py" set-variant --source "$GITHUB_WORKSPACE/source" --variant debug
+      - name: Write version and CI build number
+        run: python3 "$RUNNER_TEMP/amper-control.py" set-version --source "$GITHUB_WORKSPACE/source" --version "$VERSION" --build "$BUILD_NUMBER"
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+          BUILD_NUMBER: ${{ needs.prepare.outputs.build_number }}
+      - name: Install debug keystore
+        run: python3 "$RUNNER_TEMP/amper-control.py" android-inputs --source "$GITHUB_WORKSPACE/source"
+      # Read-only, from amper-release's bundles (built on main): trusted to untrusted only.
+      - name: Restore Kotlin toolchain OCI bundle
+        uses: ./control/actions/gh-bundle-cache
+        with:
+          mode: restore
+          name: ${{ format('{0}-{1}-{2}-{3}', needs.prepare.outputs.name, runner.os, runner.arch, 'kotlin-release') }}
+          key: ${{ needs.prepare.outputs.deps_key }}
+          fallback-key: latest
+          paths: ~/.cache/JetBrains/Kotlin
+          token: ${{ github.token }}
+        id: kotlin-cache
+      - name: Run Android and shared unit tests
+        run: ./kotlin test -p android
+        id: tests
+      # `kotlin package` makes only the AAB, and `kotlin build` leaves the APK unsigned (module.yaml signing applies
+      # to `kotlin package` only), so sign-apk zipaligns and apksigns it with the debug keystore: the WhatsApp hash
+      # and Google sign-in SHA-1 then match.
+      - name: Build the release APK
+        run: ./kotlin build -m "$MODULE" -v release
+        id: build
+        env:
+          MODULE: ${{ steps.manifest.outputs.module }}
+      - name: Sign the APK with the debug keystore
+        run: python3 "$RUNNER_TEMP/amper-control.py" sign-apk --source "$GITHUB_WORKSPACE/source"
+      - name: Locate and name the APK
+        run: |-
+          path=$(python3 "$RUNNER_TEMP/amper-control.py" find-artifact --source "$GITHUB_WORKSPACE/source" --kind apk | sed -n 's/^path=//p')
+          test -s "$path"
+          mkdir -p "$RUNNER_TEMP/apk"
+          cp "$path" "$RUNNER_TEMP/apk/$NAME-$VERSION-$BUILD_NUMBER-debug.apk"
+        env:
+          NAME: ${{ needs.prepare.outputs.name }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+          BUILD_NUMBER: ${{ needs.prepare.outputs.build_number }}
+      # Straight to the private source repo: the APK embeds the App Check debug token and never becomes an artifact here.
+      # The job-start token: no secrets.* after PR code runs, and the 45-minute timeout keeps it inside its hour.
+      - name: Publish debug prerelease in source repository
+        uses: softprops/action-gh-release@v3
+        with:
+          repository: ${{ needs.prepare.outputs.repo }}
+          token: ${{ steps.app-token.outputs.token }}
+          tag_name: ${{ needs.prepare.outputs.tag }}
+          target_commitish: ${{ needs.prepare.outputs.sha }}
+          name: ${{ needs.prepare.outputs.title }}
+          prerelease: true
+          files: ${{ format('{0}/apk/*.apk', runner.temp) }}
+          fail_on_unmatched_files: true
+          body: |-
+            ${{ needs.prepare.outputs.title }}
+            ${{ needs.prepare.outputs.pr_url }}
+            Source commit: ${{ needs.prepare.outputs.sha }}
+            [Workflow run](${{ format('{0}/{1}/actions/runs/{2}', github.server_url, github.repository, github.run_id) }})
+        id: release
+      - name: Delete APKs and signing inputs from the runner
+        run: |-
+          rm -rf "$RUNNER_TEMP/apk" build/tasks build/signed
+          find . -maxdepth 2 \( -name ci.jks -o -name keystore.properties \) -type f -delete
+        if: ${{ always() }}
+  ios-build:
+    # Free 7-GB arm64 image. ADR 0004: K/N's fixed 3 GB heap needs compact object headers here; expect 25-35 min cold.
+    runs-on: macos-26
+    timeout-minutes: 90
+    # Runs PR code (./kotlin and Xcode's Build Kotlin phase): packages: read restores amper-release's bundles, and no
+    # App Store Connect key. It parks the IPA in a draft in the source repo for ios-publish.
+    permissions:
+      contents: read
+      packages: read
+    defaults:
+      run:
+        shell: bash
+        working-directory: source
+    env:
+      CI: 'true'
+    needs:
+      - prepare
+    # The parking draft's numeric ID and the IPA's bare SHA-256; ios-publish re-checks both.
+    outputs:
+      park_id: ${{ steps.park.outputs.release_id }}
+      park_sha256: ${{ steps.park.outputs.sha256 }}
+    steps:
+      - name: Checkout trusted central controls
+        uses: actions/checkout@v7
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ github.sha }}
+          path: control
+          persist-credentials: false
+      - name: Fetch trusted orchestration helpers
+        run: |-
+          for pair in "amper/control.py:amper-control.py" "kmp/control.py:kmp-control.py"; do
+            curl -fsSL --retry 3 --retry-delay 2 --retry-all-errors --connect-timeout 10 --max-time 60 \
+              "$CONTROL_BASE/${pair%%:*}" -o "$RUNNER_TEMP/${pair##*:}.tmp"
+            test -s "$RUNNER_TEMP/${pair##*:}.tmp"
+            mv "$RUNNER_TEMP/${pair##*:}.tmp" "$RUNNER_TEMP/${pair##*:}"
+          done
+        working-directory: .
+        env:
+          CONTROL_BASE: ${{ format('https://raw.githubusercontent.com/{0}/{1}/scripts', github.repository, github.sha) }}
+      - name: Mint source-scoped GitHub App token
+        uses: actions/create-github-app-token@v3.3.0
+        with:
+          client-id: ${{ secrets.CI_APP_CLIENT_ID }}
+          private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
+          owner: ${{ needs.prepare.outputs.owner }}
+          repositories: ${{ needs.prepare.outputs.name }}
+        id: app-token
+      # No secrets.* after PR code runs here (a fresh mint would hand the App private key to a tainted runner), so
+      # parking reuses this token; the guard before parking fails closed once it is near its one-hour life.
+      - name: Record the App token mint time
+        run: echo "minted_at=$(date +%s)" >> "$GITHUB_OUTPUT"
+        working-directory: .
+        id: token-time
+      - name: Checkout pinned source commit
+        uses: actions/checkout@v7
+        with:
+          repository: ${{ needs.prepare.outputs.repo }}
+          ref: ${{ needs.prepare.outputs.sha }}
+          token: ${{ steps.app-token.outputs.token }}
+          path: source
+          persist-credentials: false
+      - name: Pin Xcode 26.6
+        uses: maxim-lobanov/setup-xcode@ed7a3b1fda3918c0306d1b724322adc0b8cc0a90  # v1.7.0
+        with:
+          xcode-version: '26.6'
+      - name: Read /Build from Infisical staging
+        uses: Infisical/secrets-action@v1.0.18
+        with:
+          method: universal
+          client-id: ${{ secrets.INFISICAL_CLIENT_ID }}
+          client-secret: ${{ secrets.INFISICAL_CLIENT_SECRET }}
+          project-slug: ${{ needs.prepare.outputs.project_slug }}
+          env-slug: staging
+          domain: ${{ secrets.INFISICAL_DOMAIN }}
+          secret-path: /Build
+          export-type: env
+      - name: Require yq for module.yaml edits
+        run: command -v yq >/dev/null || brew install yq; yq --version
+      # Validated inside jq (whole-string anchors, no ".."), and exactly two lines, before anything reaches $GITHUB_OUTPUT.
+      - name: Read Xcode project and scheme from the source manifest
+        run: |-
+          jq -er '
+            def ok(re): if type == "string" and test(re) and (contains("..") | not) then . else error("invalid manifest value: \(tojson)") end;
+            "project=\(.ios_project | ok("\\A[A-Za-z0-9_./-]+\\.xcodeproj\\z"))",
+            "scheme=\(.ios_scheme | ok("\\A[A-Za-z0-9_.-]+\\z"))"' .ci/amper.json > "$RUNNER_TEMP/ios-manifest.txt"
+          test "$(wc -l < "$RUNNER_TEMP/ios-manifest.txt")" -eq 2
+          cat "$RUNNER_TEMP/ios-manifest.txt" >> "$GITHUB_OUTPUT"
+        id: manifest
+      # set-variant writes this identity onto the app target; command-line signing overrides did not take.
+      - name: Read staging app profile identity
+        run: |-
+          python3 - <<'PY'
+          import base64, os, plistlib, re, subprocess, tempfile
+          from pathlib import Path
+          with tempfile.NamedTemporaryFile(suffix='.mobileprovision') as raw:
+              raw.write(base64.b64decode(''.join(os.environ['IOS_STAGING_PROFILE_APP_BASE64'].split()), validate=True)); raw.flush()
+              p = plistlib.loads(subprocess.run(['security', 'cms', '-D', '-i', raw.name], check=True, capture_output=True).stdout)
+          values = {'uuid': p['UUID'], 'name': p['Name'], 'team': p['TeamIdentifier'][0]}
+          if not re.fullmatch(r'[A-Za-z0-9]+', values['team']) or any(re.search(r'[\r\n";\\]', v) for v in values.values()):
+              raise SystemExit('error: unexpected characters in the staging profile identity')
+          Path(os.environ['GITHUB_OUTPUT']).open('a').writelines(f'{k}={v}\n' for k, v in values.items())
+          print(f"Staging profile {values['name']} ({values['uuid']}), team {values['team']}")
+          PY
+        id: profile
+      - name: Apply debug variant and manual app-target signing
+        run: |-
+          python3 "$RUNNER_TEMP/amper-control.py" set-variant --source "$GITHUB_WORKSPACE/source" --variant debug \
+            --team "$TEAM_ID" --profile "$PROFILE_NAME" >> "$GITHUB_OUTPUT"
+        id: variant
+        env:
+          TEAM_ID: ${{ steps.profile.outputs.team }}
+          PROFILE_NAME: ${{ steps.profile.outputs.name }}
+      - name: Write version and CI build number
+        run: python3 "$RUNNER_TEMP/amper-control.py" set-version --source "$GITHUB_WORKSPACE/source" --version "$VERSION" --build "$BUILD_NUMBER"
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+          BUILD_NUMBER: ${{ needs.prepare.outputs.build_number }}
+      - name: Install temporary Apple distribution signing
+        uses: ./control/actions/apple-signing
+        with:
+          profiles: IOS_STAGING_PROFILE_APP_BASE64
+      # Read-only, from amper-release's bundles (built on main): trusted to untrusted only.
+      - name: Restore Kotlin toolchain OCI bundle
+        uses: ./control/actions/gh-bundle-cache
+        with:
+          mode: restore
+          name: ${{ format('{0}-{1}-{2}-{3}', needs.prepare.outputs.name, runner.os, runner.arch, 'kotlin-release') }}
+          key: ${{ needs.prepare.outputs.deps_key }}
+          fallback-key: latest
+          paths: ~/Library/Caches/JetBrains/Kotlin
+          token: ${{ github.token }}
+        id: kotlin-cache
+      - name: Restore konan OCI bundle
+        uses: ./control/actions/gh-bundle-cache
+        with:
+          mode: restore
+          name: ${{ format('{0}-{1}-{2}-{3}', needs.prepare.outputs.name, runner.os, runner.arch, 'konan-release') }}
+          key: ${{ needs.prepare.outputs.deps_key }}
+          fallback-key: latest
+          paths: ~/.konan/dependencies
+          token: ${{ github.token }}
+        id: konan-cache
+      # Resolve and archive share -derivedDataPath, so SwiftPM checkouts live in one known directory.
+      - name: Restore swiftpm OCI bundle
+        uses: ./control/actions/gh-bundle-cache
+        with:
+          mode: restore
+          name: ${{ format('{0}-{1}-{2}-{3}', needs.prepare.outputs.name, runner.os, runner.arch, 'swiftpm-release') }}
+          key: ${{ needs.prepare.outputs.deps_key }}
+          fallback-key: latest
+          paths: $RUNNER_TEMP/dd/SourcePackages
+          token: ${{ github.token }}
+        id: spm-cache
+      # Resolution only: Maven dependencies, the K/N compiler and its ~/.konan dependencies, and the SwiftPM import
+      # behind cinterop. No compile, link or app signing. Task names come from the project, so any module layout works.
+      - name: Warm the Kotlin toolchain and K/N caches
+        run: |-
+          mkdir -p "$RUNNER_TEMP/kn-gc"
+          export JAVA_TOOL_OPTIONS="-XX:+UseCompactObjectHeaders -Xlog:gc:file=$RUNNER_TEMP/kn-gc/gc-%p.log:uptime,level,tags"
+          tasks=()
+          while IFS= read -r task; do tasks+=("$task"); done < <(./kotlin show tasks | sed -nE 's/^task (:[A-Za-z0-9_-]+:(resolveDependencies|cinterop)IosArm64)( .*)?$/\1/p')
+          test "${#tasks[@]}" -gt 0
+          ./kotlin task "${tasks[@]}"
+        id: warm
+        timeout-minutes: 25
+      # Every ./kotlin run deletes the committed Package.resolved and shared scheme ("no scheme named app" otherwise).
+      # Restore both; resolve and archive then read the pins and the scheme before Xcode's Build Kotlin phase runs.
+      - name: Restore the pinned Package.resolved and shared scheme
+        run: |-
+          git -C "$GITHUB_WORKSPACE/source" checkout -- "$IOS_PROJECT/xcshareddata/xcschemes/$IOS_SCHEME.xcscheme" \
+            "$IOS_PROJECT/project.xcworkspace/xcshareddata/swiftpm/Package.resolved"
+        env:
+          IOS_PROJECT: ${{ steps.manifest.outputs.project }}
+          IOS_SCHEME: ${{ steps.manifest.outputs.scheme }}
+      - name: Resolve Swift packages
+        run: |-
+          xcodebuild -resolvePackageDependencies -project "$IOS_PROJECT" -scheme "$IOS_SCHEME" -derivedDataPath "$RUNNER_TEMP/dd" \
+            -onlyUsePackageVersionsFromResolvedFile
+        env:
+          IOS_PROJECT: ${{ steps.manifest.outputs.project }}
+          IOS_SCHEME: ${{ steps.manifest.outputs.scheme }}
+      # ADR 0004: xcodebuild passes JAVA_TOOL_OPTIONS through to the forked K/N compiler JVM (undocumented),
+      # so the guard below checks the log for it and caps full GCs. The sampler records memory for docs/amper-ci.md.
+      - name: Archive optimized staging build
+        run: |-
+          mkdir -p "$RUNNER_TEMP/kn-gc"
+          export JAVA_TOOL_OPTIONS="-XX:+UseCompactObjectHeaders -Xlog:gc:file=$RUNNER_TEMP/kn-gc/gc-%p.log:uptime,level,tags"
+          ( while :; do date -u +%T; sysctl -n vm.swapusage || true; memory_pressure -Q 2>&1 | tail -1 || true; sleep 30; done ) \
+            > "$RUNNER_TEMP/memory.log" 2>&1 &
+          sampler=$!
+          trap 'kill "$sampler" 2>/dev/null || true' EXIT
+          xcodebuild -project "$IOS_PROJECT" -scheme "$IOS_SCHEME" -configuration Release -derivedDataPath "$RUNNER_TEMP/dd" \
+            -onlyUsePackageVersionsFromResolvedFile -jobs 3 -archivePath "$RUNNER_TEMP/app.xcarchive" archive 2>&1 | tee xcodebuild.log
+        id: archive
+        env:
+          IOS_PROJECT: ${{ steps.manifest.outputs.project }}
+          IOS_SCHEME: ${{ steps.manifest.outputs.scheme }}
+      - name: Guard K/N heap flags and full GCs
+        run: |-
+          python3 "$RUNNER_TEMP/amper-control.py" kn-gc-guard --log xcodebuild.log --gc-dir "$RUNNER_TEMP/kn-gc" 2>&1 \
+            | tee "$RUNNER_TEMP/gc-summary.txt"
+      - name: Write export options
+        run: |-
+          python3 "$RUNNER_TEMP/amper-control.py" export-options --team "$TEAM_ID" --profile "$PROFILE_NAME" \
+            --bundle-id "$BUNDLE_ID" --out "$RUNNER_TEMP/ExportOptions.plist"
+        env:
+          TEAM_ID: ${{ steps.profile.outputs.team }}
+          PROFILE_NAME: ${{ steps.profile.outputs.name }}
+          BUNDLE_ID: ${{ steps.variant.outputs.bundle_id }}
+      - name: Export staging IPA
+        run: |-
+          xcodebuild -exportArchive -archivePath "$RUNNER_TEMP/app.xcarchive" \
+            -exportOptionsPlist "$RUNNER_TEMP/ExportOptions.plist" -exportPath "$RUNNER_TEMP/export"
+          shopt -s nullglob
+          ipas=("$RUNNER_TEMP"/export/*.ipa)
+          test "${#ipas[@]}" -eq 1
+          echo "ipa_path=${ipas[0]}" >> "$GITHUB_OUTPUT"
+        id: export
+      - name: Upload staging dSYMs to Crashlytics
+        run: |-
+          upload="$RUNNER_TEMP/dd/SourcePackages/checkouts/firebase-ios-sdk/Crashlytics/upload-symbols"
+          test -x "$upload"
+          shopt -s nullglob
+          plists=("$RUNNER_TEMP"/app.xcarchive/Products/Applications/*.app/GoogleService-Info.plist)
+          test "${#plists[@]}" -eq 1
+          "$upload" -gsp "${plists[0]}" -p ios "$RUNNER_TEMP/app.xcarchive/dSYMs"
+      - name: Require an unexpired App token for parking
+        run: |-
+          elapsed=$(( $(date +%s) - MINTED_AT ))
+          if [ "$elapsed" -gt 3300 ]; then
+            echo "::error::App token likely expired: debug build ran past ~55 min ($(( elapsed / 60 )) min since mint); re-run with warm caches."
+            exit 1
+          fi
+        working-directory: .
+        env:
+          MINTED_AT: ${{ steps.token-time.outputs.minted_at }}
+      # A draft (no tag, no release event) in the private source repo, one per PR: ios-publish downloads it by ID,
+      # checks the SHA-256 reported here, uploads it to TestFlight and deletes the draft.
+      - name: Park the staging IPA in a draft release in the source repository
+        run: |-
+          mkdir -p "$RUNNER_TEMP/ipa"
+          cp "$IPA_PATH" "$RUNNER_TEMP/ipa/$NAME-$VERSION-$BUILD_NUMBER-staging.ipa"
+          python3 "$GITHUB_WORKSPACE/control/scripts/amper/release.py" park --repo "$SOURCE_REPO" --tag "$PARK_TAG" \
+            --sha "$SOURCE_SHA" --ipa "$RUNNER_TEMP/ipa/$NAME-$VERSION-$BUILD_NUMBER-staging.ipa"
+        id: park
+        env:
+          IPA_PATH: ${{ steps.export.outputs.ipa_path }}
+          NAME: ${{ needs.prepare.outputs.name }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+          BUILD_NUMBER: ${{ needs.prepare.outputs.build_number }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          SOURCE_REPO: ${{ needs.prepare.outputs.repo }}
+          SOURCE_SHA: ${{ needs.prepare.outputs.sha }}
+          PARK_TAG: ${{ format('ci-testflight-{0}', needs.prepare.outputs.tag) }}
+      - name: Delete the IPA, archive and build products from the runner
+        run: rm -rf "$RUNNER_TEMP/ipa" "$RUNNER_TEMP/export" "$RUNNER_TEMP/app.xcarchive" "$RUNNER_TEMP/dd/Build" "$RUNNER_TEMP/ExportOptions.plist" build
+        if: ${{ always() }}
+      - name: Remove temporary provisioning profiles
+        uses: ./control/actions/apple-signing
+        with:
+          mode: cleanup
+        if: ${{ always() }}
+      # Public repo: no raw xcodebuild.log. Only GC logs, the guard summary, memory samples and a filtered log
+      # (errors, warnings, the JVM flag line, build result) with any line naming a key, token, password or secret dropped.
+      - name: Collect redacted iOS diagnostics
+        run: |-
+          out="$RUNNER_TEMP/ios-diagnostics"
+          mkdir -p "$out"
+          if [ -d "$RUNNER_TEMP/kn-gc" ]; then cp -R "$RUNNER_TEMP/kn-gc" "$out/"; fi
+          for f in gc-summary.txt memory.log; do if [ -f "$RUNNER_TEMP/$f" ]; then cp "$RUNNER_TEMP/$f" "$out/"; fi; done
+          if [ -f xcodebuild.log ]; then
+            grep -E 'error:|warning:|Picked up JAVA_TOOL_OPTIONS|(BUILD|ARCHIVE) (SUCCEEDED|FAILED)' xcodebuild.log \
+              | grep -Eiv 'KEY|TOKEN|PASSWORD|SECRET' > "$out/xcodebuild-filtered.log" || true
+          fi
+          rm -f xcodebuild.log
+        if: ${{ always() }}
+      - name: Retain iOS diagnostics
+        uses: actions/upload-artifact@v7
+        with:
+          name: ios-diagnostics
+          path: ${{ format('{0}/ios-diagnostics', runner.temp) }}
+          if-no-files-found: warn
+          retention-days: 7
+          overwrite: true
+        if: ${{ always() }}
+  # The only job with the App Store Connect key, so it runs no source code: it checks out trusted controls only and
+  # takes the IPA ios-build parked. `needs` withholds the upload until android (the unit tests) succeeds. A skipped or
+  # failed upload keeps the draft, so "Re-run failed jobs" can retry; the PR's next run replaces it.
+  ios-publish:
+    runs-on: macos-26
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    needs:
+      - prepare
+      - android
+      - ios-build
+    env:
+      SOURCE_REPO: ${{ needs.prepare.outputs.repo }}
+      PARK_TAG: ${{ format('ci-testflight-{0}', needs.prepare.outputs.tag) }}
+      PARK_ID: ${{ needs['ios-build'].outputs.park_id }}
+    outputs:
+      uploaded: ${{ steps.upload.outputs.uploaded }}
+      bundle_id: ${{ steps.identity.outputs.bundle_id }}
+      version: ${{ steps.identity.outputs.version }}
+      build_number: ${{ steps.identity.outputs.build_number }}
+    steps:
+      - name: Checkout trusted central controls
+        uses: actions/checkout@v7
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ github.sha }}
+          path: control
+          persist-credentials: false
+      - name: Mint source-scoped GitHub App token
+        uses: actions/create-github-app-token@v3.3.0
+        with:
+          client-id: ${{ secrets.CI_APP_CLIENT_ID }}
+          private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
+          owner: ${{ needs.prepare.outputs.owner }}
+          repositories: ${{ needs.prepare.outputs.name }}
+        id: app-token
+      - name: Pin Xcode 26.6
+        uses: maxim-lobanov/setup-xcode@ed7a3b1fda3918c0306d1b724322adc0b8cc0a90  # v1.7.0
+        with:
+          xcode-version: '26.6'
+      # By ID, re-checked as a draft under this PR's parking tag, exactly one IPA, matching ios-build's SHA-256.
+      - name: Download and verify the parked staging IPA
+        run: |-
+          python3 control/scripts/amper/release.py unpark --repo "$SOURCE_REPO" --release-id "$PARK_ID" --tag "$PARK_TAG" \
+            --expected "$PARK_SHA256" --dest "$RUNNER_TEMP/ipa"
+        id: ipa
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          PARK_SHA256: ${{ needs['ios-build'].outputs.park_sha256 }}
+      - name: Upload package to TestFlight without processing poll
+        run: |-
+          python3 control/scripts/kmp/control.py upload-ipa "$IPA_PATH"
+          echo 'uploaded=true' >> "$GITHUB_OUTPUT"
+        id: upload
+        env:
+          IPA_PATH: ${{ steps.ipa.outputs.ipa }}
+          APPSTORE_API_KEY_ID: ${{ secrets.APPSTORE_API_KEY_ID }}
+          APPSTORE_ISSUER_ID: ${{ secrets.APPSTORE_ISSUER_ID }}
+          APPSTORE_API_PRIVATE_KEY: ${{ secrets.APPSTORE_API_PRIVATE_KEY }}
+      # Notes problems never fail the upload: testflight-notes fails visibly when the identity is missing.
+      - name: Read uploaded IPA identity for What to Test notes
+        run: python3 control/scripts/ios/testflight_notes.py identity "$IPA_PATH"
+        id: identity
+        continue-on-error: true
+        env:
+          IPA_PATH: ${{ steps.ipa.outputs.ipa }}
+      - name: Delete the parked draft release
+        run: |-
+          python3 control/scripts/amper/release.py discard --repo "$SOURCE_REPO" --release-id "$PARK_ID" --tag "$PARK_TAG" || {
+            echo "::warning::Could not delete the parking draft $PARK_TAG (release $PARK_ID) in $SOURCE_REPO; delete it by hand."
+            exit 1
+          }
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        if: ${{ always() && steps.upload.outcome == 'success' }}
+      - name: Delete the IPA from the runner
+        run: rm -rf "$RUNNER_TEMP/ipa"
+        if: ${{ always() }}
+  # Sets TestFlight "What to Test" from the PR (or head commit) once App Store Connect lists the build.
+  # A separate job so a notes failure never marks the upload failed; notify does not wait for it.
+  testflight-notes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    permissions:
+      contents: read
+    needs:
+      - prepare
+      - ios-publish
+    if: ${{ needs['ios-publish'].outputs.uploaded == 'true' }}
+    steps:
+      - name: Require the uploaded IPA identity
+        run: |-
+          if [ -z "$BUNDLE_ID" ] || [ -z "$VERSION" ] || [ -z "$BUILD_NUMBER" ]; then
+            echo '::error::ios-publish did not report the uploaded IPA identity; What to Test notes were not set.'
+            exit 1
+          fi
+        env:
+          BUNDLE_ID: ${{ needs['ios-publish'].outputs.bundle_id }}
+          VERSION: ${{ needs['ios-publish'].outputs.version }}
+          BUILD_NUMBER: ${{ needs['ios-publish'].outputs.build_number }}
+      - name: Fetch trusted What to Test helpers
+        run: |-
+          mkdir -p "$RUNNER_TEMP/testflight-notes"
+          for name in asc_client.py testflight_notes.py; do
+            curl -fsSL --retry 3 --retry-delay 2 --retry-all-errors --connect-timeout 10 --max-time 60 \
+              "$HELPER_BASE/$name" -o "$RUNNER_TEMP/testflight-notes/$name.tmp"
+            test -s "$RUNNER_TEMP/testflight-notes/$name.tmp"
+            mv "$RUNNER_TEMP/testflight-notes/$name.tmp" "$RUNNER_TEMP/testflight-notes/$name"
+          done
+        working-directory: .
+        env:
+          HELPER_BASE: ${{ format('https://raw.githubusercontent.com/{0}/{1}/scripts/ios', github.repository, github.sha) }}
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+      - name: Install App Store JWT support
+        run: pip install --quiet 'pyjwt[crypto]==2.15.1'
+      - name: Mint source-scoped GitHub App token
+        uses: actions/create-github-app-token@v3.3.0
+        with:
+          client-id: ${{ secrets.CI_APP_CLIENT_ID }}
+          private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
+          owner: ${{ needs.prepare.outputs.owner }}
+          repositories: ${{ needs.prepare.outputs.name }}
+        id: app-token
+      # PR text is untrusted: it reaches the helper only as a GitHub API JSON file, never through shell or expressions.
+      - name: Compose notes from the PR or head commit
+        run: |-
+          if [ -n "$PR" ]; then
+            gh api "repos/$REPO/pulls/$PR" > "$RUNNER_TEMP/notes-source.json"
+            kind=--pull
+          else
+            gh api "repos/$REPO/commits/$SHA" > "$RUNNER_TEMP/notes-source.json"
+            kind=--commit
+          fi
+          python3 "$RUNNER_TEMP/testflight-notes/testflight_notes.py" compose --branch "$BRANCH" --sha "$SHA" \
+            "$kind" "$RUNNER_TEMP/notes-source.json" --output "$RUNNER_TEMP/what-to-test.txt"
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          REPO: ${{ needs.prepare.outputs.repo }}
+          PR: ${{ needs.prepare.outputs.pr }}
+          SHA: ${{ needs.prepare.outputs.sha }}
+          BRANCH: ${{ needs.prepare.outputs.branch }}
+      - name: Set What to Test once App Store Connect lists the build
+        run: |-
+          python3 "$RUNNER_TEMP/testflight-notes/testflight_notes.py" publish --bundle-id "$BUNDLE_ID" \
+            --version "$VERSION" --build-number "$BUILD_NUMBER" --notes-file "$RUNNER_TEMP/what-to-test.txt" --timeout 1800
+        env:
+          BUNDLE_ID: ${{ needs['ios-publish'].outputs.bundle_id }}
+          VERSION: ${{ needs['ios-publish'].outputs.version }}
+          BUILD_NUMBER: ${{ needs['ios-publish'].outputs.build_number }}
+          APPSTORE_API_KEY_ID: ${{ secrets.APPSTORE_API_KEY_ID }}
+          APPSTORE_ISSUER_ID: ${{ secrets.APPSTORE_ISSUER_ID }}
+          APPSTORE_API_PRIVATE_KEY: ${{ secrets.APPSTORE_API_PRIVATE_KEY }}
+  notify:
+    runs-on: ubuntu-latest
+    # actions/checks read let the notifier point at the failing job, step and first error.
+    permissions:
+      contents: read
+      actions: read
+      checks: read
+    timeout-minutes: 10
+    needs:
+      - prepare
+      - android
+      - ios-build
+      - ios-publish
+    if: ${{ !cancelled() }}
+    steps:
+      - name: Checkout trusted central controls
+        uses: actions/checkout@v7
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ github.sha }}
+          path: control
+          persist-credentials: false
+      - name: Mint source-scoped GitHub App token
+        uses: actions/create-github-app-token@v3.3.0
+        with:
+          client-id: ${{ secrets.CI_APP_CLIENT_ID }}
+          private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
+          owner: ${{ needs.prepare.outputs.owner }}
+          repositories: ${{ needs.prepare.outputs.name }}
+        id: app-token
+        if: ${{ needs.prepare.outputs.repo != '' }}
+      # TELEGRAM_CHAT_ID lives in Infisical /Build; the bot token is a GitHub secret.
+      - name: Read /Build from Infisical staging
+        uses: Infisical/secrets-action@v1.0.18
+        with:
+          method: universal
+          client-id: ${{ secrets.INFISICAL_CLIENT_ID }}
+          client-secret: ${{ secrets.INFISICAL_CLIENT_SECRET }}
+          project-slug: ${{ needs.prepare.outputs.project_slug }}
+          env-slug: staging
+          domain: ${{ secrets.INFISICAL_DOMAIN }}
+          secret-path: /Build
+          export-type: env
+        if: ${{ !cancelled() }}
+      - name: Update Android PR status
+        uses: ./control/actions/pr-status-comment
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+          app-slug: ${{ steps.app-token.outputs.app-slug }}
+          repository: ${{ needs.prepare.outputs.repo }}
+          pr: ${{ needs.prepare.outputs.pr }}
+          marker: <!-- central-build-debug -->
+          mode: upsert
+          body: |-
+            ${{ needs.android.outputs.url != '' && format('Debug APK is ready: {0}', needs.android.outputs.url) || format('Android tests, build or publishing failed: {0}.', needs.android.result) }}
+            ${{ needs.android.outputs.url == '' && format('[Workflow run]({0}/{1}/actions/runs/{2})', github.server_url, github.repository, github.run_id) || '' }}
+        if: ${{ !cancelled() && needs.prepare.outputs.repo != '' }}
+      - name: Notify Telegram of Android result
+        uses: ./control/actions/telegram-notify
+        with:
+          token: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          chat-id: ${{ env.TELEGRAM_CHAT_ID }}
+          kind: android
+          status: ${{ needs.android.outputs.url != '' && 'success' || 'failure' }}
+          repo: ${{ needs.prepare.outputs.repo }}
+          branch: ${{ needs.prepare.outputs.branch }}
+          title: ${{ needs.prepare.outputs.title }}
+          pr-url: ${{ needs.prepare.outputs.pr_url }}
+          link: ${{ needs.android.outputs.url }}
+          results: "${{ format('Tests, build and publish: {0}', needs.android.result) }}"
+          run-url: ${{ format('{0}/{1}/actions/runs/{2}', github.server_url, github.repository, github.run_id) }}
+          github-token: ${{ github.token }}
+        if: ${{ !cancelled() }}
+      - name: Update TestFlight PR status
+        uses: ./control/actions/pr-status-comment
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+          app-slug: ${{ steps.app-token.outputs.app-slug }}
+          repository: ${{ needs.prepare.outputs.repo }}
+          pr: ${{ needs.prepare.outputs.pr }}
+          marker: <!-- central-ios-testflight -->
+          mode: upsert
+          body: |-
+            ${{ needs['ios-publish'].outputs.uploaded == 'true' && format('TestFlight {0} uploaded; Apple processing is pending. Internal testers receive it automatically when processing completes.', needs.prepare.outputs.build_number) || format('TestFlight {0} failed or was withheld. Android tests: {1}; iOS build: {2}; TestFlight upload: {3}.', needs.prepare.outputs.build_number, needs.android.result, needs['ios-build'].result, needs['ios-publish'].result) }}
+            ${{ needs['ios-publish'].outputs.uploaded != 'true' && format('[Workflow run]({0}/{1}/actions/runs/{2})', github.server_url, github.repository, github.run_id) || '' }}
+        if: ${{ !cancelled() && needs.prepare.outputs.repo != '' }}
+      - name: Notify Telegram of TestFlight result
+        uses: ./control/actions/telegram-notify
+        with:
+          token: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          chat-id: ${{ env.TELEGRAM_CHAT_ID }}
+          kind: testflight
+          status: ${{ needs['ios-publish'].outputs.uploaded == 'true' && 'success' || 'failure' }}
+          repo: ${{ needs.prepare.outputs.repo }}
+          branch: ${{ needs.prepare.outputs.branch }}
+          title: ${{ needs.prepare.outputs.title }}
+          pr-url: ${{ needs.prepare.outputs.pr_url }}
+          build-number: ${{ needs.prepare.outputs.build_number }}
+          results: "${{ format('Android tests: {0} · iOS build: {1} · TestFlight upload: {2}', needs.android.result, needs['ios-build'].result, needs['ios-publish'].result) }}"
+          run-url: ${{ format('{0}/{1}/actions/runs/{2}', github.server_url, github.repository, github.run_id) }}
+          github-token: ${{ github.token }}
+        if: ${{ !cancelled() }}

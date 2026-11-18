@@ -8,6 +8,10 @@ import argparse
 import json
 from pathlib import Path
 import re
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'kmp'))
+import apps  # noqa: E402
 
 
 def validate(payload, release, central_repository):
@@ -16,8 +20,12 @@ def validate(payload, release, central_repository):
         raise ValueError('Release repository must belong to the central organization')
     if not str(payload.get('release_id', '')).isdigit():
         raise ValueError('A numeric release_id is required')
-    if repo != 'Lascade-Co/travel-animator' or payload.get('package_name') != 'com.travelanimator.routemap':
-        raise ValueError('Only the approved KMP source repository/package may publish')
+    try:
+        app = apps.load_app(repo)
+    except SystemExit as error:
+        raise ValueError(str(error)) from None
+    if payload.get('package_name') != app['package_name']:
+        raise ValueError('Only the registered source repository/package may publish')
     if str(release.get('id')) != str(payload['release_id']) or release.get('draft') or release.get('prerelease'):
         raise ValueError('Expected the requested published production release')
     match = re.fullmatch(r'v(\d+\.\d+\.\d+)', release.get('tag_name', ''))
@@ -31,7 +39,8 @@ def validate(payload, release, central_repository):
         raise ValueError('Release notes must contain 1–500 UTF-16 code units; shorten without truncating')
     return {'owner': repo.split('/')[0], 'name': repo.split('/')[1], 'version': match[1],
             'tag': release['tag_name'], 'gh_url': f'https://github.com/{repo}/releases/tag/{release["tag_name"]}',
-            'submit': 'true' if submit else 'false'}, notes
+            'submit': 'true' if submit else 'false',
+            'bundle_id': app['bundle_id'], 'metadata_repo': app['metadata_repo'] or ''}, notes
 
 
 def main():

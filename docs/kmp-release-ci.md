@@ -2,8 +2,8 @@
 
 The source `release.yml` dispatches `kmp-release` from pushes to `main` and manual runs.
 The trusted central `kmp-build-release.yml` accepts only
-`Lascade-Co/travel-animator`, branch `main`, its immutable current SHA and project
-`travelanimator`. It validates before minting source-scoped GitHub App credentials.
+`Lascade-Co/travel-animator` (which must also be registered in `config/apps.json`, checked through
+`scripts/kmp/apps.py`), branch `main`, its immutable current SHA and project `travelanimator`. It validates before minting source-scoped GitHub App credentials.
 The entire release is serial (`kmp-release`, cancellation disabled). Stale requests fail;
 the exact release bump subject from the release bot skips the next run.
 
