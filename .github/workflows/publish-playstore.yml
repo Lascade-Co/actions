@@ -50,7 +50,7 @@ jobs:
               raise ValueError('Invalid release ID')
           if os.environ['EVENT_TYPE'] == 'publish-kmp' and payload['package_name'] != 'com.travelanimator.routemap':
               raise ValueError('KMP package must be com.travelanimator.routemap')
-          if os.environ['EVENT_TYPE'] == 'publish-kmp' and repo != 'Lascade-Co/travel-animator-shared':
+          if os.environ['EVENT_TYPE'] == 'publish-kmp' and repo != 'Lascade-Co/travel-animator':
               raise ValueError('Only the approved KMP source repository may publish')
           with open(os.environ['GITHUB_OUTPUT'], 'a') as out:
               out.write(f'owner={repo.split("/")[0]}\nname={repo.split("/")[1]}\n')

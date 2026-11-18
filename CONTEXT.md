@@ -348,9 +348,10 @@ _Avoid_: release notes, What's New — those are the App Store version's `whatsN
 - The **central runner** reads Infisical `staging` for **TestFlight builds** and `prod` for
   App Store releases — the signing material is identical in both, because TestFlight and the
   App Store take the same distribution certificate and profiles.
-- A **build number** must clear its **train**'s floor. `travel-animator-ios` is at marketing
-  version `4.0.1` with builds around `235` (it was `3.9.3` / `213` when ADR-0008 was written),
-  which is why a bare run counter cannot be used (see ADR-0008).
+- A **build number** must clear its **train**'s floor. The iOS app (now in the KMP repo
+  `travel-animator`, formerly `travel-animator-ios`) is at marketing version `4.0.1` with builds
+  around `235` (it was `3.9.3` / `213` when ADR-0008 was written), which is why a
+  bare run counter cannot be used (see ADR-0008).
 - A **TestFlight build** reuses the highest iOS **train** already in TestFlight, so every build for
   one release candidate shares a **marketing version** and is told apart by its **build number**.
 - The project **marketing version** is used instead when it is higher. That is now the only

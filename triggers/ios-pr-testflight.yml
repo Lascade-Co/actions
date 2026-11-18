@@ -1,9 +1,9 @@
 # Copy this workflow into the iOS app repo you want built on every PR, and set
 # secrets.CENTRAL_DISPATCH_TOKEN (a token that can dispatch to Lascade-Co/actions).
 # Fill in project_slug (Infisical).
-# If the app pins private SPM packages from the SAME org, list them in "spm_repos"
-# (comma-separated repo names) so the App token minted centrally can clone them.
-# Omit the field and the token is scoped to the app repo alone.
+# If the app pins private SPM packages from the SAME org, add "spm_repos" to the
+# payload (comma-separated repo names): the App token minted centrally is then
+# scoped to the app repo plus that list. Omit it and the token is owner-wide.
 # Runner: .github/workflows/ios-build-debug.yml, event type debug-ios.
 
 name: Request central TestFlight build
@@ -36,5 +36,4 @@ jobs:
              "pr":${{ toJSON(github.event.pull_request.number) }},
              "branch":${{ toJSON(github.head_ref) }},
              "title":${{ toJSON(github.event.pull_request.title) }},
-             "spm_repos": "travel-animator-shared",
              "project_slug": "travelanimator"}

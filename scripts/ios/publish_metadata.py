@@ -16,7 +16,7 @@ def validate(payload, release, central_repository):
         raise ValueError('Release repository must belong to the central organization')
     if not str(payload.get('release_id', '')).isdigit():
         raise ValueError('A numeric release_id is required')
-    if repo != 'Lascade-Co/travel-animator-shared' or payload.get('package_name') != 'com.travelanimator.routemap':
+    if repo != 'Lascade-Co/travel-animator' or payload.get('package_name') != 'com.travelanimator.routemap':
         raise ValueError('Only the approved KMP source repository/package may publish')
     if str(release.get('id')) != str(payload['release_id']) or release.get('draft') or release.get('prerelease'):
         raise ValueError('Expected the requested published production release')

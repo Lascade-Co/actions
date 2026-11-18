@@ -37,7 +37,7 @@ class Dispatch(unittest.TestCase):
         resolved=release.resolve(self.payload, 'Lascade-Co/actions',
                                  lambda path: calls.append(path) or {'sha':'a'*40,'commit':{'message':'Merge reviewed release'}})
         self.assertEqual(resolved['skip'],'false')
-        self.assertEqual(calls,['repos/Lascade-Co/travel-animator-shared/commits/main'])
+        self.assertEqual(calls,['repos/Lascade-Co/travel-animator/commits/main'])
 
     def test_invalid_scope_does_not_use_credentials(self):
         for change in ({'repo':'attacker/repo'}, {'repo':'Lascade-Co/other'}, {'branch':'dev'},

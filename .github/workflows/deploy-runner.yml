@@ -28,9 +28,9 @@ jobs:
         id: repo
         shell: bash
         run: |
-          FULL="${{ github.event.client_payload.repo }}"   # e.g. Lascade-Co/travel-animator-android
+          FULL="${{ github.event.client_payload.repo }}"   # e.g. Lascade-Co/travel-animator
           echo "owner=${FULL%%/*}" >> "$GITHUB_OUTPUT"     # Lascade-Co
-          echo "name=${FULL#*/}"   >> "$GITHUB_OUTPUT"     # travel-animator-android
+          echo "name=${FULL#*/}"   >> "$GITHUB_OUTPUT"     # travel-animator
 
       # Mint a GitHub App token scoped to that one repo
       - name: Mint GitHub App token
