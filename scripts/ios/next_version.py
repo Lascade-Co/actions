@@ -13,6 +13,14 @@ repository is never modified: a PR pipeline must not push commits to
 contributors' branches, and doing so on a pull_request trigger risks a
 re-trigger loop.
 
+Optional environment:
+    PATCH_ROLLOVER             – "true": a patch of 9 rolls into the next minor (2.4.9 -> 2.5.0)
+    FORCE_UPDATE               – "true": the next major, X.0.0, one above the highest App Store
+                                 version (2.0.2 -> 3.0.0, 3.0.0 -> 4.0.0). Apps force-update on a
+                                 higher major. A rebuild before X.0.0 reaches the App Store reuses
+                                 X.0.0 instead of jumping again. Needs the Apple lookup: on failure
+                                 it exits non-zero rather than guess.
+
 Required environment:
     APPSTORE_API_KEY_ID        – App Store Connect API key id
     APPSTORE_ISSUER_ID         – issuer id for that key
@@ -132,9 +140,28 @@ def parse(version: str):
 
 
 def bump_patch(version: str) -> str:
-    """'4.0.9' -> '4.0.10'. The smallest step App Store Connect will accept."""
+    """'4.0.9' -> '4.0.10'. The smallest step App Store Connect will accept.
+
+    With PATCH_ROLLOVER=true the patch stays a single digit: '2.4.9' -> '2.5.0'. The major never
+    changes automatically ('2.9.9' -> '2.10.0'), because apps force-update on a higher major.
+    """
     major, minor, patch = parse(version)
+    if os.environ.get("PATCH_ROLLOVER", "").strip().lower() == "true" and patch >= 9:
+        return f"{major}.{minor + 1}.0"
     return f"{major}.{minor}.{patch + 1}"
+
+
+def force_update_version(current: str, testflight_versions, closed_trains) -> str:
+    """Next major train for a force update.
+
+    Base is the highest App Store version (any state), or the project version when the app has none.
+    If that next major is already an open TestFlight train (built, not yet on the App Store), reuse
+    its highest version, so rebuilding a force-update release never skips a major.
+    """
+    base = max(closed_trains, key=parse) if closed_trains else current
+    target = parse(base)[0] + 1
+    open_trains = [v for v in testflight_versions if parse(v)[0] == target and v not in closed_trains]
+    return max(open_trains, key=parse) if open_trains else f"{target}.0.0"
 
 
 def emit(version: str, verified: bool):
@@ -152,10 +179,18 @@ def main():
     issuer = os.environ.get("APPSTORE_ISSUER_ID", "").strip()
     key = os.environ.get("APPSTORE_API_PRIVATE_KEY", "")
     bundle = os.environ.get("IOS_BUNDLE_ID", "").strip()
+    force_update = os.environ.get("FORCE_UPDATE", "").strip().lower() == "true"
+
+    def fallback(msg):
+        # A guessed major could skip a number or repeat a live one, so a force update never guesses.
+        if force_update:
+            warn(f"{msg}; a force update needs the App Store lookup, stopping")
+            sys.exit(1)
+        warn(f"{msg}; using CURRENT_VERSION")
+        emit(current, verified=False)
 
     if not all([key_id, issuer, key.strip(), bundle]):
-        warn("App Store Connect credentials or bundle id missing; using CURRENT_VERSION")
-        emit(current, verified=False)
+        fallback("App Store Connect credentials or bundle id missing")
         return
 
     try:
@@ -163,8 +198,7 @@ def main():
 
         apps = get(f"/v1/apps?filter[bundleId]={bundle}&limit=1", token)
         if not apps.get("data"):
-            warn(f"no app found for bundle id {bundle}; using CURRENT_VERSION")
-            emit(current, verified=False)
+            fallback(f"no app found for bundle id {bundle}")
             return
         app_id = apps["data"][0]["id"]
 
@@ -198,6 +232,12 @@ def main():
             if v.get("attributes", {}).get("versionString")
         }
 
+        if force_update:
+            version = force_update_version(current, testflight_versions, closed_trains)
+            warn(f"force update: next major train is {version}")
+            emit(version, verified=True)
+            return
+
         candidate = current
         if not testflight_versions:
             warn("no TestFlight marketing versions; using CURRENT_VERSION")
@@ -229,8 +269,7 @@ def main():
         emit(candidate, verified=True)
 
     except (urllib.error.URLError, subprocess.CalledProcessError, ValueError, KeyError) as e:
-        warn(f"lookup failed ({type(e).__name__}: {e}); using CURRENT_VERSION")
-        emit(current, verified=False)
+        fallback(f"lookup failed ({type(e).__name__}: {e})")
 
 
 if __name__ == "__main__":

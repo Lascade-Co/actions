@@ -252,5 +252,42 @@ class NextVersionTest(unittest.TestCase):
         self.assertEqual(1, raised.exception.code)
 
 
+class PatchRolloverTest(unittest.TestCase):
+    def test_default_keeps_counting(self):
+        with patch.dict(os.environ, {"PATCH_ROLLOVER": ""}):
+            self.assertEqual(next_version.bump_patch("2.4.9"), "2.4.10")
+
+    def test_rollover(self):
+        with patch.dict(os.environ, {"PATCH_ROLLOVER": "true"}):
+            self.assertEqual(next_version.bump_patch("2.4.0"), "2.4.1")
+            self.assertEqual(next_version.bump_patch("2.4.8"), "2.4.9")
+            self.assertEqual(next_version.bump_patch("2.4.9"), "2.5.0")
+            self.assertEqual(next_version.bump_patch("2.9.9"), "2.10.0")
+
+
+class ForceUpdateTest(unittest.TestCase):
+    def test_next_major_from_app_store(self):
+        f = next_version.force_update_version
+        self.assertEqual(f('2.0.2', ['2.0.2'], {'2.0.2': 'READY_FOR_SALE'}), '3.0.0')
+        self.assertEqual(f('3.0.0', ['3.0.0'], {'3.0.0': 'READY_FOR_SALE'}), '4.0.0')
+
+    def test_highest_app_store_version_wins(self):
+        closed = {'2.5.0': 'READY_FOR_SALE', '2.5.1': 'PREPARE_FOR_SUBMISSION'}
+        self.assertEqual(next_version.force_update_version('2.4.0', [], closed), '3.0.0')
+
+    def test_rebuild_reuses_open_major(self):
+        closed = {'2.0.2': 'READY_FOR_SALE'}
+        self.assertEqual(next_version.force_update_version('2.0.2', ['2.0.2', '3.0.0'], closed), '3.0.0')
+
+    def test_no_app_store_version_uses_project(self):
+        self.assertEqual(next_version.force_update_version('1.4.7', [], {}), '2.0.0')
+
+    def test_lookup_failure_stops(self):
+        env = {'CURRENT_VERSION': '2.0.2', 'FORCE_UPDATE': 'true'}
+        with patch.dict(os.environ, env, clear=True), redirect_stderr(io.StringIO()), \
+                self.assertRaises(SystemExit):
+            next_version.main()
+
+
 if __name__ == "__main__":
     unittest.main()
