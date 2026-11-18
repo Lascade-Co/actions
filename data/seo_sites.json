@@ -17,8 +17,7 @@
     "blog_count": 10,
     "cms_api": true,
     "repos": [
-      "Lascade-Co/travel-animator-android",
-      "Lascade-Co/travel-animator-ios"
+      "Lascade-Co/travel-animator"
     ],
     "suppress": [],
     "thresholds": {}

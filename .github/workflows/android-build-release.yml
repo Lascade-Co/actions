@@ -26,9 +26,9 @@ jobs:
       - name: Extract owner/repo
         id: repo
         run: |
-          FULL="${{ github.event.client_payload.repo }}"   # e.g. Lascade-Co/travel-animator-android
+          FULL="${{ github.event.client_payload.repo }}"   # e.g. Lascade-Co/travel-animator
           echo "owner=${FULL%%/*}" >> "$GITHUB_OUTPUT"     # Lascade-Co
-          echo "name=${FULL#*/}"   >> "$GITHUB_OUTPUT"     # travel-animator-android
+          echo "name=${FULL#*/}"   >> "$GITHUB_OUTPUT"     # travel-animator
 
       # Source repo + any submodule repos the dispatcher declared. Reused by
       # the build/release jobs when minting their App tokens.

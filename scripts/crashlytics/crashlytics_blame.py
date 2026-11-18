@@ -7,7 +7,7 @@ identified by git blame, and sends a Telegram summary.
 Usage:
     python scripts/crashlytics/crashlytics_blame.py \
         --crashes crashes.json \
-        --repo Lascade-Co/travel-animator-android \
+        --repo Lascade-Co/travel-animator \
         --telegram-chat-id "-100123456"
 
 Environment variables:
