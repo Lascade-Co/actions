@@ -6,6 +6,8 @@ The token comes from `gh auth token`. Re-running is idempotent: a run already in
 index.tsv whose zip exists is deleted without being downloaded again.
 """
 import argparse
+import http.client
+import io
 import json
 import os
 import subprocess
@@ -14,10 +16,12 @@ import tempfile
 import time
 import urllib.error
 import urllib.request
+import zipfile
 from pathlib import Path
 
 API = "https://api.github.com"
 MAX_RETRIES = 5
+TRANSPORT_ATTEMPTS = 3
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -59,8 +63,18 @@ class Purger:
         headers = {"Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"}
         if auth:
             headers["Authorization"] = f"Bearer {self.token}"
-        for _ in range(MAX_RETRIES):
-            status, resp_headers, body = self.http(method, url, headers)
+        transport_failures = 0
+        for _ in range(MAX_RETRIES + TRANSPORT_ATTEMPTS):
+            try:
+                status, resp_headers, body = self.http(method, url, headers)
+                if status >= 500:
+                    raise http.client.HTTPException(f"server error {status}")
+            except (OSError, http.client.HTTPException) as err:
+                transport_failures += 1
+                if transport_failures >= TRANSPORT_ATTEMPTS:
+                    raise Stop(f"{method} {url}: {err!r} after {transport_failures} attempts")
+                self.sleep(2 ** transport_failures)
+                continue
             retry_after = _header(resp_headers, "Retry-After")
             if status in (403, 429) and retry_after is not None:
                 self.sleep(float(retry_after) + 1)
@@ -96,16 +110,20 @@ class Purger:
                 raise Stop(f"run {run_id}: redirect without Location")
             # Blob host: never forward the token.
             status, headers, body = self.request("GET", location, auth=False)
-        if status in (404, 410):
+        elif status in (404, 410):
             return "expired", 0
         if status != 200:
             raise Stop(f"run {run_id}: logs request returned {status}")
         if not body:
             raise Stop(f"run {run_id}: empty log archive")
+        if not zipfile.is_zipfile(io.BytesIO(body)):
+            raise Stop(f"run {run_id}: logs body is not a zip archive")
         fd, tmp = tempfile.mkstemp(dir=self.archive, prefix=f".{run_id}.", suffix=".tmp")
         try:
             with os.fdopen(fd, "wb") as fh:
                 fh.write(body)
+                fh.flush()
+                os.fsync(fh.fileno())
             if os.path.getsize(tmp) == 0:
                 raise Stop(f"run {run_id}: empty log archive")
             os.replace(tmp, self.archive / f"{run_id}.zip")
@@ -120,7 +138,7 @@ class Purger:
             self.stats["would_delete"] += 1
             return
         zip_path = self.archive / f"{run_id}.zip"
-        if (run_id, "archived") in done and zip_path.exists():
+        if (run_id, "archived") in done and zip_path.exists() and zip_path.stat().st_size > 0:
             pass
         elif (run_id, "expired") in done:
             pass

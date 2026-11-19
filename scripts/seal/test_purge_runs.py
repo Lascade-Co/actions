@@ -1,5 +1,9 @@
+import io
 import json
 import sys
+import threading
+import zipfile
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -7,6 +11,16 @@ import purge_runs as pr
 
 REPO = "o/r"
 API = "https://api.github.com/repos/o/r/actions"
+
+
+def zb(content=b"x"):
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr("log.txt", content)
+    return buf.getvalue()
+
+
+ZIP = zb()
 
 
 def run(id_, status="completed"):
@@ -33,13 +47,13 @@ class Fake:
             return 200, dict(self.extra_headers), json.dumps({"workflow_runs": chunk}).encode()
         if method == "GET" and url.endswith("/logs"):
             rid = int(url.split("/runs/")[1].split("/")[0])
-            status, body = self.logs.get(rid, (200, b"zipdata"))
+            status, body = self.logs.get(rid, (200, ZIP))
             if status == 200:
                 return 302, {"Location": f"https://blob.example/{rid}"}, b""
             return status, {}, b""
         if method == "GET" and url.startswith("https://blob.example/"):
             rid = int(url.rsplit("/", 1)[1])
-            return 200, {}, self.logs.get(rid, (200, b"zipdata"))[1]
+            return 200, {}, self.logs.get(rid, (200, ZIP))[1]
         if method == "DELETE":
             rid = int(url.rsplit("/", 1)[1])
             if self.delete_status == 204:
@@ -61,15 +75,15 @@ def go(fake, tmp_path, **kw):
 
 
 def test_archives_then_deletes(tmp_path):
-    fake = Fake([run(1), run(2)], logs={1: (200, b"A"), 2: (200, b"B")})
+    fake = Fake([run(1), run(2)], logs={1: (200, zb(b"A")), 2: (200, zb(b"B"))})
     stats = go(fake, tmp_path)
     arc = tmp_path / "arc"
-    assert (arc / "1.zip").read_bytes() == b"A"
-    assert (arc / "2.zip").read_bytes() == b"B"
+    assert (arc / "1.zip").read_bytes() == zb(b"A")
+    assert (arc / "2.zip").read_bytes() == zb(b"B")
     assert fake.deleted() == [1, 2]
     lines = (arc / "index.tsv").read_text().splitlines()
     assert lines[0] == "1\twf\tpush\t2026-01-01T00:00:00Z\tsuccess\tarchived"
-    assert stats["archived"] == 2 and stats["deleted"] == 2 and stats["bytes"] == 2
+    assert stats["archived"] == 2 and stats["deleted"] == 2 and stats["bytes"] == len(zb(b"A")) + len(zb(b"B"))
     blob = [h for m, u, h in fake.calls if u.startswith("https://blob.example")]
     assert blob and all("Authorization" not in h for h in blob)
     api = [h for m, u, h in fake.calls if u.startswith("https://api.github.com")]
@@ -154,3 +168,138 @@ def test_retry_after_sleeps_and_retries(tmp_path):
     pr.purge(REPO, tmp_path / "arc", "tok", http=http, sleep=sleeps.append, out=lambda *_: None)
     assert any(s >= 7 for s in sleeps)
     assert base.deleted() == [1]
+
+
+def test_blob_404_stops_without_delete(tmp_path):
+    fake = Fake([run(1)])
+    inner = fake.__call__
+
+    def http(method, url, headers=None):
+        if url.startswith("https://blob.example/"):
+            return 404, {}, b""
+        return inner(method, url, headers)
+
+    stats = pr.purge(REPO, tmp_path / "arc", "tok", http=http, sleep=lambda s: None, out=lambda *_: None)
+    assert stats["stopped"] and fake.deleted() == [] and stats["expired"] == 0
+
+
+def test_transport_error_retried_then_succeeds(tmp_path):
+    base = Fake([run(1)])
+    state = {"n": 0}
+
+    def http(method, url, headers=None):
+        if method == "DELETE" and state["n"] < 2:
+            state["n"] += 1
+            raise ConnectionResetError("boom")
+        return base(method, url, headers)
+
+    sleeps = []
+    stats = pr.purge(REPO, tmp_path / "arc", "tok", http=http, sleep=sleeps.append, out=lambda *_: None)
+    assert base.deleted() == [1] and not stats["stopped"] and len(sleeps) == 2
+
+
+def test_transport_error_exhausted_stops(tmp_path):
+    def http(method, url, headers=None):
+        raise http_client_error()
+
+    def http_client_error():
+        import http.client
+        return http.client.IncompleteRead(b"")
+
+    out = []
+    stats = pr.purge(REPO, tmp_path / "arc", "tok", http=http, sleep=lambda s: None, out=out.append)
+    assert stats["stopped"] and any("STOPPED" in o for o in out)
+
+
+def test_5xx_retried_then_stops(tmp_path):
+    fake = Fake([run(1)], logs={1: (500, b"")})
+    sleeps = []
+    stats = pr.purge(REPO, tmp_path / "arc", "tok", http=fake, sleep=sleeps.append, out=lambda *_: None)
+    assert stats["stopped"] and fake.deleted() == []
+    assert len(fake.log_fetches()) == pr.TRANSPORT_ATTEMPTS and sleeps
+
+
+def test_non_zip_body_stops_without_delete(tmp_path):
+    fake = Fake([run(1)], logs={1: (200, b"<html>not a zip</html>")})
+    stats = go(fake, tmp_path)
+    assert stats["stopped"] and fake.deleted() == []
+    assert not (tmp_path / "arc" / "1.zip").exists()
+
+
+def test_resume_empty_zip_redownloads(tmp_path):
+    arc = tmp_path / "arc"
+    arc.mkdir()
+    (arc / "1.zip").write_bytes(b"")
+    (arc / "index.tsv").write_text("1\twf\tpush\tt\tsuccess\tarchived\n")
+    fake = Fake([run(1)])
+    go(fake, tmp_path)
+    assert len(fake.log_fetches()) == 1 and (arc / "1.zip").read_bytes() == ZIP
+
+
+def test_resume_missing_zip_redownloads(tmp_path):
+    arc = tmp_path / "arc"
+    arc.mkdir()
+    (arc / "index.tsv").write_text("1\twf\tpush\tt\tsuccess\tarchived\n")
+    fake = Fake([run(1)])
+    go(fake, tmp_path)
+    assert len(fake.log_fetches()) == 1 and fake.deleted() == [1]
+    assert (arc / "1.zip").read_bytes() == ZIP
+
+
+def test_resume_expired_row_deletes_without_download(tmp_path):
+    arc = tmp_path / "arc"
+    arc.mkdir()
+    (arc / "index.tsv").write_text("1\twf\tpush\tt\tsuccess\texpired\n")
+    fake = Fake([run(1)])
+    go(fake, tmp_path)
+    assert fake.log_fetches() == [] and fake.deleted() == [1]
+
+
+def test_pagination_over_100_completed_with_deletion(tmp_path):
+    fake = Fake([run(i) for i in range(1, 251)])
+    stats = go(fake, tmp_path)
+    assert stats["deleted"] == 250 and fake.runs == []
+    assert sorted(fake.deleted()) == list(range(1, 251))
+
+
+def test_urllib_http_does_not_follow_or_forward_auth():
+    seen = {}
+
+    class Second(BaseHTTPRequestHandler):
+        def do_GET(self):
+            seen["auth"] = self.headers.get("Authorization")
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"blob")
+
+        def log_message(self, *a):
+            pass
+
+    second = HTTPServer(("127.0.0.1", 0), Second)
+    second_url = f"http://127.0.0.1:{second.server_port}/blob"
+
+    class First(BaseHTTPRequestHandler):
+        def do_GET(self):
+            seen["first_auth"] = self.headers.get("Authorization")
+            self.send_response(302)
+            self.send_header("Location", second_url)
+            self.end_headers()
+
+        def log_message(self, *a):
+            pass
+
+    first = HTTPServer(("127.0.0.1", 0), First)
+    threads = [threading.Thread(target=s.serve_forever, daemon=True) for s in (first, second)]
+    for t in threads:
+        t.start()
+    try:
+        status, headers, _ = pr.urllib_http(
+            "GET", f"http://127.0.0.1:{first.server_port}/logs", {"Authorization": "Bearer tok"})
+        assert status == 302 and headers["Location"] == second_url
+        assert seen["first_auth"] == "Bearer tok" and "auth" not in seen
+        status, _, body = pr.urllib_http("GET", second_url, {})
+        assert status == 200 and body == b"blob" and seen["auth"] is None
+    finally:
+        for s in (first, second):
+            s.shutdown()
+            s.server_close()
