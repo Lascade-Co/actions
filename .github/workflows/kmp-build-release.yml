@@ -419,9 +419,7 @@ jobs:
         token: ${{ github.token }}
       id: konan-cache
     - name: Compute SwiftPM cache key
-      run: |-
-        [ -z "$SPM_HASH" ] || echo "::add-mask::$SPM_HASH"
-        echo "key=xcode-26-6-$SPM_HASH" >> "$GITHUB_OUTPUT"
+      run: echo "key=xcode-26-6-$SPM_HASH" >> "$GITHUB_OUTPUT"
       working-directory: .
       id: spm-key
       env:

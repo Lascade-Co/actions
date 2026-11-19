@@ -614,7 +614,7 @@ jobs:
           name: android-debug-apk
           path: ${{ runner.temp }}/seal/art/android-debug-apk/
           if-no-files-found: error
-          retention-days: 7
+          retention-days: 3
           compression-level: 0
           overwrite: true
       - name: Publish gradle OCI bundle
@@ -787,9 +787,7 @@ jobs:
         id: konan-cache
       # Resolve rewrites Package.resolved; hash it once so restore and publish share one key.
       - name: Compute SwiftPM cache key
-        run: |-
-          [ -z "$SPM_HASH" ] || echo "::add-mask::$SPM_HASH"
-          echo "key=xcode-26-6-$SPM_HASH" >> "$GITHUB_OUTPUT"
+        run: echo "key=xcode-26-6-$SPM_HASH" >> "$GITHUB_OUTPUT"
         working-directory: .
         id: spm-key
         env:
@@ -874,7 +872,7 @@ jobs:
           name: ios-staging-ipa
           path: ${{ runner.temp }}/seal/art/ios-staging-ipa/
           if-no-files-found: error
-          retention-days: 7
+          retention-days: 3
           compression-level: 0
           overwrite: true
       - name: Publish konan OCI bundle
