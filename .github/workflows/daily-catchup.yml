@@ -257,6 +257,7 @@ jobs:
           merge-multiple: true
 
       - name: Unseal repo summaries
+        if: hashFiles('artifacts/*.tgz.age') != ''
         run: seal-unpack artifacts
         env:
           REPO_AGE_KEY: ${{ secrets.REPO_AGE_KEY }}
