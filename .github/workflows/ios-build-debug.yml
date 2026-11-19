@@ -364,7 +364,7 @@ jobs:
         with:
           name: ios-testflight-ipa
           path: ${{ runner.temp }}/seal/art/ios-testflight-ipa/
-          retention-days: 7
+          retention-days: 3
           overwrite: true
 
       - name: Remove temporary provisioning profiles

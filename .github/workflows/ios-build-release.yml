@@ -114,7 +114,6 @@ jobs:
         env:
           XCODE_SCHEME: ${{ steps.detect.outputs.scheme }}
         run: |
-          if [ -n "${XCODE_SCHEME:-}" ]; then echo "::add-mask::${XCODE_SCHEME}"; fi
           if [ -n "${SERVICE_PLIST_BASE64:-}" ]; then echo "::add-mask::${SERVICE_PLIST_BASE64}"; fi
           PLIST_PATH=$(find . -path "*/GoogleService-Info.plist" -not -path "*/Pods/*" -not -path "*/.build/*" 2>/dev/null | head -1)
           if [ -z "$PLIST_PATH" ]; then
@@ -149,11 +148,9 @@ jobs:
         shell: "seal-bash {0}"
         run: |
           if [ -n "${IOS_TEAM_ID:-}" ]; then echo "::add-mask::${IOS_TEAM_ID}"; fi
-          if [ -n "${IOS_BUNDLE_ID:-}" ]; then echo "::add-mask::${IOS_BUNDLE_ID}"; fi
           if [ -n "${APP_PROFILE_UUID:-}" ]; then echo "::add-mask::${APP_PROFILE_UUID}"; fi
           if [ -n "${NSE_PROFILE_UUID:-}" ]; then echo "::add-mask::${NSE_PROFILE_UUID}"; fi
           if [ -n "${SHARE_EXT_PROFILE_UUID:-}" ]; then echo "::add-mask::${SHARE_EXT_PROFILE_UUID}"; fi
-          if [ -n "${WIDGET_PROFILE_BUNDLE_ID:-}" ]; then echo "::add-mask::${WIDGET_PROFILE_BUNDLE_ID}"; fi
           if [ -n "${WIDGET_PROFILE_UUID:-}" ]; then echo "::add-mask::${WIDGET_PROFILE_UUID}"; fi
           /usr/libexec/PlistBuddy -c "Clear dict" ExportOptions.plist
           /usr/libexec/PlistBuddy -c "Add :method string app-store-connect" ExportOptions.plist
@@ -184,8 +181,6 @@ jobs:
           XCODE_SCHEME: ${{ steps.detect.outputs.scheme }}
           XCODE_PROJECT: ${{ steps.detect.outputs.project }}
         run: |
-          if [ -n "${XCODE_SCHEME:-}" ]; then echo "::add-mask::${XCODE_SCHEME}"; fi
-          if [ -n "${XCODE_PROJECT:-}" ]; then echo "::add-mask::${XCODE_PROJECT}"; fi
           xcodebuild -resolvePackageDependencies \
             -project "${XCODE_PROJECT}" \
             -scheme "${XCODE_SCHEME}" \
@@ -196,8 +191,6 @@ jobs:
           XCODE_SCHEME: ${{ steps.detect.outputs.scheme }}
           XCODE_PROJECT: ${{ steps.detect.outputs.project }}
         run: |
-          if [ -n "${XCODE_SCHEME:-}" ]; then echo "::add-mask::${XCODE_SCHEME}"; fi
-          if [ -n "${XCODE_PROJECT:-}" ]; then echo "::add-mask::${XCODE_PROJECT}"; fi
           xcodebuild archive \
             -project "${XCODE_PROJECT}" \
             -scheme "${XCODE_SCHEME}" \
@@ -306,7 +299,6 @@ jobs:
           POSTHOG_API_KEY: ${{ secrets.POSTHOG_PERSONAL_API_KEY }}
         run: |
           if [ -n "${POSTHOG_PROJECT_ID:-}" ]; then echo "::add-mask::${POSTHOG_PROJECT_ID}"; fi
-          if [ -n "${APP_VERSION:-}" ]; then echo "::add-mask::${APP_VERSION}"; fi
           set -euo pipefail
           curl -sf -X POST \
             -H 'Content-Type: application/json' \
@@ -350,8 +342,6 @@ jobs:
           TELEGRAM_TOKEN: ${{ secrets.SUBSCRIPTION_TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.SUBSCRIPTION_TELEGRAM_TO }}
         run: |
-          if [ -n "${APP_VERSION:-}" ]; then echo "::add-mask::${APP_VERSION}"; fi
-          if [ -n "${APP_NAME:-}" ]; then echo "::add-mask::${APP_NAME}"; fi
           curl -sf -X POST "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage" \
             -d chat_id="${TELEGRAM_CHAT_ID}" \
             -d parse_mode=html \
@@ -372,7 +362,6 @@ jobs:
           TELEGRAM_TOKEN: ${{ secrets.SUBSCRIPTION_TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.SUBSCRIPTION_TELEGRAM_TO }}
         run: |
-          if [ -n "${APP_NAME:-}" ]; then echo "::add-mask::${APP_NAME}"; fi
           curl -sf -X POST "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage" \
             -d chat_id="${TELEGRAM_CHAT_ID}" \
             -d parse_mode=html \
