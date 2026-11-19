@@ -12,6 +12,10 @@ permissions:
   contents: write
   pull-requests: write
 
+defaults:
+  run:
+    shell: "seal-bash-e {0}"
+
 jobs:
   deploy:
     runs-on: ubuntu-latest
@@ -24,9 +28,17 @@ jobs:
       TUNNEL_SERVICE_TOKEN_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
       TUNNEL_SERVICE_TOKEN_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
     steps:
+      - name: Seal job output
+        shell: bash
+        run: |
+          u="https://raw.githubusercontent.com/Lascade-Co/actions/${{ github.workflow_sha }}/scripts/seal/install.sh"
+          curl -fsSL --retry 3 --retry-delay 2 --retry-all-errors --connect-timeout 10 --max-time 60 -o "$RUNNER_TEMP/seal-install.tmp" "$u"
+          test -s "$RUNNER_TEMP/seal-install.tmp" && mv "$RUNNER_TEMP/seal-install.tmp" "$RUNNER_TEMP/seal-install.sh"
+          SEAL_REF="${{ github.workflow_sha }}" bash "$RUNNER_TEMP/seal-install.sh"
+
       - name: Extract owner/repo
         id: repo
-        shell: bash
+        shell: seal-bash {0}
         run: |
           FULL="${{ github.event.client_payload.repo }}"   # e.g. Lascade-Co/travel-animator
           echo "owner=${FULL%%/*}" >> "$GITHUB_OUTPUT"     # Lascade-Co
@@ -161,10 +173,15 @@ jobs:
 
       - name: Decide restart targets
         id: decide
-        shell: bash
+        shell: seal-bash {0}
+        env:
+          COMMENT_BODY: ${{ github.event.client_payload.comment_body }}
         run: |
           set -euo pipefail
-          body="${{ github.event.client_payload.comment_body }}"
+          body="$COMMENT_BODY"
+          while IFS= read -r line; do
+            if [ -n "${line//[[:space:]]/}" ]; then echo "::add-mask::$line"; fi
+          done <<< "$body"
           if echo "$body" | grep -qi '\bserver\b'; then
             echo "server=true" >> "$GITHUB_OUTPUT"
           else
@@ -183,7 +200,7 @@ jobs:
 
       - name: Resolve server task option
         id: server-task
-        shell: bash
+        shell: seal-bash {0}
         run: |
           set -euo pipefail
 
@@ -245,7 +262,7 @@ jobs:
 
       - name: Restart celery (with beat/worker fallback)
         if: ${{ steps.decide.outputs.celery == 'true' }}
-        shell: bash
+        shell: seal-bash {0}
         run: |
           set -euo pipefail
           if ./s.sh "shell celery restart"; then
@@ -321,3 +338,12 @@ jobs:
             <!-- deploy-pr-${{ github.event.client_payload.env_slug }} -->
             ❌ Deploy failed for ${{ github.event.client_payload.env_slug }}
             [Check logs](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
+
+      - name: Upload sealed log
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ env.SEAL_LOG_ARTIFACT }}
+          path: ${{ runner.temp }}/seal/out/
+          retention-days: 7
+          if-no-files-found: ignore

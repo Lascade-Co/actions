@@ -30,7 +30,7 @@ runs:
   using: composite
   steps:
     - name: Fetch comment handler pinned to runner source
-      shell: bash
+      shell: seal-bash {0}
       env:
         CONTROL_SHA: ${{ github.sha }}
       run: |
