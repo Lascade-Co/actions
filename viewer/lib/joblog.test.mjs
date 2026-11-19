@@ -108,14 +108,14 @@ test("only a marker that is the whole line counts", () => {
   assert.ok(parseJobLog(log)[0].lines.every((l) => !l.marker));
 });
 
-test("a marker for another run or attempt is not a marker", () => {
+test("a marker binds for any attempt of the same run, not for another run", () => {
   const log = [
     markerLine(`🔒 sealed ${ART}#1 https://ci.lascade.com/?run=2&attempt=1`),
-    markerLine(`🔒 sealed ${ART}#2 https://ci.lascade.com/?run=1&attempt=2`),
-    markerLine(`🔒 sealed ${ART}#3 ${URL1}`),
+    markerLine(`🔒 sealed ${ART}#2 https://ci.lascade.com/?run=1&attempt=1`),
+    markerLine(`🔒 sealed ${ART}#3 https://ci.lascade.com/?run=1&attempt=2`),
   ].join("\n");
-  const lines = parseJobLog(log, { run: 1, attempt: 1 })[0].lines;
-  assert.deepEqual(lines.map((l) => l.marker?.seq ?? null), [null, null, 3]);
+  const lines = parseJobLog(log, { run: 1 })[0].lines;
+  assert.deepEqual(lines.map((l) => l.marker?.seq ?? null), [null, 2, 3]);
   // Without an expected run, every whole-line marker parses.
   assert.equal(parseJobLog(log)[0].lines.filter((l) => l.marker).length, 3);
 });

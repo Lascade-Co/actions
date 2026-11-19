@@ -425,7 +425,7 @@ async function showJob(job, seq) {
   }
   const text = await jobLog(settings.token, job.id);
   if (seq !== state.seq) return;
-  const sections = parseJobLog(text, { run: state.runId, attempt: state.attempt });
+  const sections = parseJobLog(text, { run: state.runId });
   const names = [...new Set(sections.flatMap((sec) => sec.lines.filter((l) => l.marker).map((l) => l.marker.artifact)))];
   const segments = new Map();
   const summaries = new Map();

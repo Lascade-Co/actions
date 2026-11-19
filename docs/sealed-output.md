@@ -39,14 +39,21 @@ branch, PR number and title, commit SHA, step names, and lines starting `::add-m
 3. Shell: `defaults.run.shell: "seal-bash {0}"` (same flags as `shell: bash`) when the workflow used `bash`, otherwise
    `"seal-bash-e {0}"` (same as the implicit default, `bash -e`). Job-level `defaults` may override. Step-level
    `shell: bash` becomes `shell: seal-bash {0}`. Composite actions use `shell: seal-bash {0}`.
-   A job without the setup step fails at its first step with "seal-bash: command not found", so a missing setup
-   fails at its first step instead of leaking output.
+   A job without the setup step fails at its first step with "Unable to locate executable file: seal-bash", so a
+   missing setup fails at its first step instead of leaking output.
 4. Artifacts: `seal-pack [--allow-empty] [--include-hidden] <name> <path>...` writes
    `$RUNNER_TEMP/seal/art/<name>/<name>.tgz.age`; upload that directory with `retention-days` of at most 7 days (the ceiling; shorter is fine). After a
    `download-artifact`, the next step runs `seal-unpack <dir> [<dest>]` with `REPO_AGE_KEY: ${{ secrets.REPO_AGE_KEY }}`.
    `actions/upload-pages-artifact` (public site) is the only unsealed upload.
-5. Use `echo "::add-mask::$VALUE"` for any secret or private value a later unsealed step (third-party actions,
-   `actions/github-script`) might print. Sealed steps forward only mask lines, so masking costs nothing in the sealed log.
+5. Masks. Use `echo "::add-mask::$VALUE"` for a private value a later unsealed step (third-party actions,
+   `actions/github-script`) might print. A mask protects only lines printed after it, so mask in an EARLIER sealed
+   step, with the value computed inside that step (e.g. from `$GITHUB_EVENT_PATH` or a file), never via the same
+   step's `env:`. Do not mask public metadata (repo, branch, PR number/title/comment, SHA, versions, app names):
+   masked values are dropped from job outputs and short masked words can break the viewer's marker lines.
+6. The runner prints each step's `run:` script (with `${{ }}` already expanded) and its evaluated `env:` block in
+   the PUBLIC step header before the sealed shell runs. Never expand private values into `run:` text, `env:` or a
+   third-party `with:`.
+7. Workflow annotations (`::warning::`/`::error::`) from run steps are sealed and appear only in the log viewer.
 
 ## Exemption
 

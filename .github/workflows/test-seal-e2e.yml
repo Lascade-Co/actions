@@ -10,6 +10,9 @@ on:
       - ".github/workflows/**"
       - "actions/**"
 
+permissions:
+  contents: read
+
 defaults:
   run:
     shell: "seal-bash {0}"
@@ -50,6 +53,7 @@ jobs:
           retention-days: 7
           if-no-files-found: ignore
 
+  # Re-running only this job is unsupported: it needs the produce job's artifacts from the same attempt.
   e2e-verify:
     needs: e2e-produce
     runs-on: ubuntu-latest
@@ -97,6 +101,7 @@ jobs:
           hasnt "public log has no CANARY" "CANARY-$GITHUB_RUN_ID" "$work/public.log"
           hasnt "public log has no MASKED" "MASKED-$GITHUB_RUN_ID" "$work/public.log"
           has "public log has the marker line" "🔒 sealed sealed-log-e2e-produce-" "$work/public.log"
+          if grep -aE "🔒 sealed sealed-log-e2e-produce-.* https://ci\.lascade\.com/\?run=$GITHUB_RUN_ID&attempt=$GITHUB_RUN_ATTEMPT\s*$" "$work/public.log" >/dev/null; then pass "marker line ends with run and attempt link"; else fail "marker line ends with run and attempt link"; fi
 
           # Sealed log of the produce job, decrypted with the repo key.
           art_id=$(gh api "$api/runs/$GITHUB_RUN_ID/artifacts" --paginate --jq ".artifacts[] | select(.name | startswith(\"sealed-log-e2e-produce-$GITHUB_RUN_ATTEMPT-\")) | .id" | head -n 1)

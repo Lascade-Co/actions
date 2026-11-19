@@ -37,16 +37,17 @@ function parseLine(raw, expected) {
   const m = TS_RE.exec(raw);
   const line = m ? { ts: m[1], text: raw.slice(m[0].length) } : { ts: null, text: raw };
   const mk = LINE_MARKER_RE.exec(line.text);
-  // A marker naming another run or attempt is left as a plain line.
-  if (mk && (!expected || (mk[3] === String(expected.run) && mk[4] === String(expected.attempt)))) {
+  // A marker naming another run is left as a plain line. Any attempt of this run
+  // binds: jobs carried over by "Re-run failed jobs" keep earlier-attempt markers.
+  if (mk && (!expected || mk[3] === String(expected.run))) {
     line.marker = { artifact: mk[1], seq: Number(mk[2]), run: mk[3], attempt: mk[4] };
   }
   return line;
 }
 
 /**
- * Splits a job log into sections. With `expected = {run, attempt}`, only markers
- * whose URL names that run and attempt are parsed as markers.
+ * Splits a job log into sections. With `expected = {run}`, only markers
+ * whose URL names that run (any attempt) are parsed as markers.
  * @returns {{title: string, lines: {ts: string|null, text: string, marker?: {artifact: string, seq: number, run: string, attempt: string}}[]}[]}
  */
 export function parseJobLog(text, expected = null) {

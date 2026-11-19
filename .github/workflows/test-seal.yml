@@ -14,6 +14,9 @@ on:
       - ".github/workflows/**"
       - "actions/**"
 
+permissions:
+  contents: read
+
 defaults:
   run:
     shell: "seal-bash {0}"
@@ -41,7 +44,7 @@ jobs:
           "$RUNNER_TEMP/venv/bin/python" -m pytest scripts/seal/ -q
       - name: Run viewer unit tests
         if: runner.os == 'Linux'
-        run: node --test viewer/lib/
+        run: node --test viewer/lib/*.test.mjs
       - name: Upload sealed log
         if: always()
         uses: actions/upload-artifact@v7

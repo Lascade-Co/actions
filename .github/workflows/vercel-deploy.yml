@@ -33,8 +33,6 @@ jobs:
           SLUG: ${{ github.event.client_payload.project_slug }}
           PR: ${{ github.event.client_payload.pr_number || '' }}
         run: |
-          echo "::add-mask::$SLUG"
-
           echo "repo=$REPO" >> "$GITHUB_OUTPUT"
           echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
           echo "owner=${REPO%%/*}" >> "$GITHUB_OUTPUT"

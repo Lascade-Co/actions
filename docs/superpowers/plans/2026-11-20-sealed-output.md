@@ -158,7 +158,7 @@ Nothing in this design has run on a real runner yet. Prove the load-bearing assu
   - `joblog.test.mjs`: `parseJobLog` on a fixture holding three `##[group]Run` headers, one marker line `2026-11-20T10:00:00.0000000Z 🔒 sealed sealed-log-build-1-0a1b2c3d#2 https://ci.lascade.com/?run=1&attempt=1` and preamble lines → 4 sections, with the marker parsed as `{artifact:"sealed-log-build-1-0a1b2c3d", seq:2}`. `mergeSealed` puts segment lines in place of the marker, in order, with `sealed:true`. A missing segment yields the "unavailable" line. Test `renders public log when no sealed artifacts`: `mergeSealed(sections, new Map())` keeps every non-marker line.
   - `tar.test.mjs`: build a tar in the test with Node's `child_process.execFileSync("tar", …)` containing a file, a nested dir, a symlink and a 150-char path. `readTar` returns all four with correct paths, types, data and linkname.
   - `sealed.test.mjs`: with `age-encryption`, generate an identity, encrypt `"line1\nline2"` as `2.log.age` and `{"job":"build"}` as `meta.json.age`, and zip them with fflate. `openSealedLog` returns `meta.job === "build"` and `segments.get("<artifact>#2")` equal to `["line1","line2"]`. A wrong identity rejects with an error whose message contains `repo key`.
-- [ ] **Step 3:** Run `node --test viewer/lib/`. Expected: FAIL.
+- [ ] **Step 3:** Run `node --test viewer/lib/*.test.mjs`. Expected: FAIL.
 - [ ] **Step 4: Implement the libs**, then the page.
   - `index.html` has a CSP meta: `default-src 'self'; connect-src https://api.github.com https://*.blob.core.windows.net; img-src 'self' data:; style-src 'self'; script-src 'self'`.
   - `ansi_up` runs in class mode (`use_classes = true`) with colour classes in `style.css`, because the CSP forbids inline styles.
@@ -167,7 +167,7 @@ Nothing in this design has run on a real runner yet. Prove the load-bearing assu
   - Sealed lines get a lock gutter mark. Step summaries render as escaped preformatted Markdown under their step.
   - An Artifacts panel lists non-`sealed-log-*` artifacts. "Unseal" decrypts the artifact, previews text entries (≤1 MB, UTF-8) inline, offers per-entry download, and offers "Download all (.tar.gz)" of the decrypted gzip bytes.
   - Errors (401 token, bad key, expired artifact) appear as one banner line naming the fix.
-- [ ] **Step 5:** Run `node --test viewer/lib/`. Expected: all pass.
+- [ ] **Step 5:** Run `node --test viewer/lib/*.test.mjs`. Expected: all pass.
 - [ ] **Step 6:** Commit (`feat(viewer): sealed log viewer`).
 
 ### Task 3: Convert workflows and composite actions
@@ -229,7 +229,7 @@ Rules for each sealed workflow:
   For composites, `test_composite_run_steps_sealed`. Also `test_missing_wrapper_fails_closed`: run `bash -c 'command -v seal-bash'` with a clean PATH, assert it fails, and assert the docs state that a job without setup fails at its first step. This pins the fail-closed behaviour: the runner errors when the shell command is not found.
 - [ ] **Step 2:** Run it before Task 3 lands. Expected: FAIL on unconverted workflows. After Task 3, expect PASS.
 - [ ] **Step 3: Write two workflows**, both sealed and both with paths `scripts/seal/**`, `viewer/**`, `.github/workflows/**` and `actions/**`. `test-seal.yml` triggers on `push` and `pull_request` and uses no secrets. `test-seal-e2e.yml` triggers on `push` only, because it needs `REPO_AGE_KEY` and the policy forbids secrets in `pull_request` workflows.
-  - `test-seal.yml` job `unit` runs on `ubuntu-latest` and `macos-latest` (matrix). It runs pytest on `scripts/seal/` (`pytest==9.1.1 pyyaml`), and on ubuntu runs `node --test viewer/lib/`.
+  - `test-seal.yml` job `unit` runs on `ubuntu-latest` and `macos-latest` (matrix). It runs pytest on `scripts/seal/` (`pytest==9.1.1 pyyaml`), and on ubuntu runs `node --test viewer/lib/*.test.mjs`.
   - `test-seal-e2e.yml` job `e2e-produce`. Its step prints `CANARY-$GITHUB_RUN_ID` and masks then prints `MASKED-$GITHUB_RUN_ID`. It also runs `seal-pack e2e-art <file containing CANARY>` and uploads that.
   - `test-seal-e2e.yml` job `e2e-verify` runs after produce, with `permissions: actions: read`. It fetches the produce job's public log via `gh api` and asserts `CANARY-` and `MASKED-` are absent and the marker line is present. It downloads the produce job's sealed-log artifact and `e2e-art`, unseals both with `REPO_AGE_KEY`, and asserts `CANARY-` is present in both. It asserts `MASKED-` appears in the sealed log, since masking applies only to the public log.
 - [ ] **Step 4: Write `docs/sealed-output.md`** in ≤1 page. Cover: what's sealed, the setup and upload snippets, `seal-pack`/`seal-unpack`, when to `::add-mask::` (Review Focus 3), the exemption rule, how to open a run (viewer URL), and how to rotate the repo key (new pair → Infisical → commit `.pub`; old artifacts expire within 7 days).
