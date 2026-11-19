@@ -340,7 +340,8 @@ jobs:
         if: ${{ !cancelled() && steps.cache-scan.outcome == 'success' && steps.kotlin-cache.outputs.hit != 'true' }}
   ios-build:
     # Free 7-GB arm64 image. ADR 0004: K/N's fixed 3 GB heap needs compact object headers here; expect 25-35 min cold.
-    runs-on: macos-26
+    # Xcode 27 lives only on GitHub's xcode-27 image (macOS 27, preview); Apple requires the iOS 27 SDK from April 2027.
+    runs-on: xcode-27
     timeout-minutes: 90
     # packages: write only for the GHCR dependency bundles.
     permissions:
@@ -382,10 +383,10 @@ jobs:
           token: ${{ steps.app-token.outputs.token }}
           path: source
           persist-credentials: false
-      - name: Pin Xcode 26.6
+      - name: Pin Xcode 27.1
         uses: maxim-lobanov/setup-xcode@ed7a3b1fda3918c0306d1b724322adc0b8cc0a90  # v1.7.0
         with:
-          xcode-version: '26.6'
+          xcode-version: '27.1'
       - name: Read /Build from Infisical prod
         uses: Infisical/secrets-action@v1.0.18
         with:

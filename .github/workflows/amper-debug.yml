@@ -265,7 +265,8 @@ jobs:
         if: ${{ always() }}
   ios-build:
     # Free 7-GB arm64 image. ADR 0004: K/N's fixed 3 GB heap needs compact object headers here; expect 25-35 min cold.
-    runs-on: macos-26
+    # Xcode 27 lives only on GitHub's xcode-27 image (macOS 27, preview); Apple requires the iOS 27 SDK from April 2027.
+    runs-on: xcode-27
     timeout-minutes: 90
     # Runs PR code (./kotlin and Xcode's Build Kotlin phase): packages: read restores amper-release's bundles, and no
     # App Store Connect key. It parks the IPA in a draft in the source repo for ios-publish.
@@ -325,10 +326,10 @@ jobs:
           token: ${{ steps.app-token.outputs.token }}
           path: source
           persist-credentials: false
-      - name: Pin Xcode 26.6
+      - name: Pin Xcode 27.1
         uses: maxim-lobanov/setup-xcode@ed7a3b1fda3918c0306d1b724322adc0b8cc0a90  # v1.7.0
         with:
-          xcode-version: '26.6'
+          xcode-version: '27.1'
       - name: Read /Build from Infisical staging
         uses: Infisical/secrets-action@v1.0.18
         with:
@@ -553,7 +554,8 @@ jobs:
   # takes the IPA ios-build parked. `needs` withholds the upload until android (the unit tests) succeeds. A skipped or
   # failed upload keeps the draft, so "Re-run failed jobs" can retry; the PR's next run replaces it.
   ios-publish:
-    runs-on: macos-26
+    # Xcode 27 lives only on GitHub's xcode-27 image (macOS 27, preview); Apple requires the iOS 27 SDK from April 2027.
+    runs-on: xcode-27
     timeout-minutes: 20
     permissions:
       contents: read
@@ -586,10 +588,10 @@ jobs:
           owner: ${{ needs.prepare.outputs.owner }}
           repositories: ${{ needs.prepare.outputs.name }}
         id: app-token
-      - name: Pin Xcode 26.6
+      - name: Pin Xcode 27.1
         uses: maxim-lobanov/setup-xcode@ed7a3b1fda3918c0306d1b724322adc0b8cc0a90  # v1.7.0
         with:
-          xcode-version: '26.6'
+          xcode-version: '27.1'
       # By ID, re-checked as a draft under this PR's parking tag, exactly one IPA, matching ios-build's SHA-256.
       - name: Download and verify the parked staging IPA
         run: |-
