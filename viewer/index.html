@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; connect-src https://api.github.com https://*.blob.core.windows.net; img-src 'self' data:; style-src 'self'; script-src 'self'">
+  <meta name="referrer" content="no-referrer">
+  <meta name="robots" content="noindex">
+  <title>CI Logs</title>
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="style.css">
+  <script type="module" src="app.js"></script>
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="./"><img src="favicon.svg" alt="" width="20" height="20">CI Logs</a>
+    <div class="run-meta" id="run-meta"></div>
+    <button type="button" class="btn" id="open-settings">Settings</button>
+  </header>
+
+  <div class="banner" id="banner" role="alert" hidden>
+    <span class="banner-text" id="banner-text"></span>
+    <button type="button" class="btn btn-small" id="banner-action" hidden>Open Settings</button>
+  </div>
+
+  <main>
+    <section class="pick" id="pick" hidden>
+      <h1>Open a run</h1>
+      <p>Paste a run link from <code>Lascade-Co/actions</code>, or its run ID. Marker lines in the public log link here too.</p>
+      <form id="pick-form" class="pick-form">
+        <input type="text" id="pick-input" inputmode="url" autocomplete="off" spellcheck="false"
+               placeholder="https://github.com/Lascade-Co/actions/actions/runs/123 or 123" aria-label="Run link or ID">
+        <button type="submit" class="btn btn-primary">Open</button>
+      </form>
+      <p class="field-error" id="pick-error" hidden></p>
+    </section>
+
+    <div class="layout" id="run" hidden>
+      <nav class="sidebar" aria-label="Jobs">
+        <h2 class="side-h">Jobs</h2>
+        <ul class="jobs" id="jobs"></ul>
+        <h2 class="side-h">Run</h2>
+        <ul class="jobs">
+          <li><a class="job" id="artifacts-link" href="#"><span class="icon icon-box" aria-hidden="true"></span><span class="job-name">Artifacts</span><span class="job-dur" id="artifacts-count"></span></a></li>
+        </ul>
+      </nav>
+
+      <section class="content">
+        <div class="content-head">
+          <h1 class="job-title" id="job-title"></h1>
+          <div class="tools" id="log-tools">
+            <input type="search" id="search" placeholder="Search logs" aria-label="Search logs" autocomplete="off" spellcheck="false">
+            <label class="toggle"><input type="checkbox" id="show-ts"> Timestamps</label>
+          </div>
+        </div>
+        <p class="notice" id="notice" hidden></p>
+        <div class="log" id="log"></div>
+        <div class="artifacts" id="artifacts" hidden></div>
+      </section>
+    </div>
+  </main>
+
+  <dialog class="dialog" id="settings" aria-labelledby="settings-h">
+    <form id="settings-form" method="dialog" novalidate>
+      <h2 id="settings-h">Settings</h2>
+      <p class="hint">Both values stay in this browser's local storage. The token is sent only to api.github.com; the repo key never leaves the page.</p>
+
+      <label class="field" for="repo-key">Repo key</label>
+      <input type="password" id="repo-key" autocomplete="off" spellcheck="false" placeholder="AGE-SECRET-KEY-1…">
+      <p class="hint">Copy it from Infisical: the secret <code>REPO_AGE_KEY</code>.</p>
+      <p class="field-error" id="key-error" hidden></p>
+
+      <label class="field" for="gh-token">GitHub token</label>
+      <input type="password" id="gh-token" autocomplete="off" spellcheck="false" placeholder="github_pat_…">
+      <p class="hint">Create a <a href="https://github.com/settings/personal-access-tokens/new" target="_blank" rel="noopener noreferrer">fine-grained token</a>.
+        Set Repository access to “Public repositories (read-only)” and add no other permissions.</p>
+      <p class="field-error" id="token-error" hidden></p>
+
+      <div class="dialog-actions">
+        <button type="button" class="btn btn-danger" id="forget">Forget</button>
+        <span class="spacer"></span>
+        <button type="button" class="btn" id="cancel-settings">Cancel</button>
+        <button type="submit" class="btn btn-primary" id="save-settings">Save</button>
+      </div>
+    </form>
+  </dialog>
+</body>
+</html>
