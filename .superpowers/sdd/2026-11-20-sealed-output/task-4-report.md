@@ -21,3 +21,5 @@ previous step must invoke seal-pack as a command (bad-upload-pack-mention.yml), 
 retention documented as a ceiling in the test docstring (good.yml 1-day pages upload passes) and docs ("at most 7 days").
 Command: pytest scripts/seal/test_workflow_policy.py -q -k "fixture or exempt or fails_closed or test-seal or all_workflows"
 Output: 42 passed, 1 failed (test_all_workflows_classified, expected RED). Full file: 161 failed, 171 passed (real unconverted workflows).
+
+Setup-step working-directory ruling: only `working-directory: ${{ github.workspace }}` is accepted as an extra key (fixtures good-setup-workdir, bad-setup-workdir, bad-setup-extra-key). Fixtures+meta: 43 passed.

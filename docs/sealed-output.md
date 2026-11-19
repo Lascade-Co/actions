@@ -20,6 +20,9 @@ branch, PR number and title, commit SHA, step names, and lines starting `::add-m
        SEAL_REF="${{ github.workflow_sha }}" bash "$RUNNER_TEMP/seal-install.sh"
    ```
 
+   The only key you may add is `working-directory: ${{ github.workspace }}`, for jobs whose default
+   working directory (e.g. `source`) does not exist yet at step 1.
+
 2. The last step uploads the sealed log:
 
    ```yaml

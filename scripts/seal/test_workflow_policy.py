@@ -95,7 +95,10 @@ def check_default_shell_is_sealed(wf):
 
 
 def is_setup(step):
-    return (set(step) == {"name", "shell", "run"} and step["name"] == SETUP_NAME
+    extra = set(step) - {"name", "shell", "run"}
+    if extra and not (extra == {"working-directory"} and step["working-directory"] == "${{ github.workspace }}"):
+        return False  # the only allowed extra key, for jobs whose default directory does not exist yet
+    return (step.keys() >= {"name", "shell", "run"} and step["name"] == SETUP_NAME
             and step["shell"] == SETUP_SHELL and norm_run(step["run"]) == norm_run(SETUP_RUN))
 
 
@@ -263,6 +266,12 @@ def test_fixture_good_passes_every_rule():
     assert violations(p) == []
     assert check_no_pull_request_target(load(p)) == []
     assert check_pull_request_no_secrets(load(p), p.read_text()) == []
+
+
+def test_fixture_setup_working_directory():
+    assert violations(fixture("good-setup-workdir.yml")) == []
+    assert check_setup_step_first(load(fixture("bad-setup-workdir.yml")))
+    assert check_setup_step_first(load(fixture("bad-setup-extra-key.yml")))
 
 
 def test_fixture_good_job_default_and_reusable_call():
