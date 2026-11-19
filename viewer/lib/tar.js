@@ -59,13 +59,15 @@ function entrySize(pax, type, h) {
 }
 
 const MAX_ENTRIES = 100_000;
+const MAX_BYTES = 1024 * 1024 * 1024;
 
 /**
  * @param {Uint8Array} bytes
- * @param {{maxEntries?: number}} [limits] members (headers included) to read before giving up
+ * @param {{maxEntries?: number, maxBytes?: number}} [limits] members (headers included) to read,
+ *   and logical file bytes to return (hard links count their target's size again)
  * @returns {{path: string, type: "file"|"dir"|"symlink", data?: Uint8Array, linkname?: string}[]}
  */
-export function readTar(bytes, { maxEntries = MAX_ENTRIES } = {}) {
+export function readTar(bytes, { maxEntries = MAX_ENTRIES, maxBytes = MAX_BYTES } = {}) {
   const entries = [];
   const files = new Map();
   let pax = {};
@@ -73,6 +75,13 @@ export function readTar(bytes, { maxEntries = MAX_ENTRIES } = {}) {
   let longLink = null;
   let off = 0;
   let headers = 0;
+  let logical = 0;
+  const count = (n) => {
+    logical += n;
+    if (logical > maxBytes) {
+      throw new Error(`not a tar archive this viewer can open (too much data, over ${Math.round(maxBytes / (1024 * 1024))} MiB)`);
+    }
+  };
   while (off + BLOCK <= bytes.length) {
     const h = bytes.subarray(off, off + BLOCK);
     if (h.every((b) => b === 0)) break;
@@ -116,6 +125,7 @@ export function readTar(bytes, { maxEntries = MAX_ENTRIES } = {}) {
     longLink = null;
 
     if (type === "0" || type === "7") {
+      count(data.length);
       const entry = { path, type: "file", data };
       files.set(path, entry);
       entries.push(entry);
@@ -126,7 +136,10 @@ export function readTar(bytes, { maxEntries = MAX_ENTRIES } = {}) {
     } else if (type === "1") {
       // A hard link shares the data of an earlier member.
       const target = files.get(clean(linkname));
-      if (target) entries.push({ path, type: "file", data: target.data });
+      if (target) {
+        count(target.data.length);
+        entries.push({ path, type: "file", data: target.data });
+      }
     }
     // Devices, FIFOs and unknown types are skipped.
   }

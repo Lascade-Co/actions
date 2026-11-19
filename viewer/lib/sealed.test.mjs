@@ -5,8 +5,8 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import * as age from "../vendor/age-encryption.js";
-import { zipSync, strToU8 } from "../vendor/fflate.js";
-import { openSealedLog, openSealedArtifact, checkRepoKey } from "./sealed.js";
+import { zipSync, strToU8, gzipSync } from "../vendor/fflate.js";
+import { openSealedLog, openSealedArtifact, checkRepoKey, gunzipCapped, MAX_UNSEALED_BYTES } from "./sealed.js";
 
 const ART = "sealed-log-build-1-0a1b2c3d";
 
@@ -96,4 +96,30 @@ test("openSealedArtifact refuses an artifact that was not sealed", async () => {
   const { identity } = await keypair();
   const zip = zipSync({ "report.txt": strToU8("plain") });
   await assert.rejects(openSealedArtifact(zip, identity), /not a sealed artifact/);
+});
+
+const MiB = 1024 * 1024;
+
+test("the unsealed size cap defaults to 1 GiB", () => {
+  assert.equal(MAX_UNSEALED_BYTES, 1024 * MiB);
+});
+
+test("gunzipCapped stops a gzip bomb at the cap", () => {
+  const bomb = gzipSync(new Uint8Array(64 * MiB), { level: 9 });
+  assert.ok(bomb.length < MiB);
+  assert.throws(() => gunzipCapped(bomb, 8 * MiB), /8 MiB/);
+  assert.equal(gunzipCapped(gzipSync(strToU8("hello")), 8 * MiB).length, 5);
+});
+
+test("openSealedArtifact rejects a gzip bomb with a message naming the cap", async () => {
+  const { identity, recipient } = await keypair();
+  const bomb = gzipSync(new Uint8Array(32 * MiB), { level: 9 });
+  const zip = zipSync({ "x.tgz.age": await seal(recipient, bomb) });
+  await assert.rejects(openSealedArtifact(zip, identity, { maxBytes: 4 * MiB }), /4 MiB/);
+});
+
+test("openSealedLog rejects a zip whose members are larger than the cap", async () => {
+  const { identity, recipient } = await keypair();
+  const zip = zipSync({ "meta.json.age": await seal(recipient, "{}"), "1.log.age": await seal(recipient, new Uint8Array(3 * MiB)) });
+  await assert.rejects(openSealedLog(zip, identity, ART, { maxBytes: 2 * MiB }), /2 MiB/);
 });

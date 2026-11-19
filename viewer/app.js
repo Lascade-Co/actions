@@ -6,7 +6,10 @@ import { ansiRenderer } from "./lib/ansi.js";
 
 const KEY = "ci.repoKey";
 const TOKEN = "ci.githubToken";
-const PREVIEW_MAX = 1024 * 1024;
+const PREVIEW_MAX = 1024 * 1024; // per file
+const PREVIEW_BUDGET = 5 * 1024 * 1024; // per unsealed artifact
+const ENTRY_ROWS_MAX = 1000;
+const downloadUrls = new Set();
 
 const $ = (id) => document.getElementById(id);
 const el = (tag, props = {}, ...children) => {
@@ -146,6 +149,7 @@ function clearDecrypted() {
   Object.assign(state, { runId: null, run: null, attempt: null, jobs: [], artifacts: [], view: null });
   state.sealedLogs.clear();
   state.sealedArtifacts.clear();
+  for (const url of [...downloadUrls]) revokeDownload(url);
   for (const id of ["log", "artifacts", "jobs", "run-meta", "job-title"]) $(id).replaceChildren();
   $("search").value = "";
   $("artifacts-count").textContent = "";
@@ -390,7 +394,8 @@ function findArtifact(name) {
 function loadSealedLog(artifact) {
   if (!state.sealedLogs.has(artifact.id)) {
     const p = artifactZip(settings.token, artifact.id).then((zip) => openSealedLog(zip, settings.key, artifact.name));
-    p.catch(() => state.sealedLogs.delete(artifact.id));
+    // Evict only this load, not a newer one that replaced it.
+    p.catch(() => state.sealedLogs.get(artifact.id) === p && state.sealedLogs.delete(artifact.id));
     state.sealedLogs.set(artifact.id, p);
   }
   return state.sealedLogs.get(artifact.id);
@@ -605,11 +610,16 @@ function visibleArtifacts() {
 
 function download(data, filename, type = "application/octet-stream") {
   const url = URL.createObjectURL(new Blob([data], { type }));
+  downloadUrls.add(url);
   const a = el("a", { href: url, download: filename });
   document.body.append(a);
   a.click();
   a.remove();
-  setTimeout(() => URL.revokeObjectURL(url), 60_000);
+  setTimeout(() => revokeDownload(url), 60_000);
+}
+
+function revokeDownload(url) {
+  if (downloadUrls.delete(url)) URL.revokeObjectURL(url);
 }
 
 function decodeText(data) {
@@ -655,7 +665,7 @@ function artifactCard(art) {
     try {
       if (!state.sealedArtifacts.has(art.id)) {
         const p = artifactZip(settings.token, art.id).then((zip) => openSealedArtifact(zip, settings.key));
-        p.catch(() => state.sealedArtifacts.delete(art.id));
+        p.catch(() => state.sealedArtifacts.get(art.id) === p && state.sealedArtifacts.delete(art.id));
         state.sealedArtifacts.set(art.id, p);
       }
       const opened = await state.sealedArtifacts.get(art.id);
@@ -683,23 +693,50 @@ function artifactCard(art) {
 
 function artifactEntries(opened) {
   const files = opened.entries.filter((e) => e.type !== "dir");
+  const shown = files.slice(0, ENTRY_ROWS_MAX);
+  // Previews render only when an entry is opened, within a per-artifact budget.
+  let budget = PREVIEW_BUDGET;
   const head = el("div", { class: "art-actions" },
     el("span", { class: "muted" }, `${files.length} file${files.length === 1 ? "" : "s"}`),
     el("button", { type: "button", class: "btn btn-small", onclick: () => download(opened.gzip, `${opened.name}.tar.gz`, "application/gzip") }, "Download all (.tar.gz)"));
-  const rows = files.map((e) => {
+  const rows = shown.map((e) => {
     if (e.type === "symlink") {
       return el("div", { class: "entry" }, el("div", { class: "entry-h" }, el("span", { class: "entry-path" }, e.path), el("span", { class: "muted" }, `→ ${e.linkname}`)));
     }
     const name = e.path.slice(e.path.lastIndexOf("/") + 1);
-    const text = decodeText(e.data);
     const h = el("div", { class: "entry-h" },
       el("span", { class: "entry-path" }, e.path),
       el("span", { class: "muted" }, bytes(e.data.length)),
-      el("button", { type: "button", class: "btn btn-small", onclick: () => download(e.data, name) }, "Download"));
-    if (text === null) return el("div", { class: "entry" }, h);
-    const pre = el("pre", { class: "preview" }, text);
-    return el("details", { class: "entry", open: files.length <= 3 }, el("summary", {}, h), pre);
+      el("button", {
+        type: "button",
+        class: "btn btn-small",
+        onclick: (ev) => {
+          ev.preventDefault();
+          download(e.data, name);
+        },
+      }, "Download"));
+    const details = el("details", { class: "entry" }, el("summary", { title: "Show a preview" }, h));
+    details.addEventListener("toggle", () => {
+      if (!details.open || details.dataset.loaded) return;
+      details.dataset.loaded = "1";
+      let body;
+      if (e.data.length > PREVIEW_MAX) body = el("p", { class: "preview-note muted" }, "Too large to preview (over 1 MB); download it instead.");
+      else if (e.data.length > budget) body = el("p", { class: "preview-note muted" }, "Preview limit for this artifact reached (5 MB); download the file instead.");
+      else {
+        const text = decodeText(e.data);
+        if (text === null) body = el("p", { class: "preview-note muted" }, "Binary file; download it to view.");
+        else {
+          budget -= e.data.length;
+          body = el("pre", { class: "preview" }, text);
+        }
+      }
+      details.append(body);
+    });
+    return details;
   });
+  if (files.length > shown.length) {
+    rows.push(el("p", { class: "preview-note muted" }, `${files.length - shown.length} more files not listed; use Download all.`));
+  }
   return [head, ...rows];
 }
 

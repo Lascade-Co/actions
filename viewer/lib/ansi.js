@@ -71,9 +71,32 @@ export function dropIncompleteEscapes(text) {
   return out;
 }
 
+// A whole OSC 8 hyperlink, in exactly the form ansi_up renders in one packet:
+// opener, printable ASCII text, closer. Any other OSC is dropped (see below).
+const OSC8_LINK = /\x1b\]8;[ -:<-~]*;[!-~]{0,512}(?:\x1b\\|\x07)[ -~]+\x1b\]8;;(?:\x1b\\|\x07)/g;
+const OSC_ANY = /\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g;
+
 /**
- * Returns a function that renders one log line to safe HTML. Colours carry
- * from line to line, but each line's escape sequences are complete on their own.
+ * Makes one line self-contained: incomplete escapes are dropped, complete OSC 8
+ * links are kept, and every other OSC sequence (an opener with no closer on this
+ * line, a stray closer, window titles) is removed. ansi_up buffers an unclosed
+ * hyperlink until it sees the closer, which would hold back every later line.
+ */
+export function selfContained(text) {
+  const t = dropIncompleteEscapes(text);
+  if (!t.includes("\x1b]")) return t;
+  let out = "";
+  let last = 0;
+  for (const m of t.matchAll(OSC8_LINK)) {
+    out += t.slice(last, m.index).replace(OSC_ANY, "") + m[0];
+    last = m.index + m[0].length;
+  }
+  return out + t.slice(last).replace(OSC_ANY, "");
+}
+
+/**
+ * Returns a function that renders one log line to safe HTML. Each line is
+ * rendered on its own: no colour, attribute or buffered input carries over.
  */
 export function ansiRenderer() {
   const au = new AnsiUp();
@@ -83,9 +106,17 @@ export function ansiRenderer() {
   au.faintStyle = "x-faint";
   au.italicStyle = "x-italic";
   au.underlineStyle = "x-underline";
-  return (text) =>
-    au
-      .ansi_to_html(dropIncompleteEscapes(text))
+  // ansi_up 6.0.6 keeps its parser state in these fields; reset them per line.
+  const reset = () => {
+    au._buffer = "";
+    au.fg = au.bg = null;
+    au.bold = au.faint = au.italic = au.underline = false;
+  };
+  return (text) => {
+    reset();
+    const html = au.ansi_to_html(selfContained(text));
+    reset();
+    return html
       // Text is already escaped, so a literal "<span" or "<a " here is markup.
       .replace(/<span style="([^"]*)"(?: class="([^"]*)")?>/g, (_, style, cls) => {
         const all = [...(cls ? cls.split(" ") : []), ...styleToClasses(style)];
@@ -94,4 +125,5 @@ export function ansiRenderer() {
         return all.length ? `<span class="${all.join(" ")}">` : "<span>";
       })
       .replace(/<a href="([^"]*)">/g, '<a href="$1" target="_blank" rel="noopener noreferrer">');
+  };
 }

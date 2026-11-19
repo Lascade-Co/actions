@@ -152,3 +152,28 @@ test("readTar caps the number of entries", () => {
   assert.equal(readTar(concat(parts)).length, 5);
   assert.throws(() => readTar(concat(parts), { maxEntries: 4 }), /too many entries/);
 });
+
+function hardLinkTar(links, size) {
+  const parts = [header("big.bin", "0", size), new Uint8Array(Math.ceil(size / 512) * 512)];
+  for (let i = 0; i < links; i++) parts.push(header(`l${i}`, "1", 0, "big.bin"));
+  parts.push(new Uint8Array(1024));
+  return concat(parts);
+}
+
+test("hard links count toward the logical byte cap", () => {
+  const MiB = 1024 * 1024;
+  // 1100 links to a 1 MiB file is over 1 GiB of logical data in a ~1.6 MB tar.
+  assert.throws(() => readTar(hardLinkTar(1100, MiB)), /1024 MiB/);
+  assert.throws(() => readTar(hardLinkTar(1000, MiB), { maxBytes: 100 * MiB }), /100 MiB/);
+});
+
+test("hard links share the target's bytes instead of copying them", () => {
+  const tar = hardLinkTar(10, 4096);
+  const entries = readTar(tar);
+  assert.equal(entries.length, 11);
+  for (const e of entries) {
+    assert.equal(e.type, "file");
+    assert.equal(e.data.buffer, tar.buffer);
+    assert.equal(e.data.length, 4096);
+  }
+});

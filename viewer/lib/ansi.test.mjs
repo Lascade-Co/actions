@@ -29,10 +29,40 @@ test("ansiRenderer uses classes, never inline styles", () => {
   assert.match(html, /<span class="ansi-[a-z-]+-fg ansi-[a-z-]+-bg">bg<\/span>/);
 });
 
-test("ansiRenderer carries colour state across lines", () => {
+test("ansiRenderer renders every line on its own (no colour carried over)", () => {
   const r = ansiRenderer();
-  r(`${ESC}[32mstart`);
-  assert.equal(r("next"), '<span class="ansi-green-fg">next</span>');
+  assert.equal(r(`${ESC}[32mstart`), '<span class="ansi-green-fg">start</span>');
+  assert.equal(r("next"), "next");
+  r(`${ESC}[1m`);
+  assert.equal(r("plain"), "plain");
+});
+
+for (const [label, st] of [["ESC \\", `${ESC}\\`], ["BEL", "\x07"]]) {
+  test(`an OSC 8 opener without a closer (${label}) does not hold later lines`, () => {
+    const r = ansiRenderer();
+    const lines = [`ok ${ESC}]8;;https://x.com${st}`, "l2 secret step output", "l3", "l4", "l5", `${ESC}]8;;${st}`, "l7"];
+    assert.deepEqual(lines.map(r), ["ok ", "l2 secret step output", "l3", "l4", "l5", "", "l7"]);
+  });
+}
+
+test("a second OSC 8 opener on a line keeps only the complete link", () => {
+  const r = ansiRenderer();
+  const html = r(`${ESC}]8;;https://a.com${ESC}\\x ${ESC}]8;;https://b.com${ESC}\\y${ESC}]8;;${ESC}\\ z`);
+  assert.equal(html, 'x <a href="https://b.com" target="_blank" rel="noopener noreferrer">y</a> z');
+  assert.equal(r("after"), "after");
+});
+
+test("the vendored ansi_up is the version whose state fields the renderer resets", async () => {
+  const { AnsiUp } = await import("../vendor/ansi_up.js");
+  const au = new AnsiUp();
+  assert.equal(au.VERSION, "6.0.6");
+  for (const k of ["_buffer", "fg", "bg", "bold", "faint", "italic", "underline"]) assert.ok(k in au, k);
+});
+
+test("a stray OSC 8 closer is dropped", () => {
+  const r = ansiRenderer();
+  assert.equal(r(`a${ESC}]8;;${ESC}\\b`), "ab");
+  assert.equal(r("c"), "c");
 });
 
 test("ansiRenderer opens links in a new tab without a referrer", () => {
