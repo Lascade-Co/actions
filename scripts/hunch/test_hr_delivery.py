@@ -64,7 +64,7 @@ def test_freeze_preserves_payload_bytes_and_schedule_on_retry(tmp_path):
     frozen = path.read_bytes()
     body = json.loads(frozen)
     assert body["from"] == "Lascade Games <noreply@metrics.lascade.com>"
-    assert body["to"] == ["cherian@lascade.com"]
+    assert body["to"] == [sender().TO]
     assert body["scheduled_at"] == "2026-11-19T13:55:00+00:00"
     write_email(tmp_path, subject="Changed")
     again = s.freeze_payload(tmp_path, REPORT_DATE, "12345", "schedule",
@@ -200,7 +200,7 @@ def test_manual_blank_date_uses_newest_pacific_date_past_0500(monkeypatch, now, 
     date, mode, to = workflow().settings()
     assert date == want
     assert mode == "test"
-    assert to == "cherian@lascade.com"
+    assert to == workflow().TO
 
 
 def test_settings_write_outputs_without_logging_dates(tmp_path, monkeypatch, capsys):

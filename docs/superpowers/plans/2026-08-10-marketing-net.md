@@ -1268,8 +1268,8 @@ CREDS = {
     "client_secret": "s",
     "refresh_token": "r",
     "dev_token": "d",
-    "login_customer_id": "6426942742",
-    "skip_customer_ids": ["6426942742", "6096341923"],
+    "login_customer_id": "1111111111",
+    "skip_customer_ids": ["1111111111", "2222222222"],
 }
 
 
@@ -1303,11 +1303,11 @@ class FetchGoogleAdsTest(unittest.TestCase):
     def test_skip_list_is_applied_explicitly(self):
         children = [
             {"customerClient": {"id": "111", "currencyCode": "USD"}},
-            {"customerClient": {"id": "6096341923", "currencyCode": "USD"}},
+            {"customerClient": {"id": "2222222222", "currencyCode": "USD"}},
         ]
         costs = {
             "111": [{"metrics": {"costMicros": "5000000"}}],
-            "6096341923": [{"metrics": {"costMicros": "999000000"}}],
+            "2222222222": [{"metrics": {"costMicros": "999000000"}}],
         }
         result = fetch_google_ads(CREDS, date(2026, 8, 10), self.table,
                                   search=searcher(children, costs))
@@ -1518,9 +1518,9 @@ class FetchMetaAdsTest(unittest.TestCase):
             seen.append(account_id)
             return []
 
-        creds = {"token": "t", "account_ids": ["act_2115160355488257"]}
+        creds = {"token": "t", "account_ids": ["act_3333333333333333"]}
         fetch_meta_ads(creds, date(2026, 8, 10), self.table, insights=insights)
-        self.assertEqual(seen, ["2115160355488257"])
+        self.assertEqual(seen, ["3333333333333333"])
 
     def test_empty_insights_is_a_real_zero(self):
         creds = {"token": "t", "account_ids": ["111"]}
