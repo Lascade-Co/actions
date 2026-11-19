@@ -8,6 +8,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 import datetime as dt
 import os
+import re
 import signal
 import threading
 import time
@@ -158,16 +159,18 @@ def absolute_deadline(deadline: dt.datetime | None):
 def rejected_reason(response) -> str:
     """Map a PostHog refusal to one status word; the body itself is never shown."""
     try:
-        detail = str(response.json().get("detail", "")).lower()
+        body = response.json()
+        detail = str(body.get("detail", "")).lower()
+        code = re.sub(r"[^a-z_]", "", str(body.get("code", "")).lower())[:40]
     except Exception:
-        detail = ""
+        detail, code = "", ""
     if response.status_code == 401:
         return "posthog-key-invalid"
     if response.status_code == 403 and "scope" in detail:
         return "posthog-scope-missing"
     if response.status_code == 403 and any(w in detail for w in ("project", "team", "organization")):
         return "posthog-project-denied"
-    return "posthog-rejected"
+    return f"posthog-rejected-{response.status_code}" + (f"-{code}" if code else "")
 
 
 def make_runner(key: str, retries: int = 4, poll_s: float = 4,
