@@ -5,6 +5,9 @@
 // the Fetch standard, drops the Authorization header on that cross-origin hop,
 // so the token never reaches blob storage. Only Accept (a CORS-safelisted header)
 // is sent besides Authorization, so the redirected request needs no preflight.
+// Listing runs and workflows also works without a token (the repo is public),
+// at GitHub's unauthenticated limit of 60 requests an hour.
+import { runsQuery } from "./runs.js";
 
 export const REPO = "Lascade-Co/actions";
 const API = `https://api.github.com/repos/${REPO}/actions`;
@@ -23,14 +26,16 @@ function id(value, what) {
   return s;
 }
 
-function fix(status, body, headers) {
+function fix(status, body, headers, authed) {
   const msg = body?.message ? ` (${body.message})` : "";
   if (status === 401) return `GitHub rejected the token${msg}: open Settings and paste a valid fine-grained token.`;
   if (status === 403 || status === 429) {
     const reset = Number(headers.get("x-ratelimit-reset"));
-    if (headers.get("x-ratelimit-remaining") === "0" && reset) {
-      return `GitHub API rate limit reached: try again after ${new Date(reset * 1000).toLocaleTimeString()}.`;
+    const after = headers.get("x-ratelimit-remaining") === "0" && reset ? `: try again after ${new Date(reset * 1000).toLocaleTimeString()}` : "";
+    if (!authed) {
+      return `GitHub refused the request${msg}${after}. Without a token GitHub allows 60 requests an hour; add a GitHub token in Settings to raise the limit.`;
     }
+    if (after) return `GitHub API rate limit reached${after}.`;
     return `GitHub refused the request${msg}: check the token in Settings has public repository read access.`;
   }
   if (status === 404) return `Not found in ${REPO}${msg}: check the run ID, or the log is not ready yet.`;
@@ -41,8 +46,9 @@ function fix(status, body, headers) {
 async function request(token, url) {
   let res;
   try {
+    const headers = token ? { Authorization: `Bearer ${token}`, Accept: "application/vnd.github+json" } : { Accept: "application/vnd.github+json" };
     res = await fetch(url, {
-      headers: { Authorization: `Bearer ${token}`, Accept: "application/vnd.github+json" },
+      headers,
       redirect: "follow",
       credentials: "omit",
       referrerPolicy: "no-referrer",
@@ -57,7 +63,7 @@ async function request(token, url) {
     } catch {
       // Not JSON (blob storage errors are XML).
     }
-    throw new GitHubError(fix(res.status, body, res.headers), res.status);
+    throw new GitHubError(fix(res.status, body, res.headers, Boolean(token)), res.status);
   }
   return res;
 }
@@ -92,4 +98,21 @@ export function listArtifacts(token, runId) {
 export async function artifactZip(token, artifactId) {
   const res = await request(token, `${API}/artifacts/${id(artifactId, "artifact id")}/zip`);
   return new Uint8Array(await res.arrayBuffer());
+}
+
+/** One page of runs, newest first: `{total, runs}`. `token` may be empty. */
+export async function listRuns(token, { page = 1, perPage, workflow = "", status = "", event = "", branch = "" } = {}) {
+  let path;
+  try {
+    path = runsQuery({ page, perPage, workflow, status, event, branch });
+  } catch (err) {
+    throw new GitHubError(err.message, 0);
+  }
+  const body = await (await request(token, `${API}${path}`)).json();
+  return { total: Number(body.total_count) || 0, runs: body.workflow_runs ?? [] };
+}
+
+/** Every workflow in the repo. `token` may be empty. */
+export function listWorkflows(token) {
+  return paginate(token, "/workflows", "workflows");
 }
