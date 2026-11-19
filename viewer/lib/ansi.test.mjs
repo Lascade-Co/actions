@@ -91,3 +91,26 @@ test("a complete sequence still renders after a stray escape", () => {
   const r = ansiRenderer();
   assert.equal(r(`a${ESC}]8;;b ${ESC}[31mred${ESC}[0m`), 'a]8;;b <span class="ansi-red-fg">red</span>');
 });
+
+test("stripAnsi removes CSI sequences", async () => {
+  const { stripAnsi } = await import("./ansi.js");
+  assert.equal(stripAnsi(`${ESC}[1;31mred${ESC}[0m plain ${ESC}[38;2;1;2;3mx${ESC}[K${ESC}[?25l`), "red plain x");
+  assert.equal(stripAnsi("no escapes <b>&"), "no escapes <b>&");
+});
+
+for (const [label, st] of [["ST", `${ESC}\\`], ["BEL", "\x07"]]) {
+  test(`stripAnsi keeps OSC 8 link text and drops the link (${label})`, async () => {
+    const { stripAnsi } = await import("./ansi.js");
+    assert.equal(stripAnsi(`see ${ESC}]8;;https://x.com/a${st}the docs${ESC}]8;;${st} now`), "see the docs now");
+    assert.equal(stripAnsi(`${ESC}]0;window title${st}after`), "after");
+  });
+}
+
+test("stripAnsi drops a stray ESC but keeps the text after it", async () => {
+  const { stripAnsi } = await import("./ansi.js");
+  assert.equal(stripAnsi(`a${ESC}b`), "ab");
+  assert.equal(stripAnsi(`text${ESC}[`), "text[");
+  assert.equal(stripAnsi(`text${ESC}`), "text");
+  assert.equal(stripAnsi(`a${ESC}]8;;b ${ESC}[31mred`), "a]8;;b red");
+  assert.equal(stripAnsi(`x${ESC}7y${ESC}8`), "xy");
+});

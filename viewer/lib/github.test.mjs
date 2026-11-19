@@ -1,6 +1,6 @@
 import { test, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { getRun, listJobs, jobLog, listArtifacts, artifactZip, GitHubError } from "./github.js";
+import { getRun, listJobs, jobLog, listArtifacts, artifactZip, listRuns, listWorkflows, GitHubError } from "./github.js";
 
 const realFetch = globalThis.fetch;
 afterEach(() => {
@@ -77,4 +77,41 @@ test("errors carry the HTTP status and a fix", async () => {
 test("rejects a run id that is not a number", async () => {
   mock(() => json({}));
   await assert.rejects(getRun("tok", "1/../../x"), /run id/i);
+});
+
+test("listRuns fetches one page of the repo's runs with filters", async () => {
+  const calls = mock(() => json({ total_count: 1234, workflow_runs: [{ id: 1 }, { id: 2 }] }));
+  const out = await listRuns("tok", { page: 2, status: "failure" });
+  assert.deepEqual(out, { total: 1234, runs: [{ id: 1 }, { id: 2 }] });
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].url, "https://api.github.com/repos/Lascade-Co/actions/actions/runs?per_page=25&page=2&status=failure");
+  assert.deepEqual(calls[0].init.headers, { Authorization: "Bearer tok", Accept: "application/vnd.github+json" });
+  assert.equal(calls[0].init.credentials, "omit");
+});
+
+test("listRuns uses the workflow's runs endpoint when a workflow is selected", async () => {
+  const calls = mock(() => json({ total_count: 0, workflow_runs: [] }));
+  assert.deepEqual(await listRuns("tok", { page: 1, workflow: "77" }), { total: 0, runs: [] });
+  assert.equal(calls[0].url, "https://api.github.com/repos/Lascade-Co/actions/actions/workflows/77/runs?per_page=25&page=1");
+});
+
+test("listRuns refuses a workflow that is not an id before fetching", async () => {
+  const calls = mock(() => json({}));
+  await assert.rejects(listRuns("tok", { workflow: "1/../../x" }), /workflow/i);
+  assert.equal(calls.length, 0);
+});
+
+test("listRuns and listWorkflows work without a token and send no Authorization header", async () => {
+  const calls = mock((url) => (url.includes("/workflows?") ? json({ total_count: 1, workflows: [{ id: 5, name: "CI" }] }) : json({ total_count: 0, workflow_runs: [] })));
+  await listRuns("", {});
+  assert.deepEqual(await listWorkflows(""), [{ id: 5, name: "CI" }]);
+  assert.equal(calls[1].url, "https://api.github.com/repos/Lascade-Co/actions/actions/workflows?per_page=100&page=1");
+  for (const c of calls) assert.deepEqual(c.init.headers, { Accept: "application/vnd.github+json" });
+});
+
+test("a rate limit without a token suggests adding one", async () => {
+  mock(() => new Response(JSON.stringify({ message: "API rate limit exceeded" }), { status: 403, headers: { "x-ratelimit-remaining": "0", "x-ratelimit-reset": "1800000000" } }));
+  await assert.rejects(listRuns("", {}), (err) => err.status === 403 && /60/.test(err.message) && /token in Settings/.test(err.message));
+  mock(() => json({ message: "Forbidden" }, 429));
+  await assert.rejects(listRuns("", {}), (err) => err.status === 429 && /60/.test(err.message));
 });

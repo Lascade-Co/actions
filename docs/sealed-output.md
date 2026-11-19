@@ -68,6 +68,10 @@ Open the marker link in the log, `https://ci.lascade.com/?run=<run id>&attempt=<
 (stored only in your browser as `ci.repoKey`) and a GitHub fine-grained token with Repository access "Public
 repositories (read-only)" and no other permissions (`ci.githubToken`).
 
+`https://ci.lascade.com/` without `?run=` lists recent runs (filter by workflow and status, 25 per page; it works
+without a token at GitHub's 60 requests an hour). In a run, "Export logs" downloads the job's or every job's log as
+plain text with sealed output merged in and ANSI codes stripped; it needs the repo key.
+
 ## Rotate the repo key
 
 1. `age-keygen -o key.txt`; put the whole `AGE-SECRET-KEY-1...` line, prefix included, into Infisical as

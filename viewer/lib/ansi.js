@@ -71,6 +71,19 @@ export function dropIncompleteEscapes(text) {
   return out;
 }
 
+// Every complete sequence (CSI; OSC, DCS, SOS, PM and APC strings ended by BEL
+// or ST; two-byte ESC sequences such as ESC 7 or ESC M) or, failing that, the
+// lone ESC.
+const ANY_ESC = /\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[PX^_][^\x07\x1b]*(?:\x07|\x1b\\)|[0-?@-OQ-WYZ\\])?/g;
+
+/**
+ * Plain text of a line: escape sequences are removed, OSC 8 links keep their
+ * text, and a stray ESC is dropped while the text after it stays.
+ */
+export function stripAnsi(text) {
+  return text.includes("\x1b") ? text.replace(ANY_ESC, "") : text;
+}
+
 // A whole OSC 8 hyperlink, in exactly the form ansi_up renders in one packet:
 // opener, printable ASCII text, closer. Any other OSC is dropped (see below).
 const OSC8_LINK = /\x1b\]8;[ -:<-~]*;[!-~]{0,512}(?:\x1b\\|\x07)[ -~]+\x1b\]8;;(?:\x1b\\|\x07)/g;
