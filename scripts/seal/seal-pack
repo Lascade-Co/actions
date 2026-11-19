@@ -24,21 +24,29 @@ mkdir -p "$dir"
 
 # Expand globs (recursive **) and print the root, then each member relative to it,
 # NUL-terminated. A lone file's root is its directory; a lone dir is its own root.
+# A match inside a matched directory is dropped: tar already recurses into it.
 members=()
 root=
 while IFS= read -r -d '' p; do
   if [ -z "$root" ]; then root=$p; else members+=("$p"); fi
 done < <(python3 -c '
 import glob, os, sys
-m = sorted({os.path.abspath(p) for a in sys.argv[1:]
-            for p in (glob.glob(a, recursive=True) or ([a] if os.path.lexists(a) else []))})
+m = {os.path.abspath(p) for a in sys.argv[1:]
+     for p in (glob.glob(a, recursive=True) or ([a] if os.path.lexists(a) else []))}
+def real_dir(p):
+    return os.path.isdir(p) and not os.path.islink(p)
 if m:
-    root = os.path.commonpath(m)
-    if root in m and (not os.path.isdir(root) or os.path.islink(root)):
+    root = os.path.commonpath(sorted(m))
+    if root in m and not real_dir(root):
         root = os.path.dirname(root)
-    rel = sorted({os.path.relpath(p, root) for p in m})
-    if "." in rel:
-        rel = ["."]
+    def covered(p):
+        q = os.path.dirname(p)
+        while q != p and len(q) >= len(root):
+            if q in m and real_dir(q):
+                return True
+            p, q = q, os.path.dirname(q)
+        return False
+    rel = sorted(os.path.relpath(p, root) for p in m if not covered(p))
     for p in [root] + ["./" + r if r.startswith("-") else r for r in rel]:
         sys.stdout.write(p + "\0")
 ' "$@")

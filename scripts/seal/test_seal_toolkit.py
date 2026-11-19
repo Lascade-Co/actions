@@ -6,6 +6,7 @@ tarball from a per-session cache under the pytest tmp dir after the first
 download. The tests generate a throwaway age key and point SEAL_PUBKEY_FILE at it.
 """
 import gzip
+import io
 import json
 import os
 from pathlib import Path
@@ -13,6 +14,7 @@ import re
 import shutil
 import signal
 import subprocess
+import tarfile
 import time
 
 import pytest
@@ -27,7 +29,11 @@ VIEWER = 'https://ci.lascade.com/?run=42&attempt=1'
 
 @pytest.fixture(scope='session')
 def shim_dir(tmp_path_factory):
-    """A PATH dir whose `curl` serves the age release tarball from a session cache."""
+    """A PATH dir whose `curl` serves the age release tarball from a session cache.
+
+    Raw control files of this repo are served from $SHIM_SERVE_DIR when a test sets
+    it; every requested URL is appended to $SHIM_LOG when set. Anything else fails.
+    """
     d = tmp_path_factory.mktemp('shim')
     cache = tmp_path_factory.mktemp('age-cache')
     (d / 'curl').write_text(f'''#!/bin/bash
@@ -35,12 +41,21 @@ set -eu
 out= url= prev=
 for a in "$@"; do
   [ "$prev" = -o ] && out=$a
-  case "$a" in https://github.com/FiloSottile/age/releases/download/*) url=$a ;; esac
+  case "$a" in https://*) url=$a ;; esac
   prev=$a
 done
 if [ -z "$url" ] || [ -z "$out" ]; then echo "test curl shim: unexpected call" >&2; exit 22; fi
-c="{cache}/${{url##*/}}"
-if [ -s "$c" ]; then cp "$c" "$out"; else "{REAL_CURL}" "$@"; cp "$out" "$c"; fi
+[ -z "${{SHIM_LOG:-}}" ] || echo "$url" >>"$SHIM_LOG"
+case "$url" in
+  https://github.com/FiloSottile/age/releases/download/*)
+    c="{cache}/${{url##*/}}"
+    if [ -s "$c" ]; then cp "$c" "$out"; else "{REAL_CURL}" "$@"; cp "$out" "$c"; fi ;;
+  https://raw.githubusercontent.com/Lascade-Co/actions/*/scripts/seal/*)
+    f="${{SHIM_SERVE_DIR:-/nonexistent}}/${{url##*/}}"
+    [ -e "$f" ] || exit 22
+    cp "$f" "$out" ;;
+  *) exit 22 ;;
+esac
 ''')
     (d / 'curl').chmod(0o755)
     return d
@@ -158,6 +173,53 @@ def test_install_exports_artifact_name(runner):
     assert (runner.seal / 'repo-key.pub').read_text() == runner.keypair['pub'].read_text()
 
 
+SHA = '0123456789abcdef0123456789abcdef01234567'
+
+
+def served_env(tmp_path, shim_dir, keypair):
+    """An env for the real (non-test-knob) path: tools and key fetched at SEAL_REF."""
+    serve = tmp_path / 'served'
+    serve.mkdir()
+    for t in ('seal-bash', 'seal-pack', 'seal-unpack'):
+        shutil.copy(HERE / t, serve / t)
+    shutil.copy(keypair['pub'], serve / 'repo-key.pub')
+    env = base_env(tmp_path, shim_dir, keypair['pub'])
+    del env['SEAL_SOURCE_DIR'], env['SEAL_PUBKEY_FILE']
+    env.update(SEAL_REF=SHA, SHIM_SERVE_DIR=str(serve), SHIM_LOG=str(tmp_path / 'urls.log'))
+    return env, serve
+
+
+def test_install_fetches_control_files_at_ref(tmp_path, shim_dir, keypair):
+    env, _ = served_env(tmp_path, shim_dir, keypair)
+    r = run_install(env)
+    assert r.returncode == 0, r.stderr
+    raw = f'https://raw.githubusercontent.com/Lascade-Co/actions/{SHA}/scripts/seal'
+    urls = (tmp_path / 'urls.log').read_text().splitlines()
+    assert urls[0].startswith('https://github.com/FiloSottile/age/releases/download/v1.3.2/age-v1.3.2-')
+    assert sorted(urls[1:]) == [f'{raw}/{t}' for t in ('repo-key.pub', 'seal-bash', 'seal-pack', 'seal-unpack')]
+    runner = Runner(tmp_path, env, keypair)
+    s = runner.step('echo fetched-ok')
+    assert s.returncode == 0
+    assert runner.decrypt(runner.out / '1.log.age') == b'fetched-ok\n'
+
+
+def test_install_requires_full_sha_ref(tmp_path, shim_dir, keypair):
+    env, _ = served_env(tmp_path, shim_dir, keypair)
+    r = run_install(env, SEAL_REF='main')
+    assert r.returncode != 0
+    assert not (Path(env['RUNNER_TEMP']) / 'seal' / 'bin' / 'seal-bash').exists()
+    assert (tmp_path / 'github_env').read_text() == ''
+
+
+def test_install_rejects_empty_download(tmp_path, shim_dir, keypair):
+    env, serve = served_env(tmp_path, shim_dir, keypair)
+    (serve / 'seal-pack').write_text('')
+    r = run_install(env)
+    assert r.returncode != 0
+    assert not (Path(env['RUNNER_TEMP']) / 'seal' / 'bin' / 'seal-bash').exists()
+    assert (tmp_path / 'github_env').read_text() == ''
+
+
 def test_install_prints_viewer_url_once(tmp_path, shim_dir, keypair):
     r = run_install(base_env(tmp_path, shim_dir, keypair['pub']))
     assert r.returncode == 0, r.stderr
@@ -269,6 +331,15 @@ def test_segment_sealed_on_failure(runner):
     assert (runner.out / '1.log.age').exists()
     assert runner.decrypt(runner.out / '1.log.age') == b'before\n'
     assert not (runner.seal / 'log' / '1.log').exists()
+
+
+def test_failed_encryption_fails_closed(runner):
+    (runner.seal / 'repo-key.pub').write_text('garbage\n')
+    r = runner.step('echo CANARY-ENC')
+    assert r.returncode != 0
+    assert 'CANARY-ENC' not in r.stdout + r.stderr
+    assert not list((runner.seal / 'log').iterdir())
+    assert not (runner.out / '1.log.age').exists() or b'CANARY-ENC' not in (runner.out / '1.log.age').read_bytes()
 
 
 def test_killed_step_is_sealed(runner):
@@ -401,6 +472,16 @@ def test_pack_unpack_roundtrip(runner, tree):
 def test_pack_expands_quoted_glob(runner, tree):
     dest = pack_and_unpack(runner, tree, 'glob', 'a/**/*.bin')
     assert listing(dest) == ['y.bin']
+
+
+def test_pack_nested_matches_archived_once(runner, tree):
+    r = runner.tool('seal-pack', 'nest', 'a/**/*', cwd=tree)
+    assert r.returncode == 0, r.stderr
+    tgz = runner.decrypt(runner.seal / 'art' / 'nest' / 'nest.tgz.age')
+    with tarfile.open(fileobj=io.BytesIO(tgz)) as t:
+        names = [os.path.normpath(n) for n in t.getnames()]
+    assert len(names) == len(set(names)), names
+    assert sorted(names) == ['b', 'b/y.bin', 'l', 'x.txt']
 
 
 def test_pack_absolute_path(runner, tree):
