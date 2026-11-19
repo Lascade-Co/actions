@@ -267,6 +267,7 @@ async function route() {
     await showJob(job, seq);
   } catch (err) {
     if (seq !== state.seq) return;
+    $("log").replaceChildren();
     if (!state.run) {
       $("job-title").textContent = "";
       $("run").hidden = true;
@@ -437,8 +438,10 @@ async function showJob(job, seq) {
     sec.summaries = markerKeys(sections[i]).filter((k) => summaries.has(k)).map((k) => summaries.get(k));
   });
 
+  const lost = names.map((n) => reasons.get(n)).find((r) => r && /expired|not found/.test(r));
   if (badKey) report(badKey);
   else if (!settings.key && names.length) banner("Add the repo key in Settings to see sealed output.", { settingsAction: true });
+  else if (lost) banner(`Sealed output for this job is unavailable: ${lost}. Only the public log is shown.`);
   else clearBanner();
   const markerCount = sections.reduce((n, sec) => n + markerKeys(sec).length, 0);
   if (!markerCount) notice("Nothing sealed in this job: this is the public log.");
