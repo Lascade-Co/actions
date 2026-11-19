@@ -2,6 +2,17 @@
 // sealed segments merged in place of their markers, as the viewer shows them.
 import { stripAnsi } from "./ansi.js";
 
+// 8-bit (C1) forms: CSI with its parameters, and OSC, DCS, SOS, PM and APC
+// strings ended by BEL, ST or ESC \ (an OSC 52 here would write the clipboard).
+const C1_SEQ = /\u009b[0-?]*[ -/]*[@-~]|[\u0090\u0098\u009d\u009e\u009f][^\x07\x1b\u009c]*(?:\x07|\u009c|\x1b\\)/g;
+// C0 and C1 controls other than tab and newline; a lone CR is dropped too.
+const CONTROLS = /[\x00-\x08\x0b-\x1f\x7f-\x9f]/g;
+
+/** One line as plain text: no escape sequences and no control characters but tab. */
+export function plainLine(text) {
+  return stripAnsi(String(text).replace(C1_SEQ, "")).replace(CONTROLS, "");
+}
+
 /**
  * Text of the jobs, in the order given. Each job is
  * `{name, conclusion, sections}` (merged sections, each with optional
@@ -12,20 +23,20 @@ export function exportText(jobs) {
   const out = [];
   jobs.forEach((job, i) => {
     if (i) out.push("");
-    out.push(`==== ${stripAnsi(job.name)} (${job.conclusion || "unknown"}) ====`);
+    out.push(`==== ${plainLine(job.name)} (${plainLine(job.conclusion || "unknown")}) ====`);
     if (job.unavailable || !job.sections) {
-      out.push(`log unavailable (${job.unavailable || "no log"})`);
+      out.push(`log unavailable (${plainLine(job.unavailable || "no log")})`);
       return;
     }
     for (const sec of job.sections) {
-      out.push(`---- ${stripAnsi(sec.title)} ----`);
+      out.push(`---- ${plainLine(sec.title)} ----`);
       for (const line of sec.lines) {
-        const text = stripAnsi(line.text);
+        const text = plainLine(line.text);
         out.push(line.ts && !line.sealed ? `${line.ts} ${text}` : text);
       }
       for (const md of sec.summaries ?? []) {
         out.push("---- summary ----");
-        out.push(...stripAnsi(md).replace(/\r?\n$/, "").split(/\r?\n/));
+        out.push(...String(md).replace(/\r?\n$/, "").split(/\r?\n/).map(plainLine));
       }
     }
   });

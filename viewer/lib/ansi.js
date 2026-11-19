@@ -72,9 +72,9 @@ export function dropIncompleteEscapes(text) {
 }
 
 // Every complete sequence (CSI; OSC, DCS, SOS, PM and APC strings ended by BEL
-// or ST; two-byte ESC sequences such as ESC 7 or ESC M) or, failing that, the
-// lone ESC.
-const ANY_ESC = /\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[PX^_][^\x07\x1b]*(?:\x07|\x1b\\)|[0-?@-OQ-WYZ\\])?/g;
+// or ST; nF escapes such as ESC ( B; two-byte ESC sequences such as ESC 7 or
+// ESC M) or, failing that, the lone ESC.
+const ANY_ESC = /\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[PX^_][^\x07\x1b]*(?:\x07|\x1b\\)|[ -/]+[0-~]|[0-?@-OQ-WYZ\\])?/g;
 
 /**
  * Plain text of a line: escape sequences are removed, OSC 8 links keep their

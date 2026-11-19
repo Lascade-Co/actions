@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { exportText, exportFilename } from "./export.js";
+import { exportText, exportFilename, plainLine } from "./export.js";
 import { parseJobLog, mergeSealed } from "./joblog.js";
 
 const ESC = "\x1b";
@@ -83,4 +83,32 @@ test("exportFilename keeps only [A-Za-z0-9._-]", () => {
   assert.equal(exportFilename({ workflow: "../../etc", runNumber: 1, attempt: 1, job: ".." }), "etc-run1-attempt1.log");
   assert.equal(exportFilename({ workflow: "", runNumber: 1, attempt: 1 }), "run-run1-attempt1.log");
   assert.match(exportFilename({ workflow: "ж".repeat(10), runNumber: 1, attempt: 1, job: "x".repeat(300) }), /^[A-Za-z0-9._-]{1,200}\.log$/);
+});
+
+test("plainLine removes 8-bit CSI and OSC sequences with their parameters", () => {
+  assert.equal(plainLine("\u009b31m\u009d52;c;aGk=\u0007"), "");
+  assert.equal(plainLine("a\u009b1;2Hb\u009d0;title\u009cc\u009d8;;u\x1b\\d"), "abcd");
+  assert.equal(plainLine("p\u0090qdcs\u009cq"), "pq");
+});
+
+test("plainLine removes C0 and C1 controls but keeps tabs", () => {
+  assert.equal(plainLine("bell\x07 back\bspace\x0e\x0f\x7f\u0085end"), "bell backspaceend");
+  assert.equal(plainLine("a\tb"), "a\tb");
+  // A lone CR (an overwrite the line splitter did not resolve) is dropped.
+  assert.equal(plainLine("50%\r100%"), "50%100%");
+  assert.equal(plainLine("x\u009b"), "x");
+});
+
+test("exportText writes no control characters other than newlines and tabs", () => {
+  const text = exportText([{
+    name: "j\u009b31m",
+    conclusion: "success",
+    sections: [{
+      title: "Run \x1b(Bx",
+      lines: [{ ts: null, text: "\u009b31m\u009d52;c;aGk=\u0007copied\rover\bx\ty", sealed: true }],
+      summaries: ["# S\r\nline\x07\r\n"],
+    }],
+  }]);
+  assert.doesNotMatch(text, /[\x00-\x08\x0b-\x1f\x7f-\x9f]/);
+  assert.equal(text, "==== j (success) ====\n---- Run x ----\ncopiedoverx\ty\n---- summary ----\n# S\nline\n");
 });

@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { runRow, pageInfo, runsQuery, relativeTime, duration, runState, readListParams, statusOptions, SEARCH_LIMIT, STATUS_FILTERS } from "./runs.js";
+import { runRow, pageInfo, maxPage, runsQuery, relativeTime, duration, runState, readListParams, statusOptions, SEARCH_LIMIT, STATUS_FILTERS } from "./runs.js";
 
 const NOW = Date.parse("2026-11-20T12:00:00Z");
 
@@ -85,7 +85,8 @@ test("pageInfo counts pages and clamps the page", () => {
   assert.deepEqual(pageInfo(0, 1, 25), { page: 1, pages: 1, hasPrev: false, hasNext: false });
   assert.deepEqual(pageInfo(51, 2, 25), { page: 2, pages: 3, hasPrev: true, hasNext: true });
   assert.deepEqual(pageInfo(51, 3, 25), { page: 3, pages: 3, hasPrev: true, hasNext: false });
-  assert.deepEqual(pageInfo(51, 9, 25), { page: 9, pages: 3, hasPrev: true, hasNext: false });
+  // A page past the end is clamped to the last page.
+  assert.deepEqual(pageInfo(51, 9, 25), { page: 3, pages: 3, hasPrev: true, hasNext: false });
 });
 
 test("pageInfo caps pages at a result limit when given one", () => {
@@ -93,6 +94,7 @@ test("pageInfo caps pages at a result limit when given one", () => {
   assert.equal(pageInfo(5000, 1, 25).pages, 200);
   assert.equal(pageInfo(5000, 1, 25, SEARCH_LIMIT).pages, 40);
   assert.equal(pageInfo(5000, 40, 25, SEARCH_LIMIT).hasNext, false);
+  assert.equal(pageInfo(5000, 41, 25, SEARCH_LIMIT).page, 40);
 });
 
 test("runsQuery builds the runs path for the repo or one workflow", () => {
@@ -123,4 +125,10 @@ test("statusOptions adds a status from the URL that the filter does not offer", 
   assert.deepEqual(statusOptions(""), STATUS_FILTERS);
   assert.deepEqual(statusOptions("failure"), STATUS_FILTERS);
   assert.deepEqual(statusOptions("completed"), [...STATUS_FILTERS, ["completed", "completed"]]);
+});
+
+test("maxPage is the last page GitHub serves for a search filter", () => {
+  assert.equal(maxPage(25, SEARCH_LIMIT), 40);
+  assert.equal(maxPage(30, SEARCH_LIMIT), 34);
+  assert.equal(maxPage(25), Infinity);
 });

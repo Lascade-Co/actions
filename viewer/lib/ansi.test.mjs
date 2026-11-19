@@ -114,3 +114,9 @@ test("stripAnsi drops a stray ESC but keeps the text after it", async () => {
   assert.equal(stripAnsi(`a${ESC}]8;;b ${ESC}[31mred`), "a]8;;b red");
   assert.equal(stripAnsi(`x${ESC}7y${ESC}8`), "xy");
 });
+
+test("stripAnsi removes nF escapes such as ESC ( B and ESC # 8", async () => {
+  const { stripAnsi } = await import("./ansi.js");
+  assert.equal(stripAnsi("x\x1b(B\x1b[my"), "xy");
+  assert.equal(stripAnsi("a\x1b#8b\x1b)0c"), "abc");
+});

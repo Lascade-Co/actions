@@ -95,10 +95,19 @@ export function runRow(run, now = Date.now()) {
   };
 }
 
-/** Page count and prev/next for `total` results; `limit` caps what GitHub will page through. */
+/** The last page GitHub serves when it pages through at most `limit` results. */
+export function maxPage(perPage = PER_PAGE, limit = Infinity) {
+  return Math.ceil(limit / perPage);
+}
+
+/**
+ * Page count and prev/next for `total` results; `limit` caps what GitHub will
+ * page through. A page past the end is clamped to the last page.
+ */
 export function pageInfo(total, page, perPage = PER_PAGE, limit = Infinity) {
   const pages = Math.max(1, Math.ceil(Math.min(Number(total) || 0, limit) / perPage));
-  return { page, pages, hasPrev: page > 1, hasNext: page < pages };
+  const p = Math.min(Math.max(1, page), pages);
+  return { page: p, pages, hasPrev: p > 1, hasNext: p < pages };
 }
 
 function positive(value, what, max = Infinity) {

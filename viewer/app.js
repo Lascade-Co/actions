@@ -3,7 +3,7 @@ import { getRun, listJobs, jobLog, listArtifacts, artifactZip, listRuns, listWor
 import { parseJobLog, mergeSealed } from "./lib/joblog.js";
 import { openSealedLog, openSealedArtifact, checkRepoKey } from "./lib/sealed.js";
 import { ansiRenderer, stripAnsi } from "./lib/ansi.js";
-import { runRow, runState, pageInfo, readListParams, statusOptions, duration, PER_PAGE, SEARCH_LIMIT } from "./lib/runs.js";
+import { runRow, runState, pageInfo, maxPage, readListParams, statusOptions, duration, PER_PAGE, SEARCH_LIMIT } from "./lib/runs.js";
 import { exportText, exportFilename } from "./lib/export.js";
 
 const KEY = "ci.repoKey";
@@ -50,9 +50,11 @@ const settings = { key: load(KEY), token: load(TOKEN) };
 
 // --- banner and notice ------------------------------------------------------
 
-function banner(message, { settingsAction = false } = {}) {
+// A sticky banner (the storage warning) survives the run list's banner reset.
+function banner(message, { settingsAction = false, sticky = false } = {}) {
   $("banner-text").textContent = message;
   $("banner-action").hidden = !settingsAction;
+  $("banner").dataset.sticky = sticky ? "1" : "";
   $("banner").hidden = false;
 }
 function clearBanner() {
@@ -112,7 +114,7 @@ function saveSettings(ev) {
   settings.token = token;
   const saved = store(KEY, key) && store(TOKEN, token);
   $("settings").close();
-  if (!saved) banner("This browser blocks local storage, so the settings last only until you close the tab.");
+  if (!saved) banner("This browser blocks local storage, so the settings last only until you close the tab.", { sticky: true });
   if (changed) {
     clearDecrypted();
     route();
@@ -251,6 +253,7 @@ async function route() {
   try {
     if (!state.run || state.runId !== runParam || (wanted && wanted !== state.attempt) || (!wanted && state.attempt !== state.run.run_attempt)) {
       clearBanner();
+      cancelExport();
       $("run").hidden = false;
       $("job-title").textContent = "Loading run…";
       $("log").replaceChildren();
@@ -307,10 +310,11 @@ function showRuns(p, error) {
   document.title = "CI Logs";
   fieldError("pick-error", error);
   $("home-hint-text").textContent = !settings.token
-    ? "Add your repo key and a GitHub token in Settings to open runs."
+    ? "Without a token GitHub allows 60 requests an hour. Add a GitHub token and the repo key in Settings to raise the limit and open runs."
     : "Add the repo key in Settings to see sealed output.";
   $("home-hint").hidden = Boolean(settings.token && settings.key);
-  clearBanner();
+  if (!$("banner").dataset.sticky) clearBanner();
+  cancelExport();
   const q = readListParams(p);
   $("filter-status").replaceChildren(...statusOptions(q.status).map(([value, label]) => el("option", { value }, label)));
   $("filter-status").value = q.status;
@@ -319,6 +323,12 @@ function showRuns(p, error) {
 }
 
 async function loadRuns(q) {
+  // GitHub pages through at most 1000 runs of a status search (422 beyond).
+  const limit = q.status ? SEARCH_LIMIT : Infinity;
+  if (q.page > maxPage(PER_PAGE, limit)) {
+    navigate({ page: maxPage(PER_PAGE, limit) }, { push: false });
+    return;
+  }
   const seq = ++state.seq;
   const list = $("runs");
   list.setAttribute("aria-busy", "true");
@@ -328,12 +338,16 @@ async function loadRuns(q) {
   try {
     const { total, runs } = await listRuns(settings.token, { page: q.page, perPage: PER_PAGE, workflow: q.workflow, status: q.status });
     if (seq !== state.seq) return;
+    const info = pageInfo(total, q.page, PER_PAGE, limit);
+    if (q.page > info.pages) {
+      // Past the last page: show the last page instead.
+      navigate({ page: info.pages === 1 ? null : info.pages }, { push: false });
+      return;
+    }
     const now = Date.now();
     const rows = runs.map((r) => runRow(r, now)).filter(Boolean);
     list.replaceChildren(...rows.map(runItem));
-    runsMessage(rows.length ? "" : q.page > 1 ? "No runs on this page." : "No runs.");
-    // GitHub pages through at most 1000 runs of a status search.
-    const info = pageInfo(total, q.page, PER_PAGE, q.status ? SEARCH_LIMIT : Infinity);
+    runsMessage(rows.length ? "" : "No runs.");
     $("runs-total").textContent = `${total.toLocaleString("en")} run${total === 1 ? "" : "s"}`;
     renderPager(info);
   } catch (err) {
@@ -637,6 +651,14 @@ function setExportStatus(message) {
   $("export-status").hidden = !message;
 }
 
+// Abandons an export in flight (leaving the run, Forget) and resets its controls.
+function cancelExport() {
+  state.gen++;
+  state.exporting = false;
+  setExportStatus("");
+  updateExportControls();
+}
+
 function updateExportControls() {
   const noKey = !settings.key;
   $("export-job").disabled = noKey || state.exporting || !state.job;
@@ -878,6 +900,7 @@ function showArtifacts() {
   markActive("artifacts");
   state.view = null;
   state.job = null;
+  updateExportControls();
   $("log").hidden = true;
   $("log").replaceChildren();
   $("log-tools").hidden = true;
