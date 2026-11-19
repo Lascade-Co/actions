@@ -112,6 +112,16 @@ def test_manual_subject_uses_current_verdict_band(k, word):
     assert "Stop line." not in html
 
 
+@pytest.mark.parametrize("test_number", [None, 42])
+def test_subject_is_preserved_in_title_without_a_visible_body_paragraph(test_number):
+    from hr_render_email import render
+    subject, html, _ = render(build(**preview_inputs(), test_number=test_number))
+    title = re.search(r"<title>(.*?)</title>", html, re.S).group(1)
+    body = re.search(r"<body\b[^>]*>(.*?)</body>", html, re.S).group(1)
+    assert unescape(title) == subject
+    assert "Subject:" not in text_of(body)
+
+
 def test_render_contains_every_section_and_escapes_external_text():
     from hr_render_email import render
     model = build(**preview_inputs())

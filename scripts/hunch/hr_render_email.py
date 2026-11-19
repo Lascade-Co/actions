@@ -367,7 +367,6 @@ def render(model):
             + f'{TABLE} style="background-color:#f5f3f1;" class="body-bg"><tr><td align="center" valign="top" style="padding:20px 10px;">'
             + '<table role="presentation" cellspacing="0" cellpadding="0" border="0" width="600" align="center" '
             'style="width:100%; max-width:600px;" class="email-container"><tr><td>'
-            + f'<p style="margin:0 0 12px 0; font-family:{FONT_BODY}; font-size:12px; color:{CTX};">Subject: {esc(subject)}</p>'
             + "".join(parts) + '</td></tr></table></td></tr></table></body></html>')
 
     lines = [subject, "", "Lascade · TreasureHunch", "Retention", f"{label} · release line 8 Nov · UTC days", "",
