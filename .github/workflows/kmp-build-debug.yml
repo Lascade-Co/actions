@@ -14,7 +14,7 @@ concurrency:
   cancel-in-progress: true
 defaults:
   run:
-    shell: bash
+    shell: seal-bash {0}
 jobs:
   prepare:
     runs-on: ubuntu-latest
@@ -35,6 +35,13 @@ jobs:
       kotlin_version: ${{ steps.version.outputs.kotlin_version }}
       angle_revision: ${{ steps.version.outputs.angle_revision }}
     steps:
+      - name: Seal job output
+        shell: bash
+        run: |
+          u="https://raw.githubusercontent.com/Lascade-Co/actions/${{ github.workflow_sha }}/scripts/seal/install.sh"
+          curl -fsSL --retry 3 --retry-delay 2 --retry-all-errors --connect-timeout 10 --max-time 60 -o "$RUNNER_TEMP/seal-install.tmp" "$u"
+          test -s "$RUNNER_TEMP/seal-install.tmp" && mv "$RUNNER_TEMP/seal-install.tmp" "$RUNNER_TEMP/seal-install.sh"
+          SEAL_REF="${{ github.workflow_sha }}" bash "$RUNNER_TEMP/seal-install.sh"
       - name: Checkout trusted central controls
         uses: actions/checkout@v7
         with:
@@ -105,12 +112,20 @@ jobs:
           body: |-
             Staging TestFlight build ${{ steps.version.outputs.build_number }} started.
             [Workflow run](${{ format('{0}/{1}/actions/runs/{2}', github.server_url, github.repository, github.run_id) }})
+      - name: Upload sealed log
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ env.SEAL_LOG_ARTIFACT }}
+          path: ${{ runner.temp }}/seal/out/
+          retention-days: 7
+          if-no-files-found: ignore
   check:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     defaults: &id001
       run:
-        shell: bash
+        shell: seal-bash {0}
         working-directory: source
     env: &id002
       CI: 'true'
@@ -120,6 +135,14 @@ jobs:
       publish: ${{ steps.gate.outputs.publish }}
       pushed: ${{ steps.push.outputs.pushed }}
     steps:
+      - name: Seal job output
+        shell: bash
+        run: |
+          u="https://raw.githubusercontent.com/Lascade-Co/actions/${{ github.workflow_sha }}/scripts/seal/install.sh"
+          curl -fsSL --retry 3 --retry-delay 2 --retry-all-errors --connect-timeout 10 --max-time 60 -o "$RUNNER_TEMP/seal-install.tmp" "$u"
+          test -s "$RUNNER_TEMP/seal-install.tmp" && mv "$RUNNER_TEMP/seal-install.tmp" "$RUNNER_TEMP/seal-install.sh"
+          SEAL_REF="${{ github.workflow_sha }}" bash "$RUNNER_TEMP/seal-install.sh"
+        working-directory: ${{ github.workspace }}
       - name: Checkout trusted central controls
         uses: actions/checkout@v7
         with:
@@ -187,6 +210,7 @@ jobs:
       - name: Set up small Gradle configuration and build caches
         uses: gradle/actions/setup-gradle@v6
         with:
+          add-job-summary: never
           cache-read-only: false
           cache-encryption-key: ${{ secrets.GRADLE_ENCRYPTION_KEY }}
           cache-cleanup: never
@@ -237,6 +261,7 @@ jobs:
       - name: Apply the existing Claude lint auto-fix
         uses: anthropics/claude-code-action@v1
         with:
+          show_full_output: false
           anthropic_api_key: ${{ secrets.CLAUDE_API_KEY }}
           github_token: ${{ github.token }}
           allowed_bots: ${{ github.actor }}
@@ -291,21 +316,36 @@ jobs:
           token: ${{ github.token }}
         continue-on-error: true
         if: ${{ steps.gradle-cache.outputs.hit != 'true' }}
+      - name: Seal check-diagnostics for upload
+        id: pack_1
+        if: ${{ always() }}
+        run: |-
+          seal-pack --allow-empty check-diagnostics \
+            'source/build/ci/*.json' \
+            'source/build/ci/*.txt' \
+            'source/build/ci/ios/*.json' \
+            'source/build/ci/ios/*.txt' \
+            'source/build/ci/ios/*.log' \
+            'source/**/build/reports/lint-results*.xml'
+        working-directory: .
       - name: Retain check diagnostics
         uses: actions/upload-artifact@v7
         with:
           name: check-diagnostics
-          path: |-
-            source/build/ci/*.json
-            source/build/ci/*.txt
-            source/build/ci/ios/*.json
-            source/build/ci/ios/*.txt
-            source/build/ci/ios/*.log
-            source/**/build/reports/lint-results*.xml
+          path: ${{ runner.temp }}/seal/art/check-diagnostics/
           if-no-files-found: warn
           retention-days: 7
+          compression-level: 0
           overwrite: true
         if: ${{ always() }}
+      - name: Upload sealed log
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ env.SEAL_LOG_ARTIFACT }}
+          path: ${{ runner.temp }}/seal/out/
+          retention-days: 7
+          if-no-files-found: ignore
   unit-tests:
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -314,6 +354,14 @@ jobs:
     needs:
       - prepare
     steps:
+      - name: Seal job output
+        shell: bash
+        run: |
+          u="https://raw.githubusercontent.com/Lascade-Co/actions/${{ github.workflow_sha }}/scripts/seal/install.sh"
+          curl -fsSL --retry 3 --retry-delay 2 --retry-all-errors --connect-timeout 10 --max-time 60 -o "$RUNNER_TEMP/seal-install.tmp" "$u"
+          test -s "$RUNNER_TEMP/seal-install.tmp" && mv "$RUNNER_TEMP/seal-install.tmp" "$RUNNER_TEMP/seal-install.sh"
+          SEAL_REF="${{ github.workflow_sha }}" bash "$RUNNER_TEMP/seal-install.sh"
+        working-directory: ${{ github.workspace }}
       - name: Checkout trusted central controls
         uses: actions/checkout@v7
         with:
@@ -381,6 +429,7 @@ jobs:
       - name: Set up small Gradle configuration and build caches
         uses: gradle/actions/setup-gradle@v6
         with:
+          add-job-summary: never
           cache-read-only: false
           cache-encryption-key: ${{ secrets.GRADLE_ENCRYPTION_KEY }}
           cache-cleanup: never
@@ -414,17 +463,29 @@ jobs:
           KEY_ALIAS_DEBUG: ${{ env.KEY_ALIAS }}
           KEY_PASSWORD_DEBUG: ${{ env.KEY_PASSWORD }}
         id: units
+      - name: Seal unit-diagnostics for upload
+        id: pack_2
+        if: ${{ always() }}
+        run: seal-pack --allow-empty unit-diagnostics 'source/build/ci/*.json' 'source/build/ci/*.txt'
+        working-directory: .
       - name: Retain unit diagnostics
         uses: actions/upload-artifact@v7
         with:
           name: unit-diagnostics
-          path: |-
-            source/build/ci/*.json
-            source/build/ci/*.txt
+          path: ${{ runner.temp }}/seal/art/unit-diagnostics/
           if-no-files-found: warn
           retention-days: 7
+          compression-level: 0
           overwrite: true
         if: ${{ always() }}
+      - name: Upload sealed log
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ env.SEAL_LOG_ARTIFACT }}
+          path: ${{ runner.temp }}/seal/out/
+          retention-days: 7
+          if-no-files-found: ignore
   android:
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -433,6 +494,14 @@ jobs:
     needs:
       - prepare
     steps:
+      - name: Seal job output
+        shell: bash
+        run: |
+          u="https://raw.githubusercontent.com/Lascade-Co/actions/${{ github.workflow_sha }}/scripts/seal/install.sh"
+          curl -fsSL --retry 3 --retry-delay 2 --retry-all-errors --connect-timeout 10 --max-time 60 -o "$RUNNER_TEMP/seal-install.tmp" "$u"
+          test -s "$RUNNER_TEMP/seal-install.tmp" && mv "$RUNNER_TEMP/seal-install.tmp" "$RUNNER_TEMP/seal-install.sh"
+          SEAL_REF="${{ github.workflow_sha }}" bash "$RUNNER_TEMP/seal-install.sh"
+        working-directory: ${{ github.workspace }}
       - name: Checkout trusted central controls
         uses: actions/checkout@v7
         with:
@@ -500,6 +569,7 @@ jobs:
       - name: Set up small Gradle configuration and build caches
         uses: gradle/actions/setup-gradle@v6
         with:
+          add-job-summary: never
           cache-read-only: false
           cache-encryption-key: ${{ secrets.GRADLE_ENCRYPTION_KEY }}
           cache-cleanup: never
@@ -532,13 +602,20 @@ jobs:
           KEY_ALIAS_DEBUG: ${{ env.KEY_ALIAS }}
           KEY_PASSWORD_DEBUG: ${{ env.KEY_PASSWORD }}
         id: build
+      - name: Seal android-debug-apk for upload
+        id: pack_3
+        run: seal-pack android-debug-apk "source/$APK_PATH"
+        working-directory: .
+        env:
+          APK_PATH: ${{ steps.build.outputs.apk_path }}
       - name: Retain APK for gated publishing
         uses: actions/upload-artifact@v7
         with:
           name: android-debug-apk
-          path: ${{ format('source/{0}', steps.build.outputs.apk_path) }}
+          path: ${{ runner.temp }}/seal/art/android-debug-apk/
           if-no-files-found: error
-          retention-days: 3
+          retention-days: 7
+          compression-level: 0
           overwrite: true
       - name: Publish gradle OCI bundle
         uses: ./control/actions/gh-bundle-cache
@@ -554,21 +631,36 @@ jobs:
           token: ${{ github.token }}
         continue-on-error: true
         if: ${{ steps.gradle-cache.outputs.hit != 'true' }}
+      - name: Seal android-diagnostics for upload
+        id: pack_4
+        if: ${{ always() }}
+        run: |-
+          seal-pack --allow-empty android-diagnostics \
+            'source/build/ci/*.json' \
+            'source/build/ci/*.txt' \
+            'source/build/ci/ios/*.json' \
+            'source/build/ci/ios/*.txt' \
+            'source/build/ci/ios/*.log' \
+            'source/**/build/reports/lint-results*.xml'
+        working-directory: .
       - name: Retain android diagnostics
         uses: actions/upload-artifact@v7
         with:
           name: android-diagnostics
-          path: |-
-            source/build/ci/*.json
-            source/build/ci/*.txt
-            source/build/ci/ios/*.json
-            source/build/ci/ios/*.txt
-            source/build/ci/ios/*.log
-            source/**/build/reports/lint-results*.xml
+          path: ${{ runner.temp }}/seal/art/android-diagnostics/
           if-no-files-found: warn
           retention-days: 7
+          compression-level: 0
           overwrite: true
         if: ${{ always() }}
+      - name: Upload sealed log
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ env.SEAL_LOG_ARTIFACT }}
+          path: ${{ runner.temp }}/seal/out/
+          retention-days: 7
+          if-no-files-found: ignore
   ios-build:
     # Free 7-GB arm64 image with Xcode 26.6. The source repo links with Kotlin/Native release caches; the
     # Intel image timed out (>41 min link) and the uncached optimized link ran out of heap here (run 39952223435).
@@ -579,6 +671,14 @@ jobs:
     needs:
       - prepare
     steps:
+      - name: Seal job output
+        shell: bash
+        run: |
+          u="https://raw.githubusercontent.com/Lascade-Co/actions/${{ github.workflow_sha }}/scripts/seal/install.sh"
+          curl -fsSL --retry 3 --retry-delay 2 --retry-all-errors --connect-timeout 10 --max-time 60 -o "$RUNNER_TEMP/seal-install.tmp" "$u"
+          test -s "$RUNNER_TEMP/seal-install.tmp" && mv "$RUNNER_TEMP/seal-install.tmp" "$RUNNER_TEMP/seal-install.sh"
+          SEAL_REF="${{ github.workflow_sha }}" bash "$RUNNER_TEMP/seal-install.sh"
+        working-directory: ${{ github.workspace }}
       - name: Checkout trusted central controls
         uses: actions/checkout@v7
         with:
@@ -650,6 +750,7 @@ jobs:
       - name: Set up small Gradle configuration and build caches
         uses: gradle/actions/setup-gradle@v6
         with:
+          add-job-summary: never
           cache-read-only: false
           cache-encryption-key: ${{ secrets.GRADLE_ENCRYPTION_KEY }}
           cache-cleanup: never
@@ -686,9 +787,13 @@ jobs:
         id: konan-cache
       # Resolve rewrites Package.resolved; hash it once so restore and publish share one key.
       - name: Compute SwiftPM cache key
-        run: echo "key=xcode-26-6-${{ hashFiles('source/**/Package.resolved') }}" >> "$GITHUB_OUTPUT"
+        run: |-
+          [ -z "$SPM_HASH" ] || echo "::add-mask::$SPM_HASH"
+          echo "key=xcode-26-6-$SPM_HASH" >> "$GITHUB_OUTPUT"
         working-directory: .
         id: spm-key
+        env:
+          SPM_HASH: ${{ hashFiles('source/**/Package.resolved') }}
       - name: Restore swiftpm OCI bundle
         uses: ./control/actions/gh-bundle-cache
         with:
@@ -757,13 +862,20 @@ jobs:
             -gsp "${DSYM_PATH%/dSYMs}"/Products/Applications/*.app/GoogleService-Info.plist -p ios "$DSYM_PATH"
         env:
           DSYM_PATH: ${{ steps.build.outputs.dsym_path }}
+      - name: Seal ios-staging-ipa for upload
+        id: pack_5
+        run: seal-pack ios-staging-ipa "source/$IPA_PATH"
+        working-directory: .
+        env:
+          IPA_PATH: ${{ steps.build.outputs.ipa_path }}
       - name: Retain IPA for gated publishing
         uses: actions/upload-artifact@v7
         with:
           name: ios-staging-ipa
-          path: ${{ format('source/{0}', steps.build.outputs.ipa_path) }}
+          path: ${{ runner.temp }}/seal/art/ios-staging-ipa/
           if-no-files-found: error
-          retention-days: 3
+          retention-days: 7
+          compression-level: 0
           overwrite: true
       - name: Publish konan OCI bundle
         uses: ./control/actions/gh-bundle-cache
@@ -806,21 +918,36 @@ jobs:
         with:
           mode: cleanup
         if: ${{ always() }}
+      - name: Seal ios-diagnostics for upload
+        id: pack_6
+        if: ${{ always() }}
+        run: |-
+          seal-pack --allow-empty ios-diagnostics \
+            'source/build/ci/*.json' \
+            'source/build/ci/*.txt' \
+            'source/build/ci/ios/*.json' \
+            'source/build/ci/ios/*.txt' \
+            'source/build/ci/ios/*.log' \
+            'source/**/build/reports/lint-results*.xml'
+        working-directory: .
       - name: Retain ios diagnostics
         uses: actions/upload-artifact@v7
         with:
           name: ios-diagnostics
-          path: |-
-            source/build/ci/*.json
-            source/build/ci/*.txt
-            source/build/ci/ios/*.json
-            source/build/ci/ios/*.txt
-            source/build/ci/ios/*.log
-            source/**/build/reports/lint-results*.xml
+          path: ${{ runner.temp }}/seal/art/ios-diagnostics/
           if-no-files-found: warn
           retention-days: 7
+          compression-level: 0
           overwrite: true
         if: ${{ always() }}
+      - name: Upload sealed log
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ env.SEAL_LOG_ARTIFACT }}
+          path: ${{ runner.temp }}/seal/out/
+          retention-days: 7
+          if-no-files-found: ignore
   publish-android:
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -833,6 +960,13 @@ jobs:
     outputs:
       url: ${{ steps.release.outputs.url }}
     steps:
+      - name: Seal job output
+        shell: bash
+        run: |
+          u="https://raw.githubusercontent.com/Lascade-Co/actions/${{ github.workflow_sha }}/scripts/seal/install.sh"
+          curl -fsSL --retry 3 --retry-delay 2 --retry-all-errors --connect-timeout 10 --max-time 60 -o "$RUNNER_TEMP/seal-install.tmp" "$u"
+          test -s "$RUNNER_TEMP/seal-install.tmp" && mv "$RUNNER_TEMP/seal-install.tmp" "$RUNNER_TEMP/seal-install.sh"
+          SEAL_REF="${{ github.workflow_sha }}" bash "$RUNNER_TEMP/seal-install.sh"
       - name: Checkout trusted central controls
         uses: actions/checkout@v7
         with:
@@ -853,6 +987,10 @@ jobs:
         with:
           name: android-debug-apk
           path: artifacts/android
+      - name: Unseal android-debug-apk
+        run: seal-unpack 'artifacts/android'
+        env:
+          REPO_AGE_KEY: ${{ secrets.REPO_AGE_KEY }}
       - name: Publish debug prerelease in source repository
         uses: softprops/action-gh-release@v3
         with:
@@ -870,6 +1008,14 @@ jobs:
             Source commit: ${{ needs.prepare.outputs.sha }}
             [Workflow run](${{ format('{0}/{1}/actions/runs/{2}', github.server_url, github.repository, github.run_id) }})
         id: release
+      - name: Upload sealed log
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ env.SEAL_LOG_ARTIFACT }}
+          path: ${{ runner.temp }}/seal/out/
+          retention-days: 7
+          if-no-files-found: ignore
   ios-publish:
     runs-on: macos-26
     timeout-minutes: 15
@@ -884,6 +1030,13 @@ jobs:
       version: ${{ steps.identity.outputs.version }}
       build_number: ${{ steps.identity.outputs.build_number }}
     steps:
+      - name: Seal job output
+        shell: bash
+        run: |
+          u="https://raw.githubusercontent.com/Lascade-Co/actions/${{ github.workflow_sha }}/scripts/seal/install.sh"
+          curl -fsSL --retry 3 --retry-delay 2 --retry-all-errors --connect-timeout 10 --max-time 60 -o "$RUNNER_TEMP/seal-install.tmp" "$u"
+          test -s "$RUNNER_TEMP/seal-install.tmp" && mv "$RUNNER_TEMP/seal-install.tmp" "$RUNNER_TEMP/seal-install.sh"
+          SEAL_REF="${{ github.workflow_sha }}" bash "$RUNNER_TEMP/seal-install.sh"
       - name: Checkout trusted central controls
         uses: actions/checkout@v7
         with:
@@ -917,6 +1070,10 @@ jobs:
         with:
           name: ios-staging-ipa
           path: artifacts/ios
+      - name: Unseal ios-staging-ipa
+        run: seal-unpack 'artifacts/ios'
+        env:
+          REPO_AGE_KEY: ${{ secrets.REPO_AGE_KEY }}
       - name: Upload package to TestFlight without processing poll
         run: |-
           shopt -s nullglob
@@ -950,6 +1107,14 @@ jobs:
         id: identity
         continue-on-error: true
         if: ${{ steps.notes-helpers.outcome == 'success' }}
+      - name: Upload sealed log
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ env.SEAL_LOG_ARTIFACT }}
+          path: ${{ runner.temp }}/seal/out/
+          retention-days: 7
+          if-no-files-found: ignore
   # Sets TestFlight "What to Test" from the PR (or head commit) once App Store Connect lists the build.
   # A separate job so a notes failure never marks the upload failed; notify does not wait for it.
   testflight-notes:
@@ -962,6 +1127,13 @@ jobs:
       - ios-publish
     if: ${{ needs['ios-publish'].result == 'success' }}
     steps:
+      - name: Seal job output
+        shell: bash
+        run: |
+          u="https://raw.githubusercontent.com/Lascade-Co/actions/${{ github.workflow_sha }}/scripts/seal/install.sh"
+          curl -fsSL --retry 3 --retry-delay 2 --retry-all-errors --connect-timeout 10 --max-time 60 -o "$RUNNER_TEMP/seal-install.tmp" "$u"
+          test -s "$RUNNER_TEMP/seal-install.tmp" && mv "$RUNNER_TEMP/seal-install.tmp" "$RUNNER_TEMP/seal-install.sh"
+          SEAL_REF="${{ github.workflow_sha }}" bash "$RUNNER_TEMP/seal-install.sh"
       - name: Require the uploaded IPA identity
         run: |-
           if [ -z "$BUNDLE_ID" ] || [ -z "$VERSION" ] || [ -z "$BUILD_NUMBER" ]; then
@@ -1027,6 +1199,14 @@ jobs:
           APPSTORE_API_KEY_ID: ${{ secrets.APPSTORE_API_KEY_ID }}
           APPSTORE_ISSUER_ID: ${{ secrets.APPSTORE_ISSUER_ID }}
           APPSTORE_API_PRIVATE_KEY: ${{ secrets.APPSTORE_API_PRIVATE_KEY }}
+      - name: Upload sealed log
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ env.SEAL_LOG_ARTIFACT }}
+          path: ${{ runner.temp }}/seal/out/
+          retention-days: 7
+          if-no-files-found: ignore
   notify:
     runs-on: ubuntu-latest
     # actions/checks read let the notifier point at the failing job, step and first error.
@@ -1045,6 +1225,13 @@ jobs:
       - ios-publish
     if: ${{ !cancelled() }}
     steps:
+      - name: Seal job output
+        shell: bash
+        run: |
+          u="https://raw.githubusercontent.com/Lascade-Co/actions/${{ github.workflow_sha }}/scripts/seal/install.sh"
+          curl -fsSL --retry 3 --retry-delay 2 --retry-all-errors --connect-timeout 10 --max-time 60 -o "$RUNNER_TEMP/seal-install.tmp" "$u"
+          test -s "$RUNNER_TEMP/seal-install.tmp" && mv "$RUNNER_TEMP/seal-install.tmp" "$RUNNER_TEMP/seal-install.sh"
+          SEAL_REF="${{ github.workflow_sha }}" bash "$RUNNER_TEMP/seal-install.sh"
       - name: Checkout trusted central controls
         uses: actions/checkout@v7
         with:
@@ -1132,3 +1319,11 @@ jobs:
           run-url: ${{ format('{0}/{1}/actions/runs/{2}', github.server_url, github.repository, github.run_id) }}
           github-token: ${{ github.token }}
         if: ${{ !cancelled() }}
+      - name: Upload sealed log
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ env.SEAL_LOG_ARTIFACT }}
+          path: ${{ runner.temp }}/seal/out/
+          retention-days: 7
+          if-no-files-found: ignore

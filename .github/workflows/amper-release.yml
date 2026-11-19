@@ -17,7 +17,7 @@ concurrency:
   cancel-in-progress: false
 defaults:
   run:
-    shell: bash
+    shell: seal-bash {0}
 jobs:
   prepare:
     runs-on: ubuntu-latest
@@ -36,6 +36,13 @@ jobs:
       release_id: ${{ steps.draft.outputs.release_id }}
       deps_key: ${{ steps.deps.outputs.key }}
     steps:
+      - name: Seal job output
+        shell: bash
+        run: |
+          u="https://raw.githubusercontent.com/Lascade-Co/actions/${{ github.workflow_sha }}/scripts/seal/install.sh"
+          curl -fsSL --retry 3 --retry-delay 2 --retry-all-errors --connect-timeout 10 --max-time 60 -o "$RUNNER_TEMP/seal-install.tmp" "$u"
+          test -s "$RUNNER_TEMP/seal-install.tmp" && mv "$RUNNER_TEMP/seal-install.tmp" "$RUNNER_TEMP/seal-install.sh"
+          SEAL_REF="${{ github.workflow_sha }}" bash "$RUNNER_TEMP/seal-install.sh"
       - name: Checkout trusted central controls
         uses: actions/checkout@v7
         with:
@@ -118,6 +125,14 @@ jobs:
           SOURCE_SHA: ${{ steps.source.outputs.sha }}
           RELEASE_TAG: ${{ steps.version.outputs.tag }}
         if: ${{ steps.source.outputs.skip != 'true' }}
+      - name: Upload sealed log
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ env.SEAL_LOG_ARTIFACT }}
+          path: ${{ runner.temp }}/seal/out/
+          retention-days: 7
+          if-no-files-found: ignore
   android:
     runs-on: ubuntu-latest
     timeout-minutes: 60
@@ -127,7 +142,7 @@ jobs:
       packages: write
     defaults:
       run:
-        shell: bash
+        shell: seal-bash {0}
         working-directory: source
     env:
       CI: 'true'
@@ -140,6 +155,14 @@ jobs:
     outputs:
       checksums: ${{ steps.upload.outputs.checksums }}
     steps:
+      - name: Seal job output
+        shell: bash
+        run: |
+          u="https://raw.githubusercontent.com/Lascade-Co/actions/${{ github.workflow_sha }}/scripts/seal/install.sh"
+          curl -fsSL --retry 3 --retry-delay 2 --retry-all-errors --connect-timeout 10 --max-time 60 -o "$RUNNER_TEMP/seal-install.tmp" "$u"
+          test -s "$RUNNER_TEMP/seal-install.tmp" && mv "$RUNNER_TEMP/seal-install.tmp" "$RUNNER_TEMP/seal-install.sh"
+          SEAL_REF="${{ github.workflow_sha }}" bash "$RUNNER_TEMP/seal-install.sh"
+        working-directory: ${{ github.workspace }}
       - name: Checkout trusted central controls
         uses: actions/checkout@v7
         with:
@@ -338,6 +361,14 @@ jobs:
           token: ${{ github.token }}
         continue-on-error: true
         if: ${{ !cancelled() && steps.cache-scan.outcome == 'success' && steps.kotlin-cache.outputs.hit != 'true' }}
+      - name: Upload sealed log
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ env.SEAL_LOG_ARTIFACT }}
+          path: ${{ runner.temp }}/seal/out/
+          retention-days: 7
+          if-no-files-found: ignore
   ios-build:
     # Free 7-GB arm64 image. ADR 0004: K/N's fixed 3 GB heap needs compact object headers here; expect 25-35 min cold.
     # Xcode 27 lives only on GitHub's xcode-27 image (macOS 27, preview); Apple requires the iOS 27 SDK from April 2027.
@@ -349,7 +380,7 @@ jobs:
       packages: write
     defaults:
       run:
-        shell: bash
+        shell: seal-bash {0}
         working-directory: source
     env:
       CI: 'true'
@@ -360,6 +391,14 @@ jobs:
     outputs:
       checksums: ${{ steps.upload.outputs.checksums }}
     steps:
+      - name: Seal job output
+        shell: bash
+        run: |
+          u="https://raw.githubusercontent.com/Lascade-Co/actions/${{ github.workflow_sha }}/scripts/seal/install.sh"
+          curl -fsSL --retry 3 --retry-delay 2 --retry-all-errors --connect-timeout 10 --max-time 60 -o "$RUNNER_TEMP/seal-install.tmp" "$u"
+          test -s "$RUNNER_TEMP/seal-install.tmp" && mv "$RUNNER_TEMP/seal-install.tmp" "$RUNNER_TEMP/seal-install.sh"
+          SEAL_REF="${{ github.workflow_sha }}" bash "$RUNNER_TEMP/seal-install.sh"
+        working-directory: ${{ github.workspace }}
       - name: Checkout trusted central controls
         uses: actions/checkout@v7
         with:
@@ -660,15 +699,29 @@ jobs:
           fi
           rm -f xcodebuild.log
         if: ${{ always() }}
+      - name: Seal ios-diagnostics for upload
+        id: pack_1
+        if: ${{ always() }}
+        run: seal-pack --allow-empty ios-diagnostics "$RUNNER_TEMP/ios-diagnostics"
+        working-directory: .
       - name: Retain iOS diagnostics
         uses: actions/upload-artifact@v7
         with:
           name: ios-diagnostics
-          path: ${{ format('{0}/ios-diagnostics', runner.temp) }}
+          path: ${{ runner.temp }}/seal/art/ios-diagnostics/
           if-no-files-found: warn
           retention-days: 7
+          compression-level: 0
           overwrite: true
         if: ${{ always() }}
+      - name: Upload sealed log
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ env.SEAL_LOG_ARTIFACT }}
+          path: ${{ runner.temp }}/seal/out/
+          retention-days: 7
+          if-no-files-found: ignore
   release:
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -676,7 +729,7 @@ jobs:
       contents: read
     defaults:
       run:
-        shell: bash
+        shell: seal-bash {0}
         working-directory: source
     needs:
       - prepare
@@ -691,6 +744,14 @@ jobs:
       VERSION: ${{ needs.prepare.outputs.version }}
       BUILD_NUMBER: ${{ needs.prepare.outputs.build_number }}
     steps:
+      - name: Seal job output
+        shell: bash
+        run: |
+          u="https://raw.githubusercontent.com/Lascade-Co/actions/${{ github.workflow_sha }}/scripts/seal/install.sh"
+          curl -fsSL --retry 3 --retry-delay 2 --retry-all-errors --connect-timeout 10 --max-time 60 -o "$RUNNER_TEMP/seal-install.tmp" "$u"
+          test -s "$RUNNER_TEMP/seal-install.tmp" && mv "$RUNNER_TEMP/seal-install.tmp" "$RUNNER_TEMP/seal-install.sh"
+          SEAL_REF="${{ github.workflow_sha }}" bash "$RUNNER_TEMP/seal-install.sh"
+        working-directory: ${{ github.workspace }}
       - name: Checkout trusted central controls
         uses: actions/checkout@v7
         with:
@@ -768,6 +829,14 @@ jobs:
       - name: Delete downloaded assets from the runner
         run: rm -rf "$RUNNER_TEMP/release-assets"
         if: ${{ always() }}
+      - name: Upload sealed log
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ env.SEAL_LOG_ARTIFACT }}
+          path: ${{ runner.temp }}/seal/out/
+          retention-days: 7
+          if-no-files-found: ignore
   notify:
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -783,6 +852,13 @@ jobs:
       - release
     if: ${{ !cancelled() && needs.prepare.outputs.skip != 'true' && needs.prepare.outputs.project_slug != '' }}
     steps:
+      - name: Seal job output
+        shell: bash
+        run: |
+          u="https://raw.githubusercontent.com/Lascade-Co/actions/${{ github.workflow_sha }}/scripts/seal/install.sh"
+          curl -fsSL --retry 3 --retry-delay 2 --retry-all-errors --connect-timeout 10 --max-time 60 -o "$RUNNER_TEMP/seal-install.tmp" "$u"
+          test -s "$RUNNER_TEMP/seal-install.tmp" && mv "$RUNNER_TEMP/seal-install.tmp" "$RUNNER_TEMP/seal-install.sh"
+          SEAL_REF="${{ github.workflow_sha }}" bash "$RUNNER_TEMP/seal-install.sh"
       - name: Checkout trusted central controls
         uses: actions/checkout@v7
         with:
@@ -823,3 +899,11 @@ jobs:
           results: "${{ format('prepare: {0} · Android: {1} · iOS: {2} · release: {3}', needs.prepare.result, needs.android.result, needs['ios-build'].result, needs.release.result) }}"
           run-url: ${{ format('{0}/{1}/actions/runs/{2}', github.server_url, github.repository, github.run_id) }}
           github-token: ${{ github.token }}
+      - name: Upload sealed log
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ env.SEAL_LOG_ARTIFACT }}
+          path: ${{ runner.temp }}/seal/out/
+          retention-days: 7
+          if-no-files-found: ignore
