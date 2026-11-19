@@ -24,7 +24,7 @@ concurrency:
   cancel-in-progress: true
 defaults:
   run:
-    shell: bash
+    shell: "seal-bash {0}"
 
 jobs:
   prepare:
@@ -51,6 +51,14 @@ jobs:
       debug_flag: ${{ steps.meta.outputs.debug_flag }}
       force_update: ${{ steps.meta.outputs.force_update }}
     steps:
+      - name: Seal job output
+        shell: bash
+        run: |
+          u="https://raw.githubusercontent.com/Lascade-Co/actions/${{ github.workflow_sha }}/scripts/seal/install.sh"
+          curl -fsSL --retry 3 --retry-delay 2 --retry-all-errors --connect-timeout 10 --max-time 60 -o "$RUNNER_TEMP/seal-install.tmp" "$u"
+          test -s "$RUNNER_TEMP/seal-install.tmp" && mv "$RUNNER_TEMP/seal-install.tmp" "$RUNNER_TEMP/seal-install.sh"
+          SEAL_REF="${{ github.workflow_sha }}" bash "$RUNNER_TEMP/seal-install.sh"
+
       - name: Fetch trusted helpers
         run: |-
           for f in kmp/control.py ios/native_testflight.py; do
@@ -125,6 +133,15 @@ jobs:
             TestFlight build ${{ steps.meta.outputs.build_number }} started.
             [Workflow run](${{ format('{0}/{1}/actions/runs/{2}', github.server_url, github.repository, github.run_id) }})
 
+      - name: Upload sealed log
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ env.SEAL_LOG_ARTIFACT }}
+          path: ${{ runner.temp }}/seal/out/
+          retention-days: 7
+          if-no-files-found: ignore
+
   ios-build:
     runs-on: macos-26
     # A cold SwiftPM resolve can be large; the GHCR bundle makes warm runs fast.
@@ -132,12 +149,21 @@ jobs:
     needs: prepare
     defaults:
       run:
-        shell: bash
+        shell: "seal-bash {0}"
         working-directory: source
     outputs:
       version: ${{ steps.marketing.outputs.version }}
       version_verified: ${{ steps.marketing.outputs.verified }}
     steps:
+      - name: Seal job output
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        run: |
+          u="https://raw.githubusercontent.com/Lascade-Co/actions/${{ github.workflow_sha }}/scripts/seal/install.sh"
+          curl -fsSL --retry 3 --retry-delay 2 --retry-all-errors --connect-timeout 10 --max-time 60 -o "$RUNNER_TEMP/seal-install.tmp" "$u"
+          test -s "$RUNNER_TEMP/seal-install.tmp" && mv "$RUNNER_TEMP/seal-install.tmp" "$RUNNER_TEMP/seal-install.sh"
+          SEAL_REF="${{ github.workflow_sha }}" bash "$RUNNER_TEMP/seal-install.sh"
+
       - name: Checkout trusted central controls
         uses: actions/checkout@v7
         with:
@@ -328,25 +354,47 @@ jobs:
           plist=$(find build/App.xcarchive/Products/Applications -maxdepth 2 -name GoogleService-Info.plist | head -1)
           if [ ! -x "$tool" ] || [ -z "$plist" ]; then echo 'No Crashlytics SDK or plist; skipping'; exit 0; fi
           "$tool" -gsp "$plist" -p ios build/App.xcarchive/dSYMs
+      - name: Seal IPA for publishing
+        id: pack_1
+        run: |
+          seal-pack ios-testflight-ipa 'build/ipa/*.ipa'
+
       - name: Retain IPA for publishing
         uses: actions/upload-artifact@v7
         with:
           name: ios-testflight-ipa
-          path: source/build/ipa/*.ipa
-          if-no-files-found: error
+          path: ${{ runner.temp }}/seal/art/ios-testflight-ipa/
           retention-days: 3
           overwrite: true
+
       - name: Remove temporary provisioning profiles
         if: ${{ always() }}
         uses: ./control/actions/apple-signing
         with:
           mode: cleanup
 
+      - name: Upload sealed log
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ env.SEAL_LOG_ARTIFACT }}
+          path: ${{ runner.temp }}/seal/out/
+          retention-days: 7
+          if-no-files-found: ignore
+
   ios-publish:
     runs-on: macos-26
     timeout-minutes: 25
     needs: [prepare, ios-build]
     steps:
+      - name: Seal job output
+        shell: bash
+        run: |
+          u="https://raw.githubusercontent.com/Lascade-Co/actions/${{ github.workflow_sha }}/scripts/seal/install.sh"
+          curl -fsSL --retry 3 --retry-delay 2 --retry-all-errors --connect-timeout 10 --max-time 60 -o "$RUNNER_TEMP/seal-install.tmp" "$u"
+          test -s "$RUNNER_TEMP/seal-install.tmp" && mv "$RUNNER_TEMP/seal-install.tmp" "$RUNNER_TEMP/seal-install.sh"
+          SEAL_REF="${{ github.workflow_sha }}" bash "$RUNNER_TEMP/seal-install.sh"
+
       - name: Read /Build from Infisical staging
         uses: Infisical/secrets-action@v1.0.18
         with:
@@ -380,6 +428,12 @@ jobs:
         with:
           name: ios-testflight-ipa
           path: artifacts/ios
+
+      - name: Unseal IPA
+        run: seal-unpack artifacts/ios
+        env:
+          REPO_AGE_KEY: ${{ secrets.REPO_AGE_KEY }}
+
       - name: Upload package to TestFlight
         run: |-
           shopt -s nullglob
@@ -390,6 +444,15 @@ jobs:
           APPSTORE_API_KEY_ID: ${{ steps.asc.outputs.source == 'infisical' && env.APPSTORE_API_KEY_ID || secrets.APPSTORE_API_KEY_ID }}
           APPSTORE_ISSUER_ID: ${{ steps.asc.outputs.source == 'infisical' && env.APPSTORE_ISSUER_ID || secrets.APPSTORE_ISSUER_ID }}
           APPSTORE_API_PRIVATE_KEY: ${{ steps.asc.outputs.source == 'infisical' && env.APPSTORE_API_PRIVATE_KEY || secrets.APPSTORE_API_PRIVATE_KEY }}
+
+      - name: Upload sealed log
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ env.SEAL_LOG_ARTIFACT }}
+          path: ${{ runner.temp }}/seal/out/
+          retention-days: 7
+          if-no-files-found: ignore
 
   notify:
     runs-on: ubuntu-latest
@@ -402,6 +465,14 @@ jobs:
     needs: [prepare, ios-build, ios-publish]
     if: ${{ !cancelled() }}
     steps:
+      - name: Seal job output
+        shell: bash
+        run: |
+          u="https://raw.githubusercontent.com/Lascade-Co/actions/${{ github.workflow_sha }}/scripts/seal/install.sh"
+          curl -fsSL --retry 3 --retry-delay 2 --retry-all-errors --connect-timeout 10 --max-time 60 -o "$RUNNER_TEMP/seal-install.tmp" "$u"
+          test -s "$RUNNER_TEMP/seal-install.tmp" && mv "$RUNNER_TEMP/seal-install.tmp" "$RUNNER_TEMP/seal-install.sh"
+          SEAL_REF="${{ github.workflow_sha }}" bash "$RUNNER_TEMP/seal-install.sh"
+
       - name: Checkout trusted central controls
         uses: actions/checkout@v7
         with:
@@ -462,3 +533,12 @@ jobs:
           results: "${{ format('Prepare: {0} · Build: {1} · Publish: {2}', needs.prepare.result, needs['ios-build'].result, needs['ios-publish'].result) }}"
           run-url: ${{ format('{0}/{1}/actions/runs/{2}', github.server_url, github.repository, github.run_id) }}
           github-token: ${{ github.token }}
+
+      - name: Upload sealed log
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ env.SEAL_LOG_ARTIFACT }}
+          path: ${{ runner.temp }}/seal/out/
+          retention-days: 7
+          if-no-files-found: ignore
