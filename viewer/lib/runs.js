@@ -27,6 +27,12 @@ export const STATUS_FILTERS = [
   ["waiting", "Waiting"],
 ];
 
+/** The status choices for `current`: the offered ones, plus `current` when it is another valid status. */
+export function statusOptions(current) {
+  if (!current || STATUS_FILTERS.some(([v]) => v === current)) return STATUS_FILTERS;
+  return [...STATUS_FILTERS, [current, current]];
+}
+
 const DIGITS = /^\d+$/;
 
 /** "9s", "3m 5s" or "2h 5m" between two ISO times; "" when either is missing. */

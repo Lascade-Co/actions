@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { runRow, pageInfo, runsQuery, relativeTime, duration, runState, readListParams, SEARCH_LIMIT } from "./runs.js";
+import { runRow, pageInfo, runsQuery, relativeTime, duration, runState, readListParams, statusOptions, SEARCH_LIMIT, STATUS_FILTERS } from "./runs.js";
 
 const NOW = Date.parse("2026-11-20T12:00:00Z");
 
@@ -117,4 +117,10 @@ test("readListParams keeps only valid page, workflow and status values", () => {
   assert.deepEqual(readListParams(new URLSearchParams("page=2&workflow=77&status=failure")), { page: 2, workflow: "77", status: "failure" });
   assert.deepEqual(readListParams(new URLSearchParams("page=-1&workflow=x&status=nope")), { page: 1, workflow: "", status: "" });
   assert.deepEqual(readListParams(new URLSearchParams("")), { page: 1, workflow: "", status: "" });
+});
+
+test("statusOptions adds a status from the URL that the filter does not offer", () => {
+  assert.deepEqual(statusOptions(""), STATUS_FILTERS);
+  assert.deepEqual(statusOptions("failure"), STATUS_FILTERS);
+  assert.deepEqual(statusOptions("completed"), [...STATUS_FILTERS, ["completed", "completed"]]);
 });

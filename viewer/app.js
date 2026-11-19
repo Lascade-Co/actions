@@ -3,7 +3,7 @@ import { getRun, listJobs, jobLog, listArtifacts, artifactZip, listRuns, listWor
 import { parseJobLog, mergeSealed } from "./lib/joblog.js";
 import { openSealedLog, openSealedArtifact, checkRepoKey } from "./lib/sealed.js";
 import { ansiRenderer, stripAnsi } from "./lib/ansi.js";
-import { runRow, runState, pageInfo, readListParams, duration, PER_PAGE, SEARCH_LIMIT, STATUS_FILTERS } from "./lib/runs.js";
+import { runRow, runState, pageInfo, readListParams, statusOptions, duration, PER_PAGE, SEARCH_LIMIT } from "./lib/runs.js";
 import { exportText, exportFilename } from "./lib/export.js";
 
 const KEY = "ci.repoKey";
@@ -312,6 +312,7 @@ function showRuns(p, error) {
   $("home-hint").hidden = Boolean(settings.token && settings.key);
   clearBanner();
   const q = readListParams(p);
+  $("filter-status").replaceChildren(...statusOptions(q.status).map(([value, label]) => el("option", { value }, label)));
   $("filter-status").value = q.status;
   fillWorkflows(q.workflow);
   loadRuns(q);
@@ -558,9 +559,11 @@ function loadJobLog(job) {
  * A finished job's public log with its sealed segments merged in, as the log
  * view and the export show it. Throws when the public log cannot be fetched.
  */
-async function loadJobSections(job) {
+async function loadJobSections(job, wanted = () => true) {
   const runId = state.runId;
   const text = await loadJobLog(job);
+  // The caller moved on (another job, run or Forget): skip opening sealed logs.
+  if (!wanted()) return null;
   const sections = parseJobLog(text, { run: runId });
   const names = [...new Set(sections.flatMap((sec) => sec.lines.filter((l) => l.marker).map((l) => l.marker.artifact)))];
   const segments = new Map();
@@ -612,8 +615,9 @@ async function showJob(job, seq) {
     notice("This job has not finished yet; its log is available once it completes. Reload the page then.");
     return;
   }
-  const { merged, names, segments, reasons, badKey } = await loadJobSections(job);
-  if (seq !== state.seq) return;
+  const loaded = await loadJobSections(job, () => seq === state.seq);
+  if (!loaded || seq !== state.seq) return;
+  const { merged, names, segments, reasons, badKey } = loaded;
 
   const lost = names.map((n) => reasons.get(n)).find((r) => r && /expired|not found/.test(r));
   if (badKey) report(badKey);
@@ -641,13 +645,14 @@ function updateExportControls() {
 }
 
 // One job for exportText: its merged sections, or why it has none.
-async function exportJob(job) {
+async function exportJob(job, wanted) {
   const base = { name: job.name, conclusion: job.conclusion ?? job.status };
   if (job.conclusion === "skipped") return { ...base, unavailable: "job was skipped" };
   if (job.status !== "completed") return { ...base, unavailable: "job has not finished" };
   try {
-    const { merged, badKey } = await loadJobSections(job);
-    return { ...base, sections: merged, badKey };
+    const loaded = await loadJobSections(job, wanted);
+    if (!loaded) return { ...base, unavailable: "export cancelled" };
+    return { ...base, sections: loaded.merged, badKey: loaded.badKey };
   } catch (err) {
     return { ...base, unavailable: err?.status === 404 || err?.status === 410 ? "log not found: it may have expired" : err?.message ?? String(err) };
   }
@@ -676,7 +681,7 @@ async function exportLogs(all) {
     const worker = async () => {
       while (next < jobs.length && gen === state.gen && !badKey) {
         const i = next++;
-        results[i] = await exportJob(jobs[i]);
+        results[i] = await exportJob(jobs[i], () => gen === state.gen);
         badKey ??= results[i].badKey;
         done++;
         if (gen === state.gen) progress();
@@ -1004,7 +1009,6 @@ function init() {
   $("export-job").addEventListener("click", () => exportLogs(false));
   $("export-all").addEventListener("click", () => exportLogs(true));
   $("filter-workflow").addEventListener("change", (ev) => changeFilter("workflow", ev.target.value));
-  $("filter-status").replaceChildren(...STATUS_FILTERS.map(([value, label]) => el("option", { value }, label)));
   $("filter-status").addEventListener("change", (ev) => changeFilter("status", ev.target.value));
   $("brand").addEventListener("click", (ev) => {
     if (!plainClick(ev)) return;
