@@ -155,6 +155,21 @@ def absolute_deadline(deadline: dt.datetime | None):
             signal.signal(signal.SIGALRM, previous_handler)
 
 
+def rejected_reason(response) -> str:
+    """Map a PostHog refusal to one status word; the body itself is never shown."""
+    try:
+        detail = str(response.json().get("detail", "")).lower()
+    except Exception:
+        detail = ""
+    if response.status_code == 401:
+        return "posthog-key-invalid"
+    if response.status_code == 403 and "scope" in detail:
+        return "posthog-scope-missing"
+    if response.status_code == 403 and any(w in detail for w in ("project", "team", "organization")):
+        return "posthog-project-denied"
+    return "posthog-rejected"
+
+
 def make_runner(key: str, retries: int = 4, poll_s: float = 4,
                 max_wait_s: float = 900, deadline: dt.datetime | None = None):
     """Return run(sql) -> row dictionaries, with bounded retries and async polls."""
@@ -169,7 +184,7 @@ def make_runner(key: str, retries: int = 4, poll_s: float = 4,
         if response.status_code >= 500 or response.status_code == 429:
             raise requests.RequestException()
         if response.status_code not in (200, 202):
-            raise FetchError("posthog-rejected")
+            raise FetchError(rejected_reason(response))
         body = response.json()
         if not isinstance(body, dict):
             raise FetchError("posthog-invalid-response")

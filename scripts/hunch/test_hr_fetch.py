@@ -119,7 +119,11 @@ def test_transient_submit_failure_is_retried_without_private_exception(monkeypat
 
 
 @pytest.mark.parametrize("status,body,reason", [
-    (401, {"detail": "private response"}, "posthog-rejected"),
+    (401, {"detail": "private response"}, "posthog-key-invalid"),
+    (403, {"detail": "API key missing required scope 'query:read'"}, "posthog-scope-missing"),
+    (403, {"detail": "You don't have access to the project."}, "posthog-project-denied"),
+    (403, {"detail": "private response"}, "posthog-rejected"),
+    (403, ["private"], "posthog-rejected"),
     (200, {"query_status": {"complete": True, "error": "private query"}}, "posthog-query-error"),
     (200, {"columns": ["n"], "results": [[40]], "hasMore": True}, "posthog-truncated"),
     (200, {"columns": ["n", "paid"], "results": [[40]]}, "posthog-invalid-response"),
