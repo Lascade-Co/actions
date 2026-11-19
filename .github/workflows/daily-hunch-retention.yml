@@ -1,0 +1,201 @@
+name: Daily TreasureHunch retention
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Build the email without sending it
+        type: boolean
+        default: false
+      report_date:
+        description: Pacific report date (YYYY-MM-DD); blank uses the newest date past 05:00
+        type: string
+        default: ''
+      recovery:
+        description: Send the real email only if its Deliver step has not succeeded
+        type: boolean
+        default: false
+      test_alert:
+        description: Fail this test run to exercise the Telegram alert
+        type: boolean
+        default: false
+      to:
+        description: Recipient for manual tests only
+        type: string
+        default: cherian@lascade.com
+  schedule:
+    - cron: '41 3 * * *'
+    - cron: '41 6 * * *'
+    - cron: '41 9 * * *'
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: daily-hunch-retention-${{ github.event_name }}
+  cancel-in-progress: false
+
+env:
+  RAW: https://raw.githubusercontent.com/Lascade-Co/actions/${{ github.sha }}
+  EVENT: ${{ github.event_name }}
+  INPUT_DATE: ${{ inputs.report_date }}
+  INPUT_TO: ${{ inputs.to || 'cherian@lascade.com' }}
+  DRY_RUN: ${{ inputs.dry_run }}
+  RECOVERY: ${{ inputs.recovery }}
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    outputs:
+      proceed: ${{ steps.gate.outputs.proceed }}
+      report_date: ${{ github.event_name == 'schedule' && steps.gate.outputs.report_date || steps.settings.outputs.report_date }}
+    steps:
+      - name: Resolve settings
+        id: settings
+        run: |
+          curl -fsSL --retry 3 -o hr_workflow.py "$RAW/scripts/hunch/hr_workflow.py" 2>/dev/null || { echo bootstrap-failed; exit 1; }
+          curl -fsSL --retry 3 -o catchup_gate.py "$RAW/scripts/catchup/catchup_gate.py" 2>/dev/null || { echo bootstrap-failed; exit 1; }
+          python3 hr_workflow.py settings
+      - id: gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if python3 catchup_gate.py --phase 1 --event "$EVENT" --workflow daily-hunch-retention.yml \
+            --sent-step "Deliver for " --tz America/Los_Angeles --target 05:05 >/dev/null 2>&1; then
+            echo gate-ok
+          else
+            echo gate-failed
+            exit 1
+          fi
+
+  gate2:
+    needs: gate
+    if: needs.gate.outputs.proceed == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    outputs:
+      proceed: ${{ steps.gate.outputs.proceed }}
+      report_date: ${{ steps.gate.outputs.report_date }}
+    steps:
+      - id: gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPORT_DATE: ${{ needs.gate.outputs.report_date }}
+        run: |
+          curl -fsSL --retry 3 -o catchup_gate.py "$RAW/scripts/catchup/catchup_gate.py" 2>/dev/null || { echo bootstrap-failed; exit 1; }
+          if python3 catchup_gate.py --phase 2 --event "$EVENT" --workflow daily-hunch-retention.yml \
+            --sent-step "Deliver for " --tz America/Los_Angeles --target 05:05 \
+            --report-date "$REPORT_DATE" >/dev/null 2>&1; then
+            echo gate-ok
+          else
+            echo gate-failed
+            exit 1
+          fi
+
+  # Only the actual sender step records Resend acceptance for delivery history.
+  email:
+    needs: gate2
+    if: needs.gate2.outputs.proceed == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    outputs:
+      report_date: ${{ steps.dates.outputs.report_date }}
+    concurrency:
+      group: daily-hunch-retention-email
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          sparse-checkout: |
+            scripts/hunch
+            scripts/ai
+            scripts/catchup/catchup_gate.py
+          sparse-checkout-cone-mode: false
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+      - name: Install dependencies
+        run: |
+          if pip install --quiet requests -r scripts/ai/requirements.txt >/dev/null 2>&1; then
+            echo dependencies-ok
+          else
+            echo dependencies-failed
+            exit 1
+          fi
+      - name: Work out the report date
+        id: dates
+        env:
+          REPORT_DATE: ${{ github.event_name == 'schedule' && needs.gate2.outputs.report_date || inputs.report_date }}
+        run: python3 scripts/hunch/hr_workflow.py settings
+      - name: Check it has not gone out already
+        id: dedupe
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPORT_DATE: ${{ steps.dates.outputs.report_date }}
+        run: python3 scripts/hunch/hr_workflow.py dedupe
+      - name: Fail on purpose (alert test)
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.test_alert }}
+        run: |
+          echo test-alert
+          exit 1
+      - name: Build the email
+        if: ${{ steps.dedupe.outputs.sent != 'True' }}
+        working-directory: scripts/hunch
+        env:
+          POSTHOG_PERSONAL_API_KEY: ${{ secrets.HUNCH_POSTHOG_QUERY_API_KEY }}
+          CLAUDE_API_KEY: ${{ secrets.CLAUDE_API_KEY }}
+          REPORT_DATE: ${{ steps.dates.outputs.report_date }}
+          HR_TEST_NUMBER: ${{ steps.dates.outputs.mode == 'test' && github.run_number || '' }}
+        run: |
+          if [ -z "$POSTHOG_PERSONAL_API_KEY" ]; then
+            echo posthog-key-missing >&2
+            exit 1
+          fi
+          FLAGS=()
+          if [ "$DRY_RUN" = true ]; then FLAGS+=(--dry-run); fi
+          python3 hr_main.py --report-date "$REPORT_DATE" --out out "${FLAGS[@]}"
+      - name: ${{ steps.dates.outputs.send_step }}
+        if: ${{ !inputs.dry_run && steps.dedupe.outputs.sent != 'True' }}
+        working-directory: scripts/hunch
+        env:
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+          REPORT_DATE: ${{ steps.dates.outputs.report_date }}
+          MODE: ${{ steps.dates.outputs.mode }}
+          RECIPIENT: ${{ steps.dates.outputs.recipient }}
+          RUN_ID: ${{ github.run_id }}
+          HR_TEST_NUMBER: ${{ steps.dates.outputs.mode == 'test' && github.run_number || '' }}
+        run: |
+          FLAGS=()
+          if [ "$MODE" = real ] && [ "$EVENT" = workflow_dispatch ]; then FLAGS+=(--recovery); fi
+          bash send_resend_hr.sh --report-date "$REPORT_DATE" --event "$EVENT" --run-id "$RUN_ID" \
+            --out out --to "$RECIPIENT" "${FLAGS[@]}"
+
+  notify:
+    needs: [gate, gate2, email]
+    if: ${{ failure() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Alert on Telegram
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TOKEN: ${{ secrets.INSTALLPAID_TELEGRAM_TOKEN }}
+          CHAT: ${{ secrets.INSTALLPAID_TELEGRAM_CHAT }}
+          REPORT_DATE: ${{ needs.email.outputs.report_date || needs.gate2.outputs.report_date || needs.gate.outputs.report_date }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          curl -fsSL --retry 3 -o hr_workflow.py "$RAW/scripts/hunch/hr_workflow.py" 2>/dev/null || { echo bootstrap-failed; exit 1; }
+          curl -fsSL --retry 3 -o catchup_gate.py "$RAW/scripts/catchup/catchup_gate.py" 2>/dev/null || { echo bootstrap-failed; exit 1; }
+          NOW=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT" --jq .run_started_at 2>/dev/null || date -u +%Y-%m-%dT%H:%M:%SZ)
+          export NOW
+          MESSAGE=$(python3 hr_workflow.py failure-message)
+          if curl -fsS --max-time 30 -o /dev/null "https://api.telegram.org/bot$TOKEN/sendMessage" \
+            --data-urlencode chat_id="$CHAT" --data-urlencode text="$MESSAGE" 2>/dev/null; then
+            echo alert-sent
+          else
+            echo alert-failed
+            exit 1
+          fi
