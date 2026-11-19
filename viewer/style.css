@@ -132,6 +132,8 @@ input:focus-visible, .btn:focus-visible, summary:focus-visible, a:focus-visible 
   outline-offset: -1px;
 }
 
+.framed { margin: 48px 16px; text-align: center; font-weight: 600; }
+
 /* ---- top bar and banner ---- */
 .topbar {
   display: flex;

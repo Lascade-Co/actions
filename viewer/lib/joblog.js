@@ -4,6 +4,10 @@
 /** The binding marker format printed by seal-bash (one per sealed step). */
 export const MARKER_RE = /🔒 sealed (sealed-log-[A-Za-z0-9_.-]+)#(\d+)/;
 
+// A marker counts only when it is the whole line (after the timestamp), exactly
+// as seal-bash prints it, so output that merely contains one is not trusted.
+const LINE_MARKER_RE = /^🔒 sealed (sealed-log-[A-Za-z0-9_.-]+)#(\d+) https:\/\/ci\.lascade\.com\/\?run=(\d+)&attempt=(\d+)$/;
+
 const TS_RE = /^(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?Z) ?/;
 const RUN_HEADER = "##[group]Run ";
 
@@ -29,18 +33,23 @@ export function splitLines(text) {
   });
 }
 
-function parseLine(raw) {
+function parseLine(raw, expected) {
   const m = TS_RE.exec(raw);
   const line = m ? { ts: m[1], text: raw.slice(m[0].length) } : { ts: null, text: raw };
-  const mk = MARKER_RE.exec(line.text);
-  if (mk) line.marker = { artifact: mk[1], seq: Number(mk[2]) };
+  const mk = LINE_MARKER_RE.exec(line.text);
+  // A marker naming another run or attempt is left as a plain line.
+  if (mk && (!expected || (mk[3] === String(expected.run) && mk[4] === String(expected.attempt)))) {
+    line.marker = { artifact: mk[1], seq: Number(mk[2]), run: mk[3], attempt: mk[4] };
+  }
   return line;
 }
 
 /**
- * @returns {{title: string, lines: {ts: string|null, text: string, marker?: {artifact: string, seq: number}}[]}[]}
+ * Splits a job log into sections. With `expected = {run, attempt}`, only markers
+ * whose URL names that run and attempt are parsed as markers.
+ * @returns {{title: string, lines: {ts: string|null, text: string, marker?: {artifact: string, seq: number, run: string, attempt: string}}[]}[]}
  */
-export function parseJobLog(text) {
+export function parseJobLog(text, expected = null) {
   const sections = [];
   let current = { title: "Set up job", lines: [] };
   const start = (title) => {
@@ -49,7 +58,7 @@ export function parseJobLog(text) {
     current = { title, lines: [] };
   };
   for (const raw of splitLines(text.replace(/^\uFEFF/, ""))) {
-    const line = parseLine(raw);
+    const line = parseLine(raw, expected);
     if (line.text.startsWith(RUN_HEADER)) start(line.text.slice("##[group]".length).trim());
     else if (BOUNDARIES.has(line.text)) start(BOUNDARIES.get(line.text));
     current.lines.push(line);
@@ -66,16 +75,25 @@ export function markerKeys(section) {
 /**
  * Replaces each marker line with its segment's lines (tagged sealed: true).
  * A marker with no segment becomes one "unavailable" line; `reasonFor(artifact)`
- * names why. Returns new sections; the input is not changed.
+ * names why. Each "artifact#seq" is used at most once: a repeat becomes an
+ * "unavailable (duplicate marker)" line. Each returned section lists the keys it
+ * used in `sealedKeys`. Returns new sections; the input is not changed.
  */
 export function mergeSealed(sections, segments, reasonFor = () => "sealed log not loaded") {
-  return sections.map((s) => ({
-    ...s,
-    lines: s.lines.flatMap((l) => {
+  const used = new Set();
+  const unavailable = (l, reason) => ({ ts: l.ts, text: `🔒 sealed output unavailable (${reason})`, sealed: true, unavailable: true });
+  return sections.map((s) => {
+    const sealedKeys = [];
+    const lines = s.lines.flatMap((l) => {
       if (!l.marker) return [l];
-      const seg = segments.get(`${l.marker.artifact}#${l.marker.seq}`);
+      const key = `${l.marker.artifact}#${l.marker.seq}`;
+      if (used.has(key)) return [unavailable(l, "duplicate marker")];
+      used.add(key);
+      sealedKeys.push(key);
+      const seg = segments.get(key);
       if (seg) return seg.map((text) => ({ ts: null, text, sealed: true }));
-      return [{ ts: l.ts, text: `🔒 sealed output unavailable (${reasonFor(l.marker.artifact)})`, sealed: true, unavailable: true }];
-    }),
-  }));
+      return [unavailable(l, reasonFor(l.marker.artifact))];
+    });
+    return { ...s, lines, sealedKeys };
+  });
 }

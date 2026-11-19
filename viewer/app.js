@@ -1,6 +1,6 @@
 // CI Logs: opens sealed Actions logs and artifacts of Lascade-Co/actions.
 import { getRun, listJobs, jobLog, listArtifacts, artifactZip, REPO } from "./lib/github.js";
-import { parseJobLog, mergeSealed, markerKeys } from "./lib/joblog.js";
+import { parseJobLog, mergeSealed } from "./lib/joblog.js";
 import { openSealedLog, openSealedArtifact, checkRepoKey } from "./lib/sealed.js";
 import { ansiRenderer } from "./lib/ansi.js";
 
@@ -108,7 +108,7 @@ function saveSettings(ev) {
   $("settings").close();
   if (!saved) banner("This browser blocks local storage, so the settings last only until you close the tab.");
   if (changed) {
-    resetCaches();
+    clearDecrypted();
     route();
   }
 }
@@ -120,7 +120,7 @@ function forgetSettings() {
   settings.token = "";
   $("repo-key").value = "";
   $("gh-token").value = "";
-  resetCaches();
+  clearDecrypted();
   $("settings").close();
   route();
 }
@@ -139,10 +139,18 @@ const state = {
   seq: 0,
 };
 
-function resetCaches() {
-  state.run = null;
+// Drops everything loaded or decrypted: cached sealed data, rendered log lines,
+// artifact previews and view state. In-flight loads are abandoned (seq bump).
+function clearDecrypted() {
+  state.seq++;
+  Object.assign(state, { runId: null, run: null, attempt: null, jobs: [], artifacts: [], view: null });
   state.sealedLogs.clear();
   state.sealedArtifacts.clear();
+  for (const id of ["log", "artifacts", "jobs", "run-meta", "job-title"]) $(id).replaceChildren();
+  $("search").value = "";
+  $("artifacts-count").textContent = "";
+  $("run").hidden = true;
+  notice("");
 }
 
 function params() {
@@ -412,7 +420,7 @@ async function showJob(job, seq) {
   }
   const text = await jobLog(settings.token, job.id);
   if (seq !== state.seq) return;
-  const sections = parseJobLog(text);
+  const sections = parseJobLog(text, { run: state.runId, attempt: state.attempt });
   const names = [...new Set(sections.flatMap((sec) => sec.lines.filter((l) => l.marker).map((l) => l.marker.artifact)))];
   const segments = new Map();
   const summaries = new Map();
@@ -435,7 +443,7 @@ async function showJob(job, seq) {
   if (seq !== state.seq) return;
   const merged = mergeSealed(sections, segments, (a) => reasons.get(a) ?? "segment missing from the sealed log");
   merged.forEach((sec, i) => {
-    sec.summaries = markerKeys(sections[i]).filter((k) => summaries.has(k)).map((k) => summaries.get(k));
+    sec.summaries = sec.sealedKeys.filter((k) => summaries.has(k)).map((k) => summaries.get(k));
   });
 
   const lost = names.map((n) => reasons.get(n)).find((r) => r && /expired|not found/.test(r));
@@ -443,7 +451,7 @@ async function showJob(job, seq) {
   else if (!settings.key && names.length) banner("Add the repo key in Settings to see sealed output.", { settingsAction: true });
   else if (lost) banner(`Sealed output for this job is unavailable: ${lost}. Only the public log is shown.`);
   else clearBanner();
-  const markerCount = sections.reduce((n, sec) => n + markerKeys(sec).length, 0);
+  const markerCount = merged.reduce((n, sec) => n + sec.sealedKeys.length, 0);
   if (!markerCount) notice("Nothing sealed in this job: this is the public log.");
   else if (!segments.size) notice(`Sealed output unavailable (${[...new Set(reasons.values())].join("; ") || "unknown"}): showing the public log.`);
   renderLog(merged, job);
@@ -651,10 +659,13 @@ function artifactCard(art) {
         state.sealedArtifacts.set(art.id, p);
       }
       const opened = await state.sealedArtifacts.get(art.id);
+      // Settings were forgotten or changed meanwhile: render nothing.
+      if (!out.isConnected) return;
       clearBanner();
       out.replaceChildren(...artifactEntries(opened));
       button.textContent = "Unsealed";
     } catch (err) {
+      if (!out.isConnected) return;
       report(err);
       button.disabled = false;
       button.textContent = "Unseal";
@@ -694,7 +705,20 @@ function artifactEntries(opened) {
 
 // --- startup ----------------------------------------------------------------
 
+// Pages cannot send frame-ancestors or X-Frame-Options, so refuse to run framed.
+function framed() {
+  try {
+    return window.top !== window.self;
+  } catch {
+    return true;
+  }
+}
+
 function init() {
+  if (framed()) {
+    document.body.replaceChildren(el("p", { class: "framed" }, "CI Logs does not run inside a frame. Open https://ci.lascade.com directly."));
+    return;
+  }
   $("open-settings").addEventListener("click", openSettings);
   $("banner-action").addEventListener("click", openSettings);
   $("settings-form").addEventListener("submit", saveSettings);

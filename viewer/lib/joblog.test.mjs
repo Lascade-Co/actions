@@ -38,7 +38,7 @@ test("parseJobLog parses the marker line", () => {
   const sections = parseJobLog(FIXTURE);
   const markers = sections.flatMap((s) => s.lines.filter((l) => l.marker));
   assert.equal(markers.length, 1);
-  assert.deepEqual(markers[0].marker, { artifact: ART, seq: 2 });
+  assert.deepEqual(markers[0].marker, { artifact: ART, seq: 2, run: "1", attempt: "1" });
   assert.equal(markers[0].ts, "2026-11-20T10:00:00.0000000Z");
   assert.ok(MARKER_RE.test(markers[0].text));
 });
@@ -89,6 +89,43 @@ test("parseJobLog starts post-job and complete-job sections", () => {
     "2026-11-20T10:00:02.0000000Z Cleaning up orphan processes",
   ].join("\n");
   assert.deepEqual(parseJobLog(log).map((s) => s.title), ["Run make", "Post job cleanup", "Complete job"]);
+});
+
+const URL1 = "https://ci.lascade.com/?run=1&attempt=1";
+const markerLine = (rest) => `2026-11-20T10:00:00.0000000Z ${rest}`;
+
+test("parseJobLog parses run and attempt from the marker URL", () => {
+  const [s] = parseJobLog(markerLine(`🔒 sealed ${ART}#2 ${URL1}`));
+  assert.deepEqual(s.lines[0].marker, { artifact: ART, seq: 2, run: "1", attempt: "1" });
+});
+
+test("only a marker that is the whole line counts", () => {
+  const log = [
+    markerLine(`echo 🔒 sealed ${ART}#2 ${URL1}`),
+    markerLine(`🔒 sealed ${ART}#2 ${URL1} trailing`),
+    markerLine(`🔒 sealed ${ART}#2`),
+  ].join("\n");
+  assert.ok(parseJobLog(log)[0].lines.every((l) => !l.marker));
+});
+
+test("a marker for another run or attempt is not a marker", () => {
+  const log = [
+    markerLine(`🔒 sealed ${ART}#1 https://ci.lascade.com/?run=2&attempt=1`),
+    markerLine(`🔒 sealed ${ART}#2 https://ci.lascade.com/?run=1&attempt=2`),
+    markerLine(`🔒 sealed ${ART}#3 ${URL1}`),
+  ].join("\n");
+  const lines = parseJobLog(log, { run: 1, attempt: 1 })[0].lines;
+  assert.deepEqual(lines.map((l) => l.marker?.seq ?? null), [null, null, 3]);
+  // Without an expected run, every whole-line marker parses.
+  assert.equal(parseJobLog(log)[0].lines.filter((l) => l.marker).length, 3);
+});
+
+test("mergeSealed consumes each artifact#seq at most once", () => {
+  const log = [markerLine(`🔒 sealed ${ART}#2 ${URL1}`), markerLine(`🔒 sealed ${ART}#2 ${URL1}`)].join("\n");
+  const merged = mergeSealed(parseJobLog(log), new Map([[`${ART}#2`, ["secret"]]]));
+  const texts = merged[0].lines.map((l) => l.text);
+  assert.deepEqual(texts, ["secret", "🔒 sealed output unavailable (duplicate marker)"]);
+  assert.equal(merged[0].lines[1].unavailable, true);
 });
 
 test("parseJobLog drops an empty preamble", () => {

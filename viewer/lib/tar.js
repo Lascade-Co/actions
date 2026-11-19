@@ -50,24 +50,44 @@ function clean(path) {
   return p.replace(/\/+$/, "");
 }
 
-/** @returns {{path: string, type: "file"|"dir"|"symlink", data?: Uint8Array, linkname?: string}[]} */
-export function readTar(bytes) {
+function entrySize(pax, type, h) {
+  if (pax.size !== undefined && !"xgLK".includes(type)) {
+    if (!/^\d+$/.test(pax.size)) throw new Error("not a tar archive (bad PAX size)");
+    return Number(pax.size);
+  }
+  return num(h, 124, 12);
+}
+
+const MAX_ENTRIES = 100_000;
+
+/**
+ * @param {Uint8Array} bytes
+ * @param {{maxEntries?: number}} [limits] members (headers included) to read before giving up
+ * @returns {{path: string, type: "file"|"dir"|"symlink", data?: Uint8Array, linkname?: string}[]}
+ */
+export function readTar(bytes, { maxEntries = MAX_ENTRIES } = {}) {
   const entries = [];
   const files = new Map();
   let pax = {};
   let longName = null;
   let longLink = null;
   let off = 0;
+  let headers = 0;
   while (off + BLOCK <= bytes.length) {
     const h = bytes.subarray(off, off + BLOCK);
     if (h.every((b) => b === 0)) break;
     if (!checksumOk(h)) throw new Error("not a tar archive (bad header checksum)");
+    if (++headers > maxEntries) throw new Error(`not a tar archive this viewer can open (too many entries, over ${maxEntries})`);
     const type = String.fromCharCode(h[156] || 0x30);
-    const size = pax.size !== undefined && !"xgLK".includes(type) ? Number(pax.size) : num(h, 124, 12);
+    const size = entrySize(pax, type, h);
+    if (!Number.isSafeInteger(size) || size < 0) throw new Error("not a tar archive (bad member size)");
     const start = off + BLOCK;
+    // Data never extends past the input, so a member can't claim more bytes than exist.
+    if (size > bytes.length - start) throw new Error("not a tar archive (truncated)");
     const data = bytes.subarray(start, start + size);
-    if (data.length < size) throw new Error("not a tar archive (truncated)");
-    off = start + Math.ceil(size / BLOCK) * BLOCK;
+    const next = start + Math.ceil(size / BLOCK) * BLOCK;
+    if (!(next > off)) throw new Error("not a tar archive (offset did not advance)");
+    off = next;
 
     if (type === "x") {
       pax = { ...pax, ...parsePax(data) };

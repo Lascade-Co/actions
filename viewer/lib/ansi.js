@@ -41,7 +41,40 @@ function styleToClasses(style) {
   return out;
 }
 
-/** Returns a stateful function that renders one log line to safe HTML. */
+// Complete escape sequences: CSI, OSC ended by BEL or ST, and two-byte ESC
+// sequences other than the string introducers (P X [ ] ^ _), which need more bytes.
+const COMPLETE_ESC = /^\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[@-OQ-WYZ\\])/;
+
+/**
+ * Drops each ESC that does not start a complete sequence (keeping the text after
+ * it), so ansi_up never buffers a partial sequence into the next line.
+ */
+export function dropIncompleteEscapes(text) {
+  if (!text.includes("\x1b")) return text;
+  let out = "";
+  let i = 0;
+  while (i < text.length) {
+    const esc = text.indexOf("\x1b", i);
+    if (esc === -1) {
+      out += text.slice(i);
+      break;
+    }
+    out += text.slice(i, esc);
+    const m = COMPLETE_ESC.exec(text.slice(esc));
+    if (m) {
+      out += m[0];
+      i = esc + m[0].length;
+    } else {
+      i = esc + 1;
+    }
+  }
+  return out;
+}
+
+/**
+ * Returns a function that renders one log line to safe HTML. Colours carry
+ * from line to line, but each line's escape sequences are complete on their own.
+ */
 export function ansiRenderer() {
   const au = new AnsiUp();
   au.use_classes = true;
@@ -52,7 +85,7 @@ export function ansiRenderer() {
   au.underlineStyle = "x-underline";
   return (text) =>
     au
-      .ansi_to_html(text)
+      .ansi_to_html(dropIncompleteEscapes(text))
       // Text is already escaped, so a literal "<span" or "<a " here is markup.
       .replace(/<span style="([^"]*)"(?: class="([^"]*)")?>/g, (_, style, cls) => {
         const all = [...(cls ? cls.split(" ") : []), ...styleToClasses(style)];

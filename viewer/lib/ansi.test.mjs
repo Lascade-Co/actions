@@ -40,3 +40,24 @@ test("ansiRenderer opens links in a new tab without a referrer", () => {
   const html = r(`${ESC}]8;;https://example.com/a?b=1&c=2${ESC}\\link${ESC}]8;;${ESC}\\`);
   assert.match(html, /^<a href="https:\/\/example.com\/a\?b=1&amp;c=2" target="_blank" rel="noopener noreferrer">link<\/a>$/);
 });
+
+test("an unterminated OSC at the end of a line does not swallow later lines", () => {
+  const r = ansiRenderer();
+  r(`before ${ESC}]8;;`);
+  assert.equal(r("next line"), "next line");
+  assert.equal(r("third"), "third");
+});
+
+test("an unterminated CSI at the end of a line does not eat the next line", () => {
+  const r = ansiRenderer();
+  r(`text${ESC}[`);
+  assert.equal(r("abc"), "abc");
+  const r2 = ansiRenderer();
+  r2(`text${ESC}`);
+  assert.equal(r2("abc"), "abc");
+});
+
+test("a complete sequence still renders after a stray escape", () => {
+  const r = ansiRenderer();
+  assert.equal(r(`a${ESC}]8;;b ${ESC}[31mred${ESC}[0m`), 'a]8;;b <span class="ansi-red-fg">red</span>');
+});

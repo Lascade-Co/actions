@@ -120,3 +120,35 @@ test("readTar rejects bytes that are not a tar archive", () => {
   const junk = new Uint8Array(1024).fill(7);
   assert.throws(() => readTar(junk), /not a tar archive/);
 });
+
+function paxRecord(key, value) {
+  const rest = ` ${key}=${value}\n`;
+  let len = rest.length + 1;
+  while (String(len).length + rest.length !== len) len = String(len).length + rest.length;
+  return `${len}${rest}`;
+}
+
+test("readTar rejects a negative PAX size without hanging", () => {
+  const rec = paxRecord("size", "-1536");
+  const tar = concat([header("PaxHeader", "x", rec.length), body(rec), header("file.txt", "0", 0), new Uint8Array(1024)]);
+  assert.throws(() => readTar(tar), /not a tar archive/);
+});
+
+test("readTar rejects a non-integer PAX size", () => {
+  const rec = paxRecord("size", "1e3");
+  const tar = concat([header("PaxHeader", "x", rec.length), body(rec), header("f", "0", 0), new Uint8Array(1024)]);
+  assert.throws(() => readTar(tar), /not a tar archive/);
+});
+
+test("readTar rejects a size larger than the archive", () => {
+  const tar = concat([header("big.bin", "0", 0o77777777777), new Uint8Array(1024)]);
+  assert.throws(() => readTar(tar), /not a tar archive/);
+});
+
+test("readTar caps the number of entries", () => {
+  const parts = [];
+  for (let i = 0; i < 5; i++) parts.push(header(`d${i}`, "5", 0));
+  parts.push(new Uint8Array(1024));
+  assert.equal(readTar(concat(parts)).length, 5);
+  assert.throws(() => readTar(concat(parts), { maxEntries: 4 }), /too many entries/);
+});
