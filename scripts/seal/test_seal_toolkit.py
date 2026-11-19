@@ -220,6 +220,27 @@ def test_install_rejects_empty_download(tmp_path, shim_dir, keypair):
     assert (tmp_path / 'github_env').read_text() == ''
 
 
+@pytest.mark.parametrize('knob, value', [
+    ('SEAL_SOURCE_DIR', str(HERE)), ('SEAL_PUBKEY_FILE', '/dev/null'),
+    ('SEAL_NO_SUDO', '1'), ('SEAL_AGE_SHA256_OVERRIDE', '0' * 64)])
+def test_install_refuses_test_knobs_on_actions(tmp_path, shim_dir, keypair, knob, value):
+    env, _ = served_env(tmp_path, shim_dir, keypair)
+    env.pop('SEAL_NO_SUDO')
+    r = run_install(env, GITHUB_ACTIONS='true', **{knob: value})
+    assert r.returncode != 0
+    assert knob in r.stderr
+    assert not (Path(env['RUNNER_TEMP']) / 'seal' / 'bin' / 'seal-bash').exists()
+    assert (tmp_path / 'github_env').read_text() == ''
+
+
+def test_install_refuses_second_run(runner):
+    r = run_install(runner.env)
+    assert r.returncode != 0
+    assert 'already installed' in r.stderr
+    assert len((runner.root / 'github_env').read_text().splitlines()) == 1
+    assert (runner.root / 'github_path').read_text() == f'{runner.bin}\n'
+
+
 def test_install_prints_viewer_url_once(tmp_path, shim_dir, keypair):
     r = run_install(base_env(tmp_path, shim_dir, keypair['pub']))
     assert r.returncode == 0, r.stderr
@@ -335,11 +356,12 @@ def test_segment_sealed_on_failure(runner):
 
 def test_failed_encryption_fails_closed(runner):
     (runner.seal / 'repo-key.pub').write_text('garbage\n')
-    r = runner.step('echo CANARY-ENC')
+    r = runner.step('echo CANARY-ENC; echo "::add-mask::m3"')
     assert r.returncode != 0
+    assert r.stdout.splitlines() == ['::add-mask::m3', f'🔒 seal failed for {runner.name}#1']
     assert 'CANARY-ENC' not in r.stdout + r.stderr
     assert not list((runner.seal / 'log').iterdir())
-    assert not (runner.out / '1.log.age').exists() or b'CANARY-ENC' not in (runner.out / '1.log.age').read_bytes()
+    assert not (runner.out / '1.log.age').exists()
 
 
 def test_killed_step_is_sealed(runner):
@@ -385,6 +407,60 @@ def test_segment_sealed_on_cancel(runner, sig, code):
         if pidfile.exists() and pidfile.read_text().strip():
             try:
                 os.kill(int(pidfile.read_text()), signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+
+def pids_gone(pids, timeout=3):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        alive = []
+        for pid in pids:
+            try:
+                os.kill(pid, 0)
+                alive.append(pid)
+            except ProcessLookupError:
+                pass
+        if not alive:
+            return True
+        time.sleep(0.05)
+    return False
+
+
+def test_cancel_kills_signal_ignoring_step(runner):
+    """INT is forwarded and waited on; TERM ends a step that ignores both, with nothing left behind."""
+    pidfile = runner.root / 'stubborn.pid'
+    p = subprocess.Popen([runner.bin / 'seal-bash', runner.script(
+        f"trap '' INT TERM; echo $$ > {pidfile}; sleep 300 & echo $! >> {pidfile}; echo running; wait")],
+        env=runner.env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, start_new_session=True)
+    pids = []
+    try:
+        deadline = time.monotonic() + 10
+        while len(pids) < 2:
+            assert time.monotonic() < deadline, 'step did not start'
+            time.sleep(0.05)
+            pids = [int(x) for x in pidfile.read_text().split()] if pidfile.exists() else []
+        p.send_signal(signal.SIGINT)
+        time.sleep(1)
+        assert p.poll() is None, 'seal-bash must keep waiting after SIGINT'
+        start = time.monotonic()
+        p.send_signal(signal.SIGTERM)
+        stdout, stderr = p.communicate(timeout=10)
+        assert time.monotonic() - start < 3
+        assert p.returncode == 143
+        assert stdout.splitlines() == [f'🔒 sealed {runner.name}#1 {VIEWER}']
+        assert stderr == ''
+        assert runner.decrypt(runner.out / '1.log.age') == b'running\n'
+        assert not (runner.seal / 'log' / '1.log').exists()
+        assert pids_gone(pids), 'a step process survived cancellation'
+    finally:
+        if p.poll() is None:
+            p.kill()
+            p.wait()
+        for pid in pids:
+            try:
+                os.kill(pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
 
@@ -469,19 +545,106 @@ def test_pack_unpack_roundtrip(runner, tree):
     assert (whole / 'l').is_symlink() and os.readlink(whole / 'l') == 'x.txt'
 
 
+def members(runner, name):
+    tgz = runner.decrypt(runner.seal / 'art' / name / f'{name}.tgz.age')
+    with tarfile.open(fileobj=io.BytesIO(tgz)) as t:
+        return [os.path.normpath(n) for n in t.getnames()]
+
+
 def test_pack_expands_quoted_glob(runner, tree):
+    """The root is the glob's search path (`a`), as upload-artifact computes it."""
     dest = pack_and_unpack(runner, tree, 'glob', 'a/**/*.bin')
-    assert listing(dest) == ['y.bin']
+    assert listing(dest) == ['b', 'b/y.bin']
 
 
 def test_pack_nested_matches_archived_once(runner, tree):
     r = runner.tool('seal-pack', 'nest', 'a/**/*', cwd=tree)
     assert r.returncode == 0, r.stderr
-    tgz = runner.decrypt(runner.seal / 'art' / 'nest' / 'nest.tgz.age')
-    with tarfile.open(fileobj=io.BytesIO(tgz)) as t:
-        names = [os.path.normpath(n) for n in t.getnames()]
+    names = members(runner, 'nest')
     assert len(names) == len(set(names)), names
-    assert sorted(names) == ['b', 'b/y.bin', 'l', 'x.txt']
+    assert sorted(names) == ['b/y.bin', 'l', 'x.txt']
+
+
+def test_pack_root_is_search_path_not_matches(runner):
+    work = runner.root / 'work'
+    for d in ('android', 'ios'):
+        (work / 'source/build/ci/release' / d).mkdir(parents=True)
+        (work / 'source/build/ci/release' / d / f'{d}.json').write_text('{}')
+    r = runner.tool('seal-pack', 'diag', 'source/build/**/*.json', cwd=work)
+    assert r.returncode == 0, r.stderr
+    assert sorted(members(runner, 'diag')) == ['ci/release/android/android.json', 'ci/release/ios/ios.json']
+    r = runner.tool('seal-pack', 'one', 'source/build/**/android.json', cwd=work)
+    assert r.returncode == 0, r.stderr
+    assert members(runner, 'one') == ['ci/release/android/android.json']
+
+
+def test_pack_missing_literal_keeps_root(runner):
+    work = runner.root / 'work'
+    (work / 'build/app/outputs/apk').mkdir(parents=True)
+    (work / 'build/app/outputs/apk/app.apk').write_text('apk')
+    r = runner.tool('seal-pack', 'rel', 'releasenotes.txt', 'build/app/outputs/**', cwd=work)
+    assert r.returncode == 0, r.stderr
+    assert members(runner, 'rel') == ['build/app/outputs/apk/app.apk']
+
+
+def test_pack_excludes_hidden_by_default(runner):
+    work = runner.root / 'work'
+    (work / 'd' / '.git').mkdir(parents=True)
+    (work / 'd' / '.git' / 'config').write_text('[core]')
+    (work / 'd' / '.env').write_text('X=1')
+    (work / 'd' / 'keep.txt').write_text('keep')
+    r = runner.tool('seal-pack', 'nohid', 'd', cwd=work)
+    assert r.returncode == 0, r.stderr
+    assert members(runner, 'nohid') == ['keep.txt']
+    r = runner.tool('seal-pack', 'nohidglob', 'd/**', cwd=work)
+    assert r.returncode == 0, r.stderr
+    assert members(runner, 'nohidglob') == ['keep.txt']
+    r = runner.tool('seal-pack', '--include-hidden', 'hid', 'd', cwd=work)
+    assert r.returncode == 0, r.stderr
+    assert sorted(members(runner, 'hid')) == ['.env', '.git/config', 'keep.txt']
+    r = runner.tool('seal-pack', '--allow-empty', 'onlyhid', 'd/.env', cwd=work)
+    assert r.returncode == 0, r.stderr
+    assert not list((runner.seal / 'art' / 'onlyhid').iterdir())
+
+
+@pytest.fixture
+def gnu_tar_shim(runner):
+    """A `tar` that reports itself as GNU tar, logs GNU-only flags and exits $TAR_SHIM_RC."""
+    real = shutil.which('tar')
+    d = runner.root / 'gnutar'
+    d.mkdir()
+    (d / 'tar').write_text(f'''#!/bin/bash
+[ "$1" = --version ] && {{ echo "tar (GNU tar) 1.35"; exit 0; }}
+args=()
+for a in "$@"; do
+  case "$a" in --warning=*|--verbatim-files-from|--no-unquote) echo "$a" >>"{d}/flags" ;; *) args+=("$a") ;; esac
+done
+"{real}" "${{args[@]}}" || exit $?
+exit "${{TAR_SHIM_RC:-0}}"
+''')
+    (d / 'tar').chmod(0o755)
+    return d
+
+
+def test_pack_gnu_tar_file_changed_is_success(runner, tree, gnu_tar_shim):
+    env = {**runner.env, 'PATH': f'{gnu_tar_shim}:{runner.env["PATH"]}', 'TAR_SHIM_RC': '1'}
+    r = runner.tool('seal-pack', 'changed', 'a/x.txt', cwd=tree, env=env)
+    assert r.returncode == 0, r.stderr
+    assert '--warning=no-file-changed' in (gnu_tar_shim / 'flags').read_text().split()
+    assert members(runner, 'changed') == ['x.txt']
+    env['TAR_SHIM_RC'] = '2'
+    r = runner.tool('seal-pack', 'broken', 'a/x.txt', cwd=tree, env=env)
+    assert r.returncode != 0
+    assert not list((runner.seal / 'art' / 'broken').iterdir())
+
+
+def test_pack_bsd_tar_exit_1_fails(runner, tree, gnu_tar_shim):
+    shim = gnu_tar_shim / 'tar'
+    shim.write_text(shim.read_text().replace('tar (GNU tar) 1.35', 'bsdtar 3.5.3'))
+    env = {**runner.env, 'PATH': f'{gnu_tar_shim}:{runner.env["PATH"]}', 'TAR_SHIM_RC': '1'}
+    r = runner.tool('seal-pack', 'bsd', 'a/x.txt', cwd=tree, env=env)
+    assert r.returncode != 0
+    assert not (gnu_tar_shim / 'flags').exists()
 
 
 def test_pack_absolute_path(runner, tree):

@@ -2,7 +2,8 @@
 # Install the sealing toolkit for one job: verified age, seal-bash/seal-bash-e,
 # seal-pack, seal-unpack and the repo key's public half, all under $RUNNER_TEMP/seal.
 # Run from the "Seal job output" setup step with SEAL_REF set to github.workflow_sha.
-# Test-only knobs: SEAL_SOURCE_DIR, SEAL_PUBKEY_FILE, SEAL_NO_SUDO, SEAL_AGE_SHA256_OVERRIDE.
+# Test-only knobs (refused when GITHUB_ACTIONS=true): SEAL_SOURCE_DIR,
+# SEAL_PUBKEY_FILE, SEAL_NO_SUDO, SEAL_AGE_SHA256_OVERRIDE.
 set -euo pipefail
 
 : "${RUNNER_TEMP:?}" "${GITHUB_ENV:?}" "${GITHUB_PATH:?}" "${GITHUB_JOB:?}" "${GITHUB_RUN_ATTEMPT:?}"
@@ -13,6 +14,14 @@ bin="$seal/bin"
 stage="$seal/stage"
 
 die() { rm -rf "$stage"; echo "seal: $*" >&2; exit 1; }
+
+if [ "${GITHUB_ACTIONS:-}" = true ]; then
+  for v in SEAL_SOURCE_DIR SEAL_PUBKEY_FILE SEAL_NO_SUDO SEAL_AGE_SHA256_OVERRIDE; do
+    [ -z "${!v:-}" ] || die "$v is a test-only setting and is refused on GitHub Actions"
+  done
+fi
+# A second install would restart the step numbering and overwrite sealed segments.
+[ ! -e "$seal/artifact-name" ] || die "already installed in this job; run the 'Seal job output' step once"
 
 # fetch <url> <dest>: bounded retries; promote only a successful, nonempty download.
 fetch() {

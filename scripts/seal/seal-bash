@@ -32,6 +32,7 @@ summary="$seal/log/$n.summary.md"
 rc=1
 child=
 sealed=
+signalled=
 
 seal_now() {
   set +e
@@ -39,37 +40,49 @@ seal_now() {
   [ -n "$sealed" ] && return
   sealed=1
   LC_ALL=C grep -a '^::add-mask::' "$log"
-  echo "🔒 sealed $name#$n https://ci.lascade.com/?run=${GITHUB_RUN_ID:-}&attempt=${GITHUB_RUN_ATTEMPT:-}"
   ok=1
   "$age" -R "$key" -o "$seal/out/$n.log.age" "$log" || ok=
   if [ -s "$summary" ]; then
     "$age" -R "$key" -o "$seal/out/$n.summary.md.age" "$summary" || ok=
   fi
   rm -f "$log" "$summary"
-  if [ -z "$ok" ]; then
-    echo "seal: could not seal step output" >&2
+  if [ -n "$ok" ]; then
+    echo "🔒 sealed $name#$n https://ci.lascade.com/?run=${GITHUB_RUN_ID:-}&attempt=${GITHUB_RUN_ATTEMPT:-}"
+  else
+    rm -f "$seal/out/$n.log.age" "$seal/out/$n.summary.md.age"
+    echo "🔒 seal failed for $name#$n"
     [ "$rc" -ne 0 ] || rc=1
   fi
 }
 
-# The runner cancels a step by signalling this process: pass the signal to the
-# step's process group, give it a moment to stop, then seal what it wrote.
-on_signal() {
-  rc=$((128 + $2))
+# The runner cancels a step by signalling this process: SIGINT, then SIGTERM
+# about 7.5 s later, then SIGKILL about 2.5 s after that.
+# SIGINT goes to the step's process group, which may then finish cleanly.
+on_int() {
+  signalled=130
+  [ -z "$child" ] || kill -s INT -- "-$child" 2>/dev/null || true
+}
+# SIGTERM goes to the group too; 1 s later the group is killed, so nothing that
+# ignores signals outlives the step, and the output is sealed before SIGKILL.
+on_term() {
   trap '' INT TERM
+  rc=143
   if [ -n "$child" ]; then
-    kill -s "$1" -- "-$child" 2>/dev/null || true
-    for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+    kill -s TERM -- "-$child" 2>/dev/null || true
+    for _ in 1 2 3 4 5; do
       kill -0 "$child" 2>/dev/null || break
       sleep 0.2
     done
+    kill -s KILL -- "-$child" 2>/dev/null || true
+    # Reap it here so bash's "Killed" job notice can't reach the public log.
+    wait "$child" 2>/dev/null || true
   fi
-  exit "$rc"
+  exit 143
 }
 
 trap 'seal_now; exit "$rc"' EXIT
-trap 'on_signal INT 2' INT
-trap 'on_signal TERM 15' TERM
+trap on_int INT
+trap on_term TERM
 
 # Job control while spawning puts the step in its own process group and keeps
 # SIGINT at its default (async commands otherwise ignore it) and stdin inherited.
@@ -79,6 +92,11 @@ GITHUB_STEP_SUMMARY="$summary" bash $flags "$script" >"$log" 2>&1 &
 child=$!
 set +m
 set +e
-wait "$child" 2>/dev/null
-rc=$?
+# A trapped signal interrupts `wait`; keep waiting while the step is alive.
+while :; do
+  wait "$child" 2>/dev/null
+  rc=$?
+  kill -0 "$child" 2>/dev/null || break
+done
 set -e
+[ -z "$signalled" ] || rc=$signalled
