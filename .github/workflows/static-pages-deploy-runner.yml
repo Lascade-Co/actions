@@ -175,7 +175,7 @@ jobs:
           name: pages-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/seal/art/pages-${{ github.run_id }}-${{ github.run_attempt }}/
           if-no-files-found: error
-          retention-days: 7
+          retention-days: 1
           compression-level: 0
 
       - name: Upload sealed log
