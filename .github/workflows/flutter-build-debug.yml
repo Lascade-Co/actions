@@ -658,6 +658,12 @@ jobs:
           name: apk
           path: artifacts/
 
+      - name: Unseal debug APK
+        if: needs.build-android.result == 'success'
+        run: seal-unpack artifacts/
+        env:
+          REPO_AGE_KEY: ${{ secrets.REPO_AGE_KEY }}
+
       - name: Download IPA artifact
         if: needs.build-ios.result == 'success'
         uses: actions/download-artifact@v8
@@ -665,8 +671,8 @@ jobs:
           name: ipa
           path: artifacts/
 
-      - name: Unseal build artifacts
-        if: needs.build-android.result == 'success' || needs.build-ios.result == 'success'
+      - name: Unseal debug IPA
+        if: needs.build-ios.result == 'success'
         run: seal-unpack artifacts/
         env:
           REPO_AGE_KEY: ${{ secrets.REPO_AGE_KEY }}
