@@ -16,6 +16,7 @@ import signal
 import subprocess
 import tarfile
 import time
+import zlib
 
 import pytest
 
@@ -652,6 +653,16 @@ def test_pack_bsd_tar_exit_1_fails(runner, tree, gnu_tar_shim):
     r = runner.tool('seal-pack', 'bsd', 'a/x.txt', cwd=tree, env=env)
     assert r.returncode != 0
     assert not (gnu_tar_shim / 'flags').exists()
+
+
+def test_pack_is_one_clean_gzip_stream(runner, tree):
+    """No bytes after the gzip member: bsdtar -z pads with zeros, which browsers' DecompressionStream rejects."""
+    r = runner.tool('seal-pack', 'clean', 'a/x.txt', cwd=tree)
+    assert r.returncode == 0, r.stderr
+    tgz = runner.decrypt(runner.seal / 'art' / 'clean' / 'clean.tgz.age')
+    d = zlib.decompressobj(31)
+    d.decompress(tgz)
+    assert d.eof and d.unused_data == b''
 
 
 def test_pack_absolute_path(runner, tree):

@@ -161,14 +161,17 @@ case "$(tar --version 2>/dev/null)" in *"GNU tar"*) gnu=1 ;; esac
 opts=(--no-xattrs --no-recursion --null)
 [ -z "$gnu" ] || opts+=(--warning=no-file-changed --verbatim-files-from --no-unquote)
 out="$dir/$name.tgz.age"
+# gzip outside tar: bsdtar -z pads its compressed output to a whole record with
+# zeros after the gzip stream, which strict decoders (DecompressionStream) reject.
 set +e
-COPYFILE_DISABLE=1 tar "${opts[@]}" -czf - -C "$root" -T "$list" \
+COPYFILE_DISABLE=1 tar "${opts[@]}" -cf - -C "$root" -T "$list" \
+  | gzip -n \
   | "$age" -R "$key" -o "$out"
 st=("${PIPESTATUS[@]}")
 set -e
 tar_ok=
 if [ "${st[0]}" -eq 0 ] || { [ -n "$gnu" ] && [ "${st[0]}" -eq 1 ]; }; then tar_ok=1; fi
-if [ -z "$tar_ok" ] || [ "${st[1]}" -ne 0 ]; then
+if [ -z "$tar_ok" ] || [ "${st[1]}" -ne 0 ] || [ "${st[2]}" -ne 0 ]; then
   rm -f "$out"
   echo "seal-pack: failed to pack $name" >&2
   exit 1
