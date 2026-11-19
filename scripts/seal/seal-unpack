@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# seal-unpack <dir> [<dest>]  (env REPO_AGE_KEY)
+# Decrypts every *.tgz.age in <dir> with the repo key, extracts it into <dest>
+# (default <dir>) and deletes the .age file. The key never touches the disk.
+set -euo pipefail
+
+[ $# -ge 1 ] && [ $# -le 2 ] || { echo "usage: seal-unpack <dir> [<dest>]" >&2; exit 2; }
+dir=$1
+dest=${2:-$1}
+if [ -z "${REPO_AGE_KEY:-}" ]; then
+  echo "seal-unpack: REPO_AGE_KEY is not set" >&2
+  exit 1
+fi
+age="${RUNNER_TEMP:?}/seal/bin/age"
+[ -x "$age" ] || { echo "seal-unpack: toolkit is not installed" >&2; exit 1; }
+
+found=
+for f in "$dir"/*.tgz.age; do
+  [ -f "$f" ] || continue
+  found=1
+  mkdir -p "$dest"
+  # printf is a builtin, so the key is not in any process's arguments.
+  if ! "$age" -d -i <(printf '%s\n' "$REPO_AGE_KEY") "$f" | tar -xzf - -C "$dest"; then
+    echo "seal-unpack: could not unseal ${f##*/}" >&2
+    exit 1
+  fi
+  rm -f "$f"
+done
+if [ -z "$found" ]; then
+  echo "seal-unpack: no .tgz.age files in $dir" >&2
+  exit 1
+fi

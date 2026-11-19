@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+# seal-pack [--allow-empty] <artifact-name> <path-or-glob>...
+# Tars the matches relative to their longest common directory (upload-artifact's
+# root rule), encrypts the tarball to the repo key and prints the directory that
+# holds <artifact-name>.tgz.age, ready for actions/upload-artifact.
+set -euo pipefail
+
+allow_empty=
+if [ "${1:-}" = --allow-empty ]; then allow_empty=1; shift; fi
+[ $# -ge 2 ] || { echo "usage: seal-pack [--allow-empty] <artifact-name> <path-or-glob>..." >&2; exit 2; }
+name=$1
+shift
+case "$name" in
+  ''|.*|-*|*/*|*\\*|*[\"\<\>\|\*\?:]*|*[[:cntrl:]]*) echo "seal-pack: invalid artifact name" >&2; exit 2 ;;
+esac
+
+seal="${RUNNER_TEMP:?}/seal"
+age="$seal/bin/age"
+key="$seal/repo-key.pub"
+[ -x "$age" ] && [ -s "$key" ] || { echo "seal-pack: toolkit is not installed" >&2; exit 1; }
+dir="$seal/art/$name"
+rm -rf "$dir"
+mkdir -p "$dir"
+
+# Expand globs (recursive **) and print the root, then each member relative to it,
+# NUL-terminated. A lone file's root is its directory; a lone dir is its own root.
+members=()
+root=
+while IFS= read -r -d '' p; do
+  if [ -z "$root" ]; then root=$p; else members+=("$p"); fi
+done < <(python3 -c '
+import glob, os, sys
+m = sorted({os.path.abspath(p) for a in sys.argv[1:]
+            for p in (glob.glob(a, recursive=True) or ([a] if os.path.lexists(a) else []))})
+if m:
+    root = os.path.commonpath(m)
+    if root in m and (not os.path.isdir(root) or os.path.islink(root)):
+        root = os.path.dirname(root)
+    rel = sorted({os.path.relpath(p, root) for p in m})
+    if "." in rel:
+        rel = ["."]
+    for p in [root] + ["./" + r if r.startswith("-") else r for r in rel]:
+        sys.stdout.write(p + "\0")
+' "$@")
+
+if [ -z "$root" ]; then
+  if [ -n "$allow_empty" ]; then echo "$dir"; exit 0; fi
+  echo "seal-pack: no files matched for $name" >&2
+  exit 1
+fi
+out="$dir/$name.tgz.age"
+if ! COPYFILE_DISABLE=1 tar --no-xattrs -czf - -C "$root" "${members[@]}" | "$age" -R "$key" -o "$out"; then
+  rm -f "$out"
+  echo "seal-pack: failed to pack $name" >&2
+  exit 1
+fi
+echo "$dir"
