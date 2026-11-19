@@ -39,7 +39,9 @@ seal_now() {
   trap '' INT TERM
   [ -n "$sealed" ] && return
   sealed=1
-  LC_ALL=C grep -a '^::add-mask::' "$log"
+  # The runner trims leading whitespace before parsing a command, so an indented
+  # ::add-mask:: still masks; forward it, minus the indentation.
+  LC_ALL=C grep -a '^[[:space:]]*::add-mask::' "$log" | LC_ALL=C sed 's/^[[:space:]]*//'
   ok=1
   "$age" -R "$key" -o "$seal/out/$n.log.age" "$log" || ok=
   if [ -s "$summary" ]; then

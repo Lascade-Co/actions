@@ -290,9 +290,16 @@ def test_stdout_shows_only_marker_and_masks(runner):
 
 
 def test_masks_survive_binary_output(runner):
-    r = runner.step(r'printf "bin\0ary\n"; echo "::add-mask::m2"; echo "  ::add-mask::indented"')
+    r = runner.step(r'printf "bin\0ary\n"; echo "::add-mask::m2"; echo "x ::add-mask::not-a-command"')
     assert r.returncode == 0
     assert r.stdout.splitlines() == ['::add-mask::m2', f'🔒 sealed {runner.name}#1 {VIEWER}']
+
+
+def test_indented_masks_are_forwarded(runner):
+    """The runner honors ::add-mask:: after leading whitespace (seen on hosted runners), so forward it."""
+    r = runner.step(r'echo "  ::add-mask::spaced"; printf "\t::add-mask::tabbed\n"; echo "  CANARY-789"')
+    assert r.returncode == 0
+    assert r.stdout.splitlines() == ['::add-mask::spaced', '::add-mask::tabbed', f'🔒 sealed {runner.name}#1 {VIEWER}']
 
 
 def test_shell_modes_match_github(runner):
