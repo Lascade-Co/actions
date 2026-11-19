@@ -17,8 +17,7 @@ class TestEditionDelivery:
         from ip_editions import get_edition, resolve_daily_schedule
         day = dt.date(2030, 1, 12)
         pt, ist = get_edition("pt"), get_edition("ist")
-        assert pt.recipient == "cherian@lascade.com"
-        assert ist.recipient == "fasna@lascade.com"
+        assert pt.recipient and ist.recipient and pt.recipient != ist.recipient
         assert pt.delivery_step(day) == "Deliver for 2030-01-12"
         assert ist.delivery_step(day) == "Deliver IST for 2030-01-12"
         assert pt.send_key(day, "schedule", "sample") == "install-paid-pt-2030-01-12-scheduled"
@@ -89,6 +88,7 @@ class TestEditionDelivery:
 
     def test_payload_is_immutable_and_edition_bound(self, tmp_path):
         import ip_send as send
+        from ip_editions import get_edition
         for name, value in (("email-A.html", "<p>synthetic</p>"), ("email-A.txt", "synthetic"),
                             ("subject-A.txt", "synthetic subject")):
             (tmp_path / name).write_text(value)
@@ -99,7 +99,7 @@ class TestEditionDelivery:
         payload = send.freeze_payload(*args, now=lambda: instant("2030-01-12T13:52"))
         frozen = payload.read_bytes()
         body = json.loads(frozen)
-        assert body["to"] == ["cherian@lascade.com"]
+        assert body["to"] == [get_edition("pt").recipient]
         assert body["scheduled_at"] == "2030-01-12T13:55:00+00:00"
         assert payload.name == "payload-pt-2030-01-12-synthetic.json"
         (tmp_path / "subject-A.txt").write_text("changed source")

@@ -685,7 +685,7 @@ CH_CFG = {"url": "https://x.supabase.co", "key": "sb_publishable_" + SENTINEL, "
 
 
 def ch_row(entity, at="2026-09-22T15:14:51.19+00:00", platform="meta", kind="Paused", why="Over budget.",
-           before=None, after="217$ per day", author="jishnu@lascade.com", rid="1"):
+           before=None, after="217$ per day", author="jishnu@example.com", rid="1"):
     return {"id": rid, "happened_at": at, "platform": platform, "kind": kind, "entity": entity,
             "before_value": before, "after_value": after, "why": why, "author_email": author}
 

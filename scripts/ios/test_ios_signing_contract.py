@@ -12,12 +12,12 @@ WORKFLOWS = (
 class WidgetSigningWorkflowContractTest(unittest.TestCase):
     def test_all_native_ios_exports_include_the_widget_profile(self) -> None:
         guard = (
-            'if [ -n "${{ env.WIDGET_PROFILE_BUNDLE_ID }}" ] '
-            '&& [ -n "${{ env.WIDGET_PROFILE_UUID }}" ]; then'
+            'if [ -n "${WIDGET_PROFILE_BUNDLE_ID}" ] '
+            '&& [ -n "${WIDGET_PROFILE_UUID}" ]; then'
         )
         mapping = (
-            'Add :provisioningProfiles:${{ env.WIDGET_PROFILE_BUNDLE_ID }} '
-            'string ${{ env.WIDGET_PROFILE_UUID }}'
+            'Add :provisioningProfiles:${WIDGET_PROFILE_BUNDLE_ID} '
+            'string ${WIDGET_PROFILE_UUID}'
         )
 
         for workflow in WORKFLOWS:

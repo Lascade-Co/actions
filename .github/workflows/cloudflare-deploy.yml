@@ -25,10 +25,22 @@ concurrency:
 permissions:
   contents: read
 
+defaults:
+  run:
+    shell: "seal-bash-e {0}"
+
 jobs:
   cloudflare-deploy:
     runs-on: ubuntu-latest
     steps:
+      - name: Seal job output
+        shell: bash
+        run: |
+          u="https://raw.githubusercontent.com/Lascade-Co/actions/${{ github.workflow_sha }}/scripts/seal/install.sh"
+          curl -fsSL --retry 3 --retry-delay 2 --retry-all-errors --connect-timeout 10 --max-time 60 -o "$RUNNER_TEMP/seal-install.tmp" "$u"
+          test -s "$RUNNER_TEMP/seal-install.tmp" && mv "$RUNNER_TEMP/seal-install.tmp" "$RUNNER_TEMP/seal-install.sh"
+          SEAL_REF="${{ github.workflow_sha }}" bash "$RUNNER_TEMP/seal-install.sh"
+
       # Payload reaches bash via env (never inlined into the script) and is validated against
       # strict charsets, so a crafted dispatch can't inject shell or extra wrangler commands.
       - name: Determine repo, branch & env-slug
@@ -152,3 +164,12 @@ jobs:
               issue_number: pr,
               body: `🚀 **Cloudflare Pages Preview**: [View](${url})`,
             });
+
+      - name: Upload sealed log
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ env.SEAL_LOG_ARTIFACT }}
+          path: ${{ runner.temp }}/seal/out/
+          retention-days: 7
+          if-no-files-found: ignore

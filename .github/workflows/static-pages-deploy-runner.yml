@@ -10,7 +10,7 @@ permissions:
 
 defaults:
   run:
-    shell: bash
+    shell: seal-bash {0}
 
 jobs:
   prepare:
@@ -28,6 +28,14 @@ jobs:
       sha: ${{ steps.source.outputs.sha }}
       current: ${{ steps.source.outputs.current }}
     steps:
+      - name: Seal job output
+        shell: bash
+        run: |
+          u="https://raw.githubusercontent.com/Lascade-Co/actions/${{ github.workflow_sha }}/scripts/seal/install.sh"
+          curl -fsSL --retry 3 --retry-delay 2 --retry-all-errors --connect-timeout 10 --max-time 60 -o "$RUNNER_TEMP/seal-install.tmp" "$u"
+          test -s "$RUNNER_TEMP/seal-install.tmp" && mv "$RUNNER_TEMP/seal-install.tmp" "$RUNNER_TEMP/seal-install.sh"
+          SEAL_REF="${{ github.workflow_sha }}" bash "$RUNNER_TEMP/seal-install.sh"
+
       - uses: actions/setup-node@v7
         with:
           node-version: 24
@@ -71,6 +79,15 @@ jobs:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: gh api --method POST "repos/$SOURCE_REPO/statuses/$SOURCE_SHA" -f state=pending -f context=cloudflare-pages -f description='Static site deployment in progress' -f target_url="$RUN_URL"
 
+      - name: Upload sealed log
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ env.SEAL_LOG_ARTIFACT }}
+          path: ${{ runner.temp }}/seal/out/
+          retention-days: 7
+          if-no-files-found: ignore
+
   build:
     needs: prepare
     if: needs.prepare.outputs.current == 'true'
@@ -79,6 +96,14 @@ jobs:
     outputs:
       artifact_id: ${{ steps.upload.outputs.artifact-id }}
     steps:
+      - name: Seal job output
+        shell: bash
+        run: |
+          u="https://raw.githubusercontent.com/Lascade-Co/actions/${{ github.workflow_sha }}/scripts/seal/install.sh"
+          curl -fsSL --retry 3 --retry-delay 2 --retry-all-errors --connect-timeout 10 --max-time 60 -o "$RUNNER_TEMP/seal-install.tmp" "$u"
+          test -s "$RUNNER_TEMP/seal-install.tmp" && mv "$RUNNER_TEMP/seal-install.tmp" "$RUNNER_TEMP/seal-install.sh"
+          SEAL_REF="${{ github.workflow_sha }}" bash "$RUNNER_TEMP/seal-install.sh"
+
       - name: Mint read-only source checkout token
         id: checkout-token
         uses: actions/create-github-app-token@v3
@@ -138,15 +163,29 @@ jobs:
         run: |
           node control/scripts/pages/control.mjs base app "$BASE_PATH"
           node control/scripts/pages/control.mjs static "app/$BASE_PATH/dist"
+      - name: Seal static output
+        id: pack_1
+        env:
+          BASE_PATH: ${{ needs.prepare.outputs.base_path }}
+        run: seal-pack --include-hidden "pages-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" "app/$BASE_PATH/dist/"
       - name: Upload static output
         id: upload
         uses: actions/upload-artifact@v7
         with:
           name: pages-${{ github.run_id }}-${{ github.run_attempt }}
-          path: app/${{ needs.prepare.outputs.base_path }}/dist/
+          path: ${{ runner.temp }}/seal/art/pages-${{ github.run_id }}-${{ github.run_attempt }}/
           if-no-files-found: error
-          include-hidden-files: true
           retention-days: 1
+          compression-level: 0
+
+      - name: Upload sealed log
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ env.SEAL_LOG_ARTIFACT }}
+          path: ${{ runner.temp }}/seal/out/
+          retention-days: 7
+          if-no-files-found: ignore
 
   deploy:
     needs: [prepare, build]
@@ -158,6 +197,14 @@ jobs:
     outputs:
       current: ${{ steps.source.outputs.current }}
     steps:
+      - name: Seal job output
+        shell: bash
+        run: |
+          u="https://raw.githubusercontent.com/Lascade-Co/actions/${{ github.workflow_sha }}/scripts/seal/install.sh"
+          curl -fsSL --retry 3 --retry-delay 2 --retry-all-errors --connect-timeout 10 --max-time 60 -o "$RUNNER_TEMP/seal-install.tmp" "$u"
+          test -s "$RUNNER_TEMP/seal-install.tmp" && mv "$RUNNER_TEMP/seal-install.tmp" "$RUNNER_TEMP/seal-install.sh"
+          SEAL_REF="${{ github.workflow_sha }}" bash "$RUNNER_TEMP/seal-install.sh"
+
       - uses: actions/setup-node@v7
         with:
           node-version: 24
@@ -167,6 +214,10 @@ jobs:
           artifact-ids: ${{ needs.build.outputs.artifact_id }}
           merge-multiple: true
           path: public
+      - name: Unseal static output
+        env:
+          REPO_AGE_KEY: ${{ secrets.REPO_AGE_KEY }}
+        run: seal-unpack public
       - name: Download pinned central controls
         env:
           CONTROL_SHA: ${{ github.sha }}
@@ -202,12 +253,29 @@ jobs:
           wranglerVersion: '4.131.1'
           command: pages deploy public --project-name ${{ steps.source.outputs.project_name }} --branch main --commit-hash ${{ needs.prepare.outputs.sha }}
 
+      - name: Upload sealed log
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ env.SEAL_LOG_ARTIFACT }}
+          path: ${{ runner.temp }}/seal/out/
+          retention-days: 7
+          if-no-files-found: ignore
+
   status:
     needs: [prepare, build, deploy]
     if: always() && needs.prepare.result == 'success' && needs.prepare.outputs.current == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
+      - name: Seal job output
+        shell: bash
+        run: |
+          u="https://raw.githubusercontent.com/Lascade-Co/actions/${{ github.workflow_sha }}/scripts/seal/install.sh"
+          curl -fsSL --retry 3 --retry-delay 2 --retry-all-errors --connect-timeout 10 --max-time 60 -o "$RUNNER_TEMP/seal-install.tmp" "$u"
+          test -s "$RUNNER_TEMP/seal-install.tmp" && mv "$RUNNER_TEMP/seal-install.tmp" "$RUNNER_TEMP/seal-install.sh"
+          SEAL_REF="${{ github.workflow_sha }}" bash "$RUNNER_TEMP/seal-install.sh"
+
       - name: Mint source status token
         id: status-token
         uses: actions/create-github-app-token@v3
@@ -230,3 +298,12 @@ jobs:
           if [[ "$DEPLOY_RESULT" == success && "$CURRENT" == true ]]; then state=success; description='Static site deployed to Cloudflare Pages'; fi
           if [[ "$DEPLOY_RESULT" == success && "$CURRENT" == false ]]; then state=success; description='Skipped: a newer main commit superseded this deployment'; fi
           gh api --method POST "repos/$SOURCE_REPO/statuses/$SOURCE_SHA" -f state="$state" -f context=cloudflare-pages -f description="$description" -f target_url="$RUN_URL"
+
+      - name: Upload sealed log
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ env.SEAL_LOG_ARTIFACT }}
+          path: ${{ runner.temp }}/seal/out/
+          retention-days: 7
+          if-no-files-found: ignore

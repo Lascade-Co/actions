@@ -71,7 +71,7 @@ runs:
   using: composite
   steps:
     - name: Send notification
-      shell: bash
+      shell: seal-bash {0}
       env:
         TELEGRAM_TOKEN: ${{ inputs.token }}
         TELEGRAM_CHAT: ${{ inputs.chat-id }}

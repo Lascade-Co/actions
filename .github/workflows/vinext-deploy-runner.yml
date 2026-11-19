@@ -10,7 +10,7 @@ permissions:
 
 defaults:
   run:
-    shell: bash
+    shell: seal-bash {0}
 
 jobs:
   prepare:
@@ -19,6 +19,14 @@ jobs:
     outputs:
       worker_key: ${{ steps.prepare.outputs.worker_key }}
     steps:
+      - name: Seal job output
+        shell: bash
+        run: |
+          u="https://raw.githubusercontent.com/Lascade-Co/actions/${{ github.workflow_sha }}/scripts/seal/install.sh"
+          curl -fsSL --retry 3 --retry-delay 2 --retry-all-errors --connect-timeout 10 --max-time 60 -o "$RUNNER_TEMP/seal-install.tmp" "$u"
+          test -s "$RUNNER_TEMP/seal-install.tmp" && mv "$RUNNER_TEMP/seal-install.tmp" "$RUNNER_TEMP/seal-install.sh"
+          SEAL_REF="${{ github.workflow_sha }}" bash "$RUNNER_TEMP/seal-install.sh"
+
       - uses: actions/setup-node@v7
         with:
           node-version: 24
@@ -78,11 +86,28 @@ jobs:
           STATUS_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: node control/scripts/vinext/cli.mjs status
 
+      - name: Upload sealed log
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ env.SEAL_LOG_ARTIFACT }}
+          path: ${{ runner.temp }}/seal/out/
+          retention-days: 7
+          if-no-files-found: ignore
+
   build:
     needs: prepare
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
+      - name: Seal job output
+        shell: bash
+        run: |
+          u="https://raw.githubusercontent.com/Lascade-Co/actions/${{ github.workflow_sha }}/scripts/seal/install.sh"
+          curl -fsSL --retry 3 --retry-delay 2 --retry-all-errors --connect-timeout 10 --max-time 60 -o "$RUNNER_TEMP/seal-install.tmp" "$u"
+          test -s "$RUNNER_TEMP/seal-install.tmp" && mv "$RUNNER_TEMP/seal-install.tmp" "$RUNNER_TEMP/seal-install.sh"
+          SEAL_REF="${{ github.workflow_sha }}" bash "$RUNNER_TEMP/seal-install.sh"
+
       - name: Set up Node for deployment controls
         uses: actions/setup-node@v7
         with:
@@ -194,18 +219,31 @@ jobs:
           GH_TOKEN: ${{ steps.checkout-token.outputs.token }}
         run: node control/scripts/vinext/cli.mjs build
 
+      - name: Seal sanitized deployment bundle
+        id: pack_1
+        run: seal-pack --include-hidden "vinext-bundle-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" bundle/
+
       - name: Upload sanitized deployment bundle
         uses: actions/upload-artifact@v7
         with:
           name: vinext-bundle-${{ github.run_id }}-${{ github.run_attempt }}
-          path: bundle/
+          path: ${{ runner.temp }}/seal/art/vinext-bundle-${{ github.run_id }}-${{ github.run_attempt }}/
           if-no-files-found: error
-          include-hidden-files: true
           retention-days: 1
+          compression-level: 0
 
       - name: Remove temporary environment file
         if: ${{ always() }}
         run: rm -f "$GITHUB_WORKSPACE/vinext-build.json"
+
+      - name: Upload sealed log
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ env.SEAL_LOG_ARTIFACT }}
+          path: ${{ runner.temp }}/seal/out/
+          retention-days: 7
+          if-no-files-found: ignore
 
   deploy:
     needs: [prepare, build]
@@ -218,6 +256,14 @@ jobs:
       queue: max
       cancel-in-progress: false
     steps:
+      - name: Seal job output
+        shell: bash
+        run: |
+          u="https://raw.githubusercontent.com/Lascade-Co/actions/${{ github.workflow_sha }}/scripts/seal/install.sh"
+          curl -fsSL --retry 3 --retry-delay 2 --retry-all-errors --connect-timeout 10 --max-time 60 -o "$RUNNER_TEMP/seal-install.tmp" "$u"
+          test -s "$RUNNER_TEMP/seal-install.tmp" && mv "$RUNNER_TEMP/seal-install.tmp" "$RUNNER_TEMP/seal-install.sh"
+          SEAL_REF="${{ github.workflow_sha }}" bash "$RUNNER_TEMP/seal-install.sh"
+
       - uses: actions/setup-node@v7
         with:
           node-version: 24
@@ -276,6 +322,12 @@ jobs:
           name: vinext-bundle-${{ github.run_id }}-${{ github.run_attempt }}
           path: bundle
 
+      - name: Unseal deployment bundle
+        if: ${{ needs.build.result == 'success' && steps.prepare.outcome == 'success' }}
+        env:
+          REPO_AGE_KEY: ${{ secrets.REPO_AGE_KEY }}
+        run: seal-unpack bundle
+
       - name: Import runtime secrets from Infisical
         if: ${{ needs.build.result == 'success' && steps.prepare.outcome == 'success' }}
         env:
@@ -315,3 +367,12 @@ jobs:
         run: |
           rm -f "$GITHUB_WORKSPACE/vinext-runtime.json"
           rm -rf "$GITHUB_WORKSPACE/bundle"
+
+      - name: Upload sealed log
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ env.SEAL_LOG_ARTIFACT }}
+          path: ${{ runner.temp }}/seal/out/
+          retention-days: 7
+          if-no-files-found: ignore

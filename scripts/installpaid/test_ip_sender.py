@@ -127,7 +127,8 @@ class TestSender:
         path, key, _ = calls[0]
         assert key == "install-paid-ist-2030-01-12-manual-synthetic"
         payload = json.loads(path.read_text())
-        assert payload["to"] == ["fasna@lascade.com"]
+        from ip_editions import get_edition
+        assert payload["to"] == [get_edition("ist").recipient]
         assert not payload["subject"].startswith("[Test")
 
     def test_cli_tags_plain_manual_pt_subject_without_changing_source(self, tmp_path, monkeypatch):

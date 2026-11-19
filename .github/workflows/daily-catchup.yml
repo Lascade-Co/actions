@@ -32,6 +32,10 @@ env:
   # that branch. (`main` here would make every branch run execute main's scripts.)
   RAW: https://raw.githubusercontent.com/Lascade-Co/actions/${{ github.sha }}
 
+defaults:
+  run:
+    shell: "seal-bash-e {0}"
+
 jobs:
   # Hold until 05:45 Pacific. Two chained jobs because one job is capped at 6h.
   gate:
@@ -42,12 +46,29 @@ jobs:
       report_date: ${{ steps.gate.outputs.report_date }}
       remaining: ${{ steps.gate.outputs.remaining }}
     steps:
+      - name: Seal job output
+        shell: bash
+        run: |
+          u="https://raw.githubusercontent.com/Lascade-Co/actions/${{ github.workflow_sha }}/scripts/seal/install.sh"
+          curl -fsSL --retry 3 --retry-delay 2 --retry-all-errors --connect-timeout 10 --max-time 60 -o "$RUNNER_TEMP/seal-install.tmp" "$u"
+          test -s "$RUNNER_TEMP/seal-install.tmp" && mv "$RUNNER_TEMP/seal-install.tmp" "$RUNNER_TEMP/seal-install.sh"
+          SEAL_REF="${{ github.workflow_sha }}" bash "$RUNNER_TEMP/seal-install.sh"
+
       - id: gate
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           curl -fsSL -o catchup_gate.py "$RAW/scripts/catchup/catchup_gate.py"
           python3 catchup_gate.py --phase 1 --event "${{ github.event_name }}"
+
+      - name: Upload sealed log
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ env.SEAL_LOG_ARTIFACT }}
+          path: ${{ runner.temp }}/seal/out/
+          retention-days: 7
+          if-no-files-found: ignore
 
   gate2:
     needs: gate
@@ -58,6 +79,14 @@ jobs:
       proceed: ${{ steps.gate.outputs.proceed }}
       report_date: ${{ steps.gate.outputs.report_date }}
     steps:
+      - name: Seal job output
+        shell: bash
+        run: |
+          u="https://raw.githubusercontent.com/Lascade-Co/actions/${{ github.workflow_sha }}/scripts/seal/install.sh"
+          curl -fsSL --retry 3 --retry-delay 2 --retry-all-errors --connect-timeout 10 --max-time 60 -o "$RUNNER_TEMP/seal-install.tmp" "$u"
+          test -s "$RUNNER_TEMP/seal-install.tmp" && mv "$RUNNER_TEMP/seal-install.tmp" "$RUNNER_TEMP/seal-install.sh"
+          SEAL_REF="${{ github.workflow_sha }}" bash "$RUNNER_TEMP/seal-install.sh"
+
       - id: gate
         env:
           GH_TOKEN: ${{ github.token }}
@@ -67,6 +96,15 @@ jobs:
             --report-date "${{ needs.gate.outputs.report_date }}" \
             --remaining "${{ needs.gate.outputs.remaining }}"
 
+      - name: Upload sealed log
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ env.SEAL_LOG_ARTIFACT }}
+          path: ${{ runner.temp }}/seal/out/
+          retention-days: 7
+          if-no-files-found: ignore
+
   discover:
     needs: gate2
     if: needs.gate2.outputs.proceed == 'true'
@@ -75,6 +113,14 @@ jobs:
       matrix: ${{ steps.disc.outputs.matrix }}
       has_repos: ${{ steps.disc.outputs.has_repos }}
     steps:
+      - name: Seal job output
+        shell: bash
+        run: |
+          u="https://raw.githubusercontent.com/Lascade-Co/actions/${{ github.workflow_sha }}/scripts/seal/install.sh"
+          curl -fsSL --retry 3 --retry-delay 2 --retry-all-errors --connect-timeout 10 --max-time 60 -o "$RUNNER_TEMP/seal-install.tmp" "$u"
+          test -s "$RUNNER_TEMP/seal-install.tmp" && mv "$RUNNER_TEMP/seal-install.tmp" "$RUNNER_TEMP/seal-install.sh"
+          SEAL_REF="${{ github.workflow_sha }}" bash "$RUNNER_TEMP/seal-install.sh"
+
       - name: Mint org-scoped GitHub App token
         id: app-token
         uses: actions/create-github-app-token@v3
@@ -91,6 +137,15 @@ jobs:
           curl -fsSL -o catchup_discover.py "$RAW/scripts/catchup/catchup_discover.py"
           python3 catchup_discover.py --hours 24
 
+      - name: Upload sealed log
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ env.SEAL_LOG_ARTIFACT }}
+          path: ${{ runner.temp }}/seal/out/
+          retention-days: 7
+          if-no-files-found: ignore
+
   summarize:
     needs: discover
     if: needs.discover.outputs.has_repos == 'true'
@@ -100,6 +155,14 @@ jobs:
       max-parallel: 5
       matrix: ${{ fromJson(needs.discover.outputs.matrix) }}
     steps:
+      - name: Seal job output
+        shell: bash
+        run: |
+          u="https://raw.githubusercontent.com/Lascade-Co/actions/${{ github.workflow_sha }}/scripts/seal/install.sh"
+          curl -fsSL --retry 3 --retry-delay 2 --retry-all-errors --connect-timeout 10 --max-time 60 -o "$RUNNER_TEMP/seal-install.tmp" "$u"
+          test -s "$RUNNER_TEMP/seal-install.tmp" && mv "$RUNNER_TEMP/seal-install.tmp" "$RUNNER_TEMP/seal-install.sh"
+          SEAL_REF="${{ github.workflow_sha }}" bash "$RUNNER_TEMP/seal-install.sh"
+
       - name: Extract owner/repo
         id: repo
         run: |
@@ -123,7 +186,7 @@ jobs:
           python-version: '3.13'
 
       - name: Install Claude API SDK
-        shell: bash
+        shell: seal-bash {0}
         run: |
           curl -fsSL --retry 3 --retry-delay 2 --max-time 60 -o claude-requirements.txt.tmp "$RAW/scripts/ai/requirements.txt"
           test -s claude-requirements.txt.tmp && mv claude-requirements.txt.tmp claude-requirements.txt
@@ -145,13 +208,27 @@ jobs:
             --summary-prompt CATCHUP_SUMMARY.md \
             --out "summary-${{ steps.repo.outputs.safe }}.json"
 
+      - name: Seal repo summary artifact
+        id: pack_1
+        run: seal-pack "summary-${{ steps.repo.outputs.safe }}" "summary-${{ steps.repo.outputs.safe }}.json"
+
       - name: Upload repo summary artifact
         uses: actions/upload-artifact@v7
         with:
           name: summary-${{ steps.repo.outputs.safe }}
-          path: summary-${{ steps.repo.outputs.safe }}.json
+          path: ${{ runner.temp }}/seal/art/summary-${{ steps.repo.outputs.safe }}/
           if-no-files-found: error
           retention-days: 7
+          compression-level: 0
+
+      - name: Upload sealed log
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ env.SEAL_LOG_ARTIFACT }}
+          path: ${{ runner.temp }}/seal/out/
+          retention-days: 7
+          if-no-files-found: ignore
 
   # Merge every per-repo summary into ONE daily file and hand it off as an
   # artifact. No catchup checkout here — committing and emailing run in parallel
@@ -164,12 +241,26 @@ jobs:
       today: ${{ steps.merge.outputs.today }}
       wrote: ${{ steps.merge.outputs.wrote }}
     steps:
+      - name: Seal job output
+        shell: bash
+        run: |
+          u="https://raw.githubusercontent.com/Lascade-Co/actions/${{ github.workflow_sha }}/scripts/seal/install.sh"
+          curl -fsSL --retry 3 --retry-delay 2 --retry-all-errors --connect-timeout 10 --max-time 60 -o "$RUNNER_TEMP/seal-install.tmp" "$u"
+          test -s "$RUNNER_TEMP/seal-install.tmp" && mv "$RUNNER_TEMP/seal-install.tmp" "$RUNNER_TEMP/seal-install.sh"
+          SEAL_REF="${{ github.workflow_sha }}" bash "$RUNNER_TEMP/seal-install.sh"
+
       - name: Download all repo summaries
         uses: actions/download-artifact@v8
         with:
           path: artifacts
           pattern: summary-*
           merge-multiple: true
+
+      - name: Unseal repo summaries
+        if: hashFiles('artifacts/*.tgz.age') != ''
+        run: seal-unpack artifacts
+        env:
+          REPO_AGE_KEY: ${{ secrets.REPO_AGE_KEY }}
 
       - name: Merge summaries into the daily file
         id: merge
@@ -182,14 +273,29 @@ jobs:
             --date "$TODAY" \
             --daily-out daily.json
 
+      - name: Seal merged daily report
+        id: pack_2
+        if: steps.merge.outputs.wrote == 'true'
+        run: seal-pack daily-report daily.json
+
       - name: Upload merged daily report
         if: steps.merge.outputs.wrote == 'true'
         uses: actions/upload-artifact@v7
         with:
           name: daily-report
-          path: daily.json
+          path: ${{ runner.temp }}/seal/art/daily-report/
           if-no-files-found: error
           retention-days: 7
+          compression-level: 0
+
+      - name: Upload sealed log
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ env.SEAL_LOG_ARTIFACT }}
+          path: ${{ runner.temp }}/seal/out/
+          retention-days: 7
+          if-no-files-found: ignore
 
   # Publish the merged daily file to Lascade-Co/catchup (placing the file +
   # updating the running index). Runs in parallel with `email`.
@@ -200,6 +306,14 @@ jobs:
     if: needs.collect.outputs.wrote == 'true' && !inputs.dry_run && !inputs.to
     runs-on: ubuntu-latest
     steps:
+      - name: Seal job output
+        shell: bash
+        run: |
+          u="https://raw.githubusercontent.com/Lascade-Co/actions/${{ github.workflow_sha }}/scripts/seal/install.sh"
+          curl -fsSL --retry 3 --retry-delay 2 --retry-all-errors --connect-timeout 10 --max-time 60 -o "$RUNNER_TEMP/seal-install.tmp" "$u"
+          test -s "$RUNNER_TEMP/seal-install.tmp" && mv "$RUNNER_TEMP/seal-install.tmp" "$RUNNER_TEMP/seal-install.sh"
+          SEAL_REF="${{ github.workflow_sha }}" bash "$RUNNER_TEMP/seal-install.sh"
+
       - name: Mint GitHub App token (catchup repo)
         id: app-token
         uses: actions/create-github-app-token@v3
@@ -220,6 +334,12 @@ jobs:
         uses: actions/download-artifact@v8
         with:
           name: daily-report
+          path: sealed-in/daily-report
+
+      - name: Unseal merged daily report
+        run: seal-unpack sealed-in/daily-report .
+        env:
+          REPO_AGE_KEY: ${{ secrets.REPO_AGE_KEY }}
 
       - name: Place daily file and update index
         run: |
@@ -245,6 +365,15 @@ jobs:
           git commit -m "Daily catchup: ${TODAY}"
           git push "https://x-access-token:${GITHUB_TOKEN}@github.com/Lascade-Co/catchup.git" HEAD:main
 
+      - name: Upload sealed log
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ env.SEAL_LOG_ARTIFACT }}
+          path: ${{ runner.temp }}/seal/out/
+          retention-days: 7
+          if-no-files-found: ignore
+
   # Build the rich HTML report (Claude prose + deterministic render) for all
   # active repos except those in data/catchup_exclude.txt, and email it via
   # Resend. Runs in parallel with `commit`; an email failure can't block the commit.
@@ -253,13 +382,21 @@ jobs:
     if: needs.collect.outputs.wrote == 'true'
     runs-on: ubuntu-latest
     steps:
+      - name: Seal job output
+        shell: bash
+        run: |
+          u="https://raw.githubusercontent.com/Lascade-Co/actions/${{ github.workflow_sha }}/scripts/seal/install.sh"
+          curl -fsSL --retry 3 --retry-delay 2 --retry-all-errors --connect-timeout 10 --max-time 60 -o "$RUNNER_TEMP/seal-install.tmp" "$u"
+          test -s "$RUNNER_TEMP/seal-install.tmp" && mv "$RUNNER_TEMP/seal-install.tmp" "$RUNNER_TEMP/seal-install.sh"
+          SEAL_REF="${{ github.workflow_sha }}" bash "$RUNNER_TEMP/seal-install.sh"
+
       - name: Set up Python
         uses: actions/setup-python@v7
         with:
           python-version: '3.13'
 
       - name: Install Claude API SDK
-        shell: bash
+        shell: seal-bash {0}
         run: |
           curl -fsSL --retry 3 --retry-delay 2 --max-time 60 -o claude-requirements.txt.tmp "$RAW/scripts/ai/requirements.txt"
           test -s claude-requirements.txt.tmp && mv claude-requirements.txt.tmp claude-requirements.txt
@@ -271,6 +408,12 @@ jobs:
         uses: actions/download-artifact@v8
         with:
           name: daily-report
+          path: sealed-in/daily-report
+
+      - name: Unseal merged daily report
+        run: seal-unpack sealed-in/daily-report .
+        env:
+          REPO_AGE_KEY: ${{ secrets.REPO_AGE_KEY }}
 
       - name: Generate report JSON
         id: report
@@ -331,3 +474,12 @@ jobs:
               -H "Authorization: Bearer $RESEND_API_KEY" \
               -H "Idempotency-Key: $KEY" \
               -H "Content-Type: application/json" --data @-
+
+      - name: Upload sealed log
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ env.SEAL_LOG_ARTIFACT }}
+          path: ${{ runner.temp }}/seal/out/
+          retention-days: 7
+          if-no-files-found: ignore

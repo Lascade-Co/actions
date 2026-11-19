@@ -14,6 +14,10 @@ concurrency:
   group: build-debug-flutter-${{ github.event.client_payload.repo }}-${{ github.event.client_payload.pr }}
   cancel-in-progress: true
 
+defaults:
+  run:
+    shell: "seal-bash-e {0}"
+
 jobs:
   prepare:
     runs-on: ubuntu-latest
@@ -24,9 +28,17 @@ jobs:
       dart_define_method: ${{ steps.flags.outputs.dart_define_method }}
       restore_build_files: ${{ steps.flags.outputs.restore_build_files }}
     steps:
+      - name: Seal job output
+        shell: bash
+        run: |
+          u="https://raw.githubusercontent.com/Lascade-Co/actions/${{ github.workflow_sha }}/scripts/seal/install.sh"
+          curl -fsSL --retry 3 --retry-delay 2 --retry-all-errors --connect-timeout 10 --max-time 60 -o "$RUNNER_TEMP/seal-install.tmp" "$u"
+          test -s "$RUNNER_TEMP/seal-install.tmp" && mv "$RUNNER_TEMP/seal-install.tmp" "$RUNNER_TEMP/seal-install.sh"
+          SEAL_REF="${{ github.workflow_sha }}" bash "$RUNNER_TEMP/seal-install.sh"
+
       - name: Extract owner/repo
         id: repo
-        shell: bash
+        shell: "seal-bash {0}"
         run: |
           FULL="${{ github.event.client_payload.repo }}"
           echo "owner=${FULL%%/*}" >> "$GITHUB_OUTPUT"
@@ -34,7 +46,7 @@ jobs:
 
       - name: Resolve flags
         id: flags
-        shell: bash
+        shell: "seal-bash {0}"
         run: |
           RAW="${{ github.event.client_payload.dart_define_method }}"
           if [ "$RAW" = "true" ]; then
@@ -92,10 +104,27 @@ jobs:
             Building debug APK (Android) and IPA (iOS)...
             Watch progress [here](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
 
+      - name: Upload sealed log
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ env.SEAL_LOG_ARTIFACT }}
+          path: ${{ runner.temp }}/seal/out/
+          retention-days: 7
+          if-no-files-found: ignore
+
   build-android:
     needs: prepare
     runs-on: ubuntu-latest
     steps:
+      - name: Seal job output
+        shell: bash
+        run: |
+          u="https://raw.githubusercontent.com/Lascade-Co/actions/${{ github.workflow_sha }}/scripts/seal/install.sh"
+          curl -fsSL --retry 3 --retry-delay 2 --retry-all-errors --connect-timeout 10 --max-time 60 -o "$RUNNER_TEMP/seal-install.tmp" "$u"
+          test -s "$RUNNER_TEMP/seal-install.tmp" && mv "$RUNNER_TEMP/seal-install.tmp" "$RUNNER_TEMP/seal-install.sh"
+          SEAL_REF="${{ github.workflow_sha }}" bash "$RUNNER_TEMP/seal-install.sh"
+
       - name: Mint GitHub App token
         id: app-token
         uses: actions/create-github-app-token@v3
@@ -152,14 +181,18 @@ jobs:
           file-output-path: /.env
 
       - name: Decode keystore
-        run: echo "${{ env.KEYSTORE_BASE64 }}" | base64 --decode > android/app/keystore-debug.jks
+        run: |
+          if [ -n "${KEYSTORE_BASE64:-}" ]; then echo "::add-mask::${KEYSTORE_BASE64}"; fi
+          echo "${KEYSTORE_BASE64}" | base64 --decode > android/app/keystore-debug.jks
 
       - name: Decode google-services.json
-        run: echo "${{ env.SERVICE_JSON_BASE64 }}" | base64 --decode > android/app/google-services.json
+        run: |
+          if [ -n "${SERVICE_JSON_BASE64:-}" ]; then echo "::add-mask::${SERVICE_JSON_BASE64}"; fi
+          echo "${SERVICE_JSON_BASE64}" | base64 --decode > android/app/google-services.json
 
       - name: Restore gitignored build files from Infisical
         if: needs.prepare.outputs.restore_build_files == 'true'
-        shell: bash
+        shell: "seal-bash {0}"
         run: |
           restore_file() {
             local b64_var="$1" path="$2"
@@ -179,9 +212,10 @@ jobs:
       - name: Determine build mode (dart-define vs .env)
         id: build-mode
         if: needs.prepare.outputs.dart_define_method == 'true'
-        shell: bash
+        shell: "seal-bash {0}"
         run: |
-          echo "${{ env.ENV_JSON_BASE64 }}" | base64 --decode > env.json
+          if [ -n "${ENV_JSON_BASE64:-}" ]; then echo "::add-mask::${ENV_JSON_BASE64}"; fi
+          echo "${ENV_JSON_BASE64}" | base64 --decode > env.json
           echo "dart_define_args=--dart-define-from-file=env.json" >> "$GITHUB_OUTPUT"
           echo "Using dart-define mode (env.json)"
 
@@ -196,10 +230,11 @@ jobs:
         with:
           cache-overwrite-existing: true
           cache-read-only: false
+          add-job-summary: never
 
       - name: Read .flutter-version
         id: flutter-version
-        shell: bash
+        shell: "seal-bash {0}"
         run: |
           if [ -f .flutter-version ]; then
             echo "version=$(cat .flutter-version)" >> "$GITHUB_OUTPUT"
@@ -223,7 +258,7 @@ jobs:
 
       - name: Flutter pub get
         id: android-pub-get
-        shell: bash
+        shell: "seal-bash {0}"
         run: |
           start=$(date +%s)
           flutter pub get
@@ -232,7 +267,7 @@ jobs:
 
       - name: Build debug APK
         id: android-build
-        shell: bash
+        shell: "seal-bash {0}"
         run: |
           start=$(date +%s)
           flutter build apk --debug --target-platform android-arm64 --no-pub --android-project-cache-dir=.gradle ${{ steps.build-mode.outputs.dart_define_args }}
@@ -245,7 +280,7 @@ jobs:
 
       - name: Summarize Android timings
         if: always()
-        shell: bash
+        shell: "seal-bash {0}"
         env:
           ANDROID_GRADLE_CACHE_HIT: ${{ steps.android-project-gradle-cache.outputs.cache-hit || 'false' }}
           ANDROID_PUB_GET_DURATION: ${{ steps.android-pub-get.outputs.duration || 'n/a' }}
@@ -259,12 +294,27 @@ jobs:
             printf -- '- flutter build apk: %ss\n' "$ANDROID_BUILD_DURATION"
           } | tee -a "$summary_target"
 
+      - name: Seal APK artifact
+        id: pack_1
+        run: |
+          seal-pack apk build/app/outputs/flutter-apk/app-debug.apk
+
       - name: Upload APK artifact
         uses: actions/upload-artifact@v7
         with:
           name: apk
-          path: build/app/outputs/flutter-apk/app-debug.apk
+          path: ${{ runner.temp }}/seal/art/apk/
+          retention-days: 7
           compression-level: 0
+
+      - name: Upload sealed log
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ env.SEAL_LOG_ARTIFACT }}
+          path: ${{ runner.temp }}/seal/out/
+          retention-days: 7
+          if-no-files-found: ignore
 
   build-ios:
     needs: prepare
@@ -272,6 +322,14 @@ jobs:
     env:
       COCOAPODS_DISABLE_STATS: "true"
     steps:
+      - name: Seal job output
+        shell: bash
+        run: |
+          u="https://raw.githubusercontent.com/Lascade-Co/actions/${{ github.workflow_sha }}/scripts/seal/install.sh"
+          curl -fsSL --retry 3 --retry-delay 2 --retry-all-errors --connect-timeout 10 --max-time 60 -o "$RUNNER_TEMP/seal-install.tmp" "$u"
+          test -s "$RUNNER_TEMP/seal-install.tmp" && mv "$RUNNER_TEMP/seal-install.tmp" "$RUNNER_TEMP/seal-install.sh"
+          SEAL_REF="${{ github.workflow_sha }}" bash "$RUNNER_TEMP/seal-install.sh"
+
       - name: Mint GitHub App token
         id: app-token
         uses: actions/create-github-app-token@v3
@@ -292,7 +350,7 @@ jobs:
       # /Applications/Xcode_<version>.app, like `.flutter-version` does for Flutter.
       # Without the file the runner's default Xcode is used.
       - name: Select Xcode from .xcode-version
-        shell: bash
+        shell: "seal-bash {0}"
         run: |
           if [ -f .xcode-version ]; then
             v="$(tr -d '[:space:]' < .xcode-version)"
@@ -308,7 +366,7 @@ jobs:
 
       - name: Capture Xcode version
         id: xcode-version
-        shell: bash
+        shell: "seal-bash {0}"
         run: |
           version="$(xcodebuild -version | tr '\n' ' ' | sed 's/[[:space:]]\+/ /g; s/ $//')"
           key="$(printf '%s' "$version" | shasum -a 256 | cut -d' ' -f1)"
@@ -355,11 +413,13 @@ jobs:
           file-output-path: /.env
 
       - name: Decode GoogleService-Info.plist
-        run: echo "${{ env.SERVICE_PLIST_BASE64 }}" | base64 --decode > ios/Runner/GoogleService-Info.plist
+        run: |
+          if [ -n "${SERVICE_PLIST_BASE64:-}" ]; then echo "::add-mask::${SERVICE_PLIST_BASE64}"; fi
+          echo "${SERVICE_PLIST_BASE64}" | base64 --decode > ios/Runner/GoogleService-Info.plist
 
       - name: Restore gitignored build files from Infisical
         if: needs.prepare.outputs.restore_build_files == 'true'
-        shell: bash
+        shell: "seal-bash {0}"
         run: |
           restore_file() {
             local b64_var="$1" path="$2"
@@ -379,9 +439,10 @@ jobs:
       - name: Determine build mode (dart-define vs .env)
         id: build-mode
         if: needs.prepare.outputs.dart_define_method == 'true'
-        shell: bash
+        shell: "seal-bash {0}"
         run: |
-          echo "${{ env.ENV_JSON_BASE64 }}" | base64 --decode > env.json
+          if [ -n "${ENV_JSON_BASE64:-}" ]; then echo "::add-mask::${ENV_JSON_BASE64}"; fi
+          echo "${ENV_JSON_BASE64}" | base64 --decode > env.json
           echo "dart_define_args=--dart-define-from-file=env.json" >> "$GITHUB_OUTPUT"
           echo "Using dart-define mode (env.json)"
 
@@ -389,7 +450,7 @@ jobs:
         run: curl -sSL https://raw.githubusercontent.com/Lascade-Co/actions/main/scripts/ios/install_apple_cert.sh | bash
 
       - name: Install additional provisioning profiles
-        shell: bash
+        shell: "seal-bash {0}"
         run: |
           PROFILES_DIR_LEGACY="$HOME/Library/MobileDevice/Provisioning Profiles"
           PROFILES_DIR_NEW="$HOME/Library/Developer/Xcode/UserData/Provisioning Profiles"
@@ -418,11 +479,18 @@ jobs:
         run: curl -sSL https://raw.githubusercontent.com/Lascade-Co/actions/main/scripts/ios/fix_ios_signing.py | python3 -
 
       - name: Generate ExportOptions.plist
-        shell: bash
+        shell: "seal-bash {0}"
         run: |
+          if [ -n "${IOS_TEAM_ID:-}" ]; then echo "::add-mask::${IOS_TEAM_ID}"; fi
+          if [ -n "${APP_PROFILE_UUID:-}" ]; then echo "::add-mask::${APP_PROFILE_UUID}"; fi
+          if [ -n "${NSE_PROFILE_UUID:-}" ]; then echo "::add-mask::${NSE_PROFILE_UUID}"; fi
+          if [ -n "${SHARE_EXT_PROFILE_UUID:-}" ]; then echo "::add-mask::${SHARE_EXT_PROFILE_UUID}"; fi
+          if [ -n "${LIVE_ACTIVITY_PROFILE_UUID:-}" ]; then echo "::add-mask::${LIVE_ACTIVITY_PROFILE_UUID}"; fi
+          if [ -n "${WIDGET_PROFILE_UUID:-}" ]; then echo "::add-mask::${WIDGET_PROFILE_UUID}"; fi
+          if [ -n "${WATCH_PROFILE_UUID:-}" ]; then echo "::add-mask::${WATCH_PROFILE_UUID}"; fi
           /usr/libexec/PlistBuddy -c "Clear dict" ExportOptions.plist
           /usr/libexec/PlistBuddy -c "Add :method string release-testing" ExportOptions.plist
-          /usr/libexec/PlistBuddy -c "Add :teamID string ${{ env.IOS_TEAM_ID }}" ExportOptions.plist
+          /usr/libexec/PlistBuddy -c "Add :teamID string ${IOS_TEAM_ID}" ExportOptions.plist
           /usr/libexec/PlistBuddy -c "Add :signingStyle string manual" ExportOptions.plist
           /usr/libexec/PlistBuddy -c "Add :provisioningProfiles dict" ExportOptions.plist
           # Map each installed profile to its real bundle id (read from the
@@ -438,16 +506,16 @@ jobs:
             /usr/libexec/PlistBuddy -c "Add :provisioningProfiles:${bundle} string ${uuid}" ExportOptions.plist
             echo "Mapped $bundle -> $uuid"
           }
-          add_pp "${{ env.APP_PROFILE_UUID }}"
-          add_pp "${{ env.NSE_PROFILE_UUID }}"
-          add_pp "${{ env.SHARE_EXT_PROFILE_UUID }}"
-          add_pp "${{ env.LIVE_ACTIVITY_PROFILE_UUID }}"
-          add_pp "${{ env.WIDGET_PROFILE_UUID }}"
-          add_pp "${{ env.WATCH_PROFILE_UUID }}"
+          add_pp "${APP_PROFILE_UUID}"
+          add_pp "${NSE_PROFILE_UUID}"
+          add_pp "${SHARE_EXT_PROFILE_UUID}"
+          add_pp "${LIVE_ACTIVITY_PROFILE_UUID}"
+          add_pp "${WIDGET_PROFILE_UUID}"
+          add_pp "${WATCH_PROFILE_UUID}"
 
       - name: Read .flutter-version
         id: flutter-version
-        shell: bash
+        shell: "seal-bash {0}"
         run: |
           if [ -f .flutter-version ]; then
             echo "version=$(cat .flutter-version)" >> "$GITHUB_OUTPUT"
@@ -475,13 +543,13 @@ jobs:
 
       - name: Flutter pub get
         id: ios-pub-get
-        shell: bash
+        shell: "seal-bash {0}"
         run: |
           start=$(date +%s)
           flutter pub get
           duration=$(( $(date +%s) - start ))
           echo "duration=${duration}" >> "$GITHUB_OUTPUT"
-          
+
       - name: Install FlutterFire CLI
         run: |
           dart pub global activate flutterfire_cli
@@ -502,7 +570,7 @@ jobs:
 
       - name: Build IPA
         id: ios-build
-        shell: bash
+        shell: "seal-bash {0}"
         run: |
           start=$(date +%s)
           flutter build ipa --export-options-plist=ExportOptions.plist --no-pub ${{ steps.build-mode.outputs.dart_define_args }}
@@ -511,7 +579,7 @@ jobs:
 
       - name: Summarize iOS timings
         if: always()
-        shell: bash
+        shell: "seal-bash {0}"
         env:
           IOS_XCODE_VERSION: ${{ steps.xcode-version.outputs.version || 'unknown' }}
           IOS_COCOAPODS_CACHE_HIT: ${{ steps.ios-cocoapods-cache.outputs.cache-hit || 'false' }}
@@ -527,18 +595,41 @@ jobs:
             printf -- '- flutter build ipa: %ss\n' "$IOS_BUILD_DURATION"
           } | tee -a "$summary_target"
 
+      - name: Seal IPA artifact
+        id: pack_2
+        run: |
+          seal-pack ipa 'build/ios/ipa/*.ipa'
+
       - name: Upload IPA artifact
         uses: actions/upload-artifact@v7
         with:
           name: ipa
-          path: build/ios/ipa/*.ipa
+          path: ${{ runner.temp }}/seal/art/ipa/
+          retention-days: 7
           compression-level: 0
+
+      - name: Upload sealed log
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ env.SEAL_LOG_ARTIFACT }}
+          path: ${{ runner.temp }}/seal/out/
+          retention-days: 7
+          if-no-files-found: ignore
 
   notify:
     needs: [prepare, build-android, build-ios]
     if: always()
     runs-on: ubuntu-latest
     steps:
+      - name: Seal job output
+        shell: bash
+        run: |
+          u="https://raw.githubusercontent.com/Lascade-Co/actions/${{ github.workflow_sha }}/scripts/seal/install.sh"
+          curl -fsSL --retry 3 --retry-delay 2 --retry-all-errors --connect-timeout 10 --max-time 60 -o "$RUNNER_TEMP/seal-install.tmp" "$u"
+          test -s "$RUNNER_TEMP/seal-install.tmp" && mv "$RUNNER_TEMP/seal-install.tmp" "$RUNNER_TEMP/seal-install.sh"
+          SEAL_REF="${{ github.workflow_sha }}" bash "$RUNNER_TEMP/seal-install.sh"
+
       - name: Mint GitHub App token
         id: app-token
         uses: actions/create-github-app-token@v3
@@ -567,12 +658,24 @@ jobs:
           name: apk
           path: artifacts/
 
+      - name: Unseal debug APK
+        if: needs.build-android.result == 'success'
+        run: seal-unpack artifacts/
+        env:
+          REPO_AGE_KEY: ${{ secrets.REPO_AGE_KEY }}
+
       - name: Download IPA artifact
         if: needs.build-ios.result == 'success'
         uses: actions/download-artifact@v8
         with:
           name: ipa
           path: artifacts/
+
+      - name: Unseal debug IPA
+        if: needs.build-ios.result == 'success'
+        run: seal-unpack artifacts/
+        env:
+          REPO_AGE_KEY: ${{ secrets.REPO_AGE_KEY }}
 
       - name: Install Firebase CLI
         id: firebase-cli
@@ -582,26 +685,30 @@ jobs:
       - name: Prepare Firebase credentials
         id: firebase-credentials
         if: needs.build-android.result == 'success' || needs.build-ios.result == 'success'
-        run: echo "${{ env.FIREBASE_SERVICE_ACCOUNT }}" | base64 --decode > sa.json
+        run: |
+          if [ -n "${FIREBASE_SERVICE_ACCOUNT:-}" ]; then echo "::add-mask::${FIREBASE_SERVICE_ACCOUNT}"; fi
+          echo "${FIREBASE_SERVICE_ACCOUNT}" | base64 --decode > sa.json
 
       - name: Upload APK to Firebase App Distribution
         id: upload-android
         if: always() && needs.build-android.result == 'success' && steps.firebase-cli.outcome == 'success' && steps.firebase-credentials.outcome == 'success'
         run: |
+          if [ -n "${FIREBASE_APP_ID_ANDROID:-}" ]; then echo "::add-mask::${FIREBASE_APP_ID_ANDROID}"; fi
           export GOOGLE_APPLICATION_CREDENTIALS="$PWD/sa.json"
           APK_PATH=$(find artifacts -name "*.apk" | head -1)
           firebase appdistribution:distribute "$APK_PATH" \
-            --app "${{ env.FIREBASE_APP_ID_ANDROID }}" \
+            --app "${FIREBASE_APP_ID_ANDROID}" \
             --groups "qa"
 
       - name: Upload IPA to Firebase App Distribution
         id: upload-ios
         if: always() && needs.build-ios.result == 'success' && steps.firebase-cli.outcome == 'success' && steps.firebase-credentials.outcome == 'success'
         run: |
+          if [ -n "${FIREBASE_APP_ID_IOS:-}" ]; then echo "::add-mask::${FIREBASE_APP_ID_IOS}"; fi
           export GOOGLE_APPLICATION_CREDENTIALS="$PWD/sa.json"
           IPA_PATH=$(find artifacts -name "*.ipa" | head -1)
           firebase appdistribution:distribute "$IPA_PATH" \
-            --app "${{ env.FIREBASE_APP_ID_IOS }}" \
+            --app "${FIREBASE_APP_ID_IOS}" \
             --groups "qa"
 
       - name: Create debug release in source repo
@@ -688,3 +795,12 @@ jobs:
               comment_id: Number("${{ needs.prepare.outputs.comment-id }}"),
               body,
             });
+
+      - name: Upload sealed log
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ env.SEAL_LOG_ARTIFACT }}
+          path: ${{ runner.temp }}/seal/out/
+          retention-days: 7
+          if-no-files-found: ignore

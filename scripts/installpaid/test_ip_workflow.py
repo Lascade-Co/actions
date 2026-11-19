@@ -178,7 +178,7 @@ class TestDailyWorkflow:
         assert dates["edition"] == edition and dates["send_step"] == prefix + "2030-01-12"
         assert run.run(run.step("dedupe"))["sent"] == "False"
         run.run(run.step("Build the email"))
-        send = WORKFLOW["jobs"]["email"]["steps"][-1]
+        send = next(s for s in WORKFLOW["jobs"]["email"]["steps"] if "send_resend_ip.sh" in s.get("run", ""))
         run.run(send)
         for script in ("ip_main.py", "ip_send.py"):
             args, = run.commands("python3", script)
@@ -218,7 +218,7 @@ class TestDailyWorkflow:
         assert run.run(run.step("dedupe"))["sent"] == "False"
         run.env["TEST_ACCEPTED_STEP"] = prefix + "2030-01-02"
         assert run.run(run.step("dedupe"))["sent"] == "True"
-        send = WORKFLOW["jobs"]["email"]["steps"][-1]
+        send = next(s for s in WORKFLOW["jobs"]["email"]["steps"] if "send_resend_ip.sh" in s.get("run", ""))
         assert rendered(send["if"], run.context) == "false"
 
     @pytest.mark.parametrize("edition,recovery,force,dry,offset,wanted_flag,wanted_step", [
@@ -237,7 +237,7 @@ class TestDailyWorkflow:
         if force:
             run.env["TEST_ACCEPTED_STEP"] = ("Deliver for " if edition == "pt" else "Deliver IST for ") + "2030-01-02"
         assert run.run(run.step("dedupe"))["sent"] == "False"
-        send = WORKFLOW["jobs"]["email"]["steps"][-1]
+        send = next(s for s in WORKFLOW["jobs"]["email"]["steps"] if "send_resend_ip.sh" in s.get("run", ""))
         assert rendered(send["name"], run.context) == wanted_step
         assert rendered(send["if"], run.context) == ("false" if dry else "true")
         if not dry:

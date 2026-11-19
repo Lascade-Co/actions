@@ -1,0 +1,104 @@
+#!/usr/bin/env bash
+# Custom Actions shell that seals a step's output: `shell: seal-bash {0}` runs the
+# script like `shell: bash`; `shell: seal-bash-e {0}` like GitHub's implicit default.
+# Output goes straight to a file (no pipe, so background processes can't hold the
+# step open). Afterwards only the script's ::add-mask:: lines and one marker line
+# reach the public log; the output and step summary are age-encrypted to the repo key.
+set -euo pipefail
+
+case "${0##*/}" in
+  seal-bash)   flags="--noprofile --norc -eo pipefail" ;;
+  seal-bash-e) flags="-e" ;;
+  *) echo "seal: unknown shell mode ${0##*/}" >&2; exit 2 ;;
+esac
+[ $# -eq 1 ] || { echo "usage: ${0##*/} <script>" >&2; exit 2; }
+script=$1
+
+seal="${RUNNER_TEMP:?}/seal"
+age="$seal/bin/age"
+key="$seal/repo-key.pub"
+if ! { [ -x "$age" ] && [ -s "$key" ] && [ -s "$seal/artifact-name" ]; }; then
+  echo "seal: toolkit is not installed; add the 'Seal job output' step first" >&2
+  exit 1
+fi
+name=$(cat "$seal/artifact-name")
+n=$(($(cat "$seal/seq") + 1))
+echo "$n" >"$seal/seq"
+log="$seal/log/$n.log"
+summary="$seal/log/$n.summary.md"
+: >"$log"
+: >"$summary"
+
+rc=1
+child=
+sealed=
+signalled=
+
+seal_now() {
+  set +e
+  trap '' INT TERM
+  [ -n "$sealed" ] && return
+  sealed=1
+  # The runner trims leading whitespace before parsing a command, so an indented
+  # ::add-mask:: still masks; forward it, minus the indentation.
+  LC_ALL=C grep -a '^[[:space:]]*::add-mask::' "$log" | LC_ALL=C sed 's/^[[:space:]]*//'
+  ok=1
+  "$age" -R "$key" -o "$seal/out/$n.log.age" "$log" || ok=
+  if [ -s "$summary" ]; then
+    "$age" -R "$key" -o "$seal/out/$n.summary.md.age" "$summary" || ok=
+  fi
+  rm -f "$log" "$summary"
+  if [ -n "$ok" ]; then
+    echo "🔒 sealed $name#$n https://ci.lascade.com/?run=${GITHUB_RUN_ID:-}&attempt=${GITHUB_RUN_ATTEMPT:-}"
+  else
+    rm -f "$seal/out/$n.log.age" "$seal/out/$n.summary.md.age"
+    echo "🔒 seal failed for $name#$n"
+    [ "$rc" -ne 0 ] || rc=1
+  fi
+}
+
+# The runner cancels a step by signalling this process: SIGINT, then SIGTERM
+# about 7.5 s later, then SIGKILL about 2.5 s after that.
+# SIGINT goes to the step's process group, which may then finish cleanly.
+on_int() {
+  signalled=130
+  [ -z "$child" ] || kill -s INT -- "-$child" 2>/dev/null || true
+}
+# SIGTERM goes to the group too; 1 s later the group is killed, so nothing that
+# ignores signals outlives the step, and the output is sealed before SIGKILL.
+on_term() {
+  trap '' INT TERM
+  rc=143
+  if [ -n "$child" ]; then
+    kill -s TERM -- "-$child" 2>/dev/null || true
+    for _ in 1 2 3 4 5; do
+      kill -0 "$child" 2>/dev/null || break
+      sleep 0.2
+    done
+    kill -s KILL -- "-$child" 2>/dev/null || true
+    # Reap it here so bash's "Killed" job notice can't reach the public log.
+    wait "$child" 2>/dev/null || true
+  fi
+  exit 143
+}
+
+trap 'seal_now; exit "$rc"' EXIT
+trap on_int INT
+trap on_term TERM
+
+# Job control while spawning puts the step in its own process group and keeps
+# SIGINT at its default (async commands otherwise ignore it) and stdin inherited.
+set -m
+# shellcheck disable=SC2086
+GITHUB_STEP_SUMMARY="$summary" bash $flags "$script" >"$log" 2>&1 &
+child=$!
+set +m
+set +e
+# A trapped signal interrupts `wait`; keep waiting while the step is alive.
+while :; do
+  wait "$child" 2>/dev/null
+  rc=$?
+  kill -0 "$child" 2>/dev/null || break
+done
+set -e
+[ -z "$signalled" ] || rc=$signalled

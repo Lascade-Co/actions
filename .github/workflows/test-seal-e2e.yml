@@ -1,0 +1,127 @@
+name: Test sealing end to end
+
+# Needs REPO_AGE_KEY, so it runs on push only (pull_request workflows may not use secrets).
+# The verify job prints nothing but sealed PASS/FAIL lines; its result is its exit code.
+on:
+  push:
+    paths:
+      - "scripts/seal/**"
+      - "viewer/**"
+      - ".github/workflows/**"
+      - "actions/**"
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: "seal-bash {0}"
+
+jobs:
+  e2e-produce:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Seal job output
+        shell: bash
+        run: |
+          u="https://raw.githubusercontent.com/Lascade-Co/actions/${{ github.workflow_sha }}/scripts/seal/install.sh"
+          curl -fsSL --retry 3 --retry-delay 2 --retry-all-errors --connect-timeout 10 --max-time 60 -o "$RUNNER_TEMP/seal-install.tmp" "$u"
+          test -s "$RUNNER_TEMP/seal-install.tmp" && mv "$RUNNER_TEMP/seal-install.tmp" "$RUNNER_TEMP/seal-install.sh"
+          SEAL_REF="${{ github.workflow_sha }}" bash "$RUNNER_TEMP/seal-install.sh"
+      - name: Print canaries
+        run: |
+          echo "CANARY-$GITHUB_RUN_ID"
+          echo "::add-mask::MASKED-$GITHUB_RUN_ID"
+          echo "MASKED-$GITHUB_RUN_ID"
+      - name: Pack e2e artifact
+        run: |
+          mkdir -p "$RUNNER_TEMP/e2e"
+          echo "CANARY-$GITHUB_RUN_ID" > "$RUNNER_TEMP/e2e/e2e.txt"
+          seal-pack e2e-art "$RUNNER_TEMP/e2e/e2e.txt"
+      - name: Upload e2e artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: e2e-art
+          path: ${{ runner.temp }}/seal/art/e2e-art/
+          retention-days: 7
+      - name: Upload sealed log
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ env.SEAL_LOG_ARTIFACT }}
+          path: ${{ runner.temp }}/seal/out/
+          retention-days: 7
+          if-no-files-found: ignore
+
+  # Re-running only this job is unsupported: it needs the produce job's artifacts from the same attempt.
+  e2e-verify:
+    needs: e2e-produce
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+    steps:
+      - name: Seal job output
+        shell: bash
+        run: |
+          u="https://raw.githubusercontent.com/Lascade-Co/actions/${{ github.workflow_sha }}/scripts/seal/install.sh"
+          curl -fsSL --retry 3 --retry-delay 2 --retry-all-errors --connect-timeout 10 --max-time 60 -o "$RUNNER_TEMP/seal-install.tmp" "$u"
+          test -s "$RUNNER_TEMP/seal-install.tmp" && mv "$RUNNER_TEMP/seal-install.tmp" "$RUNNER_TEMP/seal-install.sh"
+          SEAL_REF="${{ github.workflow_sha }}" bash "$RUNNER_TEMP/seal-install.sh"
+      - name: Download e2e artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: e2e-art
+          path: ${{ runner.temp }}/dl/art
+      - name: Unseal e2e artifact
+        env:
+          REPO_AGE_KEY: ${{ secrets.REPO_AGE_KEY }}
+        run: seal-unpack "$RUNNER_TEMP/dl/art"
+      - name: Verify public log and sealed contents
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO_AGE_KEY: ${{ secrets.REPO_AGE_KEY }}
+        run: |
+          fails=0
+          pass() { echo "PASS $1"; }
+          fail() { echo "FAIL $1"; fails=$((fails + 1)); }
+          has() { if grep -aqF -- "$2" "$3"; then pass "$1"; else fail "$1"; fi; }
+          hasnt() { if grep -aqF -- "$2" "$3"; then fail "$1"; else pass "$1"; fi; }
+          api="repos/$GITHUB_REPOSITORY/actions"
+          work="$RUNNER_TEMP/verify"; mkdir -p "$work/log"
+          trap 'rm -rf "$work"' EXIT
+
+          # Public log of the produce job (the logs endpoint redirects to blob storage).
+          job_id=$(gh api "$api/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT/jobs" --jq '.jobs[] | select(.name == "e2e-produce") | .id')
+          for _ in 1 2 3 4 5 6 7 8 9 10; do
+            curl -fsSL --connect-timeout 10 --max-time 60 -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
+              -o "$work/public.log" "https://api.github.com/$api/jobs/$job_id/logs" && [ -s "$work/public.log" ] && break
+            sleep 3
+          done
+          [ -s "$work/public.log" ] || fail "public log fetched"
+          hasnt "public log has no CANARY" "CANARY-$GITHUB_RUN_ID" "$work/public.log"
+          hasnt "public log has no MASKED" "MASKED-$GITHUB_RUN_ID" "$work/public.log"
+          has "public log has the marker line" "🔒 sealed sealed-log-e2e-produce-" "$work/public.log"
+          if grep -aE "🔒 sealed sealed-log-e2e-produce-.* https://ci\.lascade\.com/\?run=$GITHUB_RUN_ID&attempt=$GITHUB_RUN_ATTEMPT\s*$" "$work/public.log" >/dev/null; then pass "marker line ends with run and attempt link"; else fail "marker line ends with run and attempt link"; fi
+
+          # Sealed log of the produce job, decrypted with the repo key.
+          art_id=$(gh api "$api/runs/$GITHUB_RUN_ID/artifacts" --paginate --jq ".artifacts[] | select(.name | startswith(\"sealed-log-e2e-produce-$GITHUB_RUN_ATTEMPT-\")) | .id" | head -n 1)
+          gh api "$api/artifacts/$art_id/zip" > "$work/log.zip"
+          unzip -q -o "$work/log.zip" -d "$work/log"
+          : > "$work/sealed.txt"
+          for f in "$work"/log/*.log.age; do age -d -i <(printf '%s\n' "$REPO_AGE_KEY") "$f" >> "$work/sealed.txt" || fail "decrypt $(basename "$f")"; done
+          has "sealed log has CANARY" "CANARY-$GITHUB_RUN_ID" "$work/sealed.txt"
+          has "sealed log has MASKED (masking only applies to the public log)" "MASKED-$GITHUB_RUN_ID" "$work/sealed.txt"
+
+          # Sealed artifact.
+          has "e2e-art has CANARY" "CANARY-$GITHUB_RUN_ID" "$RUNNER_TEMP/dl/art/e2e.txt"
+
+          echo "SUMMARY $fails failure(s)"
+          [ "$fails" -eq 0 ]
+      - name: Upload sealed log
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ env.SEAL_LOG_ARTIFACT }}
+          path: ${{ runner.temp }}/seal/out/
+          retention-days: 7
+          if-no-files-found: ignore

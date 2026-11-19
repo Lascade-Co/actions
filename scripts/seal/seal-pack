@@ -1,0 +1,179 @@
+#!/usr/bin/env bash
+# seal-pack [--allow-empty] [--include-hidden] <artifact-name> <path-or-glob>...
+# Selects files the way actions/upload-artifact does: each pattern's matches with
+# directories expanded, hidden files and dirs left out unless --include-hidden, and
+# the archive root taken from the patterns' search paths. It tars them, encrypts
+# the tarball to the repo key and prints the directory that holds
+# <artifact-name>.tgz.age, ready for actions/upload-artifact.
+set -euo pipefail
+
+usage() { echo "usage: seal-pack [--allow-empty] [--include-hidden] <artifact-name> <path-or-glob>..." >&2; exit 2; }
+allow_empty=
+include_hidden=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --allow-empty) allow_empty=1; shift ;;
+    --include-hidden) include_hidden=1; shift ;;
+    -*) usage ;;
+    *) break ;;
+  esac
+done
+[ $# -ge 2 ] || usage
+name=$1
+shift
+case "$name" in
+  ''|.*|-*|*/*|*\\*|*[\"\<\>\|\*\?:]*|*[[:cntrl:]]*) echo "seal-pack: invalid artifact name" >&2; exit 2 ;;
+esac
+
+seal="${RUNNER_TEMP:?}/seal"
+age="$seal/bin/age"
+key="$seal/repo-key.pub"
+[ -x "$age" ] && [ -s "$key" ] || { echo "seal-pack: toolkit is not installed" >&2; exit 1; }
+dir="$seal/art/$name"
+rm -rf "$dir"
+mkdir -p "$dir"
+list=$(mktemp "$seal/pack-list.XXXXXX")
+trap 'rm -f "$list"' EXIT
+
+# Prints the archive root and writes the members, relative to it and
+# NUL-terminated, to the list file. Prints nothing if no file matched.
+# upload-artifact's rules (actions/upload-artifact search.ts, @actions/glob):
+# - a pattern's search path is its literal prefix before the first glob segment;
+#   a search path inside another one is dropped;
+# - several search paths: the root is their least common ancestor, so a missing
+#   literal still counts; one search path: the root is that path, or its parent
+#   when the only match is the search path itself (a lone file);
+# - a matched directory stands for every file below it; empty dirs are dropped;
+# - hidden means the item or a directory between it and its search path's parent
+#   starts with "."; such items are skipped unless --include-hidden.
+# Unlike upload-artifact, symlinks are archived as links, not followed.
+py=$(cat <<'PY'
+import os, re, sys
+listfile, include_hidden, pats = sys.argv[1], sys.argv[2] == "1", sys.argv[3:]
+MAGIC = re.compile(r"[*?\[]")
+
+def real_dir(p):
+    return os.path.isdir(p) and not os.path.islink(p)
+
+def seg_re(seg):
+    out, i = "", 0
+    while i < len(seg):
+        c = seg[i]
+        if c == "*":
+            out += "[^/]*"
+        elif c == "?":
+            out += "[^/]"
+        elif c == "[" and seg.find("]", i + 2) != -1:
+            j = seg.find("]", i + 2)
+            body = seg[i + 1:j]
+            if body.startswith("!"):
+                body = "^" + body[1:]
+            out += "[" + body.replace("\\", "\\\\") + "]"
+            i = j
+        else:
+            out += re.escape(c)
+        i += 1
+    return out
+
+def compile_rel(segs):
+    rx = ""
+    for k, s in enumerate(segs):
+        last = k == len(segs) - 1
+        if s == "**":
+            rx += ".*" if last else "(?:[^/]+/)*"
+        else:
+            rx += seg_re(s) + ("" if last else "/")
+    return re.compile(rx + r"\Z")
+
+def hidden(p, sp):
+    rel = os.path.relpath(p, os.path.dirname(sp))
+    return any(c.startswith(".") and c not in (".", "..") for c in rel.split(os.sep))
+
+def walk(top, sp):
+    """top and everything below it, without following symlinks or entering hidden dirs."""
+    if not include_hidden and hidden(top, sp):
+        return
+    yield top
+    if real_dir(top):
+        for d, dns, fns in os.walk(top):
+            if not include_hidden:
+                dns[:] = [n for n in dns if not n.startswith(".")]
+                fns = [n for n in fns if not n.startswith(".")]
+            for n in dns + fns:
+                yield os.path.join(d, n)
+
+search, files = [], set()
+for pat in pats:
+    if pat.startswith("!"):
+        sys.exit("seal-pack: exclude patterns are not supported: " + pat)
+    full = os.path.abspath(os.path.expanduser(pat))
+    parts = full.split(os.sep)
+    k = next((i for i, c in enumerate(parts) if MAGIC.search(c)), None)
+    sp = full if k is None else (os.sep.join(parts[:k]) or os.sep)
+    search.append(sp)
+    if not os.path.lexists(sp):
+        continue
+    if k is None:
+        files.update(x for x in walk(sp, sp) if not real_dir(x))
+        continue
+    rx = compile_rel(parts[k:])
+    for x in walk(sp, sp):
+        rel = os.path.relpath(x, sp)
+        if rx.match("" if rel == "." else rel.replace(os.sep, "/")):
+            files.update(y for y in walk(x, sp) if not real_dir(y))
+
+if files:
+    uniq = []
+    for sp in search:
+        a, p = sp, os.path.dirname(sp)
+        nested = False
+        while p != a:
+            if p in search:
+                nested = True
+                break
+            a, p = p, os.path.dirname(p)
+        if not nested and sp not in uniq:
+            uniq.append(sp)
+    if len(uniq) > 1:
+        root = os.path.commonpath(uniq)
+    elif len(files) == 1 and uniq[0] in files:
+        root = os.path.dirname(uniq[0])
+    else:
+        root = uniq[0]
+    rels = sorted(os.path.relpath(f, root) for f in files)
+    with open(listfile, "w") as out:
+        out.write("".join(("./" + r if r.startswith("-") else r) + "\0" for r in rels))
+    sys.stdout.write(root)
+PY
+)
+root=$(python3 -c "$py" "$list" "$include_hidden" "$@")
+
+if [ -z "$root" ]; then
+  if [ -n "$allow_empty" ]; then echo "$dir"; exit 0; fi
+  echo "seal-pack: no files matched for $name" >&2
+  exit 1
+fi
+
+# GNU tar exits 1 when a file changed while it was read (logs still being
+# written); that is not a failure. Its list must be read verbatim.
+gnu=
+case "$(tar --version 2>/dev/null)" in *"GNU tar"*) gnu=1 ;; esac
+opts=(--no-xattrs --no-recursion --null)
+[ -z "$gnu" ] || opts+=(--warning=no-file-changed --verbatim-files-from --no-unquote)
+out="$dir/$name.tgz.age"
+# gzip outside tar: bsdtar -z pads its compressed output to a whole record with
+# zeros after the gzip stream, which strict decoders (DecompressionStream) reject.
+set +e
+COPYFILE_DISABLE=1 tar "${opts[@]}" -cf - -C "$root" -T "$list" \
+  | gzip -n \
+  | "$age" -R "$key" -o "$out"
+st=("${PIPESTATUS[@]}")
+set -e
+tar_ok=
+if [ "${st[0]}" -eq 0 ] || { [ -n "$gnu" ] && [ "${st[0]}" -eq 1 ]; }; then tar_ok=1; fi
+if [ -z "$tar_ok" ] || [ "${st[1]}" -ne 0 ] || [ "${st[2]}" -ne 0 ]; then
+  rm -f "$out"
+  echo "seal-pack: failed to pack $name" >&2
+  exit 1
+fi
+echo "$dir"

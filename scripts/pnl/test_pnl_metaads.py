@@ -29,9 +29,9 @@ class FetchMetaAdsTest(unittest.TestCase):
             seen.append(account_id)
             return []
 
-        creds = {"token": "t", "account_ids": ["act_2115160355488257"]}
+        creds = {"token": "t", "account_ids": ["act_3333333333333333"]}
         fetch_meta_ads(creds, date(2026, 8, 10), self.table, insights=insights)
-        self.assertEqual(seen, ["2115160355488257"])
+        self.assertEqual(seen, ["3333333333333333"])
 
     def test_empty_insights_is_a_real_zero(self):
         creds = {"token": "t", "account_ids": ["111"]}

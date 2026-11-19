@@ -14,13 +14,25 @@ concurrency:
   group: build-debug-apk-${{ github.event.client_payload.repo }}-${{ github.event.client_payload.pr || github.event.client_payload.branch }}
   cancel-in-progress: true
 
+defaults:
+  run:
+    shell: "seal-bash-e {0}"
+
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
+      - name: Seal job output
+        shell: bash
+        run: |
+          u="https://raw.githubusercontent.com/Lascade-Co/actions/${{ github.workflow_sha }}/scripts/seal/install.sh"
+          curl -fsSL --retry 3 --retry-delay 2 --retry-all-errors --connect-timeout 10 --max-time 60 -o "$RUNNER_TEMP/seal-install.tmp" "$u"
+          test -s "$RUNNER_TEMP/seal-install.tmp" && mv "$RUNNER_TEMP/seal-install.tmp" "$RUNNER_TEMP/seal-install.sh"
+          SEAL_REF="${{ github.workflow_sha }}" bash "$RUNNER_TEMP/seal-install.sh"
+
       - name: Extract owner/repo
         id: repo
-        shell: bash
+        shell: seal-bash {0}
         run: |
           FULL="${{ github.event.client_payload.repo }}"   # e.g. Lascade-Co/travel-animator
           echo "owner=${FULL%%/*}" >> "$GITHUB_OUTPUT"     # Lascade-Co
@@ -30,7 +42,7 @@ jobs:
       # plus any submodules the dispatcher declared (comma-separated names, same org).
       - name: Compute token repositories
         id: token_repos
-        shell: bash
+        shell: seal-bash {0}
         run: |
           REPOS="${{ steps.repo.outputs.name }}"
           EXTRA="${{ github.event.client_payload.submodule_repos }}"
@@ -174,6 +186,7 @@ jobs:
         uses: gradle/actions/setup-gradle@v6
         with:
           cache-read-only: false
+          add-job-summary: never
 
       - name: Make gradlew executable
         run: chmod +x gradlew
@@ -189,7 +202,7 @@ jobs:
       - name: Run Android Lint
         id: lint
         continue-on-error: true
-        shell: bash
+        shell: seal-bash {0}
         env:
           KEYSTORE_PASSWORD_DEBUG: ${{ env.KEYSTORE_PASSWORD }}
           KEY_ALIAS_DEBUG: ${{ env.KEY_ALIAS }}
@@ -201,7 +214,7 @@ jobs:
       - name: Loop guard — skip AI if HEAD is already an auto-fix
         id: loopguard
         if: steps.lint.outcome == 'failure'
-        shell: bash
+        shell: seal-bash {0}
         run: |
           SUBJECT=$(git log -1 --pretty=%s || echo "")
           if printf '%s' "$SUBJECT" | grep -qE '^lint: Lint fix by (Claude|Codex)'; then
@@ -212,7 +225,7 @@ jobs:
 
       - name: Build Claude prompt from LINT.md (inject lint output only)
         if: steps.lint.outcome == 'failure' && steps.loopguard.outputs.skip == 'false'
-        shell: bash
+        shell: seal-bash {0}
         run: |
           curl -fsSL --retry 3 --retry-delay 2 --max-time 60 -o claude-prompt.md.tmp https://raw.githubusercontent.com/Lascade-Co/actions/${{ github.sha }}/data/LINT.md
           test -s claude-prompt.md.tmp && mv claude-prompt.md.tmp claude-prompt.md
@@ -233,6 +246,7 @@ jobs:
           anthropic_api_key: ${{ secrets.CLAUDE_API_KEY }}
           github_token: ${{ github.token }}
           allowed_bots: ${{ github.actor }}
+          show_full_output: false
           prompt: |
             Read claude-prompt.md in the checked-out source repository and apply its instructions.
             Edit source files and write claude-report.md. Do not commit, push or comment;
@@ -245,7 +259,7 @@ jobs:
       - name: Read Claude report
         id: report
         if: steps.lint.outcome == 'failure' && steps.loopguard.outputs.skip == 'false'
-        shell: bash
+        shell: seal-bash {0}
         run: |
           if [ -f claude-report.md ]; then
             if head -1 claude-report.md | grep -q '^Status: SUCCESS'; then
@@ -265,7 +279,7 @@ jobs:
       - name: Commit and push Claude fix to PR head
         id: push
         if: steps.lint.outcome == 'failure' && steps.claude.outcome == 'success' && steps.report.outputs.ok == 'true'
-        shell: bash
+        shell: seal-bash {0}
         env:
           GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
           HEAD_BRANCH: ${{ steps.base.outputs.head }}
@@ -304,7 +318,7 @@ jobs:
 
       - name: Fail job if lint still broken (no push happened)
         if: steps.lint.outcome == 'failure' && steps.push.outputs.pushed != 'true'
-        shell: bash
+        shell: seal-bash {0}
         run: |
           echo "Lint failed and Claude did not push a fix (skipped=${{ steps.loopguard.outputs.skip }}, claude=${{ steps.claude.outcome }}, report-ok=${{ steps.report.outputs.ok }})."
           exit 1
@@ -404,4 +418,13 @@ jobs:
               comment_id: Number("${{ steps.status.outputs.comment-id }}"),
               body,
             });
+
+      - name: Upload sealed log
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ env.SEAL_LOG_ARTIFACT }}
+          path: ${{ runner.temp }}/seal/out/
+          retention-days: 7
+          if-no-files-found: ignore
       

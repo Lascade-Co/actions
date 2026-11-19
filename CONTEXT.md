@@ -363,6 +363,50 @@ _Avoid_: release notes, What's New — those are the App Store version's `whatsN
 - **Team ID** and **bundle ID** are derived from the App Store provisioning profile rather
   than stored, so they cannot drift from the profile actually doing the signing.
 
+## Language — Confidentiality
+
+This repo is public, so its Actions logs and artifacts are readable by anyone. Anything
+private must be **sealed** before it reaches a log, an artifact or a commit.
+
+**Repo key**:
+The single age key pair that seals everything private in this repo. The public half is
+committed. The private half is held only in Infisical, which syncs it to this repo's Actions
+secrets; people use it through `infisical run` or by pasting it into the **log viewer**.
+_Avoid_: encryption key, secret key (ambiguous with Actions secrets).
+
+**Sealed**:
+Encrypted to the **repo key**'s public half. Only runners and key holders can open it.
+_Avoid_: encrypted, protected.
+
+**Public metadata**:
+Values allowed to appear in plain text in logs and artifact names: a repo's name, a branch,
+a PR (number and title), and a commit SHA.
+
+**Private value**:
+Anything that is not **public metadata** — people's names, emails, Telegram and ad account
+IDs, business numbers, source contents, build outputs. It is **masked** wherever the runner
+might print it and **sealed** wherever it is stored.
+_Avoid_: secret (reserved for Actions/Infisical secrets, which are one kind of private value).
+
+**Sealed log**:
+A job's own step output, plus its step summary and workflow annotations, sealed and uploaded as
+an artifact. The public run log shows only each step's name, its exit code and the
+**log viewer** link.
+_Avoid_: encrypted log, private log.
+
+**Sealed artifact**:
+Any artifact a job uploads, sealed before upload. A job that consumes one unseals it.
+
+**Log viewer**:
+The static page this repo serves on its own subdomain. Given a run ID, it fetches that run's
+**sealed logs** and **sealed artifacts** and opens them in the browser with the **repo key**
+the person stored there.
+_Avoid_: dashboard, decoder.
+
+**Masked**:
+Registered with the runner (an Actions secret, or `::add-mask::`) so every later line in the
+job prints `***` in its place, including step headers and third-party action output.
+
 ## Example dialogue
 
 > **Dev:** "How do I keep a noisy repo out of the email?"
