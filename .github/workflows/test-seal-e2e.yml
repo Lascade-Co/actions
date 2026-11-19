@@ -84,11 +84,12 @@ jobs:
           hasnt() { if grep -aqF -- "$2" "$3"; then fail "$1"; else pass "$1"; fi; }
           api="repos/$GITHUB_REPOSITORY/actions"
           work="$RUNNER_TEMP/verify"; mkdir -p "$work/log"
+          trap 'rm -rf "$work"' EXIT
 
           # Public log of the produce job (the logs endpoint redirects to blob storage).
           job_id=$(gh api "$api/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT/jobs" --jq '.jobs[] | select(.name == "e2e-produce") | .id')
           for _ in 1 2 3 4 5 6 7 8 9 10; do
-            curl -sSL --connect-timeout 10 --max-time 60 -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
+            curl -fsSL --connect-timeout 10 --max-time 60 -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
               -o "$work/public.log" "https://api.github.com/$api/jobs/$job_id/logs" && [ -s "$work/public.log" ] && break
             sleep 3
           done
@@ -101,17 +102,14 @@ jobs:
           art_id=$(gh api "$api/runs/$GITHUB_RUN_ID/artifacts" --paginate --jq ".artifacts[] | select(.name | startswith(\"sealed-log-e2e-produce-$GITHUB_RUN_ATTEMPT-\")) | .id" | head -n 1)
           gh api "$api/artifacts/$art_id/zip" > "$work/log.zip"
           unzip -q -o "$work/log.zip" -d "$work/log"
-          key="$work/key"; (umask 077; printf '%s\n' "$REPO_AGE_KEY" > "$key")
           : > "$work/sealed.txt"
-          for f in "$work"/log/*.log.age; do age -d -i "$key" "$f" >> "$work/sealed.txt" || fail "decrypt $(basename "$f")"; done
-          rm -f "$key"
+          for f in "$work"/log/*.log.age; do age -d -i <(printf '%s\n' "$REPO_AGE_KEY") "$f" >> "$work/sealed.txt" || fail "decrypt $(basename "$f")"; done
           has "sealed log has CANARY" "CANARY-$GITHUB_RUN_ID" "$work/sealed.txt"
           has "sealed log has MASKED (masking only applies to the public log)" "MASKED-$GITHUB_RUN_ID" "$work/sealed.txt"
 
           # Sealed artifact.
           has "e2e-art has CANARY" "CANARY-$GITHUB_RUN_ID" "$RUNNER_TEMP/dl/art/e2e.txt"
 
-          rm -rf "$work"
           echo "SUMMARY $fails failure(s)"
           [ "$fails" -eq 0 ]
       - name: Upload sealed log

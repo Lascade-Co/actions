@@ -9,9 +9,9 @@ This repo contains GitHub actions that are invokend by `repository_dispatch` / `
 - For more complex scripts, place the script in a domain subfolder under scripts/ (e.g. scripts/ios/, scripts/catchup/) and invoke it using the GitHub raw url, including the subfolder (https://raw.githubusercontent.com/Lascade-Co/actions/main/scripts/<domain>/<name>)
 - When writing an action that is using `repository_dispatch` write the corrosponding trigger action and place it in the triggers folder.
 - Sealed output: this repo is public, so every workflow job (except `workflow_call`-only workflows nothing here calls) starts with the verbatim "Seal job output" setup step, ends with the verbatim "Upload sealed log" step, and uses `seal-bash {0}` / `seal-bash-e {0}` as its default shell (job-level `defaults` may override). See `docs/sealed-output.md`.
-- Never use plain `shell: bash` (or any other unsealed shell) outside the setup step, and use `echo "::add-mask::$VALUE"` before a third-party action or `github-script` could print a private value.
-- Pack artifacts with `seal-pack` and upload from `$RUNNER_TEMP/seal/` with `retention-days: 7`; after `download-artifact`, run `seal-unpack` with `REPO_AGE_KEY` from secrets. Only `upload-pages-artifact` may upload unsealed.
-- `pull_request` workflows may not reference secrets and `pull_request_target` is banned; `scripts/seal/test_workflow_policy.py` enforces the sealing rules.
+- Never use plain `shell: bash` (or any other unsealed shell) outside the setup step, and use `echo "::add-mask::$VALUE"` before a third-party action or `github-script` could print a private value. See `docs/sealed-output.md`.
+- Pack artifacts with `seal-pack` and upload from `$RUNNER_TEMP/seal/` with `retention-days: 7`; after `download-artifact`, run `seal-unpack` with `REPO_AGE_KEY` from secrets. Only `upload-pages-artifact` may upload unsealed. See `docs/sealed-output.md`.
+- `pull_request` workflows may not reference secrets and `pull_request_target` is banned; `scripts/seal/test_workflow_policy.py` enforces the sealing rules. See `docs/sealed-output.md`.
 
 
 ## Vinext deployment

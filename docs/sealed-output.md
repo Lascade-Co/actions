@@ -39,7 +39,7 @@ branch, PR number and title, commit SHA, step names, and lines starting `::add-m
    A job without the setup step fails at its first step with "seal-bash: command not found", so a missing setup
    fails at its first step instead of leaking output.
 4. Artifacts: `seal-pack [--allow-empty] [--include-hidden] <name> <path>...` writes
-   `$RUNNER_TEMP/seal/art/<name>/<name>.tgz.age`; upload that directory with `retention-days: 7`. After a
+   `$RUNNER_TEMP/seal/art/<name>/<name>.tgz.age`; upload that directory with `retention-days` of at most 7 days (the ceiling; shorter is fine). After a
    `download-artifact`, the next step runs `seal-unpack <dir> [<dest>]` with `REPO_AGE_KEY: ${{ secrets.REPO_AGE_KEY }}`.
    `actions/upload-pages-artifact` (public site) is the only unsealed upload.
 5. Use `echo "::add-mask::$VALUE"` for any secret or private value a later unsealed step (third-party actions,

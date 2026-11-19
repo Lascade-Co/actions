@@ -3,6 +3,7 @@
 The rule functions (`check_*`) return a list of violation strings. Real files must return
 none; the synthetic files under testdata/ prove each rule can both pass and fail.
 """
+import posixpath
 import re
 import shutil
 import subprocess
@@ -13,8 +14,8 @@ import yaml
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
-WORKFLOWS = sorted((ROOT / ".github" / "workflows").glob("*.yml"))
-COMPOSITES = sorted((ROOT / "actions").glob("*/action.yml"))
+WORKFLOWS = sorted([*(ROOT / ".github" / "workflows").glob("*.yml"), *(ROOT / ".github" / "workflows").glob("*.yaml")])
+COMPOSITES = sorted([*(ROOT / "actions").glob("*/action.yml"), *(ROOT / "actions").glob("*/action.yaml")])
 TESTDATA = HERE / "testdata"
 DOCS = ROOT / "docs" / "sealed-output.md"
 
@@ -120,18 +121,33 @@ def check_no_unsealed_shell(wf):
     return bad
 
 
+SEAL_PREFIX = "${{ runner.temp }}/seal/"
+UPLOADS = ("actions/upload-artifact", "actions/upload-artifact/merge")
+
+
+def runs_seal_pack(step):
+    """The step's script invokes seal-pack as a command (first token of a line), not just mentions it."""
+    return any(re.match(r"\s*(?:[\w./$\"{}-]*/)?seal-pack(\s|$)", line) for line in str(step.get("run", "")).splitlines())
+
+
+def sealed_path(p):
+    return p.startswith(SEAL_PREFIX) and posixpath.normpath(p).startswith(SEAL_PREFIX.rstrip("/") + "/")
+
+
 def check_uploads_sealed(wf):
     bad = []
     for n, j in jobs_with_steps(wf).items():
         steps = j["steps"]
         for i, s in enumerate(steps):
-            if uses_of(s) != "actions/upload-artifact" or s == UPLOAD_STEP:
+            if uses_of(s) not in UPLOADS or s == UPLOAD_STEP:
                 continue
             paths = [p.strip() for p in str((s.get("with") or {}).get("path", "")).splitlines() if p.strip()]
             prev = steps[i - 1] if i else {}
-            if not paths or not all(p.startswith("${{ runner.temp }}/seal/") for p in paths):
+            if uses_of(s) == "actions/upload-artifact/merge":
+                bad.append(f"job {n} step {i + 1}: upload-artifact/merge would republish artifacts unsealed")
+            elif not paths or not all(sealed_path(p) for p in paths):
                 bad.append(f"job {n} step {i + 1}: upload path is not under runner.temp/seal/")
-            if "seal-pack" not in str(prev.get("run", "")):
+            if uses_of(s) == "actions/upload-artifact" and not runs_seal_pack(prev):
                 bad.append(f"job {n} step {i + 1}: previous step does not run seal-pack")
     return bad
 
@@ -152,10 +168,11 @@ def check_downloads_unsealed(wf):
 
 
 def check_retention_at_most_7(wf):
+    """Retention is a ceiling: retention-days must be set and at most 7 (1-day values pass)."""
     bad = []
     for n, j in jobs_with_steps(wf).items():
         for i, s in enumerate(j["steps"]):
-            if uses_of(s) not in ("actions/upload-artifact", "actions/upload-pages-artifact"):
+            if uses_of(s) not in (*UPLOADS, "actions/upload-pages-artifact"):
                 continue
             days = (s.get("with") or {}).get("retention-days")
             if not isinstance(days, int) or not 1 <= days <= 7:
@@ -172,8 +189,13 @@ def check_no_pull_request_target(wf):
     return ["uses pull_request_target"] if "pull_request_target" in triggers(wf) else []
 
 
+SECRET_REFS = [r"\bsecrets\s*[.\[]", r"secrets:\s*inherit", r"\$\{\{\s*secrets\s*\}\}", r"(?m)^\s*secrets:\s*$"]
+
+
 def check_pull_request_no_secrets(wf, text):
-    return ["pull_request workflow references secrets."] if "pull_request" in triggers(wf) and "secrets." in text else []
+    if "pull_request" not in triggers(wf):
+        return []
+    return [f"pull_request workflow references secrets ({r})" for r in SECRET_REFS if re.search(r, text)]
 
 
 def check_composite_run_steps_sealed(action):
@@ -269,9 +291,24 @@ def test_fixture_pull_request_target_flagged():
     assert check_no_pull_request_target(load(fixture("bad-prt.yml")))
 
 
-def test_fixture_pull_request_secrets_flagged():
-    p = fixture("bad-pr-secrets.yml")
+@pytest.mark.parametrize("name", ["bad-pr-secrets.yml", "bad-pr-secrets-index.yml", "bad-pr-secrets-inherit.yml",
+                                  "bad-pr-secrets-bare.yml", "bad-pr-secrets-key.yml"])
+def test_fixture_pull_request_secrets_flagged(name):
+    p = fixture(name)
     assert check_pull_request_no_secrets(load(p), p.read_text())
+
+
+@pytest.mark.parametrize("name", ["bad-upload-traversal.yml", "bad-upload-pack-mention.yml", "bad-upload-merge.yml"])
+def test_fixture_upload_hardening(name):
+    assert check_uploads_sealed(load(fixture(name)))
+
+
+def test_fixture_merge_retention_checked():
+    assert check_retention_at_most_7(load(fixture("bad-upload-merge.yml")))
+
+
+def test_fixture_one_day_retention_passes():
+    assert check_retention_at_most_7(load(fixture("good.yml"))) == []
 
 
 def test_fixture_composite():
