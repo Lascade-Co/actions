@@ -1,0 +1,6 @@
+name: c
+runs:
+  using: composite
+  steps:
+    - run: echo hi
+      shell: bash

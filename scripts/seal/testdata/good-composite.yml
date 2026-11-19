@@ -1,0 +1,7 @@
+name: c
+runs:
+  using: composite
+  steps:
+    - run: echo hi
+      shell: seal-bash {0}
+    - uses: actions/checkout@v7
