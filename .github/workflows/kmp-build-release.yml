@@ -15,7 +15,7 @@ concurrency:
   cancel-in-progress: false
 defaults:
   run:
-    shell: bash
+    shell: seal-bash {0}
 jobs:
   prepare:
     runs-on: ubuntu-latest
@@ -34,6 +34,13 @@ jobs:
       kotlin_version: ${{ steps.metadata.outputs.kotlin_version }}
       angle_revision: ${{ steps.metadata.outputs.angle_revision }}
     steps:
+    - name: Seal job output
+      shell: bash
+      run: |
+        u="https://raw.githubusercontent.com/Lascade-Co/actions/${{ github.workflow_sha }}/scripts/seal/install.sh"
+        curl -fsSL --retry 3 --retry-delay 2 --retry-all-errors --connect-timeout 10 --max-time 60 -o "$RUNNER_TEMP/seal-install.tmp" "$u"
+        test -s "$RUNNER_TEMP/seal-install.tmp" && mv "$RUNNER_TEMP/seal-install.tmp" "$RUNNER_TEMP/seal-install.sh"
+        SEAL_REF="${{ github.workflow_sha }}" bash "$RUNNER_TEMP/seal-install.sh"
     - name: Checkout trusted central controls
       uses: actions/checkout@v7
       with:
@@ -93,26 +100,47 @@ jobs:
     - name: Validate nonempty English release notes without truncation
       run: python3 control/scripts/kmp/release.py check-notes source/releasenotes.txt
       if: ${{ steps.source.outputs.skip != 'true' }}
+    - name: Seal kmp-release-notes for upload
+      id: pack_1
+      if: ${{ steps.source.outputs.skip != 'true' }}
+      run: seal-pack kmp-release-notes 'source/releasenotes.txt'
     - name: Retain one notes text for both stores
       uses: actions/upload-artifact@v7
       with:
         name: kmp-release-notes
-        path: source/releasenotes.txt
+        path: ${{ runner.temp }}/seal/art/kmp-release-notes/
         if-no-files-found: error
         retention-days: 7
+        compression-level: 0
       if: ${{ steps.source.outputs.skip != 'true' }}
+    - name: Upload sealed log
+      if: always()
+      uses: actions/upload-artifact@v7
+      with:
+        name: ${{ env.SEAL_LOG_ARTIFACT }}
+        path: ${{ runner.temp }}/seal/out/
+        retention-days: 7
+        if-no-files-found: ignore
   android:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     defaults:
       run:
-        shell: bash
+        shell: seal-bash {0}
         working-directory: source
     env:
       CI: 'true'
     needs:
     - prepare
     steps:
+    - name: Seal job output
+      shell: bash
+      run: |
+        u="https://raw.githubusercontent.com/Lascade-Co/actions/${{ github.workflow_sha }}/scripts/seal/install.sh"
+        curl -fsSL --retry 3 --retry-delay 2 --retry-all-errors --connect-timeout 10 --max-time 60 -o "$RUNNER_TEMP/seal-install.tmp" "$u"
+        test -s "$RUNNER_TEMP/seal-install.tmp" && mv "$RUNNER_TEMP/seal-install.tmp" "$RUNNER_TEMP/seal-install.sh"
+        SEAL_REF="${{ github.workflow_sha }}" bash "$RUNNER_TEMP/seal-install.sh"
+      working-directory: ${{ github.workspace }}
     - name: Checkout trusted central controls
       uses: actions/checkout@v7
       with:
@@ -177,6 +205,7 @@ jobs:
     - name: Set up small Gradle configuration and build caches
       uses: gradle/actions/setup-gradle@v6
       with:
+        add-job-summary: never
         cache-read-only: false
         cache-encryption-key: ${{ secrets.GRADLE_ENCRYPTION_KEY }}
         cache-cleanup: never
@@ -206,13 +235,18 @@ jobs:
       env:
         GH_TOKEN: ${{ steps.app-token.outputs.token }}
       id: build
+    - name: Seal kmp-release-android for upload
+      id: pack_2
+      run: seal-pack kmp-release-android 'source/build/ci/release/android/'
+      working-directory: .
     - name: Retain all Android release artifacts
       uses: actions/upload-artifact@v7
       with:
         name: kmp-release-android
-        path: source/build/ci/release/android/
+        path: ${{ runner.temp }}/seal/art/kmp-release-android/
         if-no-files-found: error
         retention-days: 7
+        compression-level: 0
         overwrite: true
     - name: Publish gradle OCI bundle
       uses: ./control/actions/gh-bundle-cache
@@ -228,18 +262,33 @@ jobs:
         token: ${{ github.token }}
       continue-on-error: true
       if: ${{ steps.gradle-cache.outputs.hit != 'true' }}
+    - name: Seal android-diagnostics for upload
+      id: pack_3
+      if: ${{ always() }}
+      run: |-
+        seal-pack --allow-empty android-diagnostics \
+          'source/build/ci/release/**/*.json' \
+          'source/build/ci/release/**/*.txt' \
+          'source/build/ci/release/**/*.log'
+      working-directory: .
     - name: Retain android diagnostics
       uses: actions/upload-artifact@v7
       with:
         name: android-diagnostics
-        path: |-
-          source/build/ci/release/**/*.json
-          source/build/ci/release/**/*.txt
-          source/build/ci/release/**/*.log
+        path: ${{ runner.temp }}/seal/art/android-diagnostics/
         if-no-files-found: warn
         retention-days: 7
+        compression-level: 0
         overwrite: true
       if: ${{ always() }}
+    - name: Upload sealed log
+      if: always()
+      uses: actions/upload-artifact@v7
+      with:
+        name: ${{ env.SEAL_LOG_ARTIFACT }}
+        path: ${{ runner.temp }}/seal/out/
+        retention-days: 7
+        if-no-files-found: ignore
     if: ${{ needs.prepare.outputs.skip != 'true' }}
   ios-build:
     # Free 7-GB arm64 image with Xcode 26.6, as the Staging ios-build in kmp-build-debug.yml. The source
@@ -249,13 +298,21 @@ jobs:
     timeout-minutes: 90
     defaults:
       run:
-        shell: bash
+        shell: seal-bash {0}
         working-directory: source
     env:
       CI: 'true'
     needs:
     - prepare
     steps:
+    - name: Seal job output
+      shell: bash
+      run: |
+        u="https://raw.githubusercontent.com/Lascade-Co/actions/${{ github.workflow_sha }}/scripts/seal/install.sh"
+        curl -fsSL --retry 3 --retry-delay 2 --retry-all-errors --connect-timeout 10 --max-time 60 -o "$RUNNER_TEMP/seal-install.tmp" "$u"
+        test -s "$RUNNER_TEMP/seal-install.tmp" && mv "$RUNNER_TEMP/seal-install.tmp" "$RUNNER_TEMP/seal-install.sh"
+        SEAL_REF="${{ github.workflow_sha }}" bash "$RUNNER_TEMP/seal-install.sh"
+      working-directory: ${{ github.workspace }}
     - name: Checkout trusted central controls
       uses: actions/checkout@v7
       with:
@@ -324,6 +381,7 @@ jobs:
     - name: Set up small Gradle configuration and build caches
       uses: gradle/actions/setup-gradle@v6
       with:
+        add-job-summary: never
         cache-read-only: false
         cache-encryption-key: ${{ secrets.GRADLE_ENCRYPTION_KEY }}
         cache-cleanup: never
@@ -361,9 +419,11 @@ jobs:
         token: ${{ github.token }}
       id: konan-cache
     - name: Compute SwiftPM cache key
-      run: echo "key=xcode-26-6-${{ hashFiles('source/**/Package.resolved') }}" >> "$GITHUB_OUTPUT"
+      run: echo "key=xcode-26-6-$SPM_HASH" >> "$GITHUB_OUTPUT"
       working-directory: .
       id: spm-key
+      env:
+        SPM_HASH: ${{ hashFiles('source/**/Package.resolved') }}
     - name: Restore swiftpm OCI bundle
       uses: ./control/actions/gh-bundle-cache
       with:
@@ -426,15 +486,21 @@ jobs:
           -gsp "${DSYM_PATH%/dSYMs}"/Products/Applications/*.app/GoogleService-Info.plist -p ios "$DSYM_PATH"
       env:
         DSYM_PATH: ${{ steps.build.outputs.dsym_path }}
+    - name: Seal kmp-release-ios for upload
+      id: pack_4
+      run: seal-pack kmp-release-ios "source/$IPA_PATH" "source/$DSYM_ZIP_PATH"
+      working-directory: .
+      env:
+        IPA_PATH: ${{ steps.build.outputs.ipa_path }}
+        DSYM_ZIP_PATH: ${{ steps.build.outputs.dsym_zip_path }}
     - name: Retain IPA and zipped dSYMs
       uses: actions/upload-artifact@v7
       with:
         name: kmp-release-ios
-        path: |-
-          ${{ format('source/{0}', steps.build.outputs.ipa_path) }}
-          ${{ format('source/{0}', steps.build.outputs.dsym_zip_path) }}
+        path: ${{ runner.temp }}/seal/art/kmp-release-ios/
         if-no-files-found: error
         retention-days: 7
+        compression-level: 0
         overwrite: true
     - name: Publish konan OCI bundle
       uses: ./control/actions/gh-bundle-cache
@@ -478,18 +544,33 @@ jobs:
       with:
         mode: cleanup
       if: ${{ always() }}
+    - name: Seal ios-diagnostics for upload
+      id: pack_5
+      if: ${{ always() }}
+      run: |-
+        seal-pack --allow-empty ios-diagnostics \
+          'source/build/ci/release/**/*.json' \
+          'source/build/ci/release/**/*.txt' \
+          'source/build/ci/release/**/*.log'
+      working-directory: .
     - name: Retain ios diagnostics
       uses: actions/upload-artifact@v7
       with:
         name: ios-diagnostics
-        path: |-
-          source/build/ci/release/**/*.json
-          source/build/ci/release/**/*.txt
-          source/build/ci/release/**/*.log
+        path: ${{ runner.temp }}/seal/art/ios-diagnostics/
         if-no-files-found: warn
         retention-days: 7
+        compression-level: 0
         overwrite: true
       if: ${{ always() }}
+    - name: Upload sealed log
+      if: always()
+      uses: actions/upload-artifact@v7
+      with:
+        name: ${{ env.SEAL_LOG_ARTIFACT }}
+        path: ${{ runner.temp }}/seal/out/
+        retention-days: 7
+        if-no-files-found: ignore
     if: ${{ needs.prepare.outputs.skip != 'true' }}
   release:
     runs-on: ubuntu-latest
@@ -500,13 +581,21 @@ jobs:
     - ios-build
     defaults:
       run:
-        shell: bash
+        shell: seal-bash {0}
         working-directory: source
     env:
       VERSION: ${{ needs.prepare.outputs.version }}
       BUILD_NUMBER: ${{ needs.prepare.outputs.build_number }}
       SOURCE_SHA: ${{ needs.prepare.outputs.sha }}
     steps:
+    - name: Seal job output
+      shell: bash
+      run: |
+        u="https://raw.githubusercontent.com/Lascade-Co/actions/${{ github.workflow_sha }}/scripts/seal/install.sh"
+        curl -fsSL --retry 3 --retry-delay 2 --retry-all-errors --connect-timeout 10 --max-time 60 -o "$RUNNER_TEMP/seal-install.tmp" "$u"
+        test -s "$RUNNER_TEMP/seal-install.tmp" && mv "$RUNNER_TEMP/seal-install.tmp" "$RUNNER_TEMP/seal-install.sh"
+        SEAL_REF="${{ github.workflow_sha }}" bash "$RUNNER_TEMP/seal-install.sh"
+      working-directory: ${{ github.workspace }}
     - name: Checkout trusted central controls
       uses: actions/checkout@v7
       with:
@@ -541,16 +630,31 @@ jobs:
       with:
         name: kmp-release-android
         path: release-assets/android
+    - name: Unseal kmp-release-android
+      run: seal-unpack 'release-assets/android'
+      working-directory: .
+      env:
+        REPO_AGE_KEY: ${{ secrets.REPO_AGE_KEY }}
     - name: Download IPA and dSYMs
       uses: actions/download-artifact@v8
       with:
         name: kmp-release-ios
         path: release-assets/ios
+    - name: Unseal kmp-release-ios
+      run: seal-unpack 'release-assets/ios'
+      working-directory: .
+      env:
+        REPO_AGE_KEY: ${{ secrets.REPO_AGE_KEY }}
     - name: Download identical English release notes
       uses: actions/download-artifact@v8
       with:
         name: kmp-release-notes
         path: release-notes
+    - name: Unseal kmp-release-notes
+      run: seal-unpack 'release-notes'
+      working-directory: .
+      env:
+        REPO_AGE_KEY: ${{ secrets.REPO_AGE_KEY }}
     - name: Validate all six assets and notes before changing main or tags
       run: python3 ../control/scripts/kmp/release.py verify-assets --assets ../release-assets --notes ../release-notes/releasenotes.txt
     - name: Atomically commit bump and tag with a main source-SHA lease
@@ -565,6 +669,14 @@ jobs:
         GH_TOKEN: ${{ steps.app-token.outputs.token }}
         SOURCE_REPO: ${{ needs.prepare.outputs.repo }}
         RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+    - name: Upload sealed log
+      if: always()
+      uses: actions/upload-artifact@v7
+      with:
+        name: ${{ env.SEAL_LOG_ARTIFACT }}
+        path: ${{ runner.temp }}/seal/out/
+        retention-days: 7
+        if-no-files-found: ignore
   notify:
     if: ${{ !cancelled() && needs.prepare.outputs.skip != 'true' }}
     needs:
@@ -575,6 +687,13 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
+    - name: Seal job output
+      shell: bash
+      run: |
+        u="https://raw.githubusercontent.com/Lascade-Co/actions/${{ github.workflow_sha }}/scripts/seal/install.sh"
+        curl -fsSL --retry 3 --retry-delay 2 --retry-all-errors --connect-timeout 10 --max-time 60 -o "$RUNNER_TEMP/seal-install.tmp" "$u"
+        test -s "$RUNNER_TEMP/seal-install.tmp" && mv "$RUNNER_TEMP/seal-install.tmp" "$RUNNER_TEMP/seal-install.sh"
+        SEAL_REF="${{ github.workflow_sha }}" bash "$RUNNER_TEMP/seal-install.sh"
     - name: Checkout trusted central controls
       uses: actions/checkout@v7
       with:
@@ -597,3 +716,11 @@ jobs:
           needs.release.result) }}'
         run-url: ${{ format('{0}/{1}/actions/runs/{2}', github.server_url, github.repository, github.run_id) }}
         github-token: ${{ github.token }}
+    - name: Upload sealed log
+      if: always()
+      uses: actions/upload-artifact@v7
+      with:
+        name: ${{ env.SEAL_LOG_ARTIFACT }}
+        path: ${{ runner.temp }}/seal/out/
+        retention-days: 7
+        if-no-files-found: ignore
