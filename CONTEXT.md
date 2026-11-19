@@ -403,6 +403,14 @@ The static page this repo serves on its own subdomain. Given a run ID, it fetche
 the person stored there.
 _Avoid_: dashboard, decoder.
 
+**Frozen repository**:
+A formerly public org repository that ran Actions and was made private and archived, with
+Actions disabled, because its run logs leaked **private values**. A README notice at the top
+says so. It is restored (unarchived, Actions re-enabled, then made public) only after its
+workflows are sealed like this repo's. Frozen on 2026-11-20: `daily-email-digest-actions`,
+`connector`, `chat-summary`, `store-reviews`, `infra-actions`, `scratch`, `motwr`.
+_Avoid_: disabled repo, locked repo.
+
 **Masked**:
 Registered with the runner (an Actions secret, or `::add-mask::`) so every later line in the
 job prints `***` in its place, including step headers and third-party action output.
