@@ -6,10 +6,22 @@ on:
     # Every 2 hours, 10:00–20:00 Asia/Muscat (UTC+4) → 06:00–16:00 UTC
     - cron: '0 6,8,10,12,14,16 * * *'
 
+defaults:
+  run:
+    shell: "seal-bash-e {0}"
+
 jobs:
   report:
     runs-on: ubuntu-latest
     steps:
+      - name: Seal job output
+        shell: bash
+        run: |
+          u="https://raw.githubusercontent.com/Lascade-Co/actions/${{ github.workflow_sha }}/scripts/seal/install.sh"
+          curl -fsSL --retry 3 --retry-delay 2 --retry-all-errors --connect-timeout 10 --max-time 60 -o "$RUNNER_TEMP/seal-install.tmp" "$u"
+          test -s "$RUNNER_TEMP/seal-install.tmp" && mv "$RUNNER_TEMP/seal-install.tmp" "$RUNNER_TEMP/seal-install.sh"
+          SEAL_REF="${{ github.workflow_sha }}" bash "$RUNNER_TEMP/seal-install.sh"
+
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
@@ -66,3 +78,12 @@ jobs:
             -F chat_id=-1003927562186 \
             -F document=@report.html \
             -F caption="Ship Accuracy Report — ${{ steps.port.outputs.name }}"
+
+      - name: Upload sealed log
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ env.SEAL_LOG_ARTIFACT }}
+          path: ${{ runner.temp }}/seal/out/
+          retention-days: 7
+          if-no-files-found: ignore

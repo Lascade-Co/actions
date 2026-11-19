@@ -26,11 +26,23 @@ env:
   # export-type: env puts it in this job's environment.
   MARKETING_NET_CHAT_ID: '-5466007383'
 
+defaults:
+  run:
+    shell: "seal-bash-e {0}"
+
 jobs:
   post:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
+      - name: Seal job output
+        shell: bash
+        run: |
+          u="https://raw.githubusercontent.com/Lascade-Co/actions/${{ github.workflow_sha }}/scripts/seal/install.sh"
+          curl -fsSL --retry 3 --retry-delay 2 --retry-all-errors --connect-timeout 10 --max-time 60 -o "$RUNNER_TEMP/seal-install.tmp" "$u"
+          test -s "$RUNNER_TEMP/seal-install.tmp" && mv "$RUNNER_TEMP/seal-install.tmp" "$RUNNER_TEMP/seal-install.sh"
+          SEAL_REF="${{ github.workflow_sha }}" bash "$RUNNER_TEMP/seal-install.sh"
+
       - name: Set up Python
         uses: actions/setup-python@v7
         with:
@@ -83,15 +95,26 @@ jobs:
           if [ "${{ inputs.dry_run }}" = "true" ]; then ARGS+=(--dry-run); fi
           python3 marketing_net.py "${ARGS[@]}"
 
+      - name: Seal the rendered card
+        id: pack_1
+        if: always()
+        run: seal-pack --allow-empty marketing-net-message message.png message.html cumulative-marketing-net.png daily-marketing-net.png
+
       - name: Upload the rendered card
         if: always()
         uses: actions/upload-artifact@v7
         with:
           name: marketing-net-message
-          path: |
-            message.png
-            message.html
-            cumulative-marketing-net.png
-            daily-marketing-net.png
+          path: ${{ runner.temp }}/seal/art/marketing-net-message/
           if-no-files-found: warn
-          retention-days: 30
+          retention-days: 7
+          compression-level: 0
+
+      - name: Upload sealed log
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ env.SEAL_LOG_ARTIFACT }}
+          path: ${{ runner.temp }}/seal/out/
+          retention-days: 7
+          if-no-files-found: ignore
