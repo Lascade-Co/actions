@@ -39,7 +39,7 @@ runs:
     - name: Restore or publish bundle
       id: bundle
       continue-on-error: true
-      shell: bash
+      shell: seal-bash {0}
       env:
         CACHE_MODE: ${{ inputs.mode }}
         CACHE_NAME: ${{ inputs.name }}
@@ -57,5 +57,5 @@ runs:
         python3 "$script" "$CACHE_MODE"
     - name: Report unavailable cache
       if: steps.bundle.outcome == 'failure'
-      shell: bash
+      shell: seal-bash {0}
       run: echo '::warning::Dependency cache unavailable; consult the cache step logs. Builds resolve dependencies cold, and publishing remains best effort.'

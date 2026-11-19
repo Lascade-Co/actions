@@ -17,6 +17,10 @@ concurrency:
   group: playstore-${{ github.event.client_payload.package_name }}
   cancel-in-progress: false
 
+defaults:
+  run:
+    shell: "seal-bash-e {0}"
+
 jobs:
   publish:
     runs-on: ubuntu-latest
@@ -26,6 +30,14 @@ jobs:
       TRACK: production
 
     steps:
+      - name: Seal job output
+        shell: bash
+        run: |
+          u="https://raw.githubusercontent.com/Lascade-Co/actions/${{ github.workflow_sha }}/scripts/seal/install.sh"
+          curl -fsSL --retry 3 --retry-delay 2 --retry-all-errors --connect-timeout 10 --max-time 60 -o "$RUNNER_TEMP/seal-install.tmp" "$u"
+          test -s "$RUNNER_TEMP/seal-install.tmp" && mv "$RUNNER_TEMP/seal-install.tmp" "$RUNNER_TEMP/seal-install.sh"
+          SEAL_REF="${{ github.workflow_sha }}" bash "$RUNNER_TEMP/seal-install.sh"
+
       - name: Checkout central repo (for scripts)
         uses: actions/checkout@v6
 
@@ -151,7 +163,7 @@ jobs:
       - name: Locate AAB + native debug symbols
         if: steps.stores.outputs.selected == 'true'
         id: assets
-        shell: bash
+        shell: seal-bash {0}
         env:
           NATIVE_SYMBOLS: ${{ steps.app.outputs.native_symbols }}
         run: |
@@ -216,7 +228,7 @@ jobs:
 
       - name: Create PostHog annotation
         if: steps.stores.outputs.selected == 'true' && github.event.client_payload.posthog_project_id != ''
-        shell: bash
+        shell: seal-bash {0}
         env:
           POSTHOG_API_KEY: ${{ secrets.POSTHOG_PERSONAL_API_KEY }}
           POSTHOG_PROJECT: ${{ github.event.client_payload.posthog_project_id }}
@@ -247,3 +259,12 @@ jobs:
           link: ${{ steps.meta.outputs.gh_url }}
           run-url: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
           github-token: ${{ github.token }}
+
+      - name: Upload sealed log
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ env.SEAL_LOG_ARTIFACT }}
+          path: ${{ runner.temp }}/seal/out/
+          retention-days: 7
+          if-no-files-found: ignore

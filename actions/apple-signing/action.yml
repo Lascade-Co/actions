@@ -22,7 +22,7 @@ runs:
         p12-file-base64: ${{ env[inputs.certificate-env] }}
         p12-password: ${{ env[inputs.certificate-password-env] }}
     - name: Install or clean profiles
-      shell: bash
+      shell: seal-bash {0}
       env:
         PROFILE_MODE: ${{ inputs.mode }}
         PROFILE_VARIABLES: ${{ inputs.profiles }}
