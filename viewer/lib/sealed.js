@@ -75,7 +75,7 @@ export async function checkKeyForRepo(identity, publicKey, repo) {
   const k = checkRepoKey(identity);
   if ((await recipientOf(k)) !== String(publicKey ?? "").trim()) {
     throw new SealError(
-      `This key is for a different repository: it does not match the public key of ${repo}. Paste the REPO_AGE_KEY of ${repo} from Infisical in Settings.`,
+      `This key doesn't match ${repo}'s current public key (wrong repository, or the key was rotated). Paste the current REPO_AGE_KEY of ${repo} from Infisical in Settings.`,
       "wrong-repo",
     );
   }

@@ -11,7 +11,7 @@
 //
 // Every repo name is checked before it goes into a URL path. The owner is fixed,
 // and "." or ".." (which the URL parser would resolve as path steps) are refused.
-import { runsQuery, isRepoName, OWNER, DEFAULT_REPO } from "./runs.js";
+import { runsQuery, isRepoName, repoId, OWNER, DEFAULT_REPO } from "./runs.js";
 
 const ROOT = "https://api.github.com";
 const JSON_TYPE = "application/vnd.github+json";
@@ -152,7 +152,7 @@ export async function listPublicRepos(token, page = 1) {
 
 /** Where a repo commits its seal public key: actions keeps it next to the toolkit. */
 export function publicKeyPath(repo) {
-  return checkRepo(repo) === DEFAULT_REPO ? "scripts/seal/repo-key.pub" : ".github/seal/repo-key.pub";
+  return repoId(checkRepo(repo)) === DEFAULT_REPO ? "scripts/seal/repo-key.pub" : ".github/seal/repo-key.pub";
 }
 
 /**

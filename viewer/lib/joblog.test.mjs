@@ -149,6 +149,18 @@ test("a marker binds only when both its repo and run match", () => {
   assert.deepEqual(seqs({ run: 1 }), [null, 2, 3, null, null]);
 });
 
+test("repo names match regardless of case, as on GitHub", () => {
+  const log = [
+    markerLine(`🔒 sealed ${ART}#1 https://ci.lascade.com/?repo=connector&run=1&attempt=1`),
+    markerLine(`🔒 sealed ${ART}#2 https://ci.lascade.com/?repo=Connector&run=1&attempt=1`),
+    markerLine(`🔒 sealed ${ART}#3 https://ci.lascade.com/?run=1&attempt=1`),
+  ].join("\n");
+  const seqs = (expected) => parseJobLog(log, expected)[0].lines.map((l) => l.marker?.seq ?? null);
+  assert.deepEqual(seqs({ repo: "Connector", run: 1 }), [1, 2, null]);
+  assert.deepEqual(seqs({ repo: "CONNECTOR", run: 1 }), [1, 2, null]);
+  assert.deepEqual(seqs({ repo: "Actions", run: 1 }), [null, null, 3]);
+});
+
 test("a marker with a malformed repo or extra parameters is not a marker", () => {
   const log = [
     markerLine(`🔒 sealed ${ART}#1 https://ci.lascade.com/?repo=a/b&run=1&attempt=1`),

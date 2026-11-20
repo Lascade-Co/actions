@@ -86,6 +86,45 @@ export function isRepoName(value) {
 }
 
 /**
+ * A repo's identity for comparisons, storage and cache keys: GitHub matches repo
+ * names regardless of case, while markers print the canonical name.
+ */
+export function repoId(repo) {
+  return String(repo).toLowerCase();
+}
+
+/**
+ * The API's canonical name for the repo in the URL when the two differ by case
+ * alone (the URL should then use it), else null.
+ */
+export function canonicalRepoName(urlRepo, apiName) {
+  if (!isRepoName(apiName) || apiName === urlRepo || repoId(apiName) !== repoId(urlRepo)) return null;
+  return apiName;
+}
+
+/**
+ * The hint above a repo's runs (or the picker, `repo` null): ask for the token
+ * when missing, and for the repo key only when the repo is sealed. `sealed` is
+ * true, false or null (unknown: its key file could not be read).
+ * @returns {{text: string, settings: boolean}} `settings`: offer Open Settings.
+ */
+export function homeHint({ repo, token, hasKey = false, sealed = null }) {
+  const NO_TOKEN = "Without a token GitHub allows 60 requests an hour.";
+  const NOT_SEALED = "This repository is not sealed; logs are public.";
+  if (!repo) return token ? { text: "", settings: false } : { text: `${NO_TOKEN} Add a GitHub token in Settings to raise the limit and open runs.`, settings: true };
+  if (!token) {
+    if (sealed === true && !hasKey) {
+      return { text: `${NO_TOKEN} Add a GitHub token and the repo key for ${repo} in Settings to raise the limit and open runs.`, settings: true };
+    }
+    const text = `${NO_TOKEN} Add a GitHub token in Settings to raise the limit and open runs.`;
+    return { text: sealed === false ? `${NOT_SEALED} ${text}` : text, settings: true };
+  }
+  if (sealed === false) return { text: NOT_SEALED, settings: false };
+  if (sealed === true && !hasKey) return { text: `Add the repo key for ${repo} in Settings to see its sealed output.`, settings: true };
+  return { text: "", settings: false };
+}
+
+/**
  * What the URL asks for: the repo picker (no repo), a repo's runs, or one run.
  * `?run=` without `repo=` is a run of the actions repo (links from before repos).
  * A bad value falls back to the view above it, with `error` naming it.

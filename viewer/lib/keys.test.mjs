@@ -34,8 +34,9 @@ test("each repo's key has its own storage name", () => {
 });
 
 test("migrateKeys moves the legacy key to the actions repo", () => {
-  const s = new MemoryStorage({ "ci.repoKey": "AGE-SECRET-KEY-1OLD", "ci.githubToken": "tok" });
+  const s = new MemoryStorage({ "ci.repoKey": "AGE-SECRET-KEY-1OLD", "ci.githubToken": "tok", "ci.repoKey.connector": "C" });
   assert.equal(migrateKeys(s), true);
+  assert.equal(s.getItem("ci.repoKey.connector"), "C");
   assert.equal(s.getItem("ci.repoKey.actions"), "AGE-SECRET-KEY-1OLD");
   assert.equal(s.getItem("ci.repoKey"), null);
   assert.equal(s.getItem("ci.githubToken"), "tok");
@@ -84,6 +85,41 @@ test("saveKey and forgetKey change only that repo's key", () => {
   assert.equal(s.getItem("ci.repoKey.actions"), "A");
   assert.equal(s.getItem("ci.githubToken"), "tok");
   assert.throws(() => saveKey(s, "..", "X"), /repository/i);
+});
+
+test("repo keys are stored under the lowercase repo name", () => {
+  assert.equal(keyName("Connector"), "ci.repoKey.connector");
+  const s = new MemoryStorage();
+  saveKey(s, "Connector", "B");
+  assert.equal(s.getItem("ci.repoKey.connector"), "B");
+  assert.deepEqual([...loadKeys(s)], [["connector", "B"]]);
+  saveKey(s, "CONNECTOR", "C");
+  assert.deepEqual([...loadKeys(s)], [["connector", "C"]]);
+  forgetKey(s, "Connector");
+  assert.equal(loadKeys(s).size, 0);
+});
+
+test("migrateKeys lowercases mixed-case repo keys once, keeping an existing lowercase one", () => {
+  const s = new MemoryStorage({
+    "ci.repoKey.Connector": "OLD-MIXED",
+    "ci.repoKey.connector": "LOWER",
+    "ci.repoKey.Website": "W",
+    "ci.repoKey.a/B": "bad name",
+  });
+  assert.equal(migrateKeys(s), true);
+  assert.equal(s.getItem("ci.repoKey.connector"), "LOWER");
+  assert.equal(s.getItem("ci.repoKey.website"), "W");
+  assert.equal(s.getItem("ci.repoKey.Connector"), null);
+  assert.equal(s.getItem("ci.repoKey.Website"), null);
+  assert.deepEqual([...loadKeys(s)].sort(), [["connector", "LOWER"], ["website", "W"]]);
+  assert.equal(migrateKeys(s), false);
+});
+
+test("loadKeys lists each repo once even before migration", () => {
+  const s = new MemoryStorage({ "ci.repoKey.Connector": "MIXED", "ci.repoKey.connector": "LOWER", "ci.repoKey.Other": "O" });
+  assert.deepEqual([...loadKeys(s)].sort(), [["connector", "LOWER"], ["other", "O"]]);
+  forgetKey(s, "connector");
+  assert.deepEqual([...loadKeys(s)], [["other", "O"]]);
 });
 
 test("forgetAll removes the token, the legacy key and every repo key, even unlisted ones", () => {

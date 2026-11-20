@@ -68,10 +68,12 @@ Open the marker link in the log, `https://ci.lascade.com/?repo=<repo>&run=<run i
 before repos were named have no `repo=` and open as `actions` runs. In Settings, paste a GitHub fine-grained token with
 Repository access "Public repositories (read-only)" and no other permissions (`ci.githubToken`, shared by all repos),
 and the private key of each repo you read (that repo's `REPO_AGE_KEY`, stored only in your browser as
-`ci.repoKey.<repo>`; an older single `ci.repoKey` moves to `ci.repoKey.actions`). Before a key is saved or used, the
-viewer checks that its public key equals the repo's committed `.github/seal/repo-key.pub` (`scripts/seal/repo-key.pub`
-for `actions`) and rejects a key for another repo. Settings lists the saved keys to replace or forget one; "Forget all"
-clears the token, every key and everything decrypted.
+`ci.repoKey.<repo>` with the repo name in lowercase, as GitHub matches names without case; an older single
+`ci.repoKey` moves to `ci.repoKey.actions`). Before a key is saved or used, the viewer checks that its public key equals
+the repo's committed `.github/seal/repo-key.pub` (`scripts/seal/repo-key.pub` for `actions`) and rejects a key for
+another repo or a rotated key. Repos without that file show "not sealed": their logs are public and export without a
+key. Settings lists the saved keys to replace or forget one; "Forget all" clears the token, every key and everything
+decrypted.
 
 `https://ci.lascade.com/` lists the public Lascade-Co repos with the `sealed-ci` topic ("Show all public repos" lists
 the rest, marked "not sealed"); the "Open" box takes a GitHub run link of any Lascade-Co repo or a run ID.

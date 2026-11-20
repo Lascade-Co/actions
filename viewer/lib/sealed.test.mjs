@@ -67,7 +67,7 @@ test("a key for another repository is rejected", async () => {
   const other = await keypair();
   await assert.rejects(checkKeyForRepo(identity, other.recipient, "connector"), (err) => {
     assert.equal(err.code, "wrong-repo");
-    assert.match(err.message, /^This key is for a different repository/);
+    assert.match(err.message, /^This key doesn't match connector's current public key \(wrong repository, or the key was rotated\)/);
     assert.match(err.message, /connector/);
     return true;
   });

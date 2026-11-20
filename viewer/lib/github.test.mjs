@@ -1,6 +1,6 @@
 import { test, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { getRun, listJobs, jobLog, listArtifacts, artifactZip, listRuns, listWorkflows, listSealedRepos, listPublicRepos, repoPublicKey, checkRepo, GitHubError } from "./github.js";
+import { getRun, listJobs, jobLog, listArtifacts, artifactZip, listRuns, listWorkflows, listSealedRepos, listPublicRepos, repoPublicKey, publicKeyPath, checkRepo, GitHubError } from "./github.js";
 
 const realFetch = globalThis.fetch;
 afterEach(() => {
@@ -211,4 +211,10 @@ test("repoPublicKey rejects a missing or malformed key file, naming it", async (
     mock(() => new Response(body));
     await assert.rejects(repoPublicKey("tok", "connector"), (err) => /\.github\/seal\/repo-key\.pub/.test(err.message) && /single age recipient/.test(err.message), JSON.stringify(body));
   }
+});
+
+test("the actions repo's key path does not depend on case", () => {
+  assert.equal(publicKeyPath("Actions"), "scripts/seal/repo-key.pub");
+  assert.equal(publicKeyPath("actions"), "scripts/seal/repo-key.pub");
+  assert.equal(publicKeyPath("Connector"), ".github/seal/repo-key.pub");
 });

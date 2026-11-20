@@ -3,7 +3,7 @@ import { getRun, listJobs, jobLog, listArtifacts, artifactZip, listRuns, listWor
 import { parseJobLog, mergeSealed } from "./lib/joblog.js";
 import { openSealedLog, openSealedArtifact, checkRepoKey, checkKeyForRepo, SealError } from "./lib/sealed.js";
 import { ansiRenderer, stripAnsi } from "./lib/ansi.js";
-import { runRow, repoRow, runState, pageInfo, maxPage, readListParams, readRoute, parsePick, isRepoName, statusOptions, duration, OWNER, DEFAULT_REPO, PER_PAGE, SEARCH_LIMIT } from "./lib/runs.js";
+import { runRow, repoRow, runState, pageInfo, maxPage, readListParams, readRoute, parsePick, isRepoName, repoId, canonicalRepoName, homeHint, statusOptions, duration, OWNER, DEFAULT_REPO, PER_PAGE, SEARCH_LIMIT } from "./lib/runs.js";
 import { exportText, exportFilename } from "./lib/export.js";
 import { migrateKeys, loadKeys, saveKey, forgetKey, forgetAll, TOKEN_KEY, LEGACY_KEY } from "./lib/keys.js";
 
@@ -69,30 +69,41 @@ function loadSettings() {
 
 const settings = loadSettings();
 
-// Session caches of each repo's public key (repo -> Promise<age1…>) and of the
-// check that the saved key matches it (repo -> {key, promise}). Forget clears both.
+// Session caches, keyed by repoId (lowercase repo name): each repo's public key
+// (Promise<age1…>) and the check that the saved key matches it ({key, promise}).
+// Forget clears both.
 const publicKeys = new Map();
 const verifiedKeys = new Map();
 
 function publicKeyFor(repo, token = settings.token) {
-  if (!publicKeys.has(repo)) {
+  const id = repoId(repo);
+  if (!publicKeys.has(id)) {
     const p = repoPublicKey(token, repo);
-    p.catch(() => publicKeys.get(repo) === p && publicKeys.delete(repo));
-    publicKeys.set(repo, p);
+    p.catch(() => publicKeys.get(id) === p && publicKeys.delete(id));
+    publicKeys.set(id, p);
   }
-  return publicKeys.get(repo);
+  return publicKeys.get(id);
+}
+
+/**
+ * Whether `repo` is sealed: true when its repo-key.pub reads, false when it has
+ * none (404), null when that cannot be told (rate limit, network).
+ */
+function sealedState(repo) {
+  return publicKeyFor(repo).then(() => true, (err) => (err?.status === 404 ? false : null));
 }
 
 /**
  * The saved key of `repo` once it is checked against the repo's repo-key.pub,
- * or null when none is saved. Rejects ("wrong-repo") when the key belongs to
- * another repo and ("unverified") when the public key cannot be read, so a key
- * is never tried on output it was not checked for.
+ * or null when none is saved. Rejects ("wrong-repo") when the key does not match
+ * (another repo's key, or a rotated one) and ("unverified") when the public key
+ * cannot be read, so a key is never tried on output it was not checked for.
  */
 function verifiedKey(repo) {
-  const key = settings.keys.get(repo);
+  const id = repoId(repo);
+  const key = settings.keys.get(id);
   if (!key) return Promise.resolve(null);
-  const cached = verifiedKeys.get(repo);
+  const cached = verifiedKeys.get(id);
   if (cached?.key === key) return cached.promise;
   const promise = publicKeyFor(repo).then(
     (pub) => checkKeyForRepo(key, pub, repo),
@@ -100,8 +111,8 @@ function verifiedKey(repo) {
       throw new SealError(`Could not check the repo key for ${repo} against its public key: ${err?.message ?? err}`, "unverified");
     },
   );
-  promise.catch(() => verifiedKeys.get(repo)?.promise === promise && verifiedKeys.delete(repo));
-  verifiedKeys.set(repo, { key, promise });
+  promise.catch(() => verifiedKeys.get(id)?.promise === promise && verifiedKeys.delete(id));
+  verifiedKeys.set(id, { key, promise });
   return promise;
 }
 
@@ -111,7 +122,17 @@ function currentRepo() {
 }
 
 function hasKey(repo) {
-  return Boolean(repo && settings.keys.get(repo));
+  return Boolean(repo && settings.keys.get(repoId(repo)));
+}
+
+// The shown repo has no saved key and may be sealed: export and unseal need one.
+// An unsealed repo (no repo-key.pub) exports its public logs without a key.
+function needsKey() {
+  return !hasKey(state.repo) && state.sealed !== false;
+}
+
+function sameRepo(a, b) {
+  return Boolean(a && b) && repoId(a) === repoId(b);
 }
 
 // --- banner and notice ------------------------------------------------------
@@ -192,8 +213,8 @@ function replaceKey(repo) {
 
 // Drops whatever was decrypted with `repo`'s key: it is only ever the repo shown.
 function dropDecrypted(repo) {
-  verifiedKeys.delete(repo);
-  if (state.repo === repo) {
+  verifiedKeys.delete(repoId(repo));
+  if (sameRepo(state.repo, repo)) {
     clearDecrypted();
     route();
   }
@@ -202,8 +223,8 @@ function dropDecrypted(repo) {
 function forgetOneKey(repo) {
   cancelPendingSave();
   withStorage((s) => forgetKey(s, repo));
-  settings.keys.delete(repo);
-  if (repo === DEFAULT_REPO) store(LEGACY_KEY, "");
+  settings.keys.delete(repoId(repo));
+  if (repoId(repo) === DEFAULT_REPO) store(LEGACY_KEY, "");
   renderKeyList();
   dropDecrypted(repo);
 }
@@ -255,17 +276,19 @@ async function saveSettings(ev) {
     if (gen !== dialogGen || !$("settings").open) return;
   }
   const tokenChanged = token !== settings.token;
-  const keyChanged = Boolean(key) && key !== settings.keys.get(repo);
+  const keyChanged = Boolean(key) && key !== settings.keys.get(repoId(repo));
   settings.token = token;
   let saved = store(TOKEN_KEY, token);
   if (key) {
-    settings.keys.set(repo, key);
+    settings.keys.set(repoId(repo), key);
+    // Its repo-key.pub just read, so the repo is sealed.
+    if (sameRepo(state.repo, repo)) state.sealed = true;
     saved = withStorage((s) => saveKey(s, repo, key)) && saved;
   }
   $("settings").close();
   if (!saved) banner("This browser blocks local storage, so the settings last only until you close the tab.", { sticky: true });
   if (tokenChanged) {
-    if (keyChanged) verifiedKeys.delete(repo);
+    if (keyChanged) verifiedKeys.delete(repoId(repo));
     clearDecrypted();
     route();
   } else if (keyChanged) dropDecrypted(repo);
@@ -295,7 +318,10 @@ function forgetSettings() {
 // --- state ------------------------------------------------------------------
 
 const state = {
-  repo: null, // the repo whose runs are loaded below
+  repo: null, // the repo being browsed, as the URL (or GitHub, once a run loads) spells it
+  loadedRepo: null, // the repo of the loaded run below
+  homeRepo: null, // the repo whose runs list is shown (picker: null)
+  sealed: null, // whether `repo` has a repo-key.pub: true, false or null (unknown)
   sealedRepos: null, // Promise<repos with the sealed-ci topic> for the picker
   runId: null,
   run: null,
@@ -318,7 +344,7 @@ const state = {
 function clearDecrypted() {
   state.seq++;
   state.gen++;
-  Object.assign(state, { runId: null, run: null, attempt: null, jobs: [], artifacts: [], view: null, job: null, workflows: null, exporting: false });
+  Object.assign(state, { loadedRepo: null, runId: null, run: null, attempt: null, jobs: [], artifacts: [], view: null, job: null, workflows: null, exporting: false });
   state.sealedLogs.clear();
   state.sealedArtifacts.clear();
   state.jobLogs.clear();
@@ -392,11 +418,14 @@ const STATE_LABEL = {
 async function route() {
   const p = params();
   const r = readRoute(p);
-  // Another repo: drop the last one's run, caches and workflow list.
-  if (r.repo && r.repo !== state.repo) {
+  // Another repo (names compare without case): drop the last one's run, caches
+  // and workflow list. The same repo spelled differently keeps them.
+  if (r.repo && !sameRepo(r.repo, state.repo)) {
     clearDecrypted();
-    state.repo = r.repo;
+    state.sealed = null;
+    loadSealed(r.repo);
   }
+  if (r.repo) state.repo = r.repo;
   if (r.view === "repos") {
     showRepos(p, r.error);
     return;
@@ -420,7 +449,7 @@ async function route() {
   const wanted = attemptParam && /^\d+$/.test(attemptParam) ? Number(attemptParam) : null;
   const seq = ++state.seq;
   try {
-    if (!state.run || state.runId !== runParam || state.repo !== repo || (wanted && wanted !== state.attempt) || (!wanted && state.attempt !== state.run.run_attempt)) {
+    if (!state.run || state.runId !== runParam || !sameRepo(state.loadedRepo, repo) || (wanted && wanted !== state.attempt) || (!wanted && state.attempt !== state.run.run_attempt)) {
       clearBanner();
       cancelExport();
       $("run").hidden = false;
@@ -435,13 +464,20 @@ async function route() {
       ]);
       if (seq !== state.seq) return;
       state.gen++;
-      Object.assign(state, { runId: runParam, run, attempt, jobs, artifacts, job: null, exporting: false });
+      // The URL named the repo in another case: use GitHub's name from now on.
+      const canonical = canonicalRepoName(repo, run?.repository?.name);
+      if (canonical) state.repo = canonical;
+      Object.assign(state, { loadedRepo: state.repo, runId: runParam, run, attempt, jobs, artifacts, job: null, exporting: false });
       state.sealedLogs.clear();
       state.sealedArtifacts.clear();
       state.jobLogs.clear();
       setExportStatus("");
       renderRunMeta();
       renderJobs();
+      if (canonical) {
+        navigate({ repo: canonical }, { push: false });
+        return;
+      }
     }
     if (seq !== state.seq) return;
     $("run").hidden = false;
@@ -484,16 +520,31 @@ function showHome(repo, error) {
   else $("home-h").replaceChildren("Repositories");
   document.title = repo ? `${repo} · CI Logs` : "CI Logs";
   fieldError("pick-error", error);
-  let hint = "";
-  if (!settings.token) {
-    hint = repo
-      ? `Without a token GitHub allows 60 requests an hour. Add a GitHub token and the repo key for ${repo} in Settings to raise the limit and open runs.`
-      : "Without a token GitHub allows 60 requests an hour. Add a GitHub token in Settings to raise the limit and open runs.";
-  } else if (repo && !hasKey(repo)) hint = `Add the repo key for ${repo} in Settings to see its sealed output.`;
-  $("home-hint-text").textContent = hint;
-  $("home-hint").hidden = !hint;
+  state.homeRepo = repo;
+  renderHint();
   if (!$("banner").dataset.sticky) clearBanner();
   cancelExport();
+}
+
+// The hint above the list: the token when missing, and the repo key only for a
+// sealed repo (an unsealed one says its logs are public).
+function renderHint() {
+  const repo = state.homeRepo;
+  const { text, settings: offer } = homeHint({ repo, token: Boolean(settings.token), hasKey: hasKey(repo), sealed: repo ? state.sealed : null });
+  $("home-hint-text").textContent = text;
+  $("home-settings").hidden = !offer;
+  $("home-hint").hidden = !text;
+}
+
+// Learns whether `repo` is sealed (it has a repo-key.pub; cached per session)
+// and refreshes what depends on it while that repo is still shown.
+function loadSealed(repo) {
+  sealedState(repo).then((sealed) => {
+    if (!sameRepo(state.repo, repo)) return;
+    state.sealed = sealed;
+    renderHint();
+    updateExportControls();
+  });
 }
 
 function showRuns(p, repo, error) {
@@ -568,7 +619,7 @@ async function fillWorkflows(repo, selected) {
   } catch {
     // The list still works without the filter's names.
   }
-  if (state.repo !== repo || (pending !== state.workflows && state.workflows !== null)) return;
+  if (!sameRepo(state.repo, repo) || (pending !== state.workflows && state.workflows !== null)) return;
   const options = [el("option", { value: "" }, "All workflows")];
   const sorted = [...workflows].filter((w) => /^\d+$/.test(String(w.id))).sort((a, b) => String(a.name).localeCompare(String(b.name)));
   for (const w of sorted) options.push(el("option", { value: String(w.id) }, w.name || w.path || `Workflow ${w.id}`));
@@ -910,7 +961,7 @@ async function loadJobSections(job, wanted = () => true) {
     const art = findArtifact(name);
     if (!art) return reasons.set(name, "sealed log not found: it was not uploaded or has been deleted");
     if (art.expired) return reasons.set(name, "sealed log expired: artifacts are kept for 7 days");
-    if (badKey?.code === "wrong-repo") return reasons.set(name, "the saved key is for a different repository");
+    if (badKey?.code === "wrong-repo") return reasons.set(name, `the saved key doesn't match ${repo}'s current public key`);
     if (badKey) return reasons.set(name, "the repo key could not be checked");
     if (!key) return reasons.set(name, `add the repo key for ${repo} in Settings to see it`);
     try {
@@ -984,7 +1035,7 @@ function cancelExport() {
 }
 
 function updateExportControls() {
-  const noKey = !hasKey(state.repo);
+  const noKey = needsKey();
   $("export-job").disabled = noKey || state.exporting || !state.job;
   $("export-all").disabled = noKey || state.exporting || !state.jobs.length;
   $("export-hint").hidden = !noKey;
@@ -1007,7 +1058,7 @@ async function exportJob(job, wanted) {
 // Downloads the current job's (or every job's) log as plain text. Forget, new
 // settings or another run bump state.gen, which abandons the export.
 async function exportLogs(all) {
-  if (!hasKey(state.repo)) {
+  if (needsKey()) {
     banner(`Add the repo key for ${state.repo} in Settings to export logs with their sealed output.`, { settingsAction: true });
     return;
   }
@@ -1237,7 +1288,7 @@ function showArtifacts() {
     $("artifacts").replaceChildren(el("p", { class: "muted" }, "This run has no artifacts besides its sealed logs."));
     return;
   }
-  if (!hasKey(state.repo)) banner(`Add the repo key for ${state.repo} in Settings to unseal artifacts.`, { settingsAction: true });
+  if (needsKey()) banner(`Add the repo key for ${state.repo} in Settings to unseal artifacts.`, { settingsAction: true });
   $("artifacts").replaceChildren(...list.map(artifactCard));
 }
 

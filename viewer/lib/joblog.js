@@ -41,8 +41,10 @@ function parseLine(raw, expected) {
   const mk = LINE_MARKER_RE.exec(line.text);
   // A marker naming another repo or run is left as a plain line. Any attempt of
   // this run binds: jobs carried over by "Re-run failed jobs" keep earlier-attempt markers.
+  // Repo names compare without case, as GitHub matches them.
   const repo = mk?.[3] ?? DEFAULT_REPO;
-  if (mk && (!expected || (repo === (expected.repo ?? DEFAULT_REPO) && mk[4] === String(expected.run)))) {
+  const sameRepo = () => repo.toLowerCase() === String(expected.repo ?? DEFAULT_REPO).toLowerCase();
+  if (mk && (!expected || (sameRepo() && mk[4] === String(expected.run)))) {
     line.marker = { artifact: mk[1], seq: Number(mk[2]), repo, run: mk[4], attempt: mk[5] };
   }
   return line;

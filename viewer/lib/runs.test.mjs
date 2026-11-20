@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { runRow, pageInfo, maxPage, runsQuery, relativeTime, duration, runState, readListParams, statusOptions, isRepoName, readRoute, parsePick, repoRow, SEARCH_LIMIT, STATUS_FILTERS } from "./runs.js";
+import { runRow, pageInfo, maxPage, runsQuery, relativeTime, duration, runState, readListParams, statusOptions, isRepoName, readRoute, parsePick, repoRow, repoId, canonicalRepoName, homeHint, SEARCH_LIMIT, STATUS_FILTERS } from "./runs.js";
 
 const NOW = Date.parse("2026-11-20T12:00:00Z");
 
@@ -193,6 +193,37 @@ test("repoRow maps a repo from the API to a picker row", () => {
   assert.equal(repoRow({ ...repo, topics: undefined }, NOW, new Set(["connector"])).sealed, true);
   assert.equal(repoRow({ ...repo, description: null }, NOW).description, "");
   assert.equal(repoRow({ ...repo, name: "../x" }, NOW), null);
+});
+
+test("repoId folds case, as GitHub matches repo names", () => {
+  assert.equal(repoId("Connector"), "connector");
+  assert.equal(repoId("actions"), "actions");
+});
+
+test("canonicalRepoName returns the API's name only when it differs by case alone", () => {
+  assert.equal(canonicalRepoName("Connector", "connector"), "connector");
+  assert.equal(canonicalRepoName("connector", "connector"), null);
+  assert.equal(canonicalRepoName("connector", "other"), null);
+  assert.equal(canonicalRepoName("connector", undefined), null);
+  assert.equal(canonicalRepoName("x", "X/../y"), null);
+});
+
+test("homeHint asks for a key only for sealed repos", () => {
+  const h = (o) => homeHint({ repo: "connector", token: true, hasKey: false, sealed: null, ...o });
+  assert.deepEqual(h({ sealed: true }), { text: "Add the repo key for connector in Settings to see its sealed output.", settings: true });
+  assert.deepEqual(h({ sealed: false }), { text: "This repository is not sealed; logs are public.", settings: false });
+  // Unknown (the key file could not be read): say nothing rather than guess.
+  assert.deepEqual(h({ sealed: null }), { text: "", settings: false });
+  assert.deepEqual(h({ sealed: true, hasKey: true }), { text: "", settings: false });
+  assert.match(h({ token: false, sealed: true }).text, /^Without a token .*the repo key for connector/);
+  assert.equal(h({ token: false, sealed: true }).settings, true);
+  const unsealed = h({ token: false, sealed: false });
+  assert.match(unsealed.text, /^This repository is not sealed; logs are public\. Without a token/);
+  assert.doesNotMatch(unsealed.text, /repo key/);
+  assert.doesNotMatch(h({ token: false, sealed: null }).text, /repo key/);
+  // The picker has no repo.
+  assert.match(homeHint({ repo: null, token: false }).text, /^Without a token/);
+  assert.deepEqual(homeHint({ repo: null, token: true }), { text: "", settings: false });
 });
 
 test("maxPage is the last page GitHub serves for a search filter", () => {
