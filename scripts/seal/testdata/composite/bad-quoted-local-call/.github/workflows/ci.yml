@@ -1,0 +1,6 @@
+name: ci
+on:
+  push:
+jobs:
+  c:
+    uses: "./.github/workflows/callee.yaml"

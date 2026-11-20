@@ -1,0 +1,46 @@
+name: Seal policy
+
+# Reusable: every sealed repo calls this on push and pull_request, with no secrets.
+# It runs the workflow policy (scripts/seal/test_workflow_policy.py) against the caller's checkout.
+# This workflow runs in callers' repos, so it always uses the composite seal pair, never the
+# verbatim curl setup at workflow_sha.
+
+on:
+  workflow_call:
+
+defaults:
+  run:
+    shell: "seal-bash-e {0}"
+
+jobs:
+  policy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Seal job output
+        uses: Lascade-Co/actions/actions/seal@seal-v1
+      - name: Check out caller
+        uses: actions/checkout@v7
+        with:
+          path: target
+          persist-credentials: false
+      - name: Check out policy toolkit
+        uses: actions/checkout@v7
+        with:
+          repository: Lascade-Co/actions
+          ref: seal-v1
+          path: control
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+      - name: Install test dependencies
+        run: pip install pytest==9.1.1 pyyaml==6.0.3
+      - name: Run seal workflow policy
+        env:
+          SEAL_POLICY_ROOT: ${{ github.workspace }}/target
+          SEAL_POLICY_THIS_REPO: ${{ github.repository == 'Lascade-Co/actions' }}
+        run: pytest control/scripts/seal/test_workflow_policy.py -q
+      - if: always()
+        uses: Lascade-Co/actions/actions/seal-upload@seal-v1
