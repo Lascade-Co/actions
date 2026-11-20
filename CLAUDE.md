@@ -12,6 +12,7 @@ This repo contains GitHub actions that are invokend by `repository_dispatch` / `
 - Never use plain `shell: bash` (or any other unsealed shell) outside the setup step, and use `echo "::add-mask::$VALUE"` before a third-party action or `github-script` could print a private value (mask in an earlier sealed step, never via the same step's `env:`; never mask public metadata; the public step header shows expanded `run:` and `env:`, so keep private values out of them). See `docs/sealed-output.md`.
 - Pack artifacts with `seal-pack` and upload from `$RUNNER_TEMP/seal/` with `retention-days` of at most 7; after `download-artifact`, run `seal-unpack` with `REPO_AGE_KEY` from secrets. Only `upload-pages-artifact` may upload unsealed. See `docs/sealed-output.md`.
 - `pull_request` workflows may not reference secrets and `pull_request_target` is banned; `scripts/seal/test_workflow_policy.py` enforces the sealing rules. See `docs/sealed-output.md`.
+- After changing `scripts/seal` or `actions/seal*`, move the `seal-v1` tag once tests pass on `main` (see `docs/sealed-output.md`).
 
 
 ## Vinext deployment
