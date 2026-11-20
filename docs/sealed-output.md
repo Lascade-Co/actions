@@ -68,24 +68,27 @@ Open the marker link in the log, `https://ci.lascade.com/?repo=<repo>&run=<run i
 private key (stored only in your browser, one per repo) and a GitHub fine-grained token with Repository access "Public
 repositories (read-only)" and no other permissions (`ci.githubToken`).
 
-`https://ci.lascade.com/` without `?run=` lists recent runs (filter by workflow and status, 25 per page; it works
-without a token at GitHub's 60 requests an hour). In a run, "Export logs" downloads the job's or every job's log as
-plain text with sealed output merged in and ANSI codes stripped; it needs the repo key.
+`https://ci.lascade.com/` without `?run=` lists recent runs; "Export logs" in a run downloads its log as plain text (needs the repo key).
 
-## Rotate the repo key
+## Generating or rotating a repo key
 
-1. `age-keygen -o key.txt`; put the whole `AGE-SECRET-KEY-1...` line, prefix included, into Infisical as
-   `REPO_AGE_KEY` (it syncs to the Actions secret). Delete `key.txt`.
-2. Write the new public key (`age-keygen -y`) to `scripts/seal/repo-key.pub` and commit it.
-3. Artifacts sealed to the old key become unreadable with the new one; they expire within 7 days.
+The private half must never touch disk or chat. macOS (Linux: pipe to `xclip -selection clipboard` or `wl-copy`):
+
+```sh
+k=$(age-keygen 2>/dev/null); printf '%s' "$k" | grep '^AGE-SECRET-KEY-' | tr -d '\n' | pbcopy; printf '%s\n' "$k" | grep -o 'age1[0-9a-z]*'; unset k
+```
+
+1. Paste the clipboard into Infisical as `REPO_AGE_KEY`, `AGE-SECRET-KEY-1` prefix intact (it syncs to the repo's
+   Actions secrets). The command prints the public `age1...` line.
+2. Commit only that line: `scripts/seal/repo-key.pub` here, `.github/seal/repo-key.pub` in other repos.
+3. After a rotation, artifacts sealed to the old key become unreadable; they expire within 7 days.
 
 ## Sealing another repository
 
-Other Lascade-Co repos use the same toolkit through two composite actions. Checklist for a frozen repository
-(one that stays private until sealed; never run Actions in it while private):
+Other Lascade-Co repos use the same toolkit through two composite actions. Checklist for a frozen repository (see
+`CONTEXT.md`). Actions stays disabled while the repo is private, including while you commit these changes.
 
-1. Run `age-keygen` yourself. Put the private `AGE-SECRET-KEY-1...` line in Infisical as `REPO_AGE_KEY`, synced to
-   the repo's Actions secrets. Commit the public `age1...` line as `.github/seal/repo-key.pub`.
+1. Generate the key pair as above and commit `.github/seal/repo-key.pub`.
 2. First step of every job, no `with:`:
 
    ```yaml
@@ -93,6 +96,7 @@ Other Lascade-Co repos use the same toolkit through two composite actions. Check
      uses: Lascade-Co/actions/actions/seal@seal-v1
    ```
 
+   Jobs with a `permissions:` block need `contents: read`; the seal step reads the key file through the API.
 3. Last step of every job:
 
    ```yaml
@@ -101,8 +105,7 @@ Other Lascade-Co repos use the same toolkit through two composite actions. Check
    ```
 
 4. Default shell `seal-bash {0}` / `seal-bash-e {0}`, masks, and `seal-pack`/`seal-unpack` artifacts follow the rules
-   above unchanged. A job with a `permissions:` block needs `contents: read`; the seal step reads the key file
-   through the API with the job token.
+   above unchanged.
 5. Add `.github/workflows/seal-policy.yml`, which enforces the rules in that repo:
 
    ```yaml
@@ -115,13 +118,12 @@ Other Lascade-Co repos use the same toolkit through two composite actions. Check
        uses: Lascade-Co/actions/.github/workflows/seal-policy.yml@seal-v1
    ```
 
-6. Add the `sealed-ci` topic so the viewer lists the repo.
-7. Purge every run from before sealing with `scripts/seal/purge_runs.py` (logs are archived locally first).
-8. Make the repo public, enable Actions, then check a run at `https://ci.lascade.com/?repo=<name>`.
-
-Add the "Sealed output" section from `docs/sealed-repo-claude.md` to the repo's `CLAUDE.md`.
+6. Add the `sealed-ci` topic, and the "Sealed output" section from `docs/sealed-repo-claude.md` to the repo's `CLAUDE.md`.
+7. Before the repo goes public, purge every pre-sealing run (`scripts/seal/purge_runs.py`, archive to
+   `~/Downloads/actions-log-archive/<repo>/`).
+8. Only after the purge: make public, then enable Actions, then verify at `https://ci.lascade.com/?repo=<repo>`.
 
 ## Updating the seal action
 
-`seal-v1` is a moving tag. After toolkit changes (`scripts/seal`, `actions/seal*`) pass on `main`, move it with
-`git tag -f seal-v1 <sha> && git push -f origin seal-v1`. Every sealed repo picks it up on its next run.
+`seal-v1` is a moving tag. After toolkit changes pass on `main`, run `git tag -f seal-v1 <sha> && git push -f origin seal-v1`
+from a `main` commit whose seal tests passed; a bad move breaks every sealed repo's next run.
