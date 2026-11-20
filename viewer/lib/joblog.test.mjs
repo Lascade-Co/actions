@@ -38,7 +38,7 @@ test("parseJobLog parses the marker line", () => {
   const sections = parseJobLog(FIXTURE);
   const markers = sections.flatMap((s) => s.lines.filter((l) => l.marker));
   assert.equal(markers.length, 1);
-  assert.deepEqual(markers[0].marker, { artifact: ART, seq: 2, run: "1", attempt: "1" });
+  assert.deepEqual(markers[0].marker, { artifact: ART, seq: 2, repo: "actions", run: "1", attempt: "1" });
   assert.equal(markers[0].ts, "2026-11-20T10:00:00.0000000Z");
   assert.ok(MARKER_RE.test(markers[0].text));
 });
@@ -96,7 +96,7 @@ const markerLine = (rest) => `2026-11-20T10:00:00.0000000Z ${rest}`;
 
 test("parseJobLog parses run and attempt from the marker URL", () => {
   const [s] = parseJobLog(markerLine(`🔒 sealed ${ART}#2 ${URL1}`));
-  assert.deepEqual(s.lines[0].marker, { artifact: ART, seq: 2, run: "1", attempt: "1" });
+  assert.deepEqual(s.lines[0].marker, { artifact: ART, seq: 2, repo: "actions", run: "1", attempt: "1" });
 });
 
 test("only a marker that is the whole line counts", () => {
@@ -114,7 +114,7 @@ test("a marker binds for any attempt of the same run, not for another run", () =
     markerLine(`🔒 sealed ${ART}#2 https://ci.lascade.com/?run=1&attempt=1`),
     markerLine(`🔒 sealed ${ART}#3 https://ci.lascade.com/?run=1&attempt=2`),
   ].join("\n");
-  const lines = parseJobLog(log, { run: 1 })[0].lines;
+  const lines = parseJobLog(log, { repo: "actions", run: 1 })[0].lines;
   assert.deepEqual(lines.map((l) => l.marker?.seq ?? null), [null, 2, 3]);
   // Without an expected run, every whole-line marker parses.
   assert.equal(parseJobLog(log)[0].lines.filter((l) => l.marker).length, 3);
@@ -126,6 +126,38 @@ test("mergeSealed consumes each artifact#seq at most once", () => {
   const texts = merged[0].lines.map((l) => l.text);
   assert.deepEqual(texts, ["secret", "🔒 sealed output unavailable (duplicate marker)"]);
   assert.equal(merged[0].lines[1].unavailable, true);
+});
+
+test("parseJobLog parses the repo from a marker URL", () => {
+  const [s] = parseJobLog(markerLine(`🔒 sealed ${ART}#4 https://ci.lascade.com/?repo=connector&run=9&attempt=2`));
+  assert.deepEqual(s.lines[0].marker, { artifact: ART, seq: 4, repo: "connector", run: "9", attempt: "2" });
+});
+
+test("a marker binds only when both its repo and run match", () => {
+  const log = [
+    markerLine(`🔒 sealed ${ART}#1 https://ci.lascade.com/?repo=connector&run=1&attempt=1`),
+    markerLine(`🔒 sealed ${ART}#2 https://ci.lascade.com/?repo=actions&run=1&attempt=1`),
+    markerLine(`🔒 sealed ${ART}#3 https://ci.lascade.com/?run=1&attempt=1`),
+    markerLine(`🔒 sealed ${ART}#4 https://ci.lascade.com/?repo=connector&run=2&attempt=1`),
+    markerLine(`🔒 sealed ${ART}#5 https://ci.lascade.com/?repo=connector&run=1&attempt=3`),
+  ].join("\n");
+  const seqs = (expected) => parseJobLog(log, expected)[0].lines.map((l) => l.marker?.seq ?? null);
+  assert.deepEqual(seqs({ repo: "connector", run: 1 }), [1, null, null, null, 5]);
+  // An old marker without repo= means the actions repo.
+  assert.deepEqual(seqs({ repo: "actions", run: 1 }), [null, 2, 3, null, null]);
+  // An expectation without a repo is the actions repo too.
+  assert.deepEqual(seqs({ run: 1 }), [null, 2, 3, null, null]);
+});
+
+test("a marker with a malformed repo or extra parameters is not a marker", () => {
+  const log = [
+    markerLine(`🔒 sealed ${ART}#1 https://ci.lascade.com/?repo=a/b&run=1&attempt=1`),
+    markerLine(`🔒 sealed ${ART}#2 https://ci.lascade.com/?repo=&run=1&attempt=1`),
+    markerLine(`🔒 sealed ${ART}#3 https://ci.lascade.com/?run=1&attempt=1&repo=connector`),
+    markerLine(`🔒 sealed ${ART}#4 https://ci.lascade.com/?repo=x&repo=connector&run=1&attempt=1`),
+    markerLine(`🔒 sealed ${ART}#5 https://ci.lascade.com/?repo=${"x".repeat(101)}&run=1&attempt=1`),
+  ].join("\n");
+  assert.ok(parseJobLog(log)[0].lines.every((l) => !l.marker));
 });
 
 test("parseJobLog drops an empty preamble", () => {

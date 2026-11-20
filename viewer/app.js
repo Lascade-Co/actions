@@ -1,13 +1,12 @@
-// CI Logs: opens sealed Actions logs and artifacts of Lascade-Co/actions.
-import { getRun, listJobs, jobLog, listArtifacts, artifactZip, listRuns, listWorkflows, REPO } from "./lib/github.js";
+// CI Logs: opens sealed Actions logs and artifacts of the public Lascade-Co repos.
+import { getRun, listJobs, jobLog, listArtifacts, artifactZip, listRuns, listWorkflows, listSealedRepos, listPublicRepos, repoPublicKey } from "./lib/github.js";
 import { parseJobLog, mergeSealed } from "./lib/joblog.js";
-import { openSealedLog, openSealedArtifact, checkRepoKey } from "./lib/sealed.js";
+import { openSealedLog, openSealedArtifact, checkRepoKey, checkKeyForRepo, SealError } from "./lib/sealed.js";
 import { ansiRenderer, stripAnsi } from "./lib/ansi.js";
-import { runRow, runState, pageInfo, maxPage, readListParams, statusOptions, duration, PER_PAGE, SEARCH_LIMIT } from "./lib/runs.js";
+import { runRow, repoRow, runState, pageInfo, maxPage, readListParams, readRoute, parsePick, isRepoName, statusOptions, duration, OWNER, DEFAULT_REPO, PER_PAGE, SEARCH_LIMIT } from "./lib/runs.js";
 import { exportText, exportFilename } from "./lib/export.js";
+import { migrateKeys, loadKeys, saveKey, forgetKey, forgetAll, TOKEN_KEY, LEGACY_KEY } from "./lib/keys.js";
 
-const KEY = "ci.repoKey";
-const TOKEN = "ci.githubToken";
 const PREVIEW_MAX = 1024 * 1024; // per file
 const PREVIEW_BUDGET = 5 * 1024 * 1024; // per unsealed artifact
 const ENTRY_ROWS_MAX = 1000;
@@ -46,7 +45,74 @@ function store(k, v) {
   }
 }
 
-const settings = { key: load(KEY), token: load(TOKEN) };
+// Runs `fn(localStorage)`; false when storage is unavailable or refuses the change.
+function withStorage(fn) {
+  try {
+    fn(localStorage);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// One shared token and one key per repo (ci.repoKey.<repo>). The single key of
+// older versions (ci.repoKey) was the actions repo's and moves there once.
+function loadSettings() {
+  withStorage(migrateKeys);
+  let keys = new Map();
+  withStorage((s) => (keys = loadKeys(s)));
+  // Storage refused the migration: keep using the legacy key for this tab.
+  const legacy = load(LEGACY_KEY);
+  if (legacy && !keys.has(DEFAULT_REPO)) keys.set(DEFAULT_REPO, legacy);
+  return { token: load(TOKEN_KEY), keys };
+}
+
+const settings = loadSettings();
+
+// Session caches of each repo's public key (repo -> Promise<age1…>) and of the
+// check that the saved key matches it (repo -> {key, promise}). Forget clears both.
+const publicKeys = new Map();
+const verifiedKeys = new Map();
+
+function publicKeyFor(repo, token = settings.token) {
+  if (!publicKeys.has(repo)) {
+    const p = repoPublicKey(token, repo);
+    p.catch(() => publicKeys.get(repo) === p && publicKeys.delete(repo));
+    publicKeys.set(repo, p);
+  }
+  return publicKeys.get(repo);
+}
+
+/**
+ * The saved key of `repo` once it is checked against the repo's repo-key.pub,
+ * or null when none is saved. Rejects ("wrong-repo") when the key belongs to
+ * another repo and ("unverified") when the public key cannot be read, so a key
+ * is never tried on output it was not checked for.
+ */
+function verifiedKey(repo) {
+  const key = settings.keys.get(repo);
+  if (!key) return Promise.resolve(null);
+  const cached = verifiedKeys.get(repo);
+  if (cached?.key === key) return cached.promise;
+  const promise = publicKeyFor(repo).then(
+    (pub) => checkKeyForRepo(key, pub, repo),
+    (err) => {
+      throw new SealError(`Could not check the repo key for ${repo} against its public key: ${err?.message ?? err}`, "unverified");
+    },
+  );
+  promise.catch(() => verifiedKeys.get(repo)?.promise === promise && verifiedKeys.delete(repo));
+  verifiedKeys.set(repo, { key, promise });
+  return promise;
+}
+
+/** The repo being browsed (picker: null). */
+function currentRepo() {
+  return readRoute(params()).repo;
+}
+
+function hasKey(repo) {
+  return Boolean(repo && settings.keys.get(repo));
+}
 
 // --- banner and notice ------------------------------------------------------
 
@@ -68,7 +134,8 @@ function notice(message) {
 function report(err) {
   const status = err?.status;
   const code = err?.code;
-  banner(err?.message ?? String(err), { settingsAction: status === 401 || code === "bad-key" || code === "no-key" });
+  const keyAction = ["bad-key", "no-key", "wrong-repo"].includes(code);
+  banner(err?.message ?? String(err), { settingsAction: status === 401 || keyAction });
 }
 
 // --- settings dialog --------------------------------------------------------
@@ -78,29 +145,88 @@ function fieldError(id, message) {
   $(id).hidden = !message;
 }
 
+// Bumped whenever the dialog opens, closes or forgets, so a key check still in
+// flight never saves into a dialog the user has left.
+let dialogGen = 0;
+
+function cancelPendingSave() {
+  dialogGen++;
+  $("save-settings").disabled = false;
+  keyStatus("");
+}
+
+function keyStatus(message) {
+  $("key-status").textContent = message ?? "";
+  $("key-status").hidden = !message;
+}
+
+function renderKeyList() {
+  const repos = [...settings.keys.keys()].sort((a, b) => a.localeCompare(b));
+  $("key-list").replaceChildren(...repos.map((repo) => el("li", {},
+    el("code", {}, repo),
+    el("button", { type: "button", class: "btn btn-small", "aria-label": `Replace the key for ${repo}`, onclick: () => replaceKey(repo) }, "Replace"),
+    el("button", { type: "button", class: "btn btn-small btn-danger", "aria-label": `Forget the key for ${repo}`, onclick: () => forgetOneKey(repo) }, "Forget"))));
+  $("key-list-empty").hidden = repos.length > 0;
+}
+
 function openSettings() {
-  $("repo-key").value = settings.key;
+  cancelPendingSave();
+  const repo = currentRepo() ?? "";
+  $("key-repo").value = repo;
+  $("repo-key").value = "";
+  $("repo-key").placeholder = hasKey(repo) ? "Saved: paste a new key to replace it" : "AGE-SECRET-KEY-1…";
   $("gh-token").value = settings.token;
   fieldError("key-error");
   fieldError("token-error");
+  renderKeyList();
   if (!$("settings").open) $("settings").showModal();
 }
 
-function saveSettings(ev) {
+function replaceKey(repo) {
+  $("key-repo").value = repo;
+  $("repo-key").value = "";
+  $("repo-key").placeholder = "Paste the new key";
+  fieldError("key-error");
+  $("repo-key").focus();
+}
+
+// Drops whatever was decrypted with `repo`'s key: it is only ever the repo shown.
+function dropDecrypted(repo) {
+  verifiedKeys.delete(repo);
+  if (state.repo === repo) {
+    clearDecrypted();
+    route();
+  }
+}
+
+function forgetOneKey(repo) {
+  cancelPendingSave();
+  withStorage((s) => forgetKey(s, repo));
+  settings.keys.delete(repo);
+  if (repo === DEFAULT_REPO) store(LEGACY_KEY, "");
+  renderKeyList();
+  dropDecrypted(repo);
+}
+
+async function saveSettings(ev) {
   ev.preventDefault();
+  const gen = ++dialogGen;
+  const repo = $("key-repo").value.trim();
   const rawKey = $("repo-key").value.trim();
   const token = $("gh-token").value.trim();
   let key = "";
   let ok = true;
+  fieldError("key-error");
+  keyStatus("");
   if (rawKey) {
     try {
+      if (!isRepoName(repo)) throw new Error(repo ? `“${repo}” is not a repository name.` : "Enter the repository this key is for.");
       key = checkRepoKey(rawKey);
-      fieldError("key-error");
     } catch (err) {
       fieldError("key-error", err.message);
       ok = false;
     }
-  } else fieldError("key-error");
+  }
   if (!token) {
     fieldError("token-error", "A GitHub token is required to read the run's logs.");
     ok = false;
@@ -109,25 +235,58 @@ function saveSettings(ev) {
     ok = false;
   } else fieldError("token-error");
   if (!ok) return;
-  const changed = key !== settings.key || token !== settings.token;
-  settings.key = key;
+  if (key) {
+    // Accept the key only when it opens this repo's output: its recipient must be
+    // the repo's committed repo-key.pub.
+    $("save-settings").disabled = true;
+    keyStatus(`Checking the key against the public key of ${OWNER}/${repo}…`);
+    try {
+      key = await checkKeyForRepo(key, await publicKeyFor(repo, token), repo);
+    } catch (err) {
+      if (gen !== dialogGen) return;
+      fieldError("key-error", err?.code === "wrong-repo" || err?.code === "bad-key" ? err.message : `Could not check the key: ${err?.message ?? err}`);
+      return;
+    } finally {
+      if (gen === dialogGen) {
+        $("save-settings").disabled = false;
+        keyStatus("");
+      }
+    }
+    if (gen !== dialogGen || !$("settings").open) return;
+  }
+  const tokenChanged = token !== settings.token;
+  const keyChanged = Boolean(key) && key !== settings.keys.get(repo);
   settings.token = token;
-  const saved = store(KEY, key) && store(TOKEN, token);
+  let saved = store(TOKEN_KEY, token);
+  if (key) {
+    settings.keys.set(repo, key);
+    saved = withStorage((s) => saveKey(s, repo, key)) && saved;
+  }
   $("settings").close();
   if (!saved) banner("This browser blocks local storage, so the settings last only until you close the tab.", { sticky: true });
-  if (changed) {
+  if (tokenChanged) {
+    if (keyChanged) verifiedKeys.delete(repo);
     clearDecrypted();
     route();
-  }
+  } else if (keyChanged) dropDecrypted(repo);
 }
 
+// Forget all: the token, every repo's key (stored ones included, listed or not),
+// the public key caches and everything decrypted.
 function forgetSettings() {
-  store(KEY, "");
-  store(TOKEN, "");
-  settings.key = "";
+  cancelPendingSave();
+  withStorage(forgetAll);
+  store(TOKEN_KEY, "");
+  store(LEGACY_KEY, "");
   settings.token = "";
+  settings.keys.clear();
+  publicKeys.clear();
+  verifiedKeys.clear();
+  state.sealedRepos = null;
   $("repo-key").value = "";
   $("gh-token").value = "";
+  $("key-repo").value = "";
+  renderKeyList();
   clearDecrypted();
   $("settings").close();
   route();
@@ -136,6 +295,8 @@ function forgetSettings() {
 // --- state ------------------------------------------------------------------
 
 const state = {
+  repo: null, // the repo whose runs are loaded below
+  sealedRepos: null, // Promise<repos with the sealed-ci topic> for the picker
   runId: null,
   run: null,
   attempt: null,
@@ -168,6 +329,8 @@ function clearDecrypted() {
   $("run").hidden = true;
   $("runs").replaceChildren();
   $("pager").replaceChildren();
+  $("repos").replaceChildren();
+  $("repos-pager").replaceChildren();
   setExportStatus("");
   updateExportControls();
   notice("");
@@ -228,15 +391,21 @@ const STATE_LABEL = {
 
 async function route() {
   const p = params();
-  const runParam = p.get("run");
-  if (!runParam) {
-    showRuns(p);
+  const r = readRoute(p);
+  // Another repo: drop the last one's run, caches and workflow list.
+  if (r.repo && r.repo !== state.repo) {
+    clearDecrypted();
+    state.repo = r.repo;
+  }
+  if (r.view === "repos") {
+    showRepos(p, r.error);
     return;
   }
-  if (!/^\d+$/.test(runParam)) {
-    showRuns(new URLSearchParams(), `“${runParam}” is not a run ID.`);
+  if (r.view === "runs") {
+    showRuns(r.error ? new URLSearchParams({ repo: r.repo }) : p, r.repo, r.error);
     return;
   }
+  const { repo, run: runParam } = r;
   $("home").hidden = true;
   if (!settings.token) {
     $("run").hidden = true;
@@ -251,18 +420,18 @@ async function route() {
   const wanted = attemptParam && /^\d+$/.test(attemptParam) ? Number(attemptParam) : null;
   const seq = ++state.seq;
   try {
-    if (!state.run || state.runId !== runParam || (wanted && wanted !== state.attempt) || (!wanted && state.attempt !== state.run.run_attempt)) {
+    if (!state.run || state.runId !== runParam || state.repo !== repo || (wanted && wanted !== state.attempt) || (!wanted && state.attempt !== state.run.run_attempt)) {
       clearBanner();
       cancelExport();
       $("run").hidden = false;
       $("job-title").textContent = "Loading run…";
       $("log").replaceChildren();
       notice("");
-      const run = await getRun(settings.token, runParam);
+      const run = await getRun(settings.token, repo, runParam);
       const attempt = wanted ?? run.run_attempt ?? 1;
       const [jobs, artifacts] = await Promise.all([
-        listJobs(settings.token, runParam, attempt),
-        listArtifacts(settings.token, runParam),
+        listJobs(settings.token, repo, runParam, attempt),
+        listArtifacts(settings.token, repo, runParam),
       ]);
       if (seq !== state.seq) return;
       state.gen++;
@@ -303,26 +472,40 @@ async function route() {
 
 // --- recent runs (home) ----------------------------------------------------
 
-function showRuns(p, error) {
+// Shows the home section with the repo picker (`repo` null) or a repo's runs.
+function showHome(repo, error) {
   $("run").hidden = true;
   $("run-meta").replaceChildren();
   $("home").hidden = false;
-  document.title = "CI Logs";
+  $("repos-view").hidden = Boolean(repo);
+  $("runs-view").hidden = !repo;
+  $("home-back").hidden = !repo;
+  if (repo) $("home-h").replaceChildren("Recent runs ", el("span", { class: "muted home-repo" }, "of ", el("code", {}, `${OWNER}/${repo}`)));
+  else $("home-h").replaceChildren("Repositories");
+  document.title = repo ? `${repo} · CI Logs` : "CI Logs";
   fieldError("pick-error", error);
-  $("home-hint-text").textContent = !settings.token
-    ? "Without a token GitHub allows 60 requests an hour. Add a GitHub token and the repo key in Settings to raise the limit and open runs."
-    : "Add the repo key in Settings to see sealed output.";
-  $("home-hint").hidden = Boolean(settings.token && settings.key);
+  let hint = "";
+  if (!settings.token) {
+    hint = repo
+      ? `Without a token GitHub allows 60 requests an hour. Add a GitHub token and the repo key for ${repo} in Settings to raise the limit and open runs.`
+      : "Without a token GitHub allows 60 requests an hour. Add a GitHub token in Settings to raise the limit and open runs.";
+  } else if (repo && !hasKey(repo)) hint = `Add the repo key for ${repo} in Settings to see its sealed output.`;
+  $("home-hint-text").textContent = hint;
+  $("home-hint").hidden = !hint;
   if (!$("banner").dataset.sticky) clearBanner();
   cancelExport();
+}
+
+function showRuns(p, repo, error) {
+  showHome(repo, error);
   const q = readListParams(p);
   $("filter-status").replaceChildren(...statusOptions(q.status).map(([value, label]) => el("option", { value }, label)));
   $("filter-status").value = q.status;
-  fillWorkflows(q.workflow);
-  loadRuns(q);
+  fillWorkflows(repo, q.workflow);
+  loadRuns(q, repo);
 }
 
-async function loadRuns(q) {
+async function loadRuns(q, repo) {
   // GitHub pages through at most 1000 runs of a status search (422 beyond).
   const limit = q.status ? SEARCH_LIMIT : Infinity;
   if (q.page > maxPage(PER_PAGE, limit)) {
@@ -336,7 +519,7 @@ async function loadRuns(q) {
   list.classList.add("stale");
   if (!list.children.length) runsMessage("Loading runs…");
   try {
-    const { total, runs } = await listRuns(settings.token, { page: q.page, perPage: PER_PAGE, workflow: q.workflow, status: q.status });
+    const { total, runs } = await listRuns(settings.token, repo, { page: q.page, perPage: PER_PAGE, workflow: q.workflow, status: q.status });
     if (seq !== state.seq) return;
     const info = pageInfo(total, q.page, PER_PAGE, limit);
     if (q.page > info.pages) {
@@ -345,7 +528,7 @@ async function loadRuns(q) {
       return;
     }
     const now = Date.now();
-    const rows = runs.map((r) => runRow(r, now)).filter(Boolean);
+    const rows = runs.map((r) => runRow(r, now, repo)).filter(Boolean);
     list.replaceChildren(...rows.map(runItem));
     runsMessage(rows.length ? "" : "No runs.");
     $("runs-total").textContent = `${total.toLocaleString("en")} run${total === 1 ? "" : "s"}`;
@@ -370,11 +553,11 @@ function runsMessage(message) {
   $("runs-msg").hidden = !message;
 }
 
-// Loads the workflow list once (it costs a request) and selects `selected`.
-async function fillWorkflows(selected) {
+// Loads the repo's workflow list once (it costs a request) and selects `selected`.
+async function fillWorkflows(repo, selected) {
   const select = $("filter-workflow");
   if (!state.workflows) {
-    const p = listWorkflows(settings.token);
+    const p = listWorkflows(settings.token, repo);
     p.catch(() => state.workflows === p && (state.workflows = null));
     state.workflows = p;
   }
@@ -385,7 +568,7 @@ async function fillWorkflows(selected) {
   } catch {
     // The list still works without the filter's names.
   }
-  if (pending !== state.workflows && state.workflows !== null) return;
+  if (state.repo !== repo || (pending !== state.workflows && state.workflows !== null)) return;
   const options = [el("option", { value: "" }, "All workflows")];
   const sorted = [...workflows].filter((w) => /^\d+$/.test(String(w.id))).sort((a, b) => String(a.name).localeCompare(String(b.name)));
   for (const w of sorted) options.push(el("option", { value: String(w.id) }, w.name || w.path || `Workflow ${w.id}`));
@@ -417,7 +600,7 @@ function runItem(row) {
       onclick: (ev) => {
         if (!plainClick(ev)) return;
         ev.preventDefault();
-        navigate({ run: row.id, attempt: row.attempt > 1 ? row.attempt : null }, { reset: true });
+        navigate({ repo: state.repo, run: row.id, attempt: row.attempt > 1 ? row.attempt : null }, { reset: true });
         window.scrollTo(0, 0);
       },
     },
@@ -460,21 +643,146 @@ function changeFilter(key, value) {
 
 function submitPick(ev) {
   ev.preventDefault();
-  const v = $("pick-input").value.trim();
-  const m = /\/actions\/runs\/(\d+)(?:\/attempts\/(\d+))?/.exec(v) ?? /^(\d+)$/.exec(v);
-  if (!m) {
-    fieldError("pick-error", "Paste a run link (…/actions/runs/<id>) or a numeric run ID.");
+  const pick = parsePick($("pick-input").value, currentRepo());
+  if (pick.error) {
+    fieldError("pick-error", pick.error);
     return;
   }
   $("pick-input").value = "";
-  navigate({ run: m[1], attempt: m[2] ?? null }, { reset: true });
+  navigate({ repo: pick.repo, run: pick.run, attempt: pick.attempt, job: pick.job }, { reset: true });
+}
+
+// --- repositories (home) ---------------------------------------------------
+
+function showRepos(p, error) {
+  showHome(null, error);
+  const all = p.get("all") === "1";
+  const pageParam = p.get("page") ?? "";
+  const page = all && /^\d+$/.test(pageParam) && Number(pageParam) >= 1 ? Number(pageParam) : 1;
+  $("show-all-repos").checked = all;
+  loadRepos(all, page);
+}
+
+// The sealed-ci search, once per page load (search allows 10 requests a minute unauthenticated).
+function sealedRepos() {
+  if (!state.sealedRepos) {
+    const p = listSealedRepos(settings.token);
+    p.catch(() => state.sealedRepos === p && (state.sealedRepos = null));
+    state.sealedRepos = p;
+  }
+  return state.sealedRepos;
+}
+
+function reposMessage(message) {
+  $("repos-msg").textContent = message ?? "";
+  $("repos-msg").hidden = !message;
+}
+
+async function loadRepos(all, page) {
+  const seq = ++state.seq;
+  const list = $("repos");
+  list.setAttribute("aria-busy", "true");
+  list.classList.add("stale");
+  if (!list.children.length) reposMessage("Loading repositories…");
+  try {
+    let rows;
+    let hasNext = false;
+    const now = Date.now();
+    if (all) {
+      // Marking sealed repos uses the search too, but the list does not need it.
+      const [listed, sealed] = await Promise.all([listPublicRepos(settings.token, page), sealedRepos().catch(() => [])]);
+      hasNext = listed.hasNext;
+      const names = new Set(sealed.map((r) => r?.name));
+      rows = listed.repos.map((r) => repoRow(r, now, names)).filter(Boolean).sort((a, b) => a.name.localeCompare(b.name));
+    } else {
+      const sealed = await sealedRepos();
+      rows = sealed.map((r) => repoRow({ ...r, topics: ["sealed-ci"] }, now)).filter(Boolean)
+        .sort((a, b) => String(b.pushedAt ?? "").localeCompare(String(a.pushedAt ?? "")));
+    }
+    if (seq !== state.seq) return;
+    list.replaceChildren(...rows.map(repoItem));
+    if (rows.length) reposMessage("");
+    else reposMessage(all ? "No public repositories." : "No repositories have the sealed-ci topic yet. Show all public repos to browse the rest.");
+    $("repos-total").textContent = all ? "" : `${rows.length} sealed repositor${rows.length === 1 ? "y" : "ies"}`;
+    renderReposPager(all, page, hasNext);
+  } catch (err) {
+    if (seq !== state.seq) return;
+    list.replaceChildren();
+    $("repos-pager").replaceChildren();
+    $("repos-total").textContent = "";
+    reposMessage("Could not load repositories.");
+    banner(err?.message ?? String(err), { settingsAction: [401, 403, 429].includes(err?.status) });
+  } finally {
+    if (seq === state.seq) {
+      list.setAttribute("aria-busy", "false");
+      list.classList.remove("stale");
+    }
+  }
+}
+
+function repoItem(row) {
+  return el("li", {},
+    el("a", {
+      class: "run-row repo-row",
+      href: row.href,
+      onclick: (ev) => {
+        if (!plainClick(ev)) return;
+        ev.preventDefault();
+        navigate({ repo: row.name }, { reset: true });
+        window.scrollTo(0, 0);
+      },
+    },
+    el("span", { class: "run-main" },
+      el("span", { class: "run-title" }, row.name),
+      row.description ? el("span", { class: "run-sub" }, row.description) : null),
+    el("span", { class: "run-side" },
+      row.sealed ? null : el("span", { class: "chip chip-muted", title: "Its logs have no sealed output" }, "not sealed"),
+      row.pushedAt
+        ? el("span", { class: "run-time" }, el("time", { datetime: row.pushedAt, title: new Date(row.pushedAt).toLocaleString() }, `pushed ${row.when}`))
+        : null)),
+  );
+}
+
+function renderReposPager(all, page, hasNext) {
+  if (!all || (page === 1 && !hasNext)) {
+    $("repos-pager").replaceChildren();
+    return;
+  }
+  const link = (to, text, enabled, rel) => enabled
+    ? el("a", {
+      class: "btn btn-small",
+      href: `?all=1${to > 1 ? `&page=${to}` : ""}`,
+      rel,
+      onclick: (ev) => {
+        if (!plainClick(ev)) return;
+        ev.preventDefault();
+        navigate({ all: 1, page: to === 1 ? null : to }, { reset: true });
+        window.scrollTo(0, 0);
+      },
+    }, text)
+    : el("span", { class: "btn btn-small", "aria-disabled": "true" }, text);
+  $("repos-pager").replaceChildren(
+    link(page - 1, "Previous", page > 1, "prev"),
+    el("span", { class: "pager-pos" }, `Page ${page}`),
+    link(page + 1, "Next", hasNext, "next"),
+  );
 }
 
 // --- run header and jobs ----------------------------------------------------
 
 function renderRunMeta() {
-  const { run, attempt } = state;
+  const { run, attempt, repo } = state;
   const parts = [
+    el("a", {
+      class: "chip repo-link",
+      href: `?repo=${repo}`,
+      title: `Recent runs of ${OWNER}/${repo}`,
+      onclick: (ev) => {
+        if (!plainClick(ev)) return;
+        ev.preventDefault();
+        navigate({ repo }, { reset: true });
+      },
+    }, repo),
     el("a", { class: "run-link", href: `${run.html_url}${attempt ? `/attempts/${attempt}` : ""}`, target: "_blank", rel: "noopener noreferrer" },
       run.display_title || run.name || `Run ${run.id}`),
     el("span", { class: "chip" }, run.name || "workflow"),
@@ -486,7 +794,7 @@ function renderRunMeta() {
     for (let a = 1; a <= total; a++) {
       attempts.append(
         el("a", {
-          href: `?run=${run.id}&attempt=${a}`,
+          href: `?repo=${repo}&run=${run.id}&attempt=${a}`,
           class: a === attempt ? "attempt current" : "attempt",
           "aria-current": a === attempt ? "page" : null,
           onclick: (ev) => {
@@ -508,7 +816,7 @@ function renderJobs() {
     return el("li", {},
       el("a", {
         class: "job",
-        href: `?run=${state.runId}&attempt=${state.attempt}&job=${job.id}`,
+        href: `?repo=${state.repo}&run=${state.runId}&attempt=${state.attempt}&job=${job.id}`,
         dataset: { job: String(job.id) },
         title: `${job.name}: ${STATE_LABEL[s] ?? s}`,
         onclick: (ev) => {
@@ -525,7 +833,7 @@ function renderJobs() {
   const n = visibleArtifacts().length;
   $("artifacts-count").textContent = n ? String(n) : "";
   const link = $("artifacts-link");
-  link.href = `?run=${state.runId}&attempt=${state.attempt}&view=artifacts`;
+  link.href = `?repo=${state.repo}&run=${state.runId}&attempt=${state.attempt}&view=artifacts`;
 }
 
 function markActive(jobId) {
@@ -550,9 +858,10 @@ function findArtifact(name) {
   return matches.find((a) => !a.expired) ?? matches[0] ?? null;
 }
 
-function loadSealedLog(artifact) {
+// `key` is `repo`'s verified key: cached results are dropped whenever it changes.
+function loadSealedLog(repo, artifact, key) {
   if (!state.sealedLogs.has(artifact.id)) {
-    const p = artifactZip(settings.token, artifact.id).then((zip) => openSealedLog(zip, settings.key, artifact.name));
+    const p = artifactZip(settings.token, repo, artifact.id).then((zip) => openSealedLog(zip, key, artifact.name));
     // Evict only this load, not a newer one that replaced it.
     p.catch(() => state.sealedLogs.get(artifact.id) === p && state.sealedLogs.delete(artifact.id));
     state.sealedLogs.set(artifact.id, p);
@@ -562,7 +871,7 @@ function loadSealedLog(artifact) {
 
 function loadJobLog(job) {
   if (!state.jobLogs.has(job.id)) {
-    const p = jobLog(settings.token, job.id);
+    const p = jobLog(settings.token, state.repo, job.id); // state.jobLogs is cleared with the repo
     p.catch(() => state.jobLogs.get(job.id) === p && state.jobLogs.delete(job.id));
     state.jobLogs.set(job.id, p);
   }
@@ -574,23 +883,38 @@ function loadJobLog(job) {
  * view and the export show it. Throws when the public log cannot be fetched.
  */
 async function loadJobSections(job, wanted = () => true) {
-  const runId = state.runId;
+  const { runId, repo } = state;
   const text = await loadJobLog(job);
   // The caller moved on (another job, run or Forget): skip opening sealed logs.
   if (!wanted()) return null;
-  const sections = parseJobLog(text, { run: runId });
+  // Only markers naming this repo and run are replaced with sealed output.
+  const sections = parseJobLog(text, { repo, run: runId });
   const names = [...new Set(sections.flatMap((sec) => sec.lines.filter((l) => l.marker).map((l) => l.marker.artifact)))];
   const segments = new Map();
   const summaries = new Map();
   const reasons = new Map();
   let badKey = null;
+  // The key is checked against this repo's repo-key.pub before any use, and
+  // only when there is sealed output to open.
+  let key = null;
+  const openable = names.some((name) => findArtifact(name) && !findArtifact(name).expired);
+  if (openable && hasKey(repo)) {
+    try {
+      key = await verifiedKey(repo);
+    } catch (err) {
+      badKey = err;
+    }
+    if (!wanted()) return null;
+  }
   await Promise.all(names.map(async (name) => {
     const art = findArtifact(name);
     if (!art) return reasons.set(name, "sealed log not found: it was not uploaded or has been deleted");
     if (art.expired) return reasons.set(name, "sealed log expired: artifacts are kept for 7 days");
-    if (!settings.key) return reasons.set(name, "add the repo key in Settings to see it");
+    if (badKey?.code === "wrong-repo") return reasons.set(name, "the saved key is for a different repository");
+    if (badKey) return reasons.set(name, "the repo key could not be checked");
+    if (!key) return reasons.set(name, `add the repo key for ${repo} in Settings to see it`);
     try {
-      const opened = await loadSealedLog(art);
+      const opened = await loadSealedLog(repo, art, key);
       for (const [k, v] of opened.segments) segments.set(k, v);
       for (const [k, v] of opened.summaries) summaries.set(k, v);
     } catch (err) {
@@ -635,7 +959,7 @@ async function showJob(job, seq) {
 
   const lost = names.map((n) => reasons.get(n)).find((r) => r && /expired|not found/.test(r));
   if (badKey) report(badKey);
-  else if (!settings.key && names.length) banner("Add the repo key in Settings to see sealed output.", { settingsAction: true });
+  else if (!hasKey(state.repo) && names.length) banner(`Add the repo key for ${state.repo} in Settings to see sealed output.`, { settingsAction: true });
   else if (lost) banner(`Sealed output for this job is unavailable: ${lost}. Only the public log is shown.`);
   else clearBanner();
   const markerCount = merged.reduce((n, sec) => n + sec.sealedKeys.length, 0);
@@ -660,7 +984,7 @@ function cancelExport() {
 }
 
 function updateExportControls() {
-  const noKey = !settings.key;
+  const noKey = !hasKey(state.repo);
   $("export-job").disabled = noKey || state.exporting || !state.job;
   $("export-all").disabled = noKey || state.exporting || !state.jobs.length;
   $("export-hint").hidden = !noKey;
@@ -683,14 +1007,14 @@ async function exportJob(job, wanted) {
 // Downloads the current job's (or every job's) log as plain text. Forget, new
 // settings or another run bump state.gen, which abandons the export.
 async function exportLogs(all) {
-  if (!settings.key) {
-    banner("Add the repo key in Settings to export logs with their sealed output.", { settingsAction: true });
+  if (!hasKey(state.repo)) {
+    banner(`Add the repo key for ${state.repo} in Settings to export logs with their sealed output.`, { settingsAction: true });
     return;
   }
   const jobs = all ? [...state.jobs] : [state.job].filter(Boolean);
   if (state.exporting || !state.run || !jobs.length) return;
   const gen = state.gen;
-  const { run, attempt } = state;
+  const { run, attempt, repo } = state;
   state.exporting = true;
   updateExportControls();
   const results = new Array(jobs.length);
@@ -715,7 +1039,7 @@ async function exportLogs(all) {
       report(badKey);
       return;
     }
-    const filename = exportFilename({ workflow: run.name, runNumber: run.run_number, attempt, job: all ? "" : jobs[0].name });
+    const filename = exportFilename({ repo, workflow: run.name, runNumber: run.run_number, attempt, job: all ? "" : jobs[0].name });
     download(exportText(results), filename, "text/plain;charset=utf-8");
   } finally {
     if (gen === state.gen) {
@@ -913,23 +1237,27 @@ function showArtifacts() {
     $("artifacts").replaceChildren(el("p", { class: "muted" }, "This run has no artifacts besides its sealed logs."));
     return;
   }
-  if (!settings.key) banner("Add the repo key in Settings to unseal artifacts.", { settingsAction: true });
+  if (!hasKey(state.repo)) banner(`Add the repo key for ${state.repo} in Settings to unseal artifacts.`, { settingsAction: true });
   $("artifacts").replaceChildren(...list.map(artifactCard));
 }
 
 function artifactCard(art) {
+  const repo = state.repo;
   const out = el("div", { class: "art-body" });
   const button = el("button", { type: "button", class: "btn btn-small", disabled: art.expired }, art.expired ? "Expired" : "Unseal");
   button.addEventListener("click", async () => {
-    if (!settings.key) {
-      banner("Add the repo key in Settings to unseal artifacts.", { settingsAction: true });
+    if (!hasKey(repo)) {
+      banner(`Add the repo key for ${repo} in Settings to unseal artifacts.`, { settingsAction: true });
       return;
     }
     button.disabled = true;
     button.textContent = "Unsealing…";
     try {
+      // Checked against this repo's repo-key.pub before it is used.
+      const key = await verifiedKey(repo);
+      if (!out.isConnected || !key) return;
       if (!state.sealedArtifacts.has(art.id)) {
-        const p = artifactZip(settings.token, art.id).then((zip) => openSealedArtifact(zip, settings.key));
+        const p = artifactZip(settings.token, repo, art.id).then((zip) => openSealedArtifact(zip, key));
         p.catch(() => state.sealedArtifacts.get(art.id) === p && state.sealedArtifacts.delete(art.id));
         state.sealedArtifacts.set(art.id, p);
       }
@@ -1025,6 +1353,8 @@ function init() {
   $("banner-action").addEventListener("click", openSettings);
   $("settings-form").addEventListener("submit", saveSettings);
   $("cancel-settings").addEventListener("click", () => $("settings").close());
+  // Closing (Cancel, Escape) abandons a key check still in flight.
+  $("settings").addEventListener("close", cancelPendingSave);
   $("forget").addEventListener("click", forgetSettings);
   $("pick-form").addEventListener("submit", submitPick);
   $("home-settings").addEventListener("click", openSettings);
@@ -1033,11 +1363,14 @@ function init() {
   $("export-all").addEventListener("click", () => exportLogs(true));
   $("filter-workflow").addEventListener("change", (ev) => changeFilter("workflow", ev.target.value));
   $("filter-status").addEventListener("change", (ev) => changeFilter("status", ev.target.value));
-  $("brand").addEventListener("click", (ev) => {
-    if (!plainClick(ev)) return;
-    ev.preventDefault();
-    navigate({}, { reset: true });
-  });
+  $("show-all-repos").addEventListener("change", (ev) => navigate({ all: ev.target.checked ? 1 : null }, { reset: true }));
+  for (const id of ["brand", "home-back"]) {
+    $(id).addEventListener("click", (ev) => {
+      if (!plainClick(ev)) return;
+      ev.preventDefault();
+      navigate({}, { reset: true });
+    });
+  }
   $("artifacts-link").addEventListener("click", (ev) => {
     ev.preventDefault();
     navigate({ view: "artifacts", job: null });
@@ -1049,7 +1382,6 @@ function init() {
   $("show-ts").addEventListener("change", (ev) => $("log").classList.toggle("show-ts", ev.target.checked));
   window.addEventListener("popstate", route);
   window.addEventListener("hashchange", jumpToHash);
-  $("repo-name").textContent = REPO;
   route();
 }
 

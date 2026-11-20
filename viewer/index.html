@@ -25,8 +25,9 @@
 
   <main>
     <section class="home" id="home" hidden>
+      <a class="home-back" id="home-back" href="./" hidden>← Repositories</a>
       <div class="home-head">
-        <h1>Recent runs <span class="muted home-repo">of <code id="repo-name"></code></span></h1>
+        <h1 id="home-h">Repositories</h1>
         <form id="pick-form" class="pick-form">
           <input type="text" id="pick-input" inputmode="url" autocomplete="off" spellcheck="false"
                  placeholder="Open a run: paste its link or ID" aria-label="Run link or ID">
@@ -38,18 +39,31 @@
         <span id="home-hint-text"></span>
         <button type="button" class="btn btn-small" id="home-settings">Open Settings</button>
       </p>
-      <div class="filters">
-        <label class="filter">Workflow
-          <select id="filter-workflow"><option value="">All workflows</option></select>
-        </label>
-        <label class="filter">Status
-          <select id="filter-status"></select>
-        </label>
-        <span class="runs-total muted" id="runs-total"></span>
+
+      <div id="repos-view" hidden>
+        <div class="filters">
+          <label class="toggle"><input type="checkbox" id="show-all-repos"> Show all public repos</label>
+          <span class="runs-total muted" id="repos-total"></span>
+        </div>
+        <p class="runs-msg muted" id="repos-msg" role="status" hidden></p>
+        <ul class="runs" id="repos" aria-label="Repositories" aria-busy="false"></ul>
+        <nav class="pager" id="repos-pager" aria-label="Pages"></nav>
       </div>
-      <p class="runs-msg muted" id="runs-msg" role="status" hidden></p>
-      <ul class="runs" id="runs" aria-label="Workflow runs" aria-busy="false"></ul>
-      <nav class="pager" id="pager" aria-label="Pages"></nav>
+
+      <div id="runs-view" hidden>
+        <div class="filters">
+          <label class="filter">Workflow
+            <select id="filter-workflow"><option value="">All workflows</option></select>
+          </label>
+          <label class="filter">Status
+            <select id="filter-status"></select>
+          </label>
+          <span class="runs-total muted" id="runs-total"></span>
+        </div>
+        <p class="runs-msg muted" id="runs-msg" role="status" hidden></p>
+        <ul class="runs" id="runs" aria-label="Workflow runs" aria-busy="false"></ul>
+        <nav class="pager" id="pager" aria-label="Pages"></nav>
+      </div>
     </section>
 
     <div class="layout" id="run" hidden>
@@ -87,12 +101,7 @@
   <dialog class="dialog" id="settings" aria-labelledby="settings-h">
     <form id="settings-form" method="dialog" novalidate>
       <h2 id="settings-h">Settings</h2>
-      <p class="hint">Both values stay in this browser's local storage. The token is sent only to api.github.com; the repo key never leaves the page.</p>
-
-      <label class="field" for="repo-key">Repo key</label>
-      <input type="password" id="repo-key" autocomplete="off" spellcheck="false" placeholder="AGE-SECRET-KEY-1…">
-      <p class="hint">Copy it from Infisical: the secret <code>REPO_AGE_KEY</code>.</p>
-      <p class="field-error" id="key-error" hidden></p>
+      <p class="hint">The token and the repo keys stay in this browser's local storage. The token is sent only to api.github.com; repo keys never leave the page.</p>
 
       <label class="field" for="gh-token">GitHub token</label>
       <input type="password" id="gh-token" autocomplete="off" spellcheck="false" placeholder="github_pat_…">
@@ -100,8 +109,26 @@
         Set Repository access to “Public repositories (read-only)” and add no other permissions.</p>
       <p class="field-error" id="token-error" hidden></p>
 
+      <h3 class="field" id="keys-h">Repo keys</h3>
+      <ul class="key-list" id="key-list" aria-labelledby="keys-h"></ul>
+      <p class="hint" id="key-list-empty">No repo keys saved.</p>
+
+      <div class="key-add">
+        <div class="key-add-repo">
+          <label class="field" for="key-repo">Repository</label>
+          <input type="text" id="key-repo" autocomplete="off" spellcheck="false" placeholder="actions">
+        </div>
+        <div class="key-add-key">
+          <label class="field" for="repo-key">Repo key</label>
+          <input type="password" id="repo-key" autocomplete="off" spellcheck="false" placeholder="AGE-SECRET-KEY-1…">
+        </div>
+      </div>
+      <p class="hint">Copy it from Infisical: that repository's secret <code>REPO_AGE_KEY</code>. It is checked against the repository's public key before it is saved.</p>
+      <p class="field-error" id="key-error" hidden></p>
+      <p class="hint" id="key-status" role="status" hidden></p>
+
       <div class="dialog-actions">
-        <button type="button" class="btn btn-danger" id="forget">Forget</button>
+        <button type="button" class="btn btn-danger" id="forget">Forget all</button>
         <span class="spacer"></span>
         <button type="button" class="btn" id="cancel-settings">Cancel</button>
         <button type="submit" class="btn btn-primary" id="save-settings">Save</button>

@@ -49,9 +49,10 @@ function part(s) {
   return String(s ?? "").replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^[.-]+|[.-]+$/g, "");
 }
 
-/** `<workflow>-run<n>-attempt<n>[-<job>].log`, using only [A-Za-z0-9._-]. */
-export function exportFilename({ workflow, runNumber, attempt, job }) {
-  const head = `${part(workflow) || "run"}-run${part(runNumber)}-attempt${part(attempt)}`;
+/** `[<repo>-]<workflow>-run<n>-attempt<n>[-<job>].log`, using only [A-Za-z0-9._-]. */
+export function exportFilename({ repo, workflow, runNumber, attempt, job }) {
+  const prefix = part(repo);
+  const head = `${prefix ? `${prefix}-` : ""}${part(workflow) || "run"}-run${part(runNumber)}-attempt${part(attempt)}`;
   const tail = job ? part(job) : "";
   const name = tail ? `${head}-${tail}` : head;
   return `${name.slice(0, MAX_NAME - 4).replace(/[.-]+$/, "")}.log`;

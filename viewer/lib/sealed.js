@@ -1,7 +1,7 @@
 // Opens sealed-log and sealed artifact zips (as downloaded from the Actions API)
 // with the repo key. Only fflate's synchronous APIs are used: its async ones start
 // blob: workers, which the page's CSP forbids.
-import { Decrypter } from "../vendor/age-encryption.js";
+import { Decrypter, identityToRecipient } from "../vendor/age-encryption.js";
 import { unzipSync, Gunzip } from "../vendor/fflate.js";
 import { readTar } from "./tar.js";
 import { splitLines } from "./joblog.js";
@@ -52,6 +52,32 @@ export function checkRepoKey(key) {
   if (!k) throw new SealError("No repo key set: paste REPO_AGE_KEY from Infisical in Settings.", "no-key");
   if (!k.startsWith(KEY_PREFIX)) {
     throw new SealError(`The repo key must start with ${KEY_PREFIX}: paste the whole REPO_AGE_KEY value from Infisical.`, "bad-key");
+  }
+  return k;
+}
+
+/** The `age1…` recipient (public key) of a repo key, as `age-keygen -y` prints it. */
+export async function recipientOf(identity) {
+  const k = checkRepoKey(identity);
+  try {
+    return await identityToRecipient(k);
+  } catch {
+    throw new SealError("The repo key is not a valid age key: paste the repo's REPO_AGE_KEY from Infisical in Settings.", "bad-key");
+  }
+}
+
+/**
+ * Returns the trimmed key when its recipient is `publicKey` (the repo's
+ * repo-key.pub); throws a "wrong-repo" SealError otherwise, so a key is never
+ * tried on another repository's sealed output.
+ */
+export async function checkKeyForRepo(identity, publicKey, repo) {
+  const k = checkRepoKey(identity);
+  if ((await recipientOf(k)) !== String(publicKey ?? "").trim()) {
+    throw new SealError(
+      `This key is for a different repository: it does not match the public key of ${repo}. Paste the REPO_AGE_KEY of ${repo} from Infisical in Settings.`,
+      "wrong-repo",
+    );
   }
   return k;
 }

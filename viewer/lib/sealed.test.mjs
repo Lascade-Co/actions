@@ -6,7 +6,72 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import * as age from "../vendor/age-encryption.js";
 import { zipSync, strToU8, gzipSync } from "../vendor/fflate.js";
-import { openSealedLog, openSealedArtifact, checkRepoKey, gunzipCapped, MAX_UNSEALED_BYTES } from "./sealed.js";
+import { openSealedLog, openSealedArtifact, checkRepoKey, gunzipCapped, recipientOf, checkKeyForRepo, MAX_UNSEALED_BYTES } from "./sealed.js";
+
+const REPO_PUB = new URL("../../scripts/seal/repo-key.pub", import.meta.url);
+const RECIPIENT_RE = /^age1[02-9ac-hj-np-z]{58}$/;
+
+function hasAgeKeygen() {
+  try {
+    execFileSync("age-keygen", ["--version"], { stdio: "ignore" });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+test("recipientOf gives the repo-key.pub line age-keygen writes for a test identity", async (t) => {
+  // scripts/seal/repo-key.pub is one recipient line, the format compared against.
+  assert.match(readFileSync(REPO_PUB, "utf8").trim(), RECIPIENT_RE);
+  if (!hasAgeKeygen()) {
+    t.skip("age-keygen is not installed");
+    return;
+  }
+  const dir = mkdtempSync(join(tmpdir(), "viewer-recipient-"));
+  try {
+    const keyFile = join(dir, "key.txt");
+    execFileSync("age-keygen", ["-o", keyFile], { stdio: "ignore" });
+    const identity = readFileSync(keyFile, "utf8").split("\n").find((l) => l.startsWith("AGE-SECRET-KEY-1"));
+    // Same command as "Rotate the repo key" in docs/sealed-output.md.
+    const pub = execFileSync("age-keygen", ["-y", keyFile], { encoding: "utf8" });
+    assert.equal(await recipientOf(`  ${identity}\n`), pub.trim());
+    assert.match(await recipientOf(identity), RECIPIENT_RE);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("recipientOf is the recipient that identity decrypts for", async () => {
+  const identity = await age.generateIdentity();
+  const recipient = await recipientOf(identity);
+  assert.match(recipient, RECIPIENT_RE);
+  const d = new age.Decrypter();
+  d.addIdentity(identity);
+  assert.equal(new TextDecoder().decode(await d.decrypt(await seal(recipient, "hello"))), "hello");
+  assert.notEqual(await recipientOf(await age.generateIdentity()), recipient);
+});
+
+test("recipientOf refuses a malformed key", async () => {
+  await assert.rejects(recipientOf(""), (err) => err.code === "no-key");
+  await assert.rejects(recipientOf("1QQQ"), (err) => err.code === "bad-key");
+  await assert.rejects(recipientOf("AGE-SECRET-KEY-1NOTBECH32"), (err) => err.code === "bad-key" && /not a valid age key/.test(err.message));
+});
+
+test("checkKeyForRepo accepts the repo's key and returns it trimmed", async () => {
+  const { identity, recipient } = await keypair();
+  assert.equal(await checkKeyForRepo(` ${identity}\n`, `${recipient}\n`, "connector"), identity);
+});
+
+test("a key for another repository is rejected", async () => {
+  const { identity } = await keypair();
+  const other = await keypair();
+  await assert.rejects(checkKeyForRepo(identity, other.recipient, "connector"), (err) => {
+    assert.equal(err.code, "wrong-repo");
+    assert.match(err.message, /^This key is for a different repository/);
+    assert.match(err.message, /connector/);
+    return true;
+  });
+});
 
 const ART = "sealed-log-build-1-0a1b2c3d";
 

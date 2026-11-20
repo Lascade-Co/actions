@@ -64,13 +64,20 @@ such as `release-blog.yml` are sealed. `pull_request` workflows must not use sec
 
 ## Reading a run
 
-Open the marker link in the log, `https://ci.lascade.com/?run=<run id>&attempt=<n>`. Paste the repo private key
-(stored only in your browser as `ci.repoKey`) and a GitHub fine-grained token with Repository access "Public
-repositories (read-only)" and no other permissions (`ci.githubToken`).
+Open the marker link in the log, `https://ci.lascade.com/?repo=<repo>&run=<run id>&attempt=<n>`. Markers printed
+before repos were named have no `repo=` and open as `actions` runs. In Settings, paste a GitHub fine-grained token with
+Repository access "Public repositories (read-only)" and no other permissions (`ci.githubToken`, shared by all repos),
+and the private key of each repo you read (that repo's `REPO_AGE_KEY`, stored only in your browser as
+`ci.repoKey.<repo>`; an older single `ci.repoKey` moves to `ci.repoKey.actions`). Before a key is saved or used, the
+viewer checks that its public key equals the repo's committed `.github/seal/repo-key.pub` (`scripts/seal/repo-key.pub`
+for `actions`) and rejects a key for another repo. Settings lists the saved keys to replace or forget one; "Forget all"
+clears the token, every key and everything decrypted.
 
-`https://ci.lascade.com/` without `?run=` lists recent runs (filter by workflow and status, 25 per page; it works
-without a token at GitHub's 60 requests an hour). In a run, "Export logs" downloads the job's or every job's log as
-plain text with sealed output merged in and ANSI codes stripped; it needs the repo key.
+`https://ci.lascade.com/` lists the public Lascade-Co repos with the `sealed-ci` topic ("Show all public repos" lists
+the rest, marked "not sealed"); the "Open" box takes a GitHub run link of any Lascade-Co repo or a run ID.
+`?repo=<repo>` lists that repo's recent runs (filter by workflow and status, 25 per page; it works without a token at
+GitHub's 60 requests an hour). In a run, "Export logs" downloads the job's or every job's log as plain text, named
+after the repo, with sealed output merged in and ANSI codes stripped; it needs the repo's key.
 
 ## Rotate the repo key
 
