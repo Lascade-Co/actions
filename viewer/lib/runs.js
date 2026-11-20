@@ -104,7 +104,7 @@ export function readRoute(params) {
 }
 
 const PICK_HINT = "Paste a run link (github.com/Lascade-Co/<repo>/actions/runs/<id>) or a numeric run ID.";
-const GITHUB_RUN = /^(?:https?:\/\/)?(?:www\.)?github\.com\/([^/?#]+)\/([^/?#]+)\/actions\/runs\/(\d+)(?:\/attempts\/(\d+)|\/job\/(\d+))?\/?(?:[?#].*)?$/i;
+const GITHUB_RUN = /^(?:https?:\/\/)?(?:www\.)?github\.com\/([^/?#]+)\/([^/?#]+)\/actions\/runs\/(\d+)(?:\/attempts\/(\d+)|\/job\/(\d+))?(?:[/?#].*)?$/i;
 
 /**
  * The run that the "open a run" box names: a GitHub run link of a Lascade-Co

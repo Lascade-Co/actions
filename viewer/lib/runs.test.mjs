@@ -155,6 +155,11 @@ test("parsePick opens GitHub run links of any Lascade-Co repo", () => {
   assert.deepEqual(parsePick("https://github.com/lascade-co/connector/actions/runs/123/attempts/2", ""), { repo: "connector", run: "123", attempt: "2", job: null });
   assert.deepEqual(parsePick("github.com/Lascade-Co/actions/actions/runs/5/job/77", "x"), { repo: "actions", run: "5", attempt: null, job: "77" });
   assert.deepEqual(parsePick("https://github.com/Lascade-Co/connector/actions/runs/123/job/9?pr=1#step:2:3", ""), { repo: "connector", run: "123", attempt: null, job: "9" });
+  for (const tail of ["/usage", "/workflow", "/artifacts/9", "/attempts/2/usage"]) {
+    assert.equal(parsePick(`https://github.com/Lascade-Co/connector/actions/runs/123${tail}`, "").run, "123", tail);
+  }
+  assert.equal(parsePick("https://github.com/Lascade-Co/connector/actions/runs/123/attempts/2/usage", "").attempt, "2");
+  assert.match(parsePick("https://github.com/Lascade-Co/connector/actions/runs/123abc", "").error, /run link/);
 });
 
 test("parsePick opens viewer links and bare run ids", () => {
