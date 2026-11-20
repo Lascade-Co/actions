@@ -156,6 +156,9 @@ rand=$(od -An -N4 -tx1 /dev/urandom | tr -d ' \n')
 name="sealed-log-$GITHUB_JOB-$GITHUB_RUN_ATTEMPT-$rand"
 printf '%s\n' "$name" >"$seal/artifact-name"
 printf '0\n' >"$seal/seq"
+# Values sealed steps mask (seal-bash); outside out/, so never uploaded.
+(umask 077; : >"$seal/masks")
+chmod 600 "$seal/masks"
 
 python3 -c 'import json, sys; print(json.dumps(dict(zip(("job", "attempt", "runner_name", "os", "started_at"), sys.argv[1:]))))' \
   "$GITHUB_JOB" "$GITHUB_RUN_ATTEMPT" "${RUNNER_NAME:-}" "${RUNNER_OS:-}" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \

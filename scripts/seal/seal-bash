@@ -4,6 +4,9 @@
 # Output goes straight to a file (no pipe, so background processes can't hold the
 # step open). Afterwards only the script's ::add-mask:: lines and one marker line
 # reach the public log; the output and step summary are age-encrypted to the repo key.
+# Values a sealed step masks are kept in $RUNNER_TEMP/seal/masks (mode 600, never
+# uploaded) and replaced by *** in this and every later sealed segment of the job;
+# masks registered by other actions are unknown here.
 set -euo pipefail
 
 case "${0##*/}" in
@@ -33,6 +36,62 @@ summary="$seal/log/$n.summary.md"
 : >"$log"
 : >"$summary"
 
+# redact log|summary <file>: the file as bytes with each ::add-mask:: line's value
+# replaced by *** and, like the runner, every occurrence of every known mask (overlapping
+# ones too) found in the original bytes, merged into one *** per run of touching matches.
+# The log pass first records its masks. Masks never match inside a rewritten add-mask line.
+REDACT='
+import bisect, os, re, sys
+mode, masks, src = sys.argv[1:]
+cmd = re.compile(rb"^([^\S\n]*::add-mask::)([^\n]*?)(\r*)$", re.M)
+data = open(src, "rb").read()
+found = list(cmd.finditer(data))
+lines = [(m.start(), m.end(), m.group(1) + b"***" + m.group(3)) for m in found]
+starts = [s for s, _, _ in lines]
+fd = os.open(masks, os.O_RDWR | os.O_APPEND | os.O_CREAT, 0o600)
+os.fchmod(fd, 0o600)
+with os.fdopen(fd, "r+b") as f:
+    if mode == "log":
+        f.write(b"".join(m.group(2) + b"\n" for m in found if m.group(2)))
+        f.flush()
+    f.seek(0)
+    known = set()
+    for v in f.read().split(b"\n"):
+        for w in (v, v.rstrip(), v.strip()):
+            known.update((w, w.replace(b"%0D", b"\r").replace(b"%0A", b"\n").replace(b"%25", b"%")))
+spans = []
+for v in known:
+    if not v.strip():
+        continue
+    i = data.find(v)
+    while i >= 0:
+        s, e = i, i + len(v)
+        k = max(bisect.bisect_right(starts, s) - 1, 0)
+        while k < len(lines) and lines[k][0] < e:
+            if lines[k][1] > s:
+                if lines[k][0] > s:
+                    spans.append((s, lines[k][0]))
+                s = max(s, lines[k][1])
+            k += 1
+        if s < e:
+            spans.append((s, e))
+        i = data.find(v, i + 1)
+merged = []
+for s, e in sorted(spans):
+    if merged and s <= merged[-1][1]:
+        merged[-1][1] = max(merged[-1][1], e)
+    else:
+        merged.append([s, e])
+out, pos = [], 0
+for s, e, rep in sorted([(s, e, b"***") for s, e in merged] + lines):
+    out += [data[pos:s], rep]
+    pos = e
+out.append(data[pos:])
+sys.stdout.buffer.write(b"".join(out))
+sys.stdout.buffer.flush()
+'
+redact() { python3 -I -c "$REDACT" "$1" "$seal/masks" "$2" 2>/dev/null; }
+
 rc=1
 child=
 sealed=
@@ -47,9 +106,10 @@ seal_now() {
   # ::add-mask:: still masks; forward it, minus the indentation.
   LC_ALL=C grep -a '^[[:space:]]*::add-mask::' "$log" | LC_ALL=C sed 's/^[[:space:]]*//'
   ok=1
-  "$age" -R "$key" -o "$seal/out/$n.log.age" "$log" || ok=
-  if [ -s "$summary" ]; then
-    "$age" -R "$key" -o "$seal/out/$n.summary.md.age" "$summary" || ok=
+  # pipefail: a failed redaction fails the seal, like a failed encryption.
+  redact log "$log" | "$age" -R "$key" -o "$seal/out/$n.log.age" || ok=
+  if [ -n "$ok" ] && [ -s "$summary" ]; then
+    redact summary "$summary" | "$age" -R "$key" -o "$seal/out/$n.summary.md.age" || ok=
   fi
   rm -f "$log" "$summary"
   if [ -n "$ok" ]; then

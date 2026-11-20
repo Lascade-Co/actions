@@ -111,7 +111,8 @@ jobs:
           : > "$work/sealed.txt"
           for f in "$work"/log/*.log.age; do age -d -i <(printf '%s\n' "$REPO_AGE_KEY") "$f" >> "$work/sealed.txt" || fail "decrypt $(basename "$f")"; done
           has "sealed log has CANARY" "CANARY-$GITHUB_RUN_ID" "$work/sealed.txt"
-          has "sealed log has MASKED (masking only applies to the public log)" "MASKED-$GITHUB_RUN_ID" "$work/sealed.txt"
+          hasnt "sealed log has no MASKED (sealing redacts masked values)" "MASKED-$GITHUB_RUN_ID" "$work/sealed.txt"
+          has "sealed log keeps the redacted mask line" "::add-mask::***" "$work/sealed.txt"
 
           # Sealed artifact.
           has "e2e-art has CANARY" "CANARY-$GITHUB_RUN_ID" "$RUNNER_TEMP/dl/art/e2e.txt"

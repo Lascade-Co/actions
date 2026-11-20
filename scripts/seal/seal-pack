@@ -4,7 +4,8 @@
 # directories expanded, hidden files and dirs left out unless --include-hidden, and
 # the archive root taken from the patterns' search paths. It tars them, encrypts
 # the tarball to the repo key and prints the directory that holds
-# <artifact-name>.tgz.age, ready for actions/upload-artifact.
+# <artifact-name>.tgz.age, ready for actions/upload-artifact. It refuses any match
+# whose real path is under $RUNNER_TEMP/seal (the job's mask list and logs).
 set -euo pipefail
 
 usage() { echo "usage: seal-pack [--allow-empty] [--include-hidden] <artifact-name> <path-or-glob>..." >&2; exit 2; }
@@ -49,7 +50,7 @@ trap 'rm -f "$list"' EXIT
 # Unlike upload-artifact, symlinks are archived as links, not followed.
 py=$(cat <<'PY'
 import os, re, sys
-listfile, include_hidden, pats = sys.argv[1], sys.argv[2] == "1", sys.argv[3:]
+listfile, include_hidden, seal_dir, pats = sys.argv[1], sys.argv[2] == "1", sys.argv[3], sys.argv[4:]
 MAGIC = re.compile(r"[*?\[]")
 
 def real_dir(p):
@@ -122,6 +123,11 @@ for pat in pats:
         if rx.match("" if rel == "." else rel.replace(os.sep, "/")):
             files.update(y for y in walk(x, sp) if not real_dir(y))
 
+seal_real = os.path.realpath(seal_dir)
+for f in sorted(files):
+    if os.path.commonpath([os.path.realpath(f), seal_real]) == seal_real:
+        sys.exit("seal-pack: refusing to pack " + f + ": it is under $RUNNER_TEMP/seal (the job's masks and logs)")
+
 if files:
     uniq = []
     for sp in search:
@@ -146,7 +152,7 @@ if files:
     sys.stdout.write(root)
 PY
 )
-root=$(python3 -c "$py" "$list" "$include_hidden" "$@")
+root=$(python3 -c "$py" "$list" "$include_hidden" "$seal" "$@")
 
 if [ -z "$root" ]; then
   if [ -n "$allow_empty" ]; then echo "$dir"; exit 0; fi
