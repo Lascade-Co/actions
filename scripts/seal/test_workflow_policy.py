@@ -63,8 +63,16 @@ curl -fsSL --retry 3 --retry-delay 2 --retry-all-errors --connect-timeout 10 --m
 test -s "$RUNNER_TEMP/seal-install.tmp" && mv "$RUNNER_TEMP/seal-install.tmp" "$RUNNER_TEMP/seal-install.sh"
 SEAL_REF="${{ github.workflow_sha }}" bash "$RUNNER_TEMP/seal-install.sh"
 """
-COMPOSITE_SETUP_USES = "Lascade-Co/actions/actions/seal@seal-v1"
-COMPOSITE_UPLOAD_USES = "Lascade-Co/actions/actions/seal-upload@seal-v1"
+COMPOSITE_SETUP_PREFIX = "Lascade-Co/actions/actions/seal@"
+COMPOSITE_UPLOAD_PREFIX = "Lascade-Co/actions/actions/seal-upload@"
+COMPOSITE_REF = re.compile(r"seal-v1|[0-9a-f]{40}")  # the moving tag, or a full commit SHA (fullmatch)
+
+
+def composite_ref(uses, prefix):
+    if not isinstance(uses, str) or not uses.startswith(prefix):
+        return None
+    ref = uses[len(prefix):]
+    return ref if COMPOSITE_REF.fullmatch(ref) else None
 UPLOAD_STEP = {
     "name": "Upload sealed log",
     "if": "always()",
@@ -142,17 +150,24 @@ def is_setup(step):
 
 
 def is_composite_setup(step):
-    return (set(step) <= {"name", "uses"} and step.get("uses") == COMPOSITE_SETUP_USES
+    return (set(step) <= {"name", "uses"} and composite_ref(step.get("uses"), COMPOSITE_SETUP_PREFIX)
             and isinstance(step.get("name", ""), str))
 
 
 def is_composite_upload(step):
-    return (set(step) <= {"name", "if", "uses"} and step.get("uses") == COMPOSITE_UPLOAD_USES
+    return (set(step) <= {"name", "if", "uses"} and composite_ref(step.get("uses"), COMPOSITE_UPLOAD_PREFIX)
             and step.get("if") == "always()" and isinstance(step.get("name", ""), str))
 
 
+def check_composite_single_ref(wf):
+    """Every seal/seal-upload reference in one workflow file uses the same ref (tag or one SHA)."""
+    refs = {s["uses"].split("@", 1)[1] for j in jobs_with_steps(wf).values() for s in j["steps"]
+            if isinstance(s.get("uses"), str) and s["uses"].startswith((COMPOSITE_SETUP_PREFIX, COMPOSITE_UPLOAD_PREFIX))}
+    return [f"seal and seal-upload references use different refs: {sorted(refs)}"] if len(refs) > 1 else []
+
+
 def check_setup_step_first(wf):
-    return [f"job {n}: first step is not the verbatim setup step or the seal@seal-v1 composite"
+    return [f"job {n}: first step is not the verbatim setup step or the seal composite (@seal-v1 or a full commit SHA)"
             for n, j in jobs_with_steps(wf).items()
             if not j["steps"] or not (is_setup(j["steps"][0]) or is_composite_setup(j["steps"][0]))]
 
@@ -163,7 +178,7 @@ def check_upload_step_last(wf):
         steps = j["steps"]
         last = steps[-1] if steps else {}
         if steps and is_composite_setup(steps[0]):
-            ok, what = is_composite_upload(last), "seal-upload@seal-v1 composite with if: always()"
+            ok, what = is_composite_upload(last), "seal-upload composite (@seal-v1 or a full commit SHA) with if: always()"
         elif steps and is_setup(steps[0]):
             ok, what = last == UPLOAD_STEP, "verbatim sealed-log upload"
         else:
@@ -261,6 +276,7 @@ def check_permissions_allow_contents_read(wf):
 
 
 SEALED_RULES = [check_default_shell_is_sealed, check_setup_step_first, check_upload_step_last,
+                check_composite_single_ref,
                 check_no_unsealed_shell, check_uploads_sealed, check_downloads_unsealed,
                 check_retention_at_most_7, check_permissions_allow_contents_read]
 
@@ -515,6 +531,10 @@ def test_fixture_root_good():
     assert policy_violations(COMPOSITE_ROOTS / "good") == []
 
 
+def test_fixture_root_good_sha_pinned():
+    assert policy_violations(COMPOSITE_ROOTS / "good-sha") == []
+
+
 def test_fixture_root_good_without_permissions_key():
     assert policy_violations(COMPOSITE_ROOTS / "good-no-permissions") == []
 
@@ -525,6 +545,10 @@ def test_fixture_root_good_without_permissions_key():
     ("bad-upload-wrong-ref", "last step"),
     ("bad-composite-with", "first step"),
     ("bad-mixed-forms", "last step"),
+    ("bad-mixed-tag-sha", "different refs"),
+    ("bad-two-shas", "different refs"),
+    ("bad-short-sha", "first step"),
+    ("bad-main-both", "first step"),
     ("bad-permissions", "contents: read"),
     ("bad-workflow-permissions", "contents: read"),
     ("bad-no-key", "repo-key.pub is missing"),

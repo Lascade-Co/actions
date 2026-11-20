@@ -111,6 +111,9 @@ Other Lascade-Co repos use the same toolkit through two composite actions. Check
      uses: Lascade-Co/actions/actions/seal-upload@seal-v1
    ```
 
+   Repos that pin actions by SHA may pin both seal steps to the same full commit SHA of `Lascade-Co/actions` instead of
+   `@seal-v1` (every seal reference in a workflow file must use the same ref) and bump it deliberately; the policy check
+   caller stays on `@seal-v1`.
 4. Default shell `seal-bash {0}` / `seal-bash-e {0}`, masks, and `seal-pack`/`seal-unpack` artifacts follow the rules
    above unchanged.
 5. Add `.github/workflows/seal-policy.yml`, which enforces the rules in that repo:
