@@ -71,12 +71,136 @@ export function runState(run) {
   return ICON_CONCLUSIONS.has(run.conclusion) ? run.conclusion : "neutral";
 }
 
-/** One list row for a run from the API, or null when its id is not a number. */
-export function runRow(run, now = Date.now()) {
+/** The owner of every repo the viewer opens. */
+export const OWNER = "Lascade-Co";
+
+/** The repo whose links predate `repo=`: an old marker or link without it means this one. */
+export const DEFAULT_REPO = "actions";
+
+/**
+ * A GitHub repo name: 1-100 of [A-Za-z0-9._-], and not "." or "..", which a URL
+ * path would resolve as directory steps.
+ */
+export function isRepoName(value) {
+  return typeof value === "string" && /^[A-Za-z0-9._-]{1,100}$/.test(value) && !/^\.+$/.test(value);
+}
+
+/**
+ * A repo's identity for comparisons, storage and cache keys: GitHub matches repo
+ * names regardless of case, while markers print the canonical name.
+ */
+export function repoId(repo) {
+  return String(repo).toLowerCase();
+}
+
+/**
+ * The API's canonical name for the repo in the URL when the two differ by case
+ * alone (the URL should then use it), else null.
+ */
+export function canonicalRepoName(urlRepo, apiName) {
+  if (!isRepoName(apiName) || apiName === urlRepo || repoId(apiName) !== repoId(urlRepo)) return null;
+  return apiName;
+}
+
+/**
+ * The hint above a repo's runs (or the picker, `repo` null): ask for the token
+ * when missing, and for the repo key only when the repo is sealed. `sealed` is
+ * true, false or null (unknown: its key file could not be read).
+ * @returns {{text: string, settings: boolean}} `settings`: offer Open Settings.
+ */
+export function homeHint({ repo, token, hasKey = false, sealed = null }) {
+  const NO_TOKEN = "Without a token GitHub allows 60 requests an hour.";
+  const NOT_SEALED = "This repository is not sealed; logs are public.";
+  if (!repo) return token ? { text: "", settings: false } : { text: `${NO_TOKEN} Add a GitHub token in Settings to raise the limit and open runs.`, settings: true };
+  if (!token) {
+    if (sealed === true && !hasKey) {
+      return { text: `${NO_TOKEN} Add a GitHub token and the repo key for ${repo} in Settings to raise the limit and open runs.`, settings: true };
+    }
+    const text = `${NO_TOKEN} Add a GitHub token in Settings to raise the limit and open runs.`;
+    return { text: sealed === false ? `${NOT_SEALED} ${text}` : text, settings: true };
+  }
+  if (sealed === false) return { text: NOT_SEALED, settings: false };
+  if (sealed === true && !hasKey) return { text: `Add the repo key for ${repo} in Settings to see its sealed output.`, settings: true };
+  return { text: "", settings: false };
+}
+
+/**
+ * What the URL asks for: the repo picker (no repo), a repo's runs, or one run.
+ * `?run=` without `repo=` is a run of the actions repo (links from before repos).
+ * A bad value falls back to the view above it, with `error` naming it.
+ */
+export function readRoute(params) {
+  const repoParam = params.get("repo") || "";
+  const runParam = params.get("run") || "";
+  if (repoParam && !isRepoName(repoParam)) {
+    return { view: "repos", repo: null, run: null, error: `“${repoParam}” is not a repository name.` };
+  }
+  const repo = repoParam || (runParam ? DEFAULT_REPO : null);
+  if (!repo) return { view: "repos", repo: null, run: null };
+  if (!runParam) return { view: "runs", repo, run: null };
+  if (!DIGITS.test(runParam)) return { view: "runs", repo, run: null, error: `“${runParam}” is not a run ID.` };
+  return { view: "run", repo, run: runParam };
+}
+
+const PICK_HINT = "Paste a run link (github.com/Lascade-Co/<repo>/actions/runs/<id>) or a numeric run ID.";
+const GITHUB_RUN = /^(?:https?:\/\/)?(?:www\.)?github\.com\/([^/?#]+)\/([^/?#]+)\/actions\/runs\/(\d+)(?:\/attempts\/(\d+)|\/job\/(\d+))?(?:[/?#].*)?$/i;
+
+/**
+ * The run that the "open a run" box names: a GitHub run link of a Lascade-Co
+ * repo, a viewer link, or a bare run id (of `currentRepo`, else actions).
+ * @returns {{repo: string, run: string, attempt: string|null, job: string|null} | {error: string}}
+ */
+export function parsePick(value, currentRepo) {
+  const v = String(value ?? "").trim();
+  if (DIGITS.test(v)) return { repo: isRepoName(currentRepo) ? currentRepo : DEFAULT_REPO, run: v, attempt: null, job: null };
+  const m = GITHUB_RUN.exec(v);
+  if (m) {
+    if (m[1].toLowerCase() !== OWNER.toLowerCase()) return { error: `Only ${OWNER} repositories can be opened here.` };
+    if (!isRepoName(m[2])) return { error: PICK_HINT };
+    return { repo: m[2], run: m[3], attempt: m[4] ?? null, job: m[5] ?? null };
+  }
+  if (/^https:\/\/ci\.lascade\.com\/\?/i.test(v)) {
+    let p = null;
+    try {
+      p = new URL(v).searchParams;
+    } catch {
+      // Not a URL after all.
+    }
+    const r = p ? readRoute(p) : null;
+    if (r?.view === "run" && !r.error) {
+      const attempt = p.get("attempt");
+      return { repo: r.repo, run: r.run, attempt: attempt && DIGITS.test(attempt) ? attempt : null, job: null };
+    }
+  }
+  return { error: PICK_HINT };
+}
+
+/**
+ * One picker row for a repo from the API, or null when its name is not valid.
+ * It is sealed when it has the sealed-ci topic or is in `sealedNames` (the
+ * topic search's results).
+ */
+export function repoRow(repo, now = Date.now(), sealedNames = new Set()) {
+  const name = repo?.name;
+  if (!isRepoName(name)) return null;
+  const pushedAt = repo.pushed_at || null;
+  return {
+    name,
+    description: repo.description ? String(repo.description) : "",
+    pushedAt,
+    when: relativeTime(pushedAt, now),
+    sealed: (Array.isArray(repo.topics) && repo.topics.includes("sealed-ci")) || sealedNames.has(name),
+    href: `?repo=${name}`,
+  };
+}
+
+/** One list row for a run of `repo` from the API, or null when its id is not a number. */
+export function runRow(run, now = Date.now(), repo = DEFAULT_REPO) {
   const id = String(run.id);
   if (!DIGITS.test(id)) return null;
   const attempt = Number(run.run_attempt) || 1;
   const startedAt = run.run_started_at || run.created_at || null;
+  const base = `?repo=${isRepoName(repo) ? repo : DEFAULT_REPO}&run=${id}`;
   return {
     id,
     title: run.display_title || run.name || `Run ${id}`,
@@ -87,7 +211,7 @@ export function runRow(run, now = Date.now()) {
     status: run.status,
     conclusion: run.conclusion ?? null,
     state: runState(run),
-    href: attempt > 1 ? `?run=${id}&attempt=${attempt}` : `?run=${id}`,
+    href: attempt > 1 ? `${base}&attempt=${attempt}` : base,
     startedAt,
     when: relativeTime(startedAt, now),
     duration: run.status === "completed" ? duration(startedAt, run.updated_at) : "",

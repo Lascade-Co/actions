@@ -6,7 +6,9 @@ export const MARKER_RE = /🔒 sealed (sealed-log-[A-Za-z0-9_.-]+)#(\d+)/;
 
 // A marker counts only when it is the whole line (after the timestamp), exactly
 // as seal-bash prints it, so output that merely contains one is not trusted.
-const LINE_MARKER_RE = /^🔒 sealed (sealed-log-[A-Za-z0-9_.-]+)#(\d+) https:\/\/ci\.lascade\.com\/\?run=(\d+)&attempt=(\d+)$/;
+// Markers printed before repos were named have no `repo=`: they mean actions.
+const LINE_MARKER_RE = /^🔒 sealed (sealed-log-[A-Za-z0-9_.-]+)#(\d+) https:\/\/ci\.lascade\.com\/\?(?:repo=([A-Za-z0-9._-]{1,100})&)?run=(\d+)&attempt=(\d+)$/;
+const DEFAULT_REPO = "actions";
 
 const TS_RE = /^(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?Z) ?/;
 const RUN_HEADER = "##[group]Run ";
@@ -37,18 +39,22 @@ function parseLine(raw, expected) {
   const m = TS_RE.exec(raw);
   const line = m ? { ts: m[1], text: raw.slice(m[0].length) } : { ts: null, text: raw };
   const mk = LINE_MARKER_RE.exec(line.text);
-  // A marker naming another run is left as a plain line. Any attempt of this run
-  // binds: jobs carried over by "Re-run failed jobs" keep earlier-attempt markers.
-  if (mk && (!expected || mk[3] === String(expected.run))) {
-    line.marker = { artifact: mk[1], seq: Number(mk[2]), run: mk[3], attempt: mk[4] };
+  // A marker naming another repo or run is left as a plain line. Any attempt of
+  // this run binds: jobs carried over by "Re-run failed jobs" keep earlier-attempt markers.
+  // Repo names compare without case, as GitHub matches them.
+  const repo = mk?.[3] ?? DEFAULT_REPO;
+  const sameRepo = () => repo.toLowerCase() === String(expected.repo ?? DEFAULT_REPO).toLowerCase();
+  if (mk && (!expected || (sameRepo() && mk[4] === String(expected.run)))) {
+    line.marker = { artifact: mk[1], seq: Number(mk[2]), repo, run: mk[4], attempt: mk[5] };
   }
   return line;
 }
 
 /**
- * Splits a job log into sections. With `expected = {run}`, only markers
- * whose URL names that run (any attempt) are parsed as markers.
- * @returns {{title: string, lines: {ts: string|null, text: string, marker?: {artifact: string, seq: number, run: string, attempt: string}}[]}[]}
+ * Splits a job log into sections. With `expected = {repo, run}`, only markers
+ * whose URL names that repo (no `repo=` means actions) and run (any attempt)
+ * are parsed as markers.
+ * @returns {{title: string, lines: {ts: string|null, text: string, marker?: {artifact: string, seq: number, repo: string, run: string, attempt: string}}[]}[]}
  */
 export function parseJobLog(text, expected = null) {
   const sections = [];

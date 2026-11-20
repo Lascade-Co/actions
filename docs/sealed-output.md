@@ -64,11 +64,16 @@ such as `release-blog.yml` are sealed. `pull_request` workflows must not use sec
 
 ## Reading a run
 
-Open the marker link in the log, `https://ci.lascade.com/?repo=<repo>&run=<run id>&attempt=<n>`. Paste that repo's
-private key (stored only in your browser, one per repo) and a GitHub fine-grained token with Repository access "Public
-repositories (read-only)" and no other permissions (`ci.githubToken`).
+Open the marker link in the log, `https://ci.lascade.com/?repo=<repo>&run=<run id>&attempt=<n>` (older markers
+without `repo=` open as `actions` runs). In Settings, paste a GitHub fine-grained token with Repository access "Public
+repositories (read-only)" and no other permissions (shared by all repos), and the private key (`REPO_AGE_KEY`) of each
+repo you read; keys stay only in your browser, one per repo. A key is checked against the repo's committed
+`.github/seal/repo-key.pub` (`scripts/seal/repo-key.pub` for `actions`) before it is saved or used, so a key for another
+repo or a rotated key is rejected. "Forget all" clears the token, every key and everything decrypted.
 
-`https://ci.lascade.com/` without `?run=` lists recent runs; "Export logs" in a run downloads its log as plain text (needs the repo key).
+`https://ci.lascade.com/` lists public Lascade-Co repos with the `sealed-ci` topic ("Show all public repos" adds the
+rest, marked "not sealed"); `?repo=<repo>` lists that repo's recent runs. "Export logs" in a run downloads the job's or
+every job's log as plain text with sealed output merged in (needs the repo's key).
 
 ## Generating or rotating a repo key
 

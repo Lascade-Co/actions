@@ -75,14 +75,15 @@ test("exportText writes jobs in order and notes jobs whose log is unavailable", 
 });
 
 test("exportFilename keeps only [A-Za-z0-9._-]", () => {
-  assert.equal(exportFilename({ workflow: "Vinext deploy", runNumber: 42, attempt: 2 }), "Vinext-deploy-run42-attempt2.log");
+  assert.equal(exportFilename({ repo: "actions", workflow: "Vinext deploy", runNumber: 42, attempt: 2 }), "actions-Vinext-deploy-run42-attempt2.log");
   assert.equal(
-    exportFilename({ workflow: "CI / build (ios)", runNumber: 7, attempt: 1, job: "build: arm64 → sim" }),
-    "CI-build-ios-run7-attempt1-build-arm64-sim.log",
+    exportFilename({ repo: "connector", workflow: "CI / build (ios)", runNumber: 7, attempt: 1, job: "build: arm64 → sim" }),
+    "connector-CI-build-ios-run7-attempt1-build-arm64-sim.log",
   );
-  assert.equal(exportFilename({ workflow: "../../etc", runNumber: 1, attempt: 1, job: ".." }), "etc-run1-attempt1.log");
-  assert.equal(exportFilename({ workflow: "", runNumber: 1, attempt: 1 }), "run-run1-attempt1.log");
-  assert.match(exportFilename({ workflow: "ж".repeat(10), runNumber: 1, attempt: 1, job: "x".repeat(300) }), /^[A-Za-z0-9._-]{1,200}\.log$/);
+  assert.equal(exportFilename({ repo: "..", workflow: "../../etc", runNumber: 1, attempt: 1, job: ".." }), "etc-run1-attempt1.log");
+  assert.equal(exportFilename({ repo: "actions", workflow: "", runNumber: 1, attempt: 1 }), "actions-run-run1-attempt1.log");
+  assert.equal(exportFilename({ workflow: "CI", runNumber: 1, attempt: 1 }), "CI-run1-attempt1.log");
+  assert.match(exportFilename({ repo: "r".repeat(100), workflow: "ж".repeat(10), runNumber: 1, attempt: 1, job: "x".repeat(300) }), /^[A-Za-z0-9._-]{1,200}\.log$/);
 });
 
 test("plainLine removes 8-bit CSI and OSC sequences with their parameters", () => {
