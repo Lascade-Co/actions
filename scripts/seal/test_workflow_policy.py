@@ -293,6 +293,36 @@ def check_composite_run_steps_sealed(action):
             if "run" in s and s.get("shell") not in SEALED_SHELLS]
 
 
+SEAL_ENV_RE = re.compile(r"^seal_", re.IGNORECASE)
+
+
+# This repo's own seal-policy.yml hands the policy test its settings; nothing else may.
+POLICY_ENV_ALLOWED = {"seal-policy.yml": {"SEAL_POLICY_ROOT", "SEAL_POLICY_THIS_REPO"}}
+
+
+def _seal_keys(env, allow=()):
+    return sorted(k for k in (env if isinstance(env, dict) else {}) if SEAL_ENV_RE.match(str(k)) and k not in allow)
+
+
+def check_no_seal_env(wf, allow=()):
+    """No workflow-, job- or step-level `env:` may set SEAL_*/seal_* (install.sh settings and the internal token)."""
+    if not isinstance(wf, dict):
+        return []
+    bad = [f"workflow env sets {k}" for k in _seal_keys(wf.get("env"), allow)]
+    for n, j in (wf.get("jobs") or {}).items():
+        if not isinstance(j, dict):
+            continue
+        bad += [f"job {n}: job env sets {k}" for k in _seal_keys(j.get("env"), allow)]
+        for i, s in enumerate(j.get("steps") or []):
+            bad += [f"job {n} step {i + 1}: step env sets {k}" for k in _seal_keys((s or {}).get("env"), allow)]
+    return bad
+
+
+def check_composite_no_seal_env(action):
+    steps = ((action or {}).get("runs") or {}).get("steps") or [] if isinstance(action, dict) else []
+    return [f"step {i + 1}: step env sets {k}" for i, s in enumerate(steps) for k in _seal_keys((s or {}).get("env"))]
+
+
 def violations(path):
     wf = load(path)
     return [f"{rule.__name__}: {m}" for rule in SEALED_RULES for m in rule(wf)]
@@ -312,12 +342,15 @@ def policy_violations(root, this_repo=None):
         wf = load(p)
         if p.name not in exempt:
             bad += [f"{p.name}: {v}" for v in violations(p)]
+        bad += [f"{p.name}: {m}" for m in check_no_seal_env(wf, POLICY_ENV_ALLOWED.get(p.name, ()) if this_repo else ())]
         bad += [f"{p.name}: {m}" for m in check_no_pull_request_target(wf)]
         bad += [f"{p.name}: {m}" for m in check_pull_request_no_secrets(wf, p.read_text())]
     for p in composites_of(root):
         if this_repo and is_toolkit_composite(root, p):
             continue
-        bad += [f"{p.parent.relative_to(root).as_posix()}: {m}" for m in check_composite_run_steps_sealed(load(p))]
+        a = load(p)
+        bad += [f"{p.parent.relative_to(root).as_posix()}: {m}"
+                for m in check_composite_run_steps_sealed(a) + check_composite_no_seal_env(a)]
     return bad
 
 
@@ -331,6 +364,17 @@ REAL_COMPOSITES = [p for p in COMPOSITES if not (THIS_REPO and is_toolkit_compos
 @pytest.mark.parametrize("rule", SEALED_RULES, ids=lambda r: r.__name__.removeprefix("check_"))
 def test_sealed_rules(path, rule):
     assert rule(load(path)) == []
+
+
+@pytest.mark.parametrize("path", WORKFLOWS, ids=lambda p: p.name)
+def test_no_seal_env(path):
+    allow = POLICY_ENV_ALLOWED.get(path.name, ()) if THIS_REPO else ()
+    assert check_no_seal_env(load(path), allow) == []
+
+
+@pytest.mark.parametrize("path", REAL_COMPOSITES, ids=lambda p: p.parent.name)
+def test_composite_no_seal_env(path):
+    assert check_composite_no_seal_env(load(path)) == []
 
 
 @pytest.mark.parametrize("path", WORKFLOWS, ids=lambda p: p.name)
@@ -511,6 +555,23 @@ def test_permissions_rule_values():
 def test_fixture_root_bad_more(name, needle):
     found = policy_violations(COMPOSITE_ROOTS / name)
     assert any(needle in v for v in found), found
+
+
+@pytest.mark.parametrize("name,needle", [
+    ("bad-env-workflow", "workflow env sets SEAL_KEY_REPO"),
+    ("bad-env-job", "job env sets seal_token"),
+    ("bad-env-step", "step env sets SEAL_TOKEN"),
+    ("bad-env-composite", "step env sets SEAL_REF"),
+])
+def test_fixture_root_bad_seal_env(name, needle):
+    found = policy_violations(COMPOSITE_ROOTS / name)
+    assert any(needle in v for v in found), found
+
+
+def test_toolkit_composites_may_set_seal_env():
+    action = {"runs": {"using": "composite", "steps": [{"run": "x", "env": {"SEAL_REF": "1"}}]}}
+    assert check_composite_no_seal_env(action)  # the rule flags it...
+    # ...but policy_violations skips this repo's toolkit composites, which legitimately set it
 
 
 def test_fixture_root_inherits_workflow_permissions():

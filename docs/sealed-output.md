@@ -54,6 +54,8 @@ branch, PR number and title, commit SHA, step names, and lines starting `::add-m
    the PUBLIC step header before the sealed shell runs. Never expand private values into `run:` text, `env:` or a
    third-party `with:`.
 7. Workflow annotations (`::warning::`/`::error::`) from run steps are sealed and appear only in the log viewer.
+8. Never set `SEAL_*` or `seal_*` variables in `env:` (workflow, job or step level); the setup step and composites set
+   what they need, and the policy fails any workflow or composite that does.
 
 ## Exemption
 

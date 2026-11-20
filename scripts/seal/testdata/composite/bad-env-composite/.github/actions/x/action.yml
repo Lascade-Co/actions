@@ -1,0 +1,8 @@
+name: x
+runs:
+  using: composite
+  steps:
+    - run: echo hi
+      shell: seal-bash {0}
+      env:
+        SEAL_REF: main
