@@ -44,6 +44,7 @@ def shim_dir(tmp_path_factory):
     Raw control files of this repo are served from $SHIM_SERVE_DIR when a test sets
     it; GitHub API calls go to the local stub at $SHIM_API_BASE (real curl, same
     arguments and stdin); every requested URL is appended to $SHIM_LOG when set.
+    $SHIM_ARGV_LOG, when set, gets every call's argv and environment.
     Anything else fails. A `sudo` stub makes sure no test can link into /usr/local/bin.
     """
     d = tmp_path_factory.mktemp('shim')
@@ -58,6 +59,7 @@ for a in "$@"; do
 done
 if [ -z "$url" ] || [ -z "$out" ]; then echo "test curl shim: unexpected call" >&2; exit 22; fi
 [ -z "${{SHIM_LOG:-}}" ] || echo "$url" >>"$SHIM_LOG"
+[ -z "${{SHIM_ARGV_LOG:-}}" ] || {{ printf '%s\n' "$*"; env; }} >>"$SHIM_ARGV_LOG"
 case "$url" in
   https://github.com/FiloSottile/age/releases/download/*)
     c="{cache}/${{url##*/}}"
@@ -421,8 +423,8 @@ def test_key_from_caller_repo(tmp_path, shim_dir, keypair, key_api):
     b'',
     b'AGE-SECRET-KEY-1QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ\n',
     (BOOTSTRAP_RECIPIENT + '\n' + BOOTSTRAP_RECIPIENT + '\n').encode(),
-    (BOOTSTRAP_RECIPIENT + '\r\n').encode(),
-], ids=['garbage', 'empty', 'secret', 'two-lines', 'crlf'])
+    (BOOTSTRAP_RECIPIENT + '\r\r\n').encode(),
+], ids=['garbage', 'empty', 'secret', 'two-lines', 'double-cr'])
 def test_bad_caller_key_fails_before_run_steps(tmp_path, shim_dir, key_api, body):
     """Runs as on GitHub (no test knobs): SEAL_TOOLKIT_DIR is a production setting, the bad key fails the step."""
     key_api['routes'][KEY_PATH] = (200, body)
@@ -475,11 +477,108 @@ def test_caller_key_settings_validated(tmp_path, shim_dir, keypair, key_api, var
     key_api['routes'][KEY_PATH] = (200, keypair['pub'].read_bytes())
     env = caller_env(tmp_path, shim_dir, key_api)
     env[var] = value
-    r = run_install(env, SEAL_REF=SHA)
+    r = run_install(env)
     assert r.returncode != 0
     assert key_api['requests'] == []
     assert not [u for u in logged_urls(tmp_path) if 'raw.githubusercontent.com' in u]
     assert_not_installed(tmp_path, env)
+
+
+def test_crlf_caller_key_is_accepted(tmp_path, shim_dir, keypair, key_api):
+    """A key file committed with Windows line endings: one trailing CR is stripped."""
+    key_api['routes'][KEY_PATH] = (200, keypair['pub'].read_text().strip().encode() + b'\r\n')
+    env = caller_env(tmp_path, shim_dir, key_api)
+    r = run_install(env)
+    assert r.returncode == 0, r.stderr
+    assert (Path(env['RUNNER_TEMP']) / 'seal' / 'repo-key.pub').read_text() == keypair['pub'].read_text()
+
+
+def test_rate_limited_key_fetch_says_so(tmp_path, shim_dir, key_api):
+    key_api['routes'][KEY_PATH] = (403, b'{"message":"API rate limit exceeded for installation ID 1."}')
+    env = caller_env(tmp_path, shim_dir, key_api)
+    r = run_install(env)
+    assert r.returncode != 0
+    assert 'rate limit' in r.stderr and '.github/seal/repo-key.pub' in r.stderr
+    assert 'contents: read' not in r.stderr
+    assert_not_installed(tmp_path, env)
+
+
+def test_token_never_in_child_argv_env_or_output(tmp_path, shim_dir, keypair, key_api):
+    """The token reaches curl only on stdin: never in any child's argv or environment, nor in output."""
+    key_api['routes'][KEY_PATH] = (200, keypair['pub'].read_bytes())
+    env = caller_env(tmp_path, shim_dir, key_api)
+    argv_log = tmp_path / 'argv.log'
+    r = run_install(env, SHIM_ARGV_LOG=str(argv_log))
+    assert r.returncode == 0, r.stderr
+    calls = argv_log.read_text()
+    assert 'api.github.com' in calls and 'FiloSottile/age' in calls
+    api_call = next(l for l in calls.splitlines() if 'https://api.github.com/' in l)
+    assert not re.search(r'(^| )(-[a-zA-Z]*L|--location)\b', api_call), api_call  # no redirects with the token
+    assert TOKEN not in calls
+    assert 'SEAL_TOKEN' not in calls
+    assert TOKEN not in r.stdout + r.stderr
+    assert TOKEN not in (tmp_path / 'github_env').read_text()
+    h = {k.lower(): v for k, v in key_api['requests'][0]['headers'].items()}
+    assert h['authorization'] == f'Bearer {TOKEN}'
+
+
+COMPOSITE_VARS = ('SEAL_TOOLKIT_DIR', 'SEAL_KEY_REPO', 'SEAL_KEY_REF', 'SEAL_TOKEN')
+
+
+@pytest.mark.parametrize('value', ['x', ''], ids=['set', 'set-empty'])
+@pytest.mark.parametrize('var', COMPOSITE_VARS)
+def test_verbatim_setup_refuses_composite_settings(tmp_path, shim_dir, keypair, key_api, var, value):
+    """With SEAL_REF (this repo's setup step), an ambient SEAL_KEY_*/SEAL_TOKEN/SEAL_TOOLKIT_DIR can't redirect the key."""
+    key_api['routes'][KEY_PATH] = (200, keypair['pub'].read_bytes())
+    env, _ = served_env(tmp_path, shim_dir, keypair)
+    env['SHIM_API_BASE'] = key_api['base']
+    attack = {'SEAL_TOOLKIT_DIR': str(HERE), 'SEAL_KEY_REPO': CALLER, 'SEAL_KEY_REF': SHA, 'SEAL_TOKEN': TOKEN}
+    env.update(attack)
+    env[var] = value
+    r = run_install(env)
+    assert r.returncode != 0
+    assert 'SEAL_REF' in r.stderr
+    assert key_api['requests'] == []
+    assert logged_urls(tmp_path) == []
+    assert TOKEN not in r.stdout + r.stderr
+    assert_not_installed(tmp_path, env)
+    # The same env without the stray setting installs this repo's key from SEAL_REF.
+    for v in COMPOSITE_VARS:
+        env.pop(v)
+    r = run_install(env)
+    assert r.returncode == 0, r.stderr
+    assert key_api['requests'] == []
+
+
+@pytest.mark.parametrize('var', COMPOSITE_VARS)
+def test_composite_path_requires_every_setting(tmp_path, shim_dir, keypair, key_api, var):
+    """Without SEAL_REF (the seal action), all four settings are required; nothing is fetched without them."""
+    key_api['routes'][KEY_PATH] = (200, keypair['pub'].read_bytes())
+    env = caller_env(tmp_path, shim_dir, key_api)
+    del env[var]
+    r = run_install(env)
+    assert r.returncode != 0
+    assert var in r.stderr
+    assert key_api['requests'] == []
+    assert logged_urls(tmp_path) == []
+    assert_not_installed(tmp_path, env)
+
+
+@pytest.mark.parametrize('repo', ['', None], ids=['empty', 'unset'])
+def test_marker_omits_empty_repo(tmp_path, shim_dir, keypair, repo):
+    env = base_env(tmp_path, shim_dir, keypair['pub'])
+    if repo is None:
+        del env['GITHUB_REPOSITORY']
+    else:
+        env['GITHUB_REPOSITORY'] = repo
+    r = run_install(env)
+    assert r.returncode == 0, r.stderr
+    url = 'https://ci.lascade.com/?run=42&attempt=1'
+    assert r.stdout.count(url) == 1 and 'repo=' not in r.stdout
+    runner = Runner(tmp_path, env, keypair)
+    s = runner.step('echo hi')
+    assert s.returncode == 0
+    assert s.stdout.splitlines() == [f'🔒 sealed {runner.name}#1 {url}']
 
 
 # --- composite actions ---------------------------------------------------------
