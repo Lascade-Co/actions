@@ -18,6 +18,7 @@ import time
 import urllib.error
 import urllib.request
 import zipfile
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 API = "https://api.github.com"
@@ -53,10 +54,14 @@ class Stop(Exception):
 
 
 class Purger:
-    def __init__(self, repo, archive, token, http, sleep, now, out, dry_run, progress=None):
+    def __init__(self, repo, archive, token, http, sleep, now, out, dry_run, progress=None,
+                 workers=1, delete_interval=0.0, expire_before=None):
         self.repo, self.archive, self.token = repo, Path(archive), token
         self.http, self.sleep, self.now, self.out, self.dry_run = http, sleep, now, out, dry_run
         self.progress = progress or (lambda line: None)
+        self.workers, self.delete_interval = max(1, workers), delete_interval
+        self.expire_before = expire_before  # ISO-8601 UTC; older runs' logs are past retention
+        self.last_delete = None
         self.stats = {"archived": 0, "expired": 0, "deleted": 0, "skipped": 0,
                       "would_delete": 0, "bytes": 0, "stopped": False}
         self.processed = 0
@@ -136,18 +141,46 @@ class Purger:
                 os.unlink(tmp)
         return "archived", len(body)
 
-    def process(self, run, done):
+    def already_archived(self, run, done):
         run_id = str(run["id"])
-        if self.dry_run:
-            self.stats["would_delete"] += 1
-            return
         zip_path = self.archive / f"{run_id}.zip"
         if (run_id, "archived") in done and zip_path.exists() and zip_path.stat().st_size > 0:
-            pass
-        elif (run_id, "expired") in done:
-            pass
-        else:
-            log_status, size = self.download(run["id"])
+            return True
+        return (run_id, "expired") in done
+
+    def fetch_log(self, run):
+        """Worker-safe: archive one run's logs. Returns (log_status, size); raises Stop."""
+        created = run.get("created_at") or ""
+        if self.expire_before and created and created < self.expire_before:
+            return "expired", 0  # older than log retention: nothing to download
+        return self.download(run["id"])
+
+    def process_batch(self, runs, done):
+        """Fetch logs (in parallel when workers > 1), then record and delete runs in order."""
+        if self.dry_run:
+            self.stats["would_delete"] += len(runs)
+            return
+        todo = [(r, self.already_archived(r, done)) for r in runs]
+        if self.workers <= 1:
+            for r, skip in todo:
+                self.finish(r, None if skip else self.fetch_log(r), done)
+            return
+        with ThreadPoolExecutor(max_workers=self.workers) as pool:
+            futures = [None if skip else pool.submit(self.fetch_log, r) for r, skip in todo]
+            try:
+                for (r, _), fut in zip(todo, futures):
+                    self.finish(r, None if fut is None else fut.result(), done)
+            except BaseException:
+                for fut in futures:
+                    if fut is not None:
+                        fut.cancel()
+                raise
+
+    def finish(self, run, result, done):
+        """Main thread only: index the fetched log, then delete the run (paced)."""
+        run_id = str(run["id"])
+        if result is not None:
+            log_status, size = result
             self.stats[log_status] += 1
             self.stats["bytes"] += size
             row = [run_id, run.get("name") or "", run.get("event") or "",
@@ -157,8 +190,13 @@ class Purger:
                 fh.flush()
                 os.fsync(fh.fileno())
             done.add((run_id, log_status))
+        if self.delete_interval > 0 and self.last_delete is not None:
+            wait = self.delete_interval - (self.now() - self.last_delete)
+            if wait > 0:
+                self.sleep(wait)
         run_url = f"{API}/repos/{self.repo}/actions/runs/{run_id}"
         status, _, _ = self.request("DELETE", run_url)
+        self.last_delete = self.now()
         if status == 404:
             # A retried DELETE whose first attempt succeeded answers 404; confirm it's gone.
             check, _, _ = self.request("GET", run_url)
@@ -203,8 +241,7 @@ class Purger:
                     if r.get("status") != "completed" and r["id"] not in skipped_ids:
                         skipped_ids.add(r["id"])
                         self.stats["skipped"] += 1
-                for r in completed:
-                    self.process(r, done)
+                self.process_batch(completed, done)
                 # Deleting shifts later pages forward, so re-read the same page.
                 if self.dry_run or not completed:
                     page += 1
@@ -271,8 +308,31 @@ def terminal_progress(stream=sys.stderr, every=50):
 
 
 def purge(repo, archive, token, http=urllib_http, sleep=time.sleep, now=time.time,
-          out=print, dry_run=False, progress=None):
-    return Purger(repo, archive, token, http, sleep, now, out, dry_run, progress).run()
+          out=print, dry_run=False, progress=None, workers=1, delete_interval=0.0,
+          expire_before=None):
+    return Purger(repo, archive, token, http, sleep, now, out, dry_run, progress,
+                  workers, delete_interval, expire_before).run()
+
+
+RETENTION_MARGIN_DAYS = 2
+
+
+def expiry_cutoff(retention_days, now):
+    """ISO timestamp before which a run's logs are past retention (with a safety margin)."""
+    cutoff = now - (retention_days + RETENTION_MARGIN_DAYS) * 86400
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(cutoff))
+
+
+def repo_log_retention_days(repo, token, http=urllib_http, default=90):
+    status, _, body = http("GET", f"{API}/repos/{repo}/actions/permissions/artifact-and-log-retention",
+                           {"Accept": "application/vnd.github+json",
+                            "Authorization": f"Bearer {token}"})
+    if status == 200:
+        try:
+            return int(json.loads(body)["days"])
+        except (ValueError, KeyError, TypeError):
+            pass
+    return default
 
 
 def gh_token():
@@ -285,9 +345,23 @@ def main(argv=None):
     parser.add_argument("--repo", required=True)
     parser.add_argument("--archive", required=True)
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--workers", type=int, default=4,
+                        help="parallel log downloads (deletes stay one at a time); default 4")
+    parser.add_argument("--delete-interval", type=float, default=1.0,
+                        help="minimum seconds between deletes (GitHub asks for >= 1); default 1")
+    parser.add_argument("--log-retention-days", type=int, default=None,
+                        help="skip the log download for runs older than this many days "
+                             f"(+{RETENTION_MARGIN_DAYS} margin); default: the repo's setting")
     args = parser.parse_args(argv)
-    stats = purge(args.repo, Path(args.archive).expanduser(), gh_token(), dry_run=args.dry_run,
-                  progress=terminal_progress())
+    token = gh_token()
+    days = args.log_retention_days or repo_log_retention_days(args.repo, token)
+    cutoff = expiry_cutoff(days, time.time())
+    print(f"Runs created before {cutoff} ({days}-day log retention + {RETENTION_MARGIN_DAYS} days)"
+          f" are recorded as expired without downloading. {args.workers} download workers,"
+          f" deletes at most one per {args.delete_interval:g}s.")
+    stats = purge(args.repo, Path(args.archive).expanduser(), token, dry_run=args.dry_run,
+                  progress=terminal_progress(), workers=args.workers,
+                  delete_interval=args.delete_interval, expire_before=cutoff)
     return 1 if stats["stopped"] else 0
 
 

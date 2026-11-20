@@ -352,3 +352,65 @@ def test_terminal_progress_prints_every_nth_line_when_not_a_tty():
         report(f"line {i}")
     report(None)
     assert out.getvalue() == "line 1\nline 3\n"
+
+
+def dated(id_, created):
+    r = run(id_)
+    r["created_at"] = created
+    return r
+
+
+def test_parallel_workers_archive_everything_and_delete_in_order(tmp_path):
+    fake = Fake([run(i) for i in range(1, 11)], logs={i: (200, zb(bytes([65 + i]))) for i in range(1, 11)})
+    stats = go(fake, tmp_path, workers=4)
+    assert not stats["stopped"]
+    assert fake.deleted() == list(range(1, 11))
+    for i in range(1, 11):
+        assert (tmp_path / "arc" / f"{i}.zip").read_bytes() == zb(bytes([65 + i]))
+    ids = [line.split("\t")[0] for line in (tmp_path / "arc" / "index.tsv").read_text().splitlines()]
+    assert ids == [str(i) for i in range(1, 11)]
+
+
+def test_parallel_failed_download_stops_before_deleting_that_run(tmp_path):
+    fake = Fake([run(1), run(2), run(3), run(4)], logs={3: (200, b"")})
+    stats = go(fake, tmp_path, workers=4)
+    assert stats["stopped"]
+    assert fake.deleted() == [1, 2]
+    assert 3 not in fake.deleted() and 4 not in fake.deleted()
+
+
+def test_runs_older_than_retention_are_expired_without_download(tmp_path):
+    fake = Fake([dated(1, "2026-01-01T00:00:00Z"), dated(2, "2026-11-01T00:00:00Z")])
+    stats = go(fake, tmp_path, expire_before="2026-08-20T00:00:00Z")
+    assert fake.deleted() == [1, 2]
+    assert [u for u in fake.log_fetches() if "/runs/1/" in u] == []
+    assert [u for u in fake.log_fetches() if "/runs/2/" in u]
+    assert stats["expired"] == 1 and stats["archived"] == 1
+    assert "1\twf\tpush\t2026-01-01T00:00:00Z\tsuccess\texpired" in (tmp_path / "arc" / "index.tsv").read_text()
+
+
+def test_deletes_are_paced_by_delete_interval(tmp_path):
+    clock = {"t": 1000.0}
+    sleeps = []
+
+    def sleep(s):
+        sleeps.append(s)
+        clock["t"] += s
+
+    fake = Fake([run(1), run(2), run(3)])
+    pr.purge(REPO, tmp_path / "arc", "tok", http=fake, sleep=sleep, now=lambda: clock["t"],
+             out=lambda *_: None, delete_interval=1.0)
+    assert fake.deleted() == [1, 2, 3]
+    assert sleeps == [1.0, 1.0]  # no wait before the first delete
+
+
+def test_expiry_cutoff_adds_margin():
+    now = 1795132800  # 2026-11-20T00:00:00Z
+    assert pr.expiry_cutoff(90, now) == "2026-08-20T00:00:00Z"
+
+
+def test_repo_log_retention_days_reads_setting_and_falls_back():
+    ok = lambda m, u, h=None: (200, {}, b'{"days": 30, "maximum_allowed_days": 90}')
+    bad = lambda m, u, h=None: (403, {}, b"{}")
+    assert pr.repo_log_retention_days("o/r", "tok", http=ok) == 30
+    assert pr.repo_log_retention_days("o/r", "tok", http=bad) == 90
