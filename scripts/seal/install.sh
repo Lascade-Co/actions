@@ -1,7 +1,13 @@
 #!/usr/bin/env bash
 # Install the sealing toolkit for one job: verified age, seal-bash/seal-bash-e,
 # seal-pack, seal-unpack and the repo key's public half, all under $RUNNER_TEMP/seal.
-# Run from the "Seal job output" setup step with SEAL_REF set to github.workflow_sha.
+# Two ways in:
+# - this repo's verbatim "Seal job output" step: SEAL_REF=github.workflow_sha; the
+#   tools and scripts/seal/repo-key.pub are downloaded from this repo at SEAL_REF.
+# - the actions/seal composite (other repos): SEAL_TOOLKIT_DIR is the toolkit in the
+#   action's own checkout; the key is .github/seal/repo-key.pub of SEAL_KEY_REPO at
+#   commit SEAL_KEY_REF, read through the contents API with SEAL_TOKEN. There is no
+#   fallback to this repo's key.
 # Test-only knobs (refused when GITHUB_ACTIONS=true): SEAL_SOURCE_DIR,
 # SEAL_PUBKEY_FILE, SEAL_NO_SUDO, SEAL_AGE_SHA256_OVERRIDE.
 set -euo pipefail
@@ -20,6 +26,24 @@ if [ "${GITHUB_ACTIONS:-}" = true ]; then
     [ -z "${!v:-}" ] || die "$v is a test-only setting and is refused on GitHub Actions"
   done
 fi
+# Exactly one way in, so an ambient workflow/job env can't redirect the key:
+# SEAL_REF (this repo's verbatim step) excludes every composite setting, and the
+# composite path (no SEAL_REF) needs all of them. Test mode (SEAL_SOURCE_DIR) is exempt.
+COMPOSITE_VARS="SEAL_TOOLKIT_DIR SEAL_KEY_REPO SEAL_KEY_REF SEAL_TOKEN"
+if [ -n "${SEAL_REF+x}" ]; then
+  for v in $COMPOSITE_VARS; do
+    [ -z "${!v+x}" ] || die "$v must not be set with SEAL_REF: this repo's setup step seals to scripts/seal/repo-key.pub"
+  done
+elif [ -z "${SEAL_SOURCE_DIR:-}" ]; then
+  for v in $COMPOSITE_VARS; do
+    [ -n "${!v:-}" ] || die "$v is required without SEAL_REF (the actions/seal composite sets it)"
+  done
+fi
+# Keep the token out of every child's environment; only fetch_key's printf sees it.
+# export -n: an exported seal_token in the caller's env would keep its export flag.
+seal_token=${SEAL_TOKEN:-}
+export -n seal_token
+unset SEAL_TOKEN
 # A second install would restart the step numbering and overwrite sealed segments.
 [ ! -e "$seal/artifact-name" ] || die "already installed in this job; run the 'Seal job output' step once"
 
@@ -35,6 +59,32 @@ fetch() {
   fi
 }
 
+# fetch_key <dest>: the caller repo's committed public key at SEAL_KEY_REF. No -f, so
+# an HTTP error is final (only transport errors and transient statuses are retried)
+# and gets its own message; no -L, so the token is never sent on to a redirect.
+# The token goes to curl on stdin, never in argv, env or output.
+fetch_key() {
+  local code limited=
+  rm -f "$1.tmp"
+  # shellcheck disable=SC2153 # SEAL_KEY_REF comes from the environment and is validated before any call
+  code=$(printf 'Authorization: Bearer %s\n' "$seal_token" | curl -sS --retry 3 --retry-delay 2 \
+      --retry-all-errors --connect-timeout 10 --max-time 60 -H @- \
+      -H 'Accept: application/vnd.github.raw' -H 'X-GitHub-Api-Version: 2022-11-28' \
+      -w '%{http_code}' -o "$1.tmp" \
+      "https://api.github.com/repos/$SEAL_KEY_REPO/contents/$CALLER_KEY?ref=$SEAL_KEY_REF") || true
+  if [ "$code" = 200 ] && [ -s "$1.tmp" ]; then mv "$1.tmp" "$1"; return; fi
+  if [ -f "$1.tmp" ] && grep -qi 'rate limit' "$1.tmp"; then limited=1; fi
+  rm -f "$1.tmp"
+  [ -z "$limited" ] || die "GitHub API rate limit hit reading $keyname (HTTP $code); re-run the job later"
+  case "$code" in
+    200) die "$keyname is empty" ;;
+    404) die "$keyname was not found (HTTP 404); commit the repo's age public key there and give the job contents: read" ;;
+    429) die "GitHub API rate limit hit reading $keyname (HTTP 429); re-run the job later" ;;
+    401|403) die "cannot read $keyname (HTTP $code); the job's token needs contents: read" ;;
+    *) die "could not download $keyname (HTTP ${code:-none})" ;;
+  esac
+}
+
 case "$(uname -s) $(uname -m)" in
   'Linux x86_64')  plat=linux-amd64  sum=cbe24006683f8eb669266162894b9a522a1af52f2665fbc63a4bb032ed26ac10 ;;
   'Linux aarch64') plat=linux-arm64  sum=6b8dc4333c53a5a57c9e5834e3a48f92605d7154014cd07269ff3327db5d37f4 ;;
@@ -43,7 +93,27 @@ case "$(uname -s) $(uname -m)" in
 esac
 sum="${SEAL_AGE_SHA256_OVERRIDE:-$sum}"
 
-if [ -z "${SEAL_SOURCE_DIR:-}" ]; then
+# Tools: the test source dir, the action's toolkit dir, or this repo at SEAL_REF.
+src=${SEAL_SOURCE_DIR:-${SEAL_TOOLKIT_DIR:-}}
+# Key: the test file, the caller repo, the test source dir, or this repo at SEAL_REF.
+CALLER_KEY=.github/seal/repo-key.pub
+keyname='repo-key.pub'
+if [ -n "${SEAL_PUBKEY_FILE:-}" ]; then keysrc='file'
+elif [ -n "${SEAL_KEY_REPO:-}" ]; then
+  keysrc='api'
+  keyname="$CALLER_KEY in ${SEAL_KEY_REPO} at ${SEAL_KEY_REF:-}"
+  owner=${SEAL_KEY_REPO%%/*} name=${SEAL_KEY_REPO#*/}
+  [[ "$SEAL_KEY_REPO" == */* && "$owner" =~ ^[A-Za-z0-9-]+$ && "$name" =~ ^[A-Za-z0-9_.-]+$ \
+     && "$name" != . && "$name" != .. ]] \
+    || die "SEAL_KEY_REPO must be owner/name, not '$SEAL_KEY_REPO'"
+  [[ "${SEAL_KEY_REF:-}" =~ ^[0-9a-f]{40}$ ]] || die "SEAL_KEY_REF must be a full commit SHA to read $CALLER_KEY"
+  [ -n "$seal_token" ] || die "SEAL_TOKEN is required to read $CALLER_KEY from $SEAL_KEY_REPO"
+elif [ -n "${SEAL_TOOLKIT_DIR:-}" ]; then
+  die "SEAL_TOOLKIT_DIR needs SEAL_KEY_REPO: the key must come from $CALLER_KEY in the calling repo"
+elif [ -n "${SEAL_SOURCE_DIR:-}" ]; then keysrc='source'
+else keysrc='raw'; fi
+
+if [ -z "$src" ] || [ "$keysrc" = raw ]; then
   [[ "${SEAL_REF:-}" =~ ^[0-9a-f]{40}$ ]] || die "SEAL_REF must be a full commit SHA"
   raw="https://raw.githubusercontent.com/Lascade-Co/actions/$SEAL_REF/scripts/seal"
 fi
@@ -58,14 +128,19 @@ if command -v sha256sum >/dev/null; then got=$(sha256sum "$tgz"); else got=$(sha
 [ "${got%% *}" = "$sum" ] || die "age $AGE_VERSION checksum mismatch for $plat"
 tar -xzf "$tgz" -C "$stage"
 
-if [ -n "${SEAL_PUBKEY_FILE:-}" ]; then cp "$SEAL_PUBKEY_FILE" "$stage/repo-key.pub"
-elif [ -n "${SEAL_SOURCE_DIR:-}" ]; then cp "$SEAL_SOURCE_DIR/repo-key.pub" "$stage/repo-key.pub"
-else fetch "$raw/repo-key.pub" "$stage/repo-key.pub"; fi
+case $keysrc in
+  file)   cp "$SEAL_PUBKEY_FILE" "$stage/repo-key.pub" ;;
+  api)    fetch_key "$stage/repo-key.pub" ;;
+  source) cp "$SEAL_SOURCE_DIR/repo-key.pub" "$stage/repo-key.pub" ;;
+  raw)    fetch "$raw/repo-key.pub" "$stage/repo-key.pub" ;;
+esac
+unset seal_token
 recipient=$(cat "$stage/repo-key.pub")
-[[ "$recipient" =~ ^age1[02-9ac-hj-np-z]{58}$ ]] || die "repo-key.pub is not a single age recipient"
+recipient=${recipient%$'\r'}  # a key file committed with CRLF line endings
+[[ "$recipient" =~ ^age1[02-9ac-hj-np-z]{58}$ ]] || die "$keyname is not a single age recipient (one age1... line)"
 
 for t in $TOOLS; do
-  if [ -n "${SEAL_SOURCE_DIR:-}" ]; then cp "$SEAL_SOURCE_DIR/$t" "$stage/$t"
+  if [ -n "$src" ]; then cp "$src/$t" "$stage/$t" || die "toolkit file missing: $src/$t"
   else fetch "$raw/$t" "$stage/$t"; fi
 done
 
@@ -96,4 +171,7 @@ fi
 
 printf '%s\n' "$bin" >>"$GITHUB_PATH"
 printf 'SEAL_LOG_ARTIFACT=%s\n' "$name" >>"$GITHUB_ENV"
-echo "🔒 Step output in this job is sealed. Open it at https://ci.lascade.com/?run=${GITHUB_RUN_ID:-}&attempt=$GITHUB_RUN_ATTEMPT"
+repo=${GITHUB_REPOSITORY:-}
+repo=${repo#*/}
+repo=${repo:+repo=$repo&}
+echo "🔒 Step output in this job is sealed. Open it at https://ci.lascade.com/?${repo}run=${GITHUB_RUN_ID:-}&attempt=$GITHUB_RUN_ATTEMPT"

@@ -1,0 +1,29 @@
+name: Seal job output
+description: >-
+  First step of every job in a sealed repo. Installs seal-bash, seal-bash-e, seal-pack and seal-unpack
+  from this action's own ref, and reads the repo's age public key from .github/seal/repo-key.pub at the
+  job's commit through the contents API (no checkout needed). Fails the job if the key is missing or
+  malformed. Use it with no `with:` block; end the job with seal-upload. See docs/sealed-output.md.
+inputs:
+  token:
+    description: Token that can read the key file (contents read).
+    required: false
+    default: ${{ github.token }}
+  repository:
+    description: Repository (owner/name) whose .github/seal/repo-key.pub seals the output.
+    required: false
+    default: ${{ github.repository }}
+  ref:
+    description: Commit SHA to read the key file at.
+    required: false
+    default: ${{ github.sha }}
+runs:
+  using: composite
+  steps:
+    - name: Install sealing toolkit
+      shell: bash
+      env:
+        SEAL_TOKEN: ${{ inputs.token }}
+        SEAL_KEY_REPO: ${{ inputs.repository }}
+        SEAL_KEY_REF: ${{ inputs.ref }}
+      run: SEAL_TOOLKIT_DIR="$GITHUB_ACTION_PATH/../../scripts/seal" bash "$GITHUB_ACTION_PATH/../../scripts/seal/install.sh"

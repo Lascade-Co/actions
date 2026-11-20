@@ -1,0 +1,16 @@
+name: Upload sealed log
+description: >-
+  Last step of every job in a sealed repo: uploads the job's sealed log written by the seal action.
+  A composite cannot force its own condition, so the calling step must set `if: always()`.
+runs:
+  using: composite
+  steps:
+    - name: Upload sealed log
+      # Runs whenever the calling step does, even after an earlier step in this action failed.
+      if: always()
+      uses: actions/upload-artifact@v7
+      with:
+        name: ${{ env.SEAL_LOG_ARTIFACT }}
+        path: ${{ runner.temp }}/seal/out/
+        retention-days: 7
+        if-no-files-found: ignore
