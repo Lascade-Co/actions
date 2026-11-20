@@ -636,7 +636,7 @@ def test_seal_upload_action_is_composite():
     (step,) = a['runs']['steps']
     assert set(step) <= {'name', 'if', 'uses', 'with'}
     assert step.get('if', 'always()') == 'always()'
-    assert step['uses'] == 'actions/upload-artifact@v7'
+    assert step['uses'] == 'actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9'  # v7.0.2
     assert step['with'] == {
         'name': '${{ env.SEAL_LOG_ARTIFACT }}',
         'path': '${{ runner.temp }}/seal/out/',
