@@ -31,8 +31,9 @@ def run(id_, status="completed"):
 class Fake:
     """Fake http client returning (status, headers, body). Deletions shift the run list."""
 
-    def __init__(self, runs, logs=None, delete_status=204, headers=None):
+    def __init__(self, runs, logs=None, delete_status=204, headers=None, gone_on_404=True):
         self.runs = list(runs)
+        self.gone_on_404 = gone_on_404
         self.logs = logs or {}  # id -> (status, body)
         self.delete_status = delete_status
         self.calls = []
@@ -44,7 +45,8 @@ class Fake:
         if method == "GET" and url.startswith(f"{API}/runs?"):
             page = int(url.split("&page=")[1])
             chunk = self.runs[(page - 1) * 100:page * 100]
-            return 200, dict(self.extra_headers), json.dumps({"workflow_runs": chunk}).encode()
+            listing = {"total_count": len(self.runs), "workflow_runs": chunk}
+            return 200, dict(self.extra_headers), json.dumps(listing).encode()
         if method == "GET" and url.endswith("/logs"):
             rid = int(url.split("/runs/")[1].split("/")[0])
             status, body = self.logs.get(rid, (200, ZIP))
@@ -56,9 +58,13 @@ class Fake:
             return 200, {}, self.logs.get(rid, (200, ZIP))[1]
         if method == "DELETE":
             rid = int(url.rsplit("/", 1)[1])
-            if self.delete_status == 204:
+            if self.delete_status == 204 or (self.delete_status == 404 and self.gone_on_404):
                 self.runs = [r for r in self.runs if r["id"] != rid]
             return self.delete_status, {}, b""
+        if method == "GET" and "/runs/" in url and url.rsplit("/", 1)[1].isdigit():
+            rid = int(url.rsplit("/", 1)[1])
+            exists = any(r["id"] == rid for r in self.runs)
+            return (200 if exists else 404), {}, b""
         raise AssertionError(url)
 
     def deleted(self):
@@ -303,3 +309,46 @@ def test_urllib_http_does_not_follow_or_forward_auth():
         for s in (first, second):
             s.shutdown()
             s.server_close()
+
+
+def test_delete_404_for_a_run_that_is_gone_counts_as_deleted(tmp_path):
+    fake = Fake([run(1), run(2)], delete_status=404, gone_on_404=True)
+    stats = go(fake, tmp_path)
+    assert not stats["stopped"]
+    assert stats["deleted"] == 2 and stats["archived"] == 2
+    assert [u for m, u, _ in fake.calls if m == "GET" and u.endswith("/runs/1")]
+
+
+def test_delete_404_but_run_still_listed_stops(tmp_path):
+    fake = Fake([run(1)], delete_status=404, gone_on_404=False)
+    stats = go(fake, tmp_path)
+    assert stats["stopped"] and stats["deleted"] == 0
+
+
+def test_progress_reported_per_run_with_total(tmp_path):
+    lines = []
+    fake = Fake([run(1), run(2), run(3)])
+    go(fake, tmp_path, progress=lines.append)
+    shown = [l for l in lines if l]
+    assert len(shown) == 3
+    assert shown[0].startswith("[1/3 ") and shown[-1].startswith("[3/3 100.0%]")
+    assert "2026-01-01 wf" in shown[-1]
+    assert lines[-1] is None  # line finished before the summary
+
+
+def test_format_progress_rate_eta_and_size():
+    stats = {"archived": 30, "expired": 10, "bytes": 3 * 1024 * 1024}
+    line = pr.format_progress(40, 100, stats, elapsed=120, run={"created_at": "2026-11-02T17:48:03Z", "name": "Vinext"})
+    assert line.startswith("[40/100  40.0%] archived 30 expired 10")
+    assert "3.0 MB" in line and "20.0 runs/min" in line and "elapsed 2m00s" in line
+    assert "ETA 3m00s" in line and line.endswith("2026-11-02 Vinext")
+    assert "ETA ?" in pr.format_progress(0, None, stats, elapsed=0)
+
+
+def test_terminal_progress_prints_every_nth_line_when_not_a_tty():
+    out = io.StringIO()
+    report = pr.terminal_progress(stream=out, every=2)
+    for i in range(5):
+        report(f"line {i}")
+    report(None)
+    assert out.getvalue() == "line 1\nline 3\n"

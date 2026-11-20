@@ -10,6 +10,7 @@ import http.client
 import io
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -52,12 +53,15 @@ class Stop(Exception):
 
 
 class Purger:
-    def __init__(self, repo, archive, token, http, sleep, now, out, dry_run):
+    def __init__(self, repo, archive, token, http, sleep, now, out, dry_run, progress=None):
         self.repo, self.archive, self.token = repo, Path(archive), token
         self.http, self.sleep, self.now, self.out, self.dry_run = http, sleep, now, out, dry_run
+        self.progress = progress or (lambda line: None)
         self.stats = {"archived": 0, "expired": 0, "deleted": 0, "skipped": 0,
                       "would_delete": 0, "bytes": 0, "stopped": False}
         self.processed = 0
+        self.total = None
+        self.started = now()
 
     def request(self, method, url, auth=True):
         headers = {"Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"}
@@ -153,13 +157,22 @@ class Purger:
                 fh.flush()
                 os.fsync(fh.fileno())
             done.add((run_id, log_status))
-        status, _, _ = self.request("DELETE", f"{API}/repos/{self.repo}/actions/runs/{run_id}")
-        if status != 204:
+        run_url = f"{API}/repos/{self.repo}/actions/runs/{run_id}"
+        status, _, _ = self.request("DELETE", run_url)
+        if status == 404:
+            # A retried DELETE whose first attempt succeeded answers 404; confirm it's gone.
+            check, _, _ = self.request("GET", run_url)
+            if check != 404:
+                raise Stop(f"run {run_id}: delete returned 404 but the run still exists ({check})")
+        elif status != 204:
             raise Stop(f"run {run_id}: delete returned {status}")
         self.stats["deleted"] += 1
         self.processed += 1
-        if self.processed % 50 == 0:
-            self.out(self.summary("progress"))
+        self.progress(self.progress_line(run))
+
+    def progress_line(self, run=None):
+        return format_progress(self.processed, self.total, self.stats,
+                               self.now() - self.started, run)
 
     def summary(self, label):
         s = self.stats
@@ -179,7 +192,10 @@ class Purger:
                 status, _, body = self.request("GET", url)
                 if status != 200:
                     raise Stop(f"listing runs returned {status}")
-                runs = json.loads(body).get("workflow_runs", [])
+                listing = json.loads(body)
+                runs = listing.get("workflow_runs", [])
+                if self.total is None:
+                    self.total = listing.get("total_count")
                 if not runs:
                     break
                 completed = [r for r in runs if r.get("status") == "completed"]
@@ -194,14 +210,69 @@ class Purger:
                     page += 1
         except Stop as err:
             self.stats["stopped"] = True
+            self.progress(None)
             self.out(f"STOPPED: {err}")
+        self.progress(None)
         self.out(self.summary("done"))
         return self.stats
 
 
+def _duration(seconds):
+    seconds = int(max(0, seconds))
+    h, rem = divmod(seconds, 3600)
+    m, s = divmod(rem, 60)
+    return f"{h}h{m:02d}m" if h else f"{m}m{s:02d}s"
+
+
+def _size(n):
+    for unit in ("B", "KB", "MB", "GB"):
+        if n < 1024 or unit == "GB":
+            return f"{n:.0f} {unit}" if unit == "B" else f"{n:.1f} {unit}"
+        n /= 1024
+
+
+def format_progress(done, total, stats, elapsed, run=None):
+    """One status line: done/total, percent, counts, size, rate, ETA and the current run."""
+    total_txt = str(total) if total else "?"
+    pct = f"{100 * done / total:5.1f}%" if total else "  ?  "
+    rate = done / elapsed * 60 if elapsed > 0 else 0.0
+    eta = _duration((total - done) / rate * 60) if total and rate > 0 and total >= done else "?"
+    line = (f"[{done}/{total_txt} {pct}] archived {stats['archived']} expired {stats['expired']}"
+            f" · {_size(stats['bytes'])} · {rate:.1f} runs/min · elapsed {_duration(elapsed)}"
+            f" · ETA {eta}")
+    if run:
+        line += f" · {(run.get('created_at') or '')[:10]} {run.get('name') or ''}".rstrip()
+    return line
+
+
+def terminal_progress(stream=sys.stderr, every=50):
+    """Redraw one line on a terminal; elsewhere print every `every`-th update."""
+    state = {"n": 0, "width": 0}
+
+    def report(line):
+        if line is None:  # finish the line before other output
+            if stream.isatty() and state["width"]:
+                stream.write("\n")
+                stream.flush()
+                state["width"] = 0
+            return
+        state["n"] += 1
+        if stream.isatty():
+            cols = shutil.get_terminal_size((120, 20)).columns
+            text = line[: cols - 1]
+            stream.write("\r" + text + " " * max(0, state["width"] - len(text)))
+            state["width"] = len(text)
+            stream.flush()
+        elif state["n"] % every == 0:
+            stream.write(line + "\n")
+            stream.flush()
+
+    return report
+
+
 def purge(repo, archive, token, http=urllib_http, sleep=time.sleep, now=time.time,
-          out=print, dry_run=False):
-    return Purger(repo, archive, token, http, sleep, now, out, dry_run).run()
+          out=print, dry_run=False, progress=None):
+    return Purger(repo, archive, token, http, sleep, now, out, dry_run, progress).run()
 
 
 def gh_token():
@@ -215,7 +286,8 @@ def main(argv=None):
     parser.add_argument("--archive", required=True)
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(argv)
-    stats = purge(args.repo, Path(args.archive).expanduser(), gh_token(), dry_run=args.dry_run)
+    stats = purge(args.repo, Path(args.archive).expanduser(), gh_token(), dry_run=args.dry_run,
+                  progress=terminal_progress())
     return 1 if stats["stopped"] else 0
 
 
