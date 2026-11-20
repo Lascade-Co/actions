@@ -22,6 +22,8 @@ if ! { [ -x "$age" ] && [ -s "$key" ] && [ -s "$seal/artifact-name" ]; }; then
   exit 1
 fi
 name=$(cat "$seal/artifact-name")
+repo=${GITHUB_REPOSITORY:-}
+repo=${repo#*/}
 n=$(($(cat "$seal/seq") + 1))
 echo "$n" >"$seal/seq"
 log="$seal/log/$n.log"
@@ -49,7 +51,7 @@ seal_now() {
   fi
   rm -f "$log" "$summary"
   if [ -n "$ok" ]; then
-    echo "🔒 sealed $name#$n https://ci.lascade.com/?run=${GITHUB_RUN_ID:-}&attempt=${GITHUB_RUN_ATTEMPT:-}"
+    echo "🔒 sealed $name#$n https://ci.lascade.com/?repo=$repo&run=${GITHUB_RUN_ID:-}&attempt=${GITHUB_RUN_ATTEMPT:-}"
   else
     rm -f "$seal/out/$n.log.age" "$seal/out/$n.summary.md.age"
     echo "🔒 seal failed for $name#$n"

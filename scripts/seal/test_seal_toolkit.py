@@ -4,8 +4,11 @@ Each test runs install.sh against a fake runner in tmp_path. install.sh download
 and verifies the real age v1.3.2 release; a `curl` shim on PATH replays the
 tarball from a per-session cache under the pytest tmp dir after the first
 download. The tests generate a throwaway age key and point SEAL_PUBKEY_FILE at it.
+The caller-repo key path (the `actions/seal` composite) is served by a local
+http.server standing in for the GitHub contents API; the shim rewrites the API host.
 """
 import gzip
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import io
 import json
 import os
@@ -15,17 +18,23 @@ import shutil
 import signal
 import subprocess
 import tarfile
+import threading
 import time
 import zlib
 
 import pytest
+import yaml
 
 HERE = Path(__file__).resolve().parent
+ROOT = HERE.parent.parent
 INSTALL = HERE / 'install.sh'
+SEAL_ACTION = ROOT / 'actions' / 'seal' / 'action.yml'
+UPLOAD_ACTION = ROOT / 'actions' / 'seal-upload' / 'action.yml'
+TEST_KNOBS = ('SEAL_SOURCE_DIR', 'SEAL_PUBKEY_FILE', 'SEAL_NO_SUDO', 'SEAL_AGE_SHA256_OVERRIDE')
 REAL_CURL = shutil.which('curl')
 # Example recipient from the age README; only used to bootstrap age-keygen.
 BOOTSTRAP_RECIPIENT = 'age1ql3z7hjy54pw3hyww5ayyfg7zqgvc7w3j2elw8zmrj2kg5sfn9aqmcac8p'
-VIEWER = 'https://ci.lascade.com/?run=42&attempt=1'
+VIEWER = 'https://ci.lascade.com/?repo=actions&run=42&attempt=1'
 
 
 @pytest.fixture(scope='session')
@@ -33,7 +42,9 @@ def shim_dir(tmp_path_factory):
     """A PATH dir whose `curl` serves the age release tarball from a session cache.
 
     Raw control files of this repo are served from $SHIM_SERVE_DIR when a test sets
-    it; every requested URL is appended to $SHIM_LOG when set. Anything else fails.
+    it; GitHub API calls go to the local stub at $SHIM_API_BASE (real curl, same
+    arguments and stdin); every requested URL is appended to $SHIM_LOG when set.
+    Anything else fails. A `sudo` stub makes sure no test can link into /usr/local/bin.
     """
     d = tmp_path_factory.mktemp('shim')
     cache = tmp_path_factory.mktemp('age-cache')
@@ -55,10 +66,19 @@ case "$url" in
     f="${{SHIM_SERVE_DIR:-/nonexistent}}/${{url##*/}}"
     [ -e "$f" ] || exit 22
     cp "$f" "$out" ;;
+  https://api.github.com/*)
+    [ -n "${{SHIM_API_BASE:-}}" ] || exit 22
+    args=()
+    for a in "$@"; do
+      case "$a" in https://api.github.com/*) args+=("$SHIM_API_BASE/${{a#https://api.github.com/}}") ;; *) args+=("$a") ;; esac
+    done
+    exec "{REAL_CURL}" "${{args[@]}}" ;;
   *) exit 22 ;;
 esac
 ''')
     (d / 'curl').chmod(0o755)
+    (d / 'sudo').write_text('#!/bin/sh\necho "test sudo shim: refused" >&2\nexit 1\n')
+    (d / 'sudo').chmod(0o755)
     return d
 
 
@@ -77,6 +97,7 @@ def base_env(root, shim_dir, pubkey_file):
         GITHUB_JOB='build',
         GITHUB_RUN_ATTEMPT='1',
         GITHUB_RUN_ID='42',
+        GITHUB_REPOSITORY='Lascade-Co/actions',
         RUNNER_NAME='test-runner 1',
         RUNNER_OS='macOS',
         SEAL_SOURCE_DIR=str(HERE),
@@ -276,6 +297,257 @@ def test_install_rejects_bad_pubkey(tmp_path, shim_dir):
     r = run_install(env)
     assert r.returncode != 0
     assert (tmp_path / 'github_env').read_text() == ''
+
+
+# --- caller-repo key (actions/seal composite) ---------------------------------
+
+CALLER = 'Lascade-Co/connector'
+TOKEN = 'ghs_TESTTOKEN0123456789abcdefSECRET'
+KEY_PATH = f'/repos/{CALLER}/contents/.github/seal/repo-key.pub?ref={SHA}'
+
+
+@pytest.fixture
+def key_api():
+    """A stand-in for the GitHub contents API. `routes` maps request path to (status, body)."""
+    state = {'routes': {}, 'requests': []}
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            state['requests'].append({'path': self.path, 'headers': dict(self.headers)})
+            status, body = state['routes'].get(self.path, (404, b'{"message":"Not Found","status":"404"}'))
+            self.send_response(status)
+            self.send_header('Content-Length', str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    srv = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+    t = threading.Thread(target=srv.serve_forever, daemon=True)
+    t.start()
+    state['base'] = f'http://127.0.0.1:{srv.server_address[1]}'
+    try:
+        yield state
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
+def caller_env(tmp_path, shim_dir, key_api):
+    """The composite action's install: tools from SEAL_TOOLKIT_DIR, key from the caller repo."""
+    env = base_env(tmp_path, shim_dir, '/nonexistent')
+    del env['SEAL_SOURCE_DIR'], env['SEAL_PUBKEY_FILE']
+    env.update(SEAL_TOOLKIT_DIR=str(HERE), SEAL_KEY_REPO=CALLER, SEAL_KEY_REF=SHA, SEAL_TOKEN=TOKEN,
+               GITHUB_REPOSITORY=CALLER, SHIM_API_BASE=key_api['base'], SHIM_LOG=str(tmp_path / 'urls.log'))
+    return env
+
+
+def logged_urls(tmp_path):
+    log = tmp_path / 'urls.log'
+    return log.read_text().splitlines() if log.exists() else []
+
+
+def run_install_in(cwd, env, **extra):
+    """install.sh from a directory with no checkout in it."""
+    cwd.mkdir(exist_ok=True)
+    return subprocess.run(['bash', str(INSTALL)], env={**env, **extra}, cwd=cwd, capture_output=True,
+                          text=True, stdin=subprocess.DEVNULL, start_new_session=True, timeout=120)
+
+
+def assert_not_installed(tmp_path, env):
+    assert not (Path(env['RUNNER_TEMP']) / 'seal' / 'bin' / 'seal-bash').exists()
+    assert not (Path(env['RUNNER_TEMP']) / 'seal' / 'repo-key.pub').exists()
+    assert (tmp_path / 'github_env').read_text() == ''
+    assert (tmp_path / 'github_path').read_text() == ''
+
+
+def test_marker_includes_repo(tmp_path, shim_dir, keypair):
+    env = base_env(tmp_path, shim_dir, keypair['pub'])
+    env['GITHUB_REPOSITORY'] = CALLER
+    r = run_install(env)
+    assert r.returncode == 0, r.stderr
+    url = 'https://ci.lascade.com/?repo=connector&run=42&attempt=1'
+    assert r.stdout.count(url) == 1
+    runner = Runner(tmp_path, env, keypair)
+    s = runner.step('echo hi')
+    assert s.returncode == 0
+    assert s.stdout.splitlines() == [f'🔒 sealed {runner.name}#1 {url}']
+
+
+def test_install_from_toolkit_dir_without_curl(tmp_path, shim_dir, keypair, key_api):
+    """Tools are copied from SEAL_TOOLKIT_DIR (the action's checkout): no raw download, no SEAL_REF."""
+    key_api['routes'][KEY_PATH] = (200, keypair['pub'].read_bytes())
+    env = caller_env(tmp_path, shim_dir, key_api)
+    assert 'SEAL_REF' not in env
+    r = run_install(env)
+    assert r.returncode == 0, r.stderr
+    urls = logged_urls(tmp_path)
+    assert urls[0].startswith('https://github.com/FiloSottile/age/releases/download/v1.3.2/age-v1.3.2-')
+    assert urls[1:] == [f'https://api.github.com{KEY_PATH}']
+    runner = Runner(tmp_path, env, keypair)
+    for t in ('seal-bash', 'seal-pack', 'seal-unpack'):
+        assert (runner.bin / t).read_bytes() == (HERE / t).read_bytes(), t
+    assert (runner.bin / 'seal-bash-e').read_bytes() == (HERE / 'seal-bash').read_bytes()
+    s = runner.step('echo toolkit-ok')
+    assert s.returncode == 0
+    assert runner.decrypt(runner.out / '1.log.age') == b'toolkit-ok\n'
+
+
+def test_key_from_caller_repo(tmp_path, shim_dir, keypair, key_api):
+    """The key comes from the caller repo's contents API at the ref; no checkout is needed."""
+    assert keypair['pub'].read_text() != (HERE / 'repo-key.pub').read_text()
+    key_api['routes'][KEY_PATH] = (200, keypair['pub'].read_bytes())
+    env = caller_env(tmp_path, shim_dir, key_api)
+    r = run_install_in(tmp_path / 'no-checkout', env)
+    assert r.returncode == 0, r.stderr
+    seal = Path(env['RUNNER_TEMP']) / 'seal'
+    assert (seal / 'repo-key.pub').read_text() == keypair['pub'].read_text()
+    assert [q['path'] for q in key_api['requests']] == [KEY_PATH]
+    h = {k.lower(): v for k, v in key_api['requests'][0]['headers'].items()}
+    assert h['authorization'] == f'Bearer {TOKEN}'
+    assert h['accept'] == 'application/vnd.github.raw'
+    assert h['x-github-api-version'] == '2022-11-28'
+    assert TOKEN not in r.stdout + r.stderr
+    assert 'https://ci.lascade.com/?repo=connector&run=42&attempt=1' in r.stdout
+    runner = Runner(tmp_path, env, keypair)
+    s = runner.step('echo caller-key-ok')
+    assert s.returncode == 0
+    assert runner.decrypt(runner.out / '1.log.age') == b'caller-key-ok\n'
+
+
+@pytest.mark.parametrize('body', [
+    b'not-a-key\n',
+    b'',
+    b'AGE-SECRET-KEY-1QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ\n',
+    (BOOTSTRAP_RECIPIENT + '\n' + BOOTSTRAP_RECIPIENT + '\n').encode(),
+    (BOOTSTRAP_RECIPIENT + '\r\n').encode(),
+], ids=['garbage', 'empty', 'secret', 'two-lines', 'crlf'])
+def test_bad_caller_key_fails_before_run_steps(tmp_path, shim_dir, key_api, body):
+    """Runs as on GitHub (no test knobs): SEAL_TOOLKIT_DIR is a production setting, the bad key fails the step."""
+    key_api['routes'][KEY_PATH] = (200, body)
+    env = caller_env(tmp_path, shim_dir, key_api)
+    env.pop('SEAL_NO_SUDO')
+    r = run_install_in(tmp_path / 'no-checkout', env, GITHUB_ACTIONS='true')
+    assert r.returncode != 0
+    assert 'test-only' not in r.stderr
+    assert '.github/seal/repo-key.pub' in r.stderr and CALLER in r.stderr
+    assert TOKEN not in r.stdout + r.stderr
+    assert_not_installed(tmp_path, env)
+    assert not [u for u in logged_urls(tmp_path) if 'raw.githubusercontent.com' in u]
+    script = tmp_path / 's.sh'
+    script.write_text('echo CANARY-BADKEY\n')
+    s = subprocess.run(['bash', HERE / 'seal-bash', script], env=env, capture_output=True, text=True,
+                       stdin=subprocess.DEVNULL)
+    assert s.returncode != 0 and 'CANARY-BADKEY' not in s.stdout + s.stderr
+
+
+def test_missing_caller_key_names_the_file(tmp_path, shim_dir, key_api):
+    """A 404 names the file and repo, is not retried, and never falls back to this repo's key."""
+    env = caller_env(tmp_path, shim_dir, key_api)
+    env.pop('SEAL_NO_SUDO')
+    r = run_install_in(tmp_path / 'no-checkout', env, GITHUB_ACTIONS='true')
+    assert r.returncode != 0
+    assert '.github/seal/repo-key.pub' in r.stderr and CALLER in r.stderr
+    assert 'test-only' not in r.stderr
+    assert TOKEN not in r.stdout + r.stderr
+    assert [q['path'] for q in key_api['requests']] == [KEY_PATH]
+    assert not [u for u in logged_urls(tmp_path) if 'raw.githubusercontent.com' in u]
+    assert_not_installed(tmp_path, env)
+
+
+@pytest.mark.parametrize('status', [401, 403])
+def test_unreadable_caller_key_mentions_permission(tmp_path, shim_dir, key_api, status):
+    key_api['routes'][KEY_PATH] = (status, b'{"message":"Resource not accessible by integration"}')
+    env = caller_env(tmp_path, shim_dir, key_api)
+    r = run_install(env)
+    assert r.returncode != 0
+    assert '.github/seal/repo-key.pub' in r.stderr and 'contents: read' in r.stderr
+    assert_not_installed(tmp_path, env)
+
+
+@pytest.mark.parametrize('var, value', [
+    ('SEAL_KEY_REPO', ''), ('SEAL_KEY_REPO', 'connector'), ('SEAL_KEY_REPO', 'Lascade-Co/..'),
+    ('SEAL_KEY_REPO', 'Lascade-Co/x?ref=main#'), ('SEAL_KEY_REF', 'main'), ('SEAL_KEY_REF', ''),
+    ('SEAL_TOKEN', '')])
+def test_caller_key_settings_validated(tmp_path, shim_dir, keypair, key_api, var, value):
+    """Bad settings fail before any request; SEAL_TOOLKIT_DIR without SEAL_KEY_REPO never uses this repo's key."""
+    key_api['routes'][KEY_PATH] = (200, keypair['pub'].read_bytes())
+    env = caller_env(tmp_path, shim_dir, key_api)
+    env[var] = value
+    r = run_install(env, SEAL_REF=SHA)
+    assert r.returncode != 0
+    assert key_api['requests'] == []
+    assert not [u for u in logged_urls(tmp_path) if 'raw.githubusercontent.com' in u]
+    assert_not_installed(tmp_path, env)
+
+
+# --- composite actions ---------------------------------------------------------
+
+def load_action(path):
+    return yaml.safe_load(path.read_text())
+
+
+def test_seal_action_is_composite():
+    a = load_action(SEAL_ACTION)
+    assert a['runs']['using'] == 'composite'
+    assert {k: v['default'] for k, v in a['inputs'].items()} == {
+        'token': '${{ github.token }}', 'repository': '${{ github.repository }}', 'ref': '${{ github.sha }}'}
+    assert all(not v.get('required', False) for v in a['inputs'].values())
+    (step,) = a['runs']['steps']
+    assert set(step) <= {'name', 'shell', 'env', 'run'}
+    assert step['shell'] == 'bash'
+    assert step['env'] == {'SEAL_TOKEN': '${{ inputs.token }}', 'SEAL_KEY_REPO': '${{ inputs.repository }}',
+                           'SEAL_KEY_REF': '${{ inputs.ref }}'}
+    assert '${{' not in step['run']
+    assert 'SEAL_TOOLKIT_DIR="$GITHUB_ACTION_PATH/../../scripts/seal"' in step['run']
+    assert 'bash "$GITHUB_ACTION_PATH/../../scripts/seal/install.sh"' in step['run']
+    for knob in (*TEST_KNOBS, 'SEAL_REF='):
+        assert knob not in step['run'], knob
+
+
+def test_seal_upload_action_is_composite():
+    a = load_action(UPLOAD_ACTION)
+    assert not a.get('inputs')
+    assert a['runs']['using'] == 'composite'
+    (step,) = a['runs']['steps']
+    assert set(step) <= {'name', 'if', 'uses', 'with'}
+    assert step.get('if', 'always()') == 'always()'
+    assert step['uses'] == 'actions/upload-artifact@v7'
+    assert step['with'] == {
+        'name': '${{ env.SEAL_LOG_ARTIFACT }}',
+        'path': '${{ runner.temp }}/seal/out/',
+        'retention-days': 7,
+        'if-no-files-found': 'ignore',
+    }
+
+
+def test_seal_action_step_installs(tmp_path, shim_dir, keypair, key_api):
+    """Run the composite's step as the runner would: its env with the default inputs, `shell: bash`."""
+    key_api['routes'][KEY_PATH] = (200, keypair['pub'].read_bytes())
+    step = load_action(SEAL_ACTION)['runs']['steps'][0]
+    inputs = {'token': TOKEN, 'repository': CALLER, 'ref': SHA}
+    env = caller_env(tmp_path, shim_dir, key_api)
+    for k in ('SEAL_TOOLKIT_DIR', 'SEAL_KEY_REPO', 'SEAL_KEY_REF', 'SEAL_TOKEN'):
+        del env[k]
+    for k, v in step['env'].items():
+        env[k] = re.sub(r'\$\{\{ inputs\.(\w+) \}\}', lambda m: inputs[m.group(1)], v)
+    env['GITHUB_ACTION_PATH'] = str(SEAL_ACTION.parent)
+    script = tmp_path / 'composite-step.sh'
+    script.write_text(step['run'])
+    cwd = tmp_path / 'no-checkout'
+    cwd.mkdir()
+    r = subprocess.run(['bash', '--noprofile', '--norc', '-eo', 'pipefail', script], env=env, cwd=cwd,
+                       capture_output=True, text=True, stdin=subprocess.DEVNULL, start_new_session=True,
+                       timeout=120)
+    assert r.returncode == 0, r.stderr
+    assert [q['path'] for q in key_api['requests']] == [KEY_PATH]
+    assert not [u for u in logged_urls(tmp_path) if 'raw.githubusercontent.com' in u]
+    runner = Runner(tmp_path, env, keypair)
+    s = runner.step('echo composite-ok')
+    assert s.stdout.splitlines() == [
+        f'🔒 sealed {runner.name}#1 https://ci.lascade.com/?repo=connector&run=42&attempt=1']
+    assert runner.decrypt(runner.out / '1.log.age') == b'composite-ok\n'
 
 
 # --- seal-bash ----------------------------------------------------------------
