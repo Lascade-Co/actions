@@ -50,6 +50,9 @@ branch, PR number and title, commit SHA, step names, and lines starting `::add-m
    step, with the value computed inside that step (e.g. from `$GITHUB_EVENT_PATH` or a file), never via the same
    step's `env:`. Do not mask public metadata (repo, branch, PR number/title/comment, SHA, versions, app names):
    masked values are dropped from job outputs and short masked words can break the viewer's marker lines.
+   Values registered with `::add-mask::` in a sealed step are also replaced by `***` in that job's sealed logs from
+   that point on (masks registered by other actions are not); secrets printed without a mask are stored in the
+   sealed log as printed.
 6. The runner prints each step's `run:` script (with `${{ }}` already expanded) and its evaluated `env:` block in
    the PUBLIC step header before the sealed shell runs. Never expand private values into `run:` text, `env:` or a
    third-party `with:`.

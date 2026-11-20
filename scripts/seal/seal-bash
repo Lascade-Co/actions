@@ -4,6 +4,9 @@
 # Output goes straight to a file (no pipe, so background processes can't hold the
 # step open). Afterwards only the script's ::add-mask:: lines and one marker line
 # reach the public log; the output and step summary are age-encrypted to the repo key.
+# Values a sealed step masks are kept in $RUNNER_TEMP/seal/masks (mode 600, never
+# uploaded) and replaced by *** in this and every later sealed segment of the job;
+# masks registered by other actions are unknown here.
 set -euo pipefail
 
 case "${0##*/}" in
@@ -33,6 +36,32 @@ summary="$seal/log/$n.summary.md"
 : >"$log"
 : >"$summary"
 
+# redact log|summary <file>: the file with every ::add-mask:: value and every known
+# mask replaced by ***, longest first, as bytes; the log pass first records its masks.
+REDACT='
+import os, re, sys
+mode, masks, src = sys.argv[1:]
+cmd = re.compile(rb"^([^\S\n]*::add-mask::)([^\n]*?)(\r*)$", re.M)
+data = open(src, "rb").read()
+fd = os.open(masks, os.O_RDWR | os.O_APPEND | os.O_CREAT, 0o600)
+os.fchmod(fd, 0o600)
+with os.fdopen(fd, "r+b") as f:
+    if mode == "log":
+        f.write(b"".join(m.group(2) + b"\n" for m in cmd.finditer(data) if m.group(2)))
+        f.flush()
+    f.seek(0)
+    known = set()
+    for v in f.read().split(b"\n"):
+        u = v.rstrip()
+        known.update((v, u, u.replace(b"%0D", b"\r").replace(b"%0A", b"\n").replace(b"%25", b"%")))
+data = cmd.sub(lambda m: m.group(1) + b"***" + m.group(3), data)
+for v in sorted((v for v in known if v.strip()), key=len, reverse=True):
+    data = data.replace(v, b"***")
+sys.stdout.buffer.write(data)
+sys.stdout.buffer.flush()
+'
+redact() { python3 -I -c "$REDACT" "$1" "$seal/masks" "$2" 2>/dev/null; }
+
 rc=1
 child=
 sealed=
@@ -47,9 +76,10 @@ seal_now() {
   # ::add-mask:: still masks; forward it, minus the indentation.
   LC_ALL=C grep -a '^[[:space:]]*::add-mask::' "$log" | LC_ALL=C sed 's/^[[:space:]]*//'
   ok=1
-  "$age" -R "$key" -o "$seal/out/$n.log.age" "$log" || ok=
-  if [ -s "$summary" ]; then
-    "$age" -R "$key" -o "$seal/out/$n.summary.md.age" "$summary" || ok=
+  # pipefail: a failed redaction fails the seal, like a failed encryption.
+  redact log "$log" | "$age" -R "$key" -o "$seal/out/$n.log.age" || ok=
+  if [ -n "$ok" ] && [ -s "$summary" ]; then
+    redact summary "$summary" | "$age" -R "$key" -o "$seal/out/$n.summary.md.age" || ok=
   fi
   rm -f "$log" "$summary"
   if [ -n "$ok" ]; then

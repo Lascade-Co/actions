@@ -886,6 +886,101 @@ def test_large_output_is_complete(runner):
     assert lines == [str(i) for i in range(1, 200001)]
 
 
+def test_add_mask_value_redacted_in_sealed_log(runner):
+    r = runner.step('echo "::add-mask::S3CR3T-123"; echo "using S3CR3T-123 now"')
+    assert r.returncode == 0
+    assert r.stdout.splitlines() == ['::add-mask::S3CR3T-123', f'🔒 sealed {runner.name}#1 {VIEWER}']
+    log = runner.decrypt(runner.out / '1.log.age')
+    assert log == b'::add-mask::***\nusing *** now\n'
+    assert b'S3CR3T-123' not in log
+    assert not list((runner.seal / 'log').iterdir())
+
+
+def test_mask_from_earlier_step_redacts_later_steps(runner):
+    a = runner.step('echo "  ::add-mask::EARLY-SECRET\r"; echo "before EARLY-SECRET"')
+    b = runner.step('echo "later EARLY-SECRET and EARLY-SECRET"; echo "::add-mask::"; echo "::add-mask::LATE"')
+    c = runner.step('echo "EARLY-SECRET LATE"', mode='seal-bash-e')
+    assert a.returncode == b.returncode == c.returncode == 0
+    assert runner.decrypt(runner.out / '1.log.age') == b'  ::add-mask::***\r\nbefore ***\n'
+    assert runner.decrypt(runner.out / '2.log.age') == b'later *** and ***\n::add-mask::***\n::add-mask::***\n'
+    assert runner.decrypt(runner.out / '3.log.age') == b'*** ***\n'
+
+
+def test_mask_with_regex_metacharacters(runner):
+    value = 'a.b*c[d]\\e/f$(g)|h+?^{2}'
+    (runner.root / 'v').write_text(value)
+    r = runner.step(f'v=$(cat {runner.root / "v"}); echo "::add-mask::$v"; echo "x${{v}}y abbbc axbxc"; '
+                    'echo "::add-mask::DOLLAR\\$1\\\\0&"; echo "lit DOLLAR\\$1\\\\0& end"')
+    assert r.returncode == 0
+    assert r.stdout.splitlines()[0] == f'::add-mask::{value}'
+    log = runner.decrypt(runner.out / '1.log.age')
+    assert log == b'::add-mask::***\nx***y abbbc axbxc\n::add-mask::***\nlit *** end\n'
+
+
+def test_mask_redacts_earlier_lines_and_runner_forms(runner):
+    """Masks apply to the whole step, and to the trimmed and %-unescaped forms the runner masks."""
+    r = runner.step('echo "early PRE-MASK"; echo "::add-mask::PRE-MASK"; echo "::add-mask::TRAIL  "; '
+                    'echo "::add-mask::ML%0Aline%25"; echo "TRAIL."; printf "ML\\nline%%\\n"')
+    assert r.returncode == 0
+    assert runner.decrypt(runner.out / '1.log.age') == (
+        b'early ***\n::add-mask::***\n::add-mask::***\n::add-mask::***\n***.\n***\n')
+
+
+def test_longest_mask_wins(runner):
+    r = runner.step('echo "::add-mask::abc"; echo "::add-mask::abcdef"; echo "abcdef abc abcde"')
+    assert r.returncode == 0
+    assert runner.decrypt(runner.out / '1.log.age') == b'::add-mask::***\n::add-mask::***\n*** *** ***de\n'
+
+
+def test_mask_in_summary_redacted(runner):
+    runner.step('echo "::add-mask::SUM-OLD"')
+    r = runner.step('echo "::add-mask::SUM-NEW"; echo "# SUM-OLD SUM-NEW" >> "$GITHUB_STEP_SUMMARY"')
+    assert r.returncode == 0
+    summary = runner.decrypt(runner.out / '2.summary.md.age')
+    assert summary == b'# *** ***\n'
+    assert not list((runner.seal / 'log').iterdir())
+
+
+def test_binary_output_with_mask(runner):
+    r = runner.step(r'echo "::add-mask::BIN-SECRET"; printf "\xff\xfeBIN-SECRET\x80\0\xc3(BIN-SECRET\n\xff"')
+    assert r.returncode == 0
+    assert r.stdout.splitlines() == ['::add-mask::BIN-SECRET', f'🔒 sealed {runner.name}#1 {VIEWER}']
+    log = runner.decrypt(runner.out / '1.log.age')
+    assert log == b'::add-mask::***\n\xff\xfe***\x80\0\xc3(***\n\xff'
+
+
+def test_mask_list_not_uploaded(runner):
+    masks = runner.seal / 'masks'
+    assert masks.exists() and masks.stat().st_mode & 0o777 == 0o600
+    r = runner.step('echo "::add-mask::LISTED"')
+    assert r.returncode == 0
+    assert masks.stat().st_mode & 0o777 == 0o600
+    assert b'LISTED' in masks.read_bytes()
+    assert not [p for p in runner.out.rglob('*') if 'mask' in p.name]
+    assert sorted(p.name for p in runner.out.iterdir()) == ['1.log.age', 'meta.json.age']
+    masks.unlink()
+    r = runner.step('echo "::add-mask::LAZY"; echo LAZY')
+    assert r.returncode == 0
+    assert masks.stat().st_mode & 0o777 == 0o600
+    assert runner.decrypt(runner.out / '2.log.age') == b'::add-mask::***\n***\n'
+
+
+def test_redaction_failure_fails_closed(runner):
+    stub = runner.root / 'stub'
+    stub.mkdir()
+    (stub / 'python3').write_text('#!/bin/sh\necho "stub: REDACT-FAIL" >&2\nexit 1\n')
+    (stub / 'python3').chmod(0o755)
+    runner.env['PATH'] = f'{stub}:{runner.env["PATH"]}'
+    r = runner.step('echo "::add-mask::m4"; echo CANARY-RED; echo "# CANARY-SUM" >> "$GITHUB_STEP_SUMMARY"')
+    assert r.returncode != 0
+    assert r.stdout.splitlines() == ['::add-mask::m4', f'🔒 seal failed for {runner.name}#1']
+    assert 'CANARY' not in r.stdout + r.stderr
+    assert 'REDACT-FAIL' not in r.stderr
+    assert not (runner.out / '1.log.age').exists()
+    assert not (runner.out / '1.summary.md.age').exists()
+    assert not list((runner.seal / 'log').iterdir())
+
+
 def test_seal_bash_fails_closed_without_install(tmp_path):
     script = tmp_path / 's.sh'
     script.write_text('echo CANARY-789\n')
