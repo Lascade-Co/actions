@@ -40,7 +40,9 @@ elif [ -z "${SEAL_SOURCE_DIR:-}" ]; then
   done
 fi
 # Keep the token out of every child's environment; only fetch_key's printf sees it.
+# export -n: an exported seal_token in the caller's env would keep its export flag.
 seal_token=${SEAL_TOKEN:-}
+export -n seal_token
 unset SEAL_TOKEN
 # A second install would restart the step numbering and overwrite sealed segments.
 [ ! -e "$seal/artifact-name" ] || die "already installed in this job; run the 'Seal job output' step once"

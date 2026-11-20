@@ -79,7 +79,8 @@ case "$url" in
 esac
 ''')
     (d / 'curl').chmod(0o755)
-    (d / 'sudo').write_text('#!/bin/sh\necho "test sudo shim: refused" >&2\nexit 1\n')
+    (d / 'sudo').write_text('#!/bin/sh\n[ -z "${SHIM_ARGV_LOG:-}" ] || { echo "spy:sudo $*"; env; } >>"$SHIM_ARGV_LOG"\n'
+                            'echo "test sudo shim: refused" >&2\nexit 1\n')
     (d / 'sudo').chmod(0o755)
     return d
 
@@ -503,19 +504,42 @@ def test_rate_limited_key_fetch_says_so(tmp_path, shim_dir, key_api):
     assert_not_installed(tmp_path, env)
 
 
-def test_token_never_in_child_argv_env_or_output(tmp_path, shim_dir, keypair, key_api):
-    """The token reaches curl only on stdin: never in any child's argv or environment, nor in output."""
+SPIED = ('tar', 'python3', 'uname', 'sha256sum', 'shasum', 'od', 'date')
+
+
+def spy_dir(tmp_path):
+    """PATH wrappers that log each call's argv and environment to $SHIM_ARGV_LOG, then run the real tool."""
+    d = tmp_path / 'spy'
+    d.mkdir()
+    for t in SPIED:
+        real = shutil.which(t)
+        if real:
+            (d / t).write_text(f'#!/bin/bash\n{{ echo "spy:{t} $*"; env; }} >>"$SHIM_ARGV_LOG"\nexec "{real}" "$@"\n')
+            (d / t).chmod(0o755)
+    return d
+
+
+@pytest.mark.parametrize('ambient', [None, 'ambient-decoy'], ids=['plain', 'ambient-seal_token'])
+def test_token_never_in_child_argv_env_or_output(tmp_path, shim_dir, keypair, key_api, ambient):
+    """The token reaches curl only on stdin: never in any child's argv or environment, nor in output,
+    even when the caller's env exports a variable named like install.sh's internal one."""
     key_api['routes'][KEY_PATH] = (200, keypair['pub'].read_bytes())
     env = caller_env(tmp_path, shim_dir, key_api)
+    env.pop('SEAL_NO_SUDO')  # reach the sudo stub too (it refuses; nothing is linked)
+    if ambient:
+        env['seal_token'] = ambient
+    env['PATH'] = f'{spy_dir(tmp_path)}:{env["PATH"]}'
     argv_log = tmp_path / 'argv.log'
     r = run_install(env, SHIM_ARGV_LOG=str(argv_log))
     assert r.returncode == 0, r.stderr
     calls = argv_log.read_text()
     assert 'api.github.com' in calls and 'FiloSottile/age' in calls
+    for t in ('tar', 'python3', 'uname', 'sudo'):
+        assert f'spy:{t} ' in calls, t
     api_call = next(l for l in calls.splitlines() if 'https://api.github.com/' in l)
     assert not re.search(r'(^| )(-[a-zA-Z]*L|--location)\b', api_call), api_call  # no redirects with the token
     assert TOKEN not in calls
-    assert 'SEAL_TOKEN' not in calls
+    assert 'SEAL_TOKEN' not in calls and 'seal_token' not in calls
     assert TOKEN not in r.stdout + r.stderr
     assert TOKEN not in (tmp_path / 'github_env').read_text()
     h = {k.lower(): v for k, v in key_api['requests'][0]['headers'].items()}
