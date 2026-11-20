@@ -40,6 +40,7 @@ jobs:
       - name: Run seal workflow policy
         env:
           SEAL_POLICY_ROOT: ${{ github.workspace }}/target
+          SEAL_POLICY_THIS_REPO: ${{ github.repository == 'Lascade-Co/actions' }}
         run: pytest control/scripts/seal/test_workflow_policy.py -q
       - if: always()
         uses: Lascade-Co/actions/actions/seal-upload@seal-v1

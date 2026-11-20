@@ -36,10 +36,11 @@ def composites_of(root):
 
 
 def is_this_repo(root):
-    """Lascade-Co/actions itself: the control checkout, or a checkout of it recognised by its toolkit files."""
-    root = Path(root).resolve()
-    return root == CONTROL or ((root / "scripts" / "seal" / "repo-key.pub").is_file()
-                               and (root / "actions" / "seal" / "action.yml").is_file())
+    """Lascade-Co/actions itself: the control checkout, or the reusable workflow said so via the environment.
+
+    Never decided by the root's contents: a caller controls those.
+    """
+    return Path(root).resolve() == CONTROL or os.environ.get("SEAL_POLICY_THIS_REPO") == "true"
 
 
 def is_toolkit_composite(root, path):
@@ -286,6 +287,8 @@ def check_repo_key(root):
 
 
 def check_composite_run_steps_sealed(action):
+    if not isinstance(action, dict):
+        return ["not a valid action file"]
     return [f"step {i + 1}: shell {s.get('shell')!r}" for i, s in enumerate((action.get("runs") or {}).get("steps", []))
             if "run" in s and s.get("shell") not in SEALED_SHELLS]
 
@@ -525,10 +528,28 @@ def test_uncalled_reusable_exempt_only_in_this_repo():
     assert not any("callee.yml" in v for v in policy_violations(root, this_repo=True))
 
 
-def test_is_this_repo_detects_actions_repo_checkout(tmp_path):
-    assert not is_this_repo(tmp_path)
-    (tmp_path / "scripts" / "seal").mkdir(parents=True)
-    (tmp_path / "scripts" / "seal" / "repo-key.pub").write_text("x")
-    (tmp_path / "actions" / "seal").mkdir(parents=True)
-    (tmp_path / "actions" / "seal" / "action.yml").write_text("x")
-    assert is_this_repo(tmp_path)
+def _spoof_root(tmp_path):
+    shutil.copytree(COMPOSITE_ROOTS / "bad-uncalled-reusable", tmp_path / "r")
+    root = tmp_path / "r"
+    (root / "scripts" / "seal").mkdir(parents=True)
+    (root / "scripts" / "seal" / "repo-key.pub").write_text("")
+    (root / "actions" / "seal").mkdir(parents=True)
+    (root / "actions" / "seal" / "action.yml").write_text("")
+    return root
+
+
+def test_spoofed_toolkit_files_do_not_make_a_caller_this_repo(tmp_path, monkeypatch):
+    monkeypatch.delenv("SEAL_POLICY_THIS_REPO", raising=False)
+    root = _spoof_root(tmp_path)
+    assert not is_this_repo(root)
+    assert any("callee.yml" in v for v in policy_violations(root))
+
+
+def test_this_repo_env_flag_and_control_root(tmp_path, monkeypatch):
+    root = _spoof_root(tmp_path)
+    monkeypatch.setenv("SEAL_POLICY_THIS_REPO", "true")
+    assert is_this_repo(root)
+    assert not any("callee.yml" in v for v in policy_violations(root))
+    monkeypatch.setenv("SEAL_POLICY_THIS_REPO", "false")
+    assert not is_this_repo(root)
+    assert is_this_repo(CONTROL)
