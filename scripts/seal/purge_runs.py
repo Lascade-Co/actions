@@ -55,6 +55,10 @@ def _header(headers, name):
     return None
 
 
+def _workflow_basename(run):
+    return (run.get("path") or "").split("@")[0].rsplit("/", 1)[-1]
+
+
 class Stop(Exception):
     pass
 
@@ -68,6 +72,8 @@ class Purger:
         self.progress = progress or (lambda line: None)
         self.workers, self.delete_interval = max(1, workers), delete_interval
         self.expire_before = expire_before  # ISO-8601 UTC; older runs' logs are past retention
+        if keep_expired and expire_before is None:
+            raise ValueError("keep_expired requires expire_before")
         self.keep_expired = keep_expired
         self.always_delete = list(always_delete)
         for name in self.always_delete:
@@ -237,13 +243,13 @@ class Purger:
                 f"skipped={s['skipped']} kept={s['kept']} bytes={s['bytes']}"
                 + (f" would_delete={s['would_delete']}" if self.dry_run else ""))
 
-    def drain(self, base, done, skipped_ids, main):
+    def drain(self, base, done, skipped_ids, main, name=None):
         """List `base` newest first, archive+delete completed runs. False if the listing is 404."""
         page = 1
         while True:
             status, _, body = self.request("GET", f"{base}?per_page=100&page={page}")
             if status == 404 and not main:
-                return False
+                return page > 1  # False only when the workflow itself is unknown
             if status != 200:
                 raise Stop(f"listing runs returned {status}")
             listing = json.loads(body)
@@ -258,13 +264,24 @@ class Purger:
                     skipped_ids.add(r["id"])
                     self.stats["skipped"] += 1
             if main and self.keep_expired:
-                fresh = [r for r in completed if not self.is_expired(r)]
-                self.kept_ids.update(r["id"] for r in completed if self.is_expired(r))
+                # Fail closed: a run with no created_at is kept, never deleted.
+                old = [r for r in completed if not r.get("created_at") or self.is_expired(r)]
+                old_ids = {r["id"] for r in old}
+                fresh = [r for r in completed if r["id"] not in old_ids]
+                self.kept_ids.update(old_ids)
                 self.stats["kept"] = len(self.kept_ids)
                 if completed and not fresh:
                     return True  # newest first: everything further back is older still
                 completed = fresh
             elif not main:
+                mine = []
+                for r in completed:
+                    if _workflow_basename(r) == name:
+                        mine.append(r)
+                    elif r["id"] not in skipped_ids:
+                        skipped_ids.add(r["id"])
+                        self.stats["skipped"] += 1
+                completed = mine
                 self.kept_ids.difference_update(r["id"] for r in completed)
                 self.stats["kept"] = len(self.kept_ids)
             self.process_batch(completed, done)
@@ -282,7 +299,7 @@ class Purger:
             self.drain(f"{API}/repos/{self.repo}/actions/runs", done, skipped_ids, True)
             for name in self.always_delete:
                 base = f"{API}/repos/{self.repo}/actions/workflows/{name}/runs"
-                if not self.drain(base, done, skipped_ids, False):
+                if not self.drain(base, done, skipped_ids, False, name):
                     self.progress(None)
                     self.out(f"workflow {name} not found (404); continuing")
         except Stop as err:

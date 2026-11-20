@@ -32,7 +32,8 @@ class Fake:
     """Fake http client returning (status, headers, body). Deletions shift the run list."""
 
     def __init__(self, runs, logs=None, delete_status=204, headers=None, gone_on_404=True,
-                 extra_workflows=()):
+                 extra_workflows=(), leak=None):
+        self.leak = leak  # a foreign run every per-workflow listing wrongly includes
         self.runs = list(runs)
         self.workflows = {r["path"].rsplit("/", 1)[1] for r in self.runs if r.get("path")}
         self.workflows |= set(extra_workflows)
@@ -51,6 +52,8 @@ class Fake:
                 return 404, {}, b"{}"
             page = int(url.split("&page=")[1])
             mine = [r for r in self.runs if (r.get("path") or "").endswith("/" + name)]
+            if self.leak is not None and any(r["id"] == self.leak["id"] for r in self.runs):
+                mine.append(self.leak)
             listing = {"total_count": len(mine), "workflow_runs": mine[(page - 1) * 100:page * 100]}
             return 200, dict(self.extra_headers), json.dumps(listing).encode()
         if method == "GET" and url.startswith(f"{API}/runs?"):
@@ -517,3 +520,50 @@ def test_dry_run_always_delete_does_not_double_count(tmp_path):
 def test_progress_line_shows_kept():
     stats = {"archived": 1, "expired": 0, "bytes": 0, "kept": 7}
     assert "kept 7" in pr.format_progress(1, None, stats, elapsed=1)
+
+
+def test_always_delete_skips_runs_of_other_workflows(tmp_path):
+    foreign = wf(9, OLD, "other.yml")
+    fake = Fake([wf(3, OLD, "a.yml"), foreign], leak=foreign)
+    stats = go(fake, tmp_path, expire_before=CUT, keep_expired=True, always_delete=("a.yml",))
+    assert fake.deleted() == [3] and stats["skipped"] == 1 and not stats["stopped"]
+    assert [r["id"] for r in fake.runs] == [9]
+
+
+def test_always_delete_accepts_ref_suffixed_path(tmp_path):
+    r = wf(3, OLD, "a.yml")
+    r["path"] += "@refs/heads/main"
+    fake = Fake([r], extra_workflows=("a.yml",))
+    go(fake, tmp_path, expire_before=CUT, always_delete=("a.yml",))
+    assert fake.deleted() == [3]
+
+
+def test_keep_expired_keeps_runs_without_created_at(tmp_path):
+    bad = dated(1, NEW)
+    bad["created_at"] = ""
+    gone = dict(dated(2, NEW))
+    del gone["created_at"]
+    fake = Fake([bad, gone])
+    stats = go(fake, tmp_path, expire_before=CUT, keep_expired=True)
+    assert fake.deleted() == [] and stats["kept"] == 2
+
+
+def test_keep_expired_requires_cutoff(tmp_path):
+    import pytest
+    with pytest.raises(ValueError):
+        go(Fake([dated(1, NEW)]), tmp_path, keep_expired=True)
+
+
+def test_always_delete_404_on_later_page_is_not_workflow_not_found(tmp_path):
+    out = []
+    fake = Fake([wf(i, NEW, "a.yml") for i in range(1, 4)])
+    inner = fake.__call__
+
+    def http(method, url, headers=None):
+        if "/workflows/a.yml/runs?" in url and url.endswith("page=2"):
+            return 404, {}, b"{}"
+        return inner(method, url, headers)
+
+    stats = pr.purge(REPO, tmp_path / "arc", "tok", http=http, sleep=lambda s: None, out=out.append,
+                     dry_run=True, always_delete=("a.yml",))
+    assert not stats["stopped"] and not any("not found" in o for o in out)
