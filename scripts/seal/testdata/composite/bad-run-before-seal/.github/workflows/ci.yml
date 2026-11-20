@@ -1,0 +1,17 @@
+name: ci
+on:
+  push:
+defaults:
+  run:
+    shell: "seal-bash-e {0}"
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - run: echo early
+      - name: Seal job output
+        uses: Lascade-Co/actions/actions/seal@seal-v1
+      - if: always()
+        uses: Lascade-Co/actions/actions/seal-upload@seal-v1

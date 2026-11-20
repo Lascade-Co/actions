@@ -16,7 +16,6 @@ import yaml
 HERE = Path(__file__).resolve().parent
 CONTROL = HERE.parents[1]  # the checkout that holds this toolkit (this repo, or `control/` in a caller's run)
 ROOT = Path(os.environ.get("SEAL_POLICY_ROOT") or CONTROL).resolve()
-THIS_REPO = ROOT == CONTROL
 TESTDATA = HERE / "testdata"
 DOCS = CONTROL / "docs" / "sealed-output.md"
 TOOLKIT_COMPOSITES = {"seal", "seal-upload"}  # the toolkit itself: their install step must run under plain bash
@@ -30,10 +29,24 @@ def workflows_of(root):
 
 
 def composites_of(root):
-    d = Path(root) / "actions"
-    return sorted([*d.glob("*/action.yml"), *d.glob("*/action.yaml")])
+    found = []
+    for d in (Path(root) / "actions", Path(root) / ".github" / "actions"):
+        found += [*d.glob("*/action.yml"), *d.glob("*/action.yaml")]
+    return sorted(found)
 
 
+def is_this_repo(root):
+    """Lascade-Co/actions itself: the control checkout, or a checkout of it recognised by its toolkit files."""
+    root = Path(root).resolve()
+    return root == CONTROL or ((root / "scripts" / "seal" / "repo-key.pub").is_file()
+                               and (root / "actions" / "seal" / "action.yml").is_file())
+
+
+def is_toolkit_composite(root, path):
+    return Path(path).parent.parent == Path(root) / "actions" and path.parent.name in TOOLKIT_COMPOSITES
+
+
+THIS_REPO = is_this_repo(ROOT)
 WORKFLOWS = workflows_of(ROOT)
 COMPOSITES = composites_of(ROOT)
 
@@ -105,7 +118,10 @@ def exempt_names(workflows=None):
     workflows = WORKFLOWS if workflows is None else workflows
     called = set()
     for p in workflows:
-        called |= set(re.findall(r"uses:\s*\./\.github/workflows/([\w.-]+\.ya?ml)", p.read_text()))
+        for j in (load(p).get("jobs") or {}).values():
+            uses = str(j.get("uses", "")) if isinstance(j, dict) else ""
+            if uses.startswith("./.github/workflows/"):
+                called.add(posixpath.basename(uses))
     return {p.name for p in workflows if triggers(load(p)) == {"workflow_call"} and p.name not in called}
 
 
@@ -279,12 +295,16 @@ def violations(path):
     return [f"{rule.__name__}: {m}" for rule in SEALED_RULES for m in rule(wf)]
 
 
-def policy_violations(root, this_repo=False):
-    """The whole policy as a function of a repo root (what the reusable seal-policy workflow runs on a caller)."""
+def policy_violations(root, this_repo=None):
+    """The whole policy as a function of a repo root (what the reusable seal-policy workflow runs on a caller).
+
+    The workflow_call-only exemption and the toolkit-composite exemption apply only to this repo.
+    """
     root = Path(root)
+    this_repo = is_this_repo(root) if this_repo is None else this_repo
     bad = [] if this_repo else [f"repo-key: {m}" for m in check_repo_key(root)]
     wfs = workflows_of(root)
-    exempt = exempt_names(wfs)
+    exempt = exempt_names(wfs) if this_repo else set()
     for p in wfs:
         wf = load(p)
         if p.name not in exempt:
@@ -292,16 +312,16 @@ def policy_violations(root, this_repo=False):
         bad += [f"{p.name}: {m}" for m in check_no_pull_request_target(wf)]
         bad += [f"{p.name}: {m}" for m in check_pull_request_no_secrets(wf, p.read_text())]
     for p in composites_of(root):
-        if this_repo and p.parent.name in TOOLKIT_COMPOSITES:
+        if this_repo and is_toolkit_composite(root, p):
             continue
-        bad += [f"actions/{p.parent.name}: {m}" for m in check_composite_run_steps_sealed(load(p))]
+        bad += [f"{p.parent.relative_to(root).as_posix()}: {m}" for m in check_composite_run_steps_sealed(load(p))]
     return bad
 
 
 # ---------------------------------------------------------------- real files
 
-NON_EXEMPT = [p for p in WORKFLOWS if p.name not in exempt_names()]
-REAL_COMPOSITES = [p for p in COMPOSITES if not (THIS_REPO and p.parent.name in TOOLKIT_COMPOSITES)]
+NON_EXEMPT = [p for p in WORKFLOWS if not THIS_REPO or p.name not in exempt_names()]
+REAL_COMPOSITES = [p for p in COMPOSITES if not (THIS_REPO and is_toolkit_composite(ROOT, p))]
 
 
 @pytest.mark.parametrize("path", NON_EXEMPT, ids=lambda p: p.name)
@@ -474,3 +494,41 @@ def test_permissions_rule_values():
         assert check_permissions_allow_contents_read(wf(ok)) == []
     for bad in ({}, {"issues": "read"}, {"contents": "none"}, "none"):
         assert check_permissions_allow_contents_read(wf(bad))
+
+
+# ---------------------------------------------------------------- review fixes
+
+@pytest.mark.parametrize("name,needle", [
+    ("bad-run-before-seal", "first step"),
+    ("bad-empty-steps", "first step"),
+    ("bad-empty-job-permissions", "contents: read"),
+    ("bad-uncalled-reusable", "callee.yml"),  # no exemption outside this repo
+    ("bad-dot-github-composite", ".github/actions/x"),
+])
+def test_fixture_root_bad_more(name, needle):
+    found = policy_violations(COMPOSITE_ROOTS / name)
+    assert any(needle in v for v in found), found
+
+
+def test_fixture_root_inherits_workflow_permissions():
+    assert policy_violations(COMPOSITE_ROOTS / "good-inherits-workflow-permissions") == []
+
+
+def test_quoted_local_call_is_seen_as_called():
+    root = COMPOSITE_ROOTS / "bad-quoted-local-call"
+    assert exempt_names(workflows_of(root)) == set()
+    assert any("callee.yaml" in v for v in policy_violations(root, this_repo=True))
+
+
+def test_uncalled_reusable_exempt_only_in_this_repo():
+    root = COMPOSITE_ROOTS / "bad-uncalled-reusable"
+    assert not any("callee.yml" in v for v in policy_violations(root, this_repo=True))
+
+
+def test_is_this_repo_detects_actions_repo_checkout(tmp_path):
+    assert not is_this_repo(tmp_path)
+    (tmp_path / "scripts" / "seal").mkdir(parents=True)
+    (tmp_path / "scripts" / "seal" / "repo-key.pub").write_text("x")
+    (tmp_path / "actions" / "seal").mkdir(parents=True)
+    (tmp_path / "actions" / "seal" / "action.yml").write_text("x")
+    assert is_this_repo(tmp_path)

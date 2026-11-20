@@ -1,0 +1,12 @@
+name: ci
+on:
+  push:
+defaults:
+  run:
+    shell: "seal-bash-e {0}"
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps: []
