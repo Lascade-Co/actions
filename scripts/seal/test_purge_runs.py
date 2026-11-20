@@ -31,8 +31,11 @@ def run(id_, status="completed"):
 class Fake:
     """Fake http client returning (status, headers, body). Deletions shift the run list."""
 
-    def __init__(self, runs, logs=None, delete_status=204, headers=None, gone_on_404=True):
+    def __init__(self, runs, logs=None, delete_status=204, headers=None, gone_on_404=True,
+                 extra_workflows=()):
         self.runs = list(runs)
+        self.workflows = {r["path"].rsplit("/", 1)[1] for r in self.runs if r.get("path")}
+        self.workflows |= set(extra_workflows)
         self.gone_on_404 = gone_on_404
         self.logs = logs or {}  # id -> (status, body)
         self.delete_status = delete_status
@@ -42,6 +45,14 @@ class Fake:
     def __call__(self, method, url, headers=None):
         headers = headers or {}
         self.calls.append((method, url, dict(headers)))
+        if method == "GET" and url.startswith(f"{API}/workflows/"):
+            name = url.split("/workflows/")[1].split("/runs?")[0]
+            if name not in self.workflows:
+                return 404, {}, b"{}"
+            page = int(url.split("&page=")[1])
+            mine = [r for r in self.runs if (r.get("path") or "").endswith("/" + name)]
+            listing = {"total_count": len(mine), "workflow_runs": mine[(page - 1) * 100:page * 100]}
+            return 200, dict(self.extra_headers), json.dumps(listing).encode()
         if method == "GET" and url.startswith(f"{API}/runs?"):
             page = int(url.split("&page=")[1])
             chunk = self.runs[(page - 1) * 100:page * 100]
@@ -414,3 +425,95 @@ def test_repo_log_retention_days_reads_setting_and_falls_back():
     bad = lambda m, u, h=None: (403, {}, b"{}")
     assert pr.repo_log_retention_days("o/r", "tok", http=ok) == 30
     assert pr.repo_log_retention_days("o/r", "tok", http=bad) == 90
+
+
+CUT = "2026-08-20T00:00:00Z"
+OLD, NEW = "2026-01-01T00:00:00Z", "2026-11-01T00:00:00Z"
+
+
+def wf(id_, created, name):
+    r = dated(id_, created)
+    r["path"] = f".github/workflows/{name}"
+    return r
+
+
+def test_keep_expired_skips_old_and_terminates(tmp_path):
+    fake = Fake([dated(1, NEW), dated(2, NEW), dated(3, OLD), dated(4, OLD)])
+    stats = go(fake, tmp_path, expire_before=CUT, keep_expired=True)
+    assert fake.deleted() == [1, 2]
+    assert stats["kept"] == 2 and not stats["stopped"]
+    assert [u for u in fake.log_fetches() if "/runs/3/" in u or "/runs/4/" in u] == []
+    assert "\t3\t" not in (tmp_path / "arc" / "index.tsv").read_text()
+
+
+def test_keep_expired_stops_listing_at_first_all_old_page(tmp_path):
+    fake = Fake([dated(i, OLD) for i in range(1, 251)])
+    stats = go(fake, tmp_path, expire_before=CUT, keep_expired=True)
+    assert fake.deleted() == [] and stats["kept"] == 100
+    listings = [u for m, u, _ in fake.calls if "/runs?" in u]
+    assert len(listings) == 1
+
+
+def test_keep_expired_mixed_page_deletes_new_keeps_old(tmp_path):
+    fake = Fake([dated(i, NEW) for i in range(1, 51)] + [dated(i, OLD) for i in range(51, 151)])
+    stats = go(fake, tmp_path, expire_before=CUT, keep_expired=True)
+    assert sorted(fake.deleted()) == list(range(1, 51))
+    assert stats["kept"] == 100 and stats["deleted"] == 50 and not stats["stopped"]
+
+
+def test_keep_expired_advances_past_in_progress_page(tmp_path):
+    fake = Fake([run(i, "in_progress") for i in range(1, 101)] + [dated(200, NEW), dated(201, OLD)])
+    stats = go(fake, tmp_path, expire_before=CUT, keep_expired=True)
+    assert fake.deleted() == [200] and stats["kept"] == 1
+
+
+def test_always_delete_removes_old_runs_of_that_workflow_only(tmp_path):
+    fake = Fake([wf(1, NEW, "a.yml"), wf(3, OLD, "a.yml"), wf(4, OLD, "b.yml")])
+    stats = go(fake, tmp_path, expire_before=CUT, keep_expired=True, always_delete=("a.yml",))
+    assert sorted(fake.deleted()) == [1, 3]
+    assert [r["id"] for r in fake.runs] == [4]
+    assert stats["expired"] == 1 and stats["kept"] == 1
+    assert [u for u in fake.log_fetches() if "/runs/3/" in u] == []
+    assert "3\twf\tpush\t2026-01-01T00:00:00Z\tsuccess\texpired" in (tmp_path / "arc" / "index.tsv").read_text()
+
+
+def test_always_delete_without_keep_expired_is_harmless(tmp_path):
+    fake = Fake([wf(1, NEW, "a.yml"), wf(3, OLD, "a.yml")])
+    stats = go(fake, tmp_path, expire_before=CUT, always_delete=("a.yml",))
+    assert sorted(fake.deleted()) == [1, 3] and stats["deleted"] == 2
+
+
+def test_always_delete_404_workflow_reports_and_continues(tmp_path):
+    out = []
+    fake = Fake([wf(3, OLD, "a.yml")])
+    stats = pr.purge(REPO, tmp_path / "arc", "tok", http=fake, sleep=lambda s: None, out=out.append,
+                     expire_before=CUT, keep_expired=True, always_delete=("nope.yml", "a.yml"))
+    assert fake.deleted() == [3] and not stats["stopped"]
+    assert any("nope.yml" in o and "not found" in o for o in out)
+
+
+def test_always_delete_rejects_invalid_names(tmp_path):
+    import pytest
+    for bad in ("../x.yml", "a/b.yml", "x.txt", "a b.yml", "", ".yml"):
+        with pytest.raises(SystemExit):
+            pr.main(["--repo", "o/r", "--archive", str(tmp_path), "--always-delete", bad])
+    assert pr.WORKFLOW_FILE_RE.match("google-backfill.yml") and pr.WORKFLOW_FILE_RE.match("a_b.1.yaml")
+
+
+def test_dry_run_counts_kept_and_always_delete(tmp_path):
+    fake = Fake([wf(1, NEW, "a.yml"), wf(3, OLD, "a.yml"), wf(4, OLD, "b.yml")])
+    stats = go(fake, tmp_path, dry_run=True, expire_before=CUT, keep_expired=True,
+               always_delete=("a.yml",))
+    assert fake.deleted() == [] and fake.log_fetches() == []
+    assert stats["would_delete"] == 2 and stats["kept"] == 1 and stats["deleted"] == 0
+
+
+def test_dry_run_always_delete_does_not_double_count(tmp_path):
+    fake = Fake([wf(1, NEW, "a.yml"), wf(3, OLD, "a.yml")])
+    stats = go(fake, tmp_path, dry_run=True, expire_before=CUT, always_delete=("a.yml",))
+    assert stats["would_delete"] == 2
+
+
+def test_progress_line_shows_kept():
+    stats = {"archived": 1, "expired": 0, "bytes": 0, "kept": 7}
+    assert "kept 7" in pr.format_progress(1, None, stats, elapsed=1)

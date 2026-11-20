@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 """Archive every completed GitHub Actions run's logs locally, then delete the run.
 
-Usage: purge_runs.py --repo OWNER/REPO --archive DIR [--dry-run]
+Usage: purge_runs.py --repo OWNER/REPO --archive DIR [--dry-run] [--keep-expired]
+       [--always-delete WORKFLOW_FILE ...]
+--keep-expired leaves runs older than the log-retention cutoff untouched (neither archived
+nor deleted); --always-delete (repeatable, e.g. google-backfill.yml) additionally archives
+and deletes every completed run of that workflow regardless of age.
 The token comes from `gh auth token`. Re-running is idempotent: a run already in
 index.tsv whose zip exists is deleted without being downloaded again.
 """
@@ -10,6 +14,7 @@ import http.client
 import io
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -23,6 +28,7 @@ from pathlib import Path
 
 API = "https://api.github.com"
 MAX_RETRIES = 5
+WORKFLOW_FILE_RE = re.compile(r"^[A-Za-z0-9._-]+\.ya?ml$")
 TRANSPORT_ATTEMPTS = 3
 
 
@@ -55,14 +61,22 @@ class Stop(Exception):
 
 class Purger:
     def __init__(self, repo, archive, token, http, sleep, now, out, dry_run, progress=None,
-                 workers=1, delete_interval=0.0, expire_before=None):
+                 workers=1, delete_interval=0.0, expire_before=None, keep_expired=False,
+                 always_delete=()):
         self.repo, self.archive, self.token = repo, Path(archive), token
         self.http, self.sleep, self.now, self.out, self.dry_run = http, sleep, now, out, dry_run
         self.progress = progress or (lambda line: None)
         self.workers, self.delete_interval = max(1, workers), delete_interval
         self.expire_before = expire_before  # ISO-8601 UTC; older runs' logs are past retention
+        self.keep_expired = keep_expired
+        self.always_delete = list(always_delete)
+        for name in self.always_delete:
+            if not WORKFLOW_FILE_RE.match(name):
+                raise ValueError(f"invalid workflow file name: {name!r}")
+        self.kept_ids = set()
+        self.dry_seen = set()
         self.last_delete = None
-        self.stats = {"archived": 0, "expired": 0, "deleted": 0, "skipped": 0,
+        self.stats = {"archived": 0, "expired": 0, "deleted": 0, "skipped": 0, "kept": 0,
                       "would_delete": 0, "bytes": 0, "stopped": False}
         self.processed = 0
         self.total = None
@@ -148,17 +162,22 @@ class Purger:
             return True
         return (run_id, "expired") in done
 
+    def is_expired(self, run):
+        created = run.get("created_at") or ""
+        return bool(self.expire_before and created and created < self.expire_before)
+
     def fetch_log(self, run):
         """Worker-safe: archive one run's logs. Returns (log_status, size); raises Stop."""
-        created = run.get("created_at") or ""
-        if self.expire_before and created and created < self.expire_before:
+        if self.is_expired(run):
             return "expired", 0  # older than log retention: nothing to download
         return self.download(run["id"])
 
     def process_batch(self, runs, done):
         """Fetch logs (in parallel when workers > 1), then record and delete runs in order."""
         if self.dry_run:
-            self.stats["would_delete"] += len(runs)
+            fresh = [r for r in runs if r["id"] not in self.dry_seen]
+            self.dry_seen.update(r["id"] for r in fresh)
+            self.stats["would_delete"] += len(fresh)
             return
         todo = [(r, self.already_archived(r, done)) for r in runs]
         if self.workers <= 1:
@@ -215,36 +234,57 @@ class Purger:
     def summary(self, label):
         s = self.stats
         return (f"{label}: archived={s['archived']} expired={s['expired']} deleted={s['deleted']} "
-                f"skipped={s['skipped']} bytes={s['bytes']}"
+                f"skipped={s['skipped']} kept={s['kept']} bytes={s['bytes']}"
                 + (f" would_delete={s['would_delete']}" if self.dry_run else ""))
+
+    def drain(self, base, done, skipped_ids, main):
+        """List `base` newest first, archive+delete completed runs. False if the listing is 404."""
+        page = 1
+        while True:
+            status, _, body = self.request("GET", f"{base}?per_page=100&page={page}")
+            if status == 404 and not main:
+                return False
+            if status != 200:
+                raise Stop(f"listing runs returned {status}")
+            listing = json.loads(body)
+            runs = listing.get("workflow_runs", [])
+            if main and self.total is None and not self.keep_expired:
+                self.total = listing.get("total_count")  # unknown when old runs are kept
+            if not runs:
+                return True
+            completed = [r for r in runs if r.get("status") == "completed"]
+            for r in runs:
+                if r.get("status") != "completed" and r["id"] not in skipped_ids:
+                    skipped_ids.add(r["id"])
+                    self.stats["skipped"] += 1
+            if main and self.keep_expired:
+                fresh = [r for r in completed if not self.is_expired(r)]
+                self.kept_ids.update(r["id"] for r in completed if self.is_expired(r))
+                self.stats["kept"] = len(self.kept_ids)
+                if completed and not fresh:
+                    return True  # newest first: everything further back is older still
+                completed = fresh
+            elif not main:
+                self.kept_ids.difference_update(r["id"] for r in completed)
+                self.stats["kept"] = len(self.kept_ids)
+            self.process_batch(completed, done)
+            # Deleting shifts later pages forward, so re-read the same page; when nothing
+            # was deleted (dry run, in-progress only) move on.
+            if self.dry_run or not completed:
+                page += 1
 
     def run(self):
         if not self.dry_run:
             self.archive.mkdir(parents=True, exist_ok=True)
         done = self.load_index() if not self.dry_run else set()
         skipped_ids = set()
-        page = 1
         try:
-            while True:
-                url = f"{API}/repos/{self.repo}/actions/runs?per_page=100&page={page}"
-                status, _, body = self.request("GET", url)
-                if status != 200:
-                    raise Stop(f"listing runs returned {status}")
-                listing = json.loads(body)
-                runs = listing.get("workflow_runs", [])
-                if self.total is None:
-                    self.total = listing.get("total_count")
-                if not runs:
-                    break
-                completed = [r for r in runs if r.get("status") == "completed"]
-                for r in runs:
-                    if r.get("status") != "completed" and r["id"] not in skipped_ids:
-                        skipped_ids.add(r["id"])
-                        self.stats["skipped"] += 1
-                self.process_batch(completed, done)
-                # Deleting shifts later pages forward, so re-read the same page.
-                if self.dry_run or not completed:
-                    page += 1
+            self.drain(f"{API}/repos/{self.repo}/actions/runs", done, skipped_ids, True)
+            for name in self.always_delete:
+                base = f"{API}/repos/{self.repo}/actions/workflows/{name}/runs"
+                if not self.drain(base, done, skipped_ids, False):
+                    self.progress(None)
+                    self.out(f"workflow {name} not found (404); continuing")
         except Stop as err:
             self.stats["stopped"] = True
             self.progress(None)
@@ -275,6 +315,7 @@ def format_progress(done, total, stats, elapsed, run=None):
     rate = done / elapsed * 60 if elapsed > 0 else 0.0
     eta = _duration((total - done) / rate * 60) if total and rate > 0 and total >= done else "?"
     line = (f"[{done}/{total_txt} {pct}] archived {stats['archived']} expired {stats['expired']}"
+            f"{' kept ' + str(stats['kept']) if stats.get('kept') else ''}"
             f" · {_size(stats['bytes'])} · {rate:.1f} runs/min · elapsed {_duration(elapsed)}"
             f" · ETA {eta}")
     if run:
@@ -309,9 +350,9 @@ def terminal_progress(stream=sys.stderr, every=50):
 
 def purge(repo, archive, token, http=urllib_http, sleep=time.sleep, now=time.time,
           out=print, dry_run=False, progress=None, workers=1, delete_interval=0.0,
-          expire_before=None):
+          expire_before=None, keep_expired=False, always_delete=()):
     return Purger(repo, archive, token, http, sleep, now, out, dry_run, progress,
-                  workers, delete_interval, expire_before).run()
+                  workers, delete_interval, expire_before, keep_expired, always_delete).run()
 
 
 RETENTION_MARGIN_DAYS = 2
@@ -340,6 +381,12 @@ def gh_token():
                           text=True).stdout.strip()
 
 
+def _workflow_file(value):
+    if not WORKFLOW_FILE_RE.match(value):
+        raise argparse.ArgumentTypeError(f"invalid workflow file name: {value!r}")
+    return value
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--repo", required=True)
@@ -352,6 +399,12 @@ def main(argv=None):
     parser.add_argument("--log-retention-days", type=int, default=None,
                         help="skip the log download for runs older than this many days "
                              f"(+{RETENTION_MARGIN_DAYS} margin); default: the repo's setting")
+    parser.add_argument("--keep-expired", action="store_true",
+                        help="leave runs older than the retention cutoff alone (no archive, no delete)")
+    parser.add_argument("--always-delete", action="append", default=[], metavar="WORKFLOW_FILE",
+                        type=_workflow_file,
+                        help="repeatable; archive+delete every completed run of this workflow "
+                             "file (e.g. google-backfill.yml) regardless of age")
     args = parser.parse_args(argv)
     token = gh_token()
     days = args.log_retention_days or repo_log_retention_days(args.repo, token)
@@ -361,7 +414,8 @@ def main(argv=None):
           f" deletes at most one per {args.delete_interval:g}s.")
     stats = purge(args.repo, Path(args.archive).expanduser(), token, dry_run=args.dry_run,
                   progress=terminal_progress(), workers=args.workers,
-                  delete_interval=args.delete_interval, expire_before=cutoff)
+                  delete_interval=args.delete_interval, expire_before=cutoff,
+                  keep_expired=args.keep_expired, always_delete=args.always_delete)
     return 1 if stats["stopped"] else 0
 
 
