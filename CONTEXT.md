@@ -403,6 +403,17 @@ The static page this repo serves on its own subdomain. Given a run ID, it fetche
 the person stored there.
 _Avoid_: dashboard, decoder.
 
+**Sealed repository**:
+An org repository whose workflows all seal their output, with its own **repo key** (public half
+in `.github/seal/repo-key.pub`), a passing seal policy check, and the `sealed-ci` topic that
+lists it in the **log viewer**. This repo is the first; others reuse its **seal action**.
+_Avoid_: secure repo, encrypted repo.
+
+**Seal action**:
+The pair of composite actions this repo publishes on the moving `seal-v1` tag: one installs
+the sealed shell as a job's first step, the other uploads the **sealed log** as its last step.
+Other **sealed repositories** use them instead of copying scripts.
+
 **Frozen repository**:
 A formerly public org repository that ran Actions and was made private and archived, with
 Actions disabled, because its run logs leaked **private values**. A README notice at the top
