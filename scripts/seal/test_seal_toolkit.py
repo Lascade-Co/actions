@@ -932,6 +932,32 @@ def test_longest_mask_wins(runner):
     assert runner.decrypt(runner.out / '1.log.age') == b'::add-mask::***\n::add-mask::***\n*** *** ***de\n'
 
 
+def test_overlapping_masks_leave_no_fragment(runner):
+    r = runner.step('echo "::add-mask::abcX"; echo "::add-mask::Xdefgh"; echo "1 abcXdefgh 2 abcXdef 3 abXdefgh"')
+    assert r.returncode == 0
+    assert runner.decrypt(runner.out / '1.log.age') == (
+        b'::add-mask::***\n::add-mask::***\n1 *** 2 ***def 3 ab***\n')
+
+
+def test_self_overlapping_mask_leaves_no_fragment(runner):
+    r = runner.step('echo "::add-mask::abab"; echo "ababab x abababab y aba"')
+    assert r.returncode == 0
+    assert runner.decrypt(runner.out / '1.log.age') == b'::add-mask::***\n*** x *** y aba\n'
+
+
+def test_one_char_masks_keep_add_mask_lines(runner):
+    r = runner.step('echo "::add-mask::a"; echo "  ::add-mask::-"; echo "::add-mask:::"; echo "x:a-b banana ::add-mask"')
+    assert r.returncode == 0
+    assert runner.decrypt(runner.out / '1.log.age') == (
+        b'::add-mask::***\n  ::add-mask::***\n::add-mask::***\nx***b b***n***n*** ***dd***m***sk\n')
+
+
+def test_mask_trimmed_on_both_sides(runner):
+    r = runner.step('echo "::add-mask::  PADDED  "; echo "xPADDEDx"')
+    assert r.returncode == 0
+    assert runner.decrypt(runner.out / '1.log.age') == b'::add-mask::***\nx***x\n'
+
+
 def test_mask_in_summary_redacted(runner):
     runner.step('echo "::add-mask::SUM-OLD"')
     r = runner.step('echo "::add-mask::SUM-NEW"; echo "# SUM-OLD SUM-NEW" >> "$GITHUB_STEP_SUMMARY"')
@@ -979,6 +1005,67 @@ def test_redaction_failure_fails_closed(runner):
     assert not (runner.out / '1.log.age').exists()
     assert not (runner.out / '1.summary.md.age').exists()
     assert not list((runner.seal / 'log').iterdir())
+
+
+def python3_stub(runner, body):
+    """Put a `python3` first on PATH for seal-bash; argv is -I -c <code> <mode> <masks> <file>."""
+    stub = runner.root / 'stub'
+    stub.mkdir(exist_ok=True)
+    (stub / 'python3').write_text(f'#!/bin/sh\n{body}\n')
+    (stub / 'python3').chmod(0o755)
+    runner.env['PATH'] = f'{stub}:{runner.env["PATH"]}'
+
+
+def test_partial_redaction_output_is_not_kept(runner):
+    """A redactor that streams the raw log and then fails must not leave that ciphertext behind."""
+    python3_stub(runner, 'cat "$6"; exit 1')
+    r = runner.step('echo "::add-mask::m5"; echo CANARY-RAW m5')
+    assert r.returncode != 0
+    assert r.stdout.splitlines() == ['::add-mask::m5', f'🔒 seal failed for {runner.name}#1']
+    assert 'CANARY' not in r.stdout + r.stderr
+    assert not (runner.out / '1.log.age').exists()
+    assert not list((runner.seal / 'log').iterdir())
+
+
+def test_summary_redaction_failure_fails_closed(runner):
+    real = shutil.which('python3')
+    python3_stub(runner, f'[ "$4" = summary ] && {{ cat "$6"; exit 1; }}\nexec "{real}" "$@"')
+    r = runner.step('echo "::add-mask::m6"; echo CANARY-LOG; echo "# CANARY-SUM m6" >> "$GITHUB_STEP_SUMMARY"')
+    assert r.returncode != 0
+    assert r.stdout.splitlines() == ['::add-mask::m6', f'🔒 seal failed for {runner.name}#1']
+    assert 'CANARY' not in r.stdout + r.stderr
+    assert not (runner.out / '1.log.age').exists()
+    assert not (runner.out / '1.summary.md.age').exists()
+    assert not list((runner.seal / 'log').iterdir())
+
+
+def test_masks_redacted_when_cancelled(runner):
+    pidfile = runner.root / 'child.pid'
+    p = subprocess.Popen([runner.bin / 'seal-bash', runner.script(
+        f'echo "::add-mask::TERM-SECRET"; echo "x TERM-SECRET"; '
+        f"bash -c 'echo $$ > {pidfile}; exec sleep 30'")],
+        env=runner.env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, start_new_session=True)
+    try:
+        deadline = time.monotonic() + 10
+        while not (pidfile.exists() and pidfile.read_text().strip()):
+            assert time.monotonic() < deadline, 'step did not start'
+            time.sleep(0.05)
+        p.send_signal(signal.SIGTERM)
+        stdout, stderr = p.communicate(timeout=15)
+        assert p.returncode == 143
+        assert stdout.splitlines() == ['::add-mask::TERM-SECRET', f'🔒 sealed {runner.name}#1 {VIEWER}']
+        assert stderr == ''
+        assert runner.decrypt(runner.out / '1.log.age') == b'::add-mask::***\nx ***\n'
+    finally:
+        if p.poll() is None:
+            p.kill()
+            p.wait()
+        if pidfile.exists() and pidfile.read_text().strip():
+            try:
+                os.kill(int(pidfile.read_text()), signal.SIGKILL)
+            except ProcessLookupError:
+                pass
 
 
 def test_seal_bash_fails_closed_without_install(tmp_path):
@@ -1186,6 +1273,27 @@ def test_pack_rejects_unsafe_name(runner, tree):
         r = runner.tool('seal-pack', name, 'a/x.txt', cwd=tree)
         assert r.returncode != 0, name
     assert not (runner.seal / 'x').exists()
+
+
+def test_pack_refuses_seal_state(runner, tree):
+    """Nothing under $RUNNER_TEMP/seal (masks, logs, keys, other artifacts) may be packed for key holders."""
+    runner.step('echo "::add-mask::PACKED-SECRET"')
+    (tree / 'into-seal').symlink_to(runner.seal)
+    cases = [
+        (runner.seal / 'masks',),
+        (f'{runner.seal}/*',),
+        (runner.rt,),
+        ('into-seal/masks',),
+        ('a/x.txt', f'{runner.seal}/m*'),
+    ]
+    for args in cases:
+        r = runner.tool('seal-pack', 'leak', *args, cwd=tree)
+        assert r.returncode != 0, args
+        assert 'RUNNER_TEMP/seal' in r.stderr, args
+        assert 'PACKED-SECRET' not in r.stdout + r.stderr
+        assert not list((runner.seal / 'art' / 'leak').glob('*.age')), args
+    ok = runner.tool('seal-pack', 'fine', 'a/x.txt', cwd=tree)
+    assert ok.returncode == 0, ok.stderr
 
 
 def test_unpack_without_key_fails(runner, tree):

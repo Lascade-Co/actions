@@ -44,7 +44,9 @@ branch, PR number and title, commit SHA, step names, and lines starting `::add-m
 4. Artifacts: `seal-pack [--allow-empty] [--include-hidden] <name> <path>...` writes
    `$RUNNER_TEMP/seal/art/<name>/<name>.tgz.age`; upload that directory with `retention-days` of at most 7 days (the ceiling; shorter is fine). After a
    `download-artifact`, the next step runs `seal-unpack <dir> [<dest>]` with `REPO_AGE_KEY: ${{ secrets.REPO_AGE_KEY }}`.
-   `actions/upload-pages-artifact` (public site) is the only unsealed upload.
+   `actions/upload-pages-artifact` (public site) is the only unsealed upload. An `upload-artifact` path is either
+   `${{ runner.temp }}/seal/out/` (rule 2) or `${{ runner.temp }}/seal/art/<name>/`, and `seal-pack` refuses any
+   file under `$RUNNER_TEMP/seal`.
 5. Masks. Use `echo "::add-mask::$VALUE"` for a private value a later unsealed step (third-party actions,
    `actions/github-script`) might print. A mask protects only lines printed after it, so mask in an EARLIER sealed
    step, with the value computed inside that step (e.g. from `$GITHUB_EVENT_PATH` or a file), never via the same
@@ -52,7 +54,9 @@ branch, PR number and title, commit SHA, step names, and lines starting `::add-m
    masked values are dropped from job outputs and short masked words can break the viewer's marker lines.
    Values registered with `::add-mask::` in a sealed step are also replaced by `***` in that job's sealed logs from
    that point on (masks registered by other actions are not); secrets printed without a mask are stored in the
-   sealed log as printed.
+   sealed log as printed. Those values are kept in `$RUNNER_TEMP/seal/masks`, which every later step and action in
+   the same job (same user) can read; it is never uploaded. Each step's log is redacted in memory, so a very large
+   log, or a cancel that kills the redaction, can drop that step's sealed segment; it never leaks the plaintext.
 6. The runner prints each step's `run:` script (with `${{ }}` already expanded) and its evaluated `env:` block in
    the PUBLIC step header before the sealed shell runs. Never expand private values into `run:` text, `env:` or a
    third-party `with:`.

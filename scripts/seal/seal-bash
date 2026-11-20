@@ -36,28 +36,58 @@ summary="$seal/log/$n.summary.md"
 : >"$log"
 : >"$summary"
 
-# redact log|summary <file>: the file with every ::add-mask:: value and every known
-# mask replaced by ***, longest first, as bytes; the log pass first records its masks.
+# redact log|summary <file>: the file as bytes with each ::add-mask:: line's value
+# replaced by *** and, like the runner, every occurrence of every known mask (overlapping
+# ones too) found in the original bytes, merged into one *** per run of touching matches.
+# The log pass first records its masks. Masks never match inside a rewritten add-mask line.
 REDACT='
-import os, re, sys
+import bisect, os, re, sys
 mode, masks, src = sys.argv[1:]
 cmd = re.compile(rb"^([^\S\n]*::add-mask::)([^\n]*?)(\r*)$", re.M)
 data = open(src, "rb").read()
+found = list(cmd.finditer(data))
+lines = [(m.start(), m.end(), m.group(1) + b"***" + m.group(3)) for m in found]
+starts = [s for s, _, _ in lines]
 fd = os.open(masks, os.O_RDWR | os.O_APPEND | os.O_CREAT, 0o600)
 os.fchmod(fd, 0o600)
 with os.fdopen(fd, "r+b") as f:
     if mode == "log":
-        f.write(b"".join(m.group(2) + b"\n" for m in cmd.finditer(data) if m.group(2)))
+        f.write(b"".join(m.group(2) + b"\n" for m in found if m.group(2)))
         f.flush()
     f.seek(0)
     known = set()
     for v in f.read().split(b"\n"):
-        u = v.rstrip()
-        known.update((v, u, u.replace(b"%0D", b"\r").replace(b"%0A", b"\n").replace(b"%25", b"%")))
-data = cmd.sub(lambda m: m.group(1) + b"***" + m.group(3), data)
-for v in sorted((v for v in known if v.strip()), key=len, reverse=True):
-    data = data.replace(v, b"***")
-sys.stdout.buffer.write(data)
+        for w in (v, v.rstrip(), v.strip()):
+            known.update((w, w.replace(b"%0D", b"\r").replace(b"%0A", b"\n").replace(b"%25", b"%")))
+spans = []
+for v in known:
+    if not v.strip():
+        continue
+    i = data.find(v)
+    while i >= 0:
+        s, e = i, i + len(v)
+        k = max(bisect.bisect_right(starts, s) - 1, 0)
+        while k < len(lines) and lines[k][0] < e:
+            if lines[k][1] > s:
+                if lines[k][0] > s:
+                    spans.append((s, lines[k][0]))
+                s = max(s, lines[k][1])
+            k += 1
+        if s < e:
+            spans.append((s, e))
+        i = data.find(v, i + 1)
+merged = []
+for s, e in sorted(spans):
+    if merged and s <= merged[-1][1]:
+        merged[-1][1] = max(merged[-1][1], e)
+    else:
+        merged.append([s, e])
+out, pos = [], 0
+for s, e, rep in sorted([(s, e, b"***") for s, e in merged] + lines):
+    out += [data[pos:s], rep]
+    pos = e
+out.append(data[pos:])
+sys.stdout.buffer.write(b"".join(out))
 sys.stdout.buffer.flush()
 '
 redact() { python3 -I -c "$REDACT" "$1" "$seal/masks" "$2" 2>/dev/null; }

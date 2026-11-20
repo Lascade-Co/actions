@@ -210,7 +210,13 @@ def runs_seal_pack(step):
 
 
 def sealed_path(p):
-    return p.startswith(SEAL_PREFIX) and posixpath.normpath(p).startswith(SEAL_PREFIX.rstrip("/") + "/")
+    """Only the sealed log (seal/out/) or one packed artifact dir (seal/art/<name>/): never the
+    rest of seal/, which holds the job's mask list and plaintext logs."""
+    if p == SEAL_PREFIX + "out/":
+        return True
+    name = p.removeprefix(SEAL_PREFIX + "art/")
+    return (name != p and name.endswith("/") and name[:-1] not in ("", ".", "..")
+            and not re.search(r"[/*?\[\]\\!]", name[:-1]))
 
 
 def check_uploads_sealed(wf):
@@ -225,7 +231,7 @@ def check_uploads_sealed(wf):
             if uses_of(s) == "actions/upload-artifact/merge":
                 bad.append(f"job {n} step {i + 1}: upload-artifact/merge would republish artifacts unsealed")
             elif not paths or not all(sealed_path(p) for p in paths):
-                bad.append(f"job {n} step {i + 1}: upload path is not under runner.temp/seal/")
+                bad.append(f"job {n} step {i + 1}: upload path is not runner.temp/seal/out/ or runner.temp/seal/art/<name>/")
             if uses_of(s) == "actions/upload-artifact" and not runs_seal_pack(prev):
                 bad.append(f"job {n} step {i + 1}: previous step does not run seal-pack")
     return bad
@@ -491,9 +497,34 @@ def test_fixture_pull_request_secrets_flagged(name):
     assert check_pull_request_no_secrets(load(p), p.read_text())
 
 
-@pytest.mark.parametrize("name", ["bad-upload-traversal.yml", "bad-upload-pack-mention.yml", "bad-upload-merge.yml"])
+@pytest.mark.parametrize("name", ["bad-upload-traversal.yml", "bad-upload-pack-mention.yml", "bad-upload-merge.yml",
+                                  "bad-upload-masks.yml", "bad-upload-seal-glob.yml"])
 def test_fixture_upload_hardening(name):
     assert check_uploads_sealed(load(fixture(name)))
+
+
+@pytest.mark.parametrize("path,ok", [
+    ("${{ runner.temp }}/seal/out/", True),
+    ("${{ runner.temp }}/seal/art/apk/", True),
+    ("${{ runner.temp }}/seal/art/pages-${{ github.run_id }}-${{ github.run_attempt }}/", True),
+    ("${{ runner.temp }}/seal/art/seo-report-${{ matrix.site }}/", True),
+    ("${{ runner.temp }}/seal/masks", False),
+    ("${{ runner.temp }}/seal/*", False),
+    ("${{ runner.temp }}/seal/**", False),
+    ("${{ runner.temp }}/seal/", False),
+    ("${{ runner.temp }}/seal/log/", False),
+    ("${{ runner.temp }}/seal/out/1.log.age", False),
+    ("${{ runner.temp }}/seal/out/../masks", False),
+    ("${{ runner.temp }}/seal/art/", False),
+    ("${{ runner.temp }}/seal/art/*/", False),
+    ("${{ runner.temp }}/seal/art/../", False),
+    ("${{ runner.temp }}/seal/art/./", False),
+    ("${{ runner.temp }}/seal/art/a/b/", False),
+    ("${{ runner.temp }}/seal/art/a/../../masks", False),
+    ("${{ runner.temp }}/seal/art/apk", False),
+])
+def test_upload_paths_only_sealed_log_or_packed_artifact(path, ok):
+    assert sealed_path(path) is ok
 
 
 def test_fixture_merge_retention_checked():
