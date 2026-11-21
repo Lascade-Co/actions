@@ -1,5 +1,7 @@
 # Pre-publish validation runs an allowlist of the audit's rules, not the audit
 
+Superseded by ADR 0015: Release Blog was deleted.
+
 Before a draft is written to the CMS, its HTML is wrapped in a synthetic host page, parsed by
 `seo_parse.parse_blog()` and run through **18 named rules from the Blog SEO Audit** — not the audit,
 and not a second checker written for the purpose. The set is an explicit allowlist in

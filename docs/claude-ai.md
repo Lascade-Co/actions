@@ -13,7 +13,6 @@ only the assembled prompt; it has no local tools or access to the process enviro
 | --- | --- | --- |
 | Daily Catchup | Commit classification, developer summaries, executive prose | Deterministic statuses, counts and source bullets remain available. |
 | Daily Ad Spend | Optional commentary from computed facts | Commentary is omitted; the report still sends. |
-| Release Blog | JSON metadata and HTML draft | Existing SEO validation, one revision and draft-only CMS behavior remain; generation cannot fail the release. |
 | Android release | Release notes from the supplied diff | Generation remains best-effort and does not replace existing notes on an API failure. |
 | Android debug | Source edits for failing lint through `anthropics/claude-code-action@v1` | The workflow pushes only after a successful action and `Status: SUCCESS` report; otherwise the lint job fails. |
 
@@ -24,9 +23,7 @@ existing secret name.
 
 The SDK retries transient failures twice. API error bodies and generated report
 content are never printed by the shared helper. Empty, truncated, refused and
-invalid JSON responses trigger the consumer's fallback. Release Blog writes the API
-response to the existing `blog.json` and `blog.html` artifacts, then applies the same
-validation and CMS gates as before.
+invalid JSON responses trigger the consumer's fallback.
 
 Android lint uses read, search and file-edit tools. The workflow owns git operations
 and PR comments. It recognizes both old Codex and new Claude auto-fix commit subjects

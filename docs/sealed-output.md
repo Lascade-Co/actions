@@ -86,7 +86,7 @@ environment allows (`main`). The policy test fails the job otherwise.
 
 A workflow is exempt when its only trigger is `workflow_call` and no workflow here calls it via
 `uses: ./.github/workflows/...` (the `*-deploy-trigger.yml` files, which run in callers' repos). Called workflows
-such as `release-blog.yml` are sealed. `pull_request` workflows must not use secrets; `pull_request_target` is banned.
+are sealed. `pull_request` workflows must not use secrets; `pull_request_target` is banned.
 `scripts/seal/test_workflow_policy.py` enforces all of this.
 
 ## Reading a run

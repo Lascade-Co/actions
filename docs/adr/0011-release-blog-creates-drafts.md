@@ -1,5 +1,7 @@
 # The Release Blog pipeline creates drafts, never published blogs
 
+Superseded by ADR 0015: Release Blog was deleted.
+
 `.github/workflows/release-blog.yml` turns a release diff into an SEO-validated post in the site's
 CMS and stops there: `status: draft`, every time, with no path to publishing. An **editor** reviews
 it and publishes. The pipeline holds credentials that could publish and deliberately does not use

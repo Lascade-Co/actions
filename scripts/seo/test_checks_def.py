@@ -238,7 +238,7 @@ class GroupDTest(unittest.TestCase):
 
     def test_d9_fires_on_an_unstripped_editor_checklist(self):
         page = make_page(
-            raw_html='<article><div class="release-blog-checklist" '
+            raw_html='<article><div class="editor-checklist" '
             'data-strip-before-publish="true">Replace these</div></article>'
         )
         self.assertEqual(run_rule("D9", page)[0].severity, SEVERITY_ERROR)
