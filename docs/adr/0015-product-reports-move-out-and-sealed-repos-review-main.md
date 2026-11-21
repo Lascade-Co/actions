@@ -34,6 +34,10 @@ ruleset:
 - force-push and deletion are blocked
 
 Org admins bypass it fully, so urgent fixes are never blocked when no second reviewer is around.
+A repository whose workflows commit to `main` (store-reviews pushes its review state) also lists the
+CI App as a bypass actor; those workflows push with a CI App token, never `GITHUB_TOKEN`.
+`repo_settings.py` refuses to apply the ruleset to such a repository until the App's slug is in its
+`bypass_apps`.
 
 **Why secrets live in a main-only environment.** A ruleset on `main` does not stop anyone with Write
 access from pushing a branch that edits a workflow and running it. That run gets every repository

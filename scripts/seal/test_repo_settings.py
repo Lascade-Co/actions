@@ -111,9 +111,13 @@ def test_plan_fork_and_teams():
 
 
 def test_check_flags_repo_secret_not_exempt():
+    cur = current_matching("connector")
+    cur["repo_secrets"] = ["OTHER"]
+    probs = rs.check("connector", cur)
+    assert len(probs) == 1 and "OTHER" in probs[0]
     cur = current_matching("store-reviews")
     cur["repo_secrets"] = ["CI_APP_CLIENT_ID", "CI_APP_PRIVATE_KEY", "OTHER"]
-    probs = rs.check("store-reviews", cur)
+    probs = [p for p in rs.check("store-reviews", cur) if "CI App slug" not in p]
     assert len(probs) == 1 and "OTHER" in probs[0]
 
 
@@ -223,3 +227,66 @@ def test_extra_policies_flagged_not_deleted():
     assert any("tag:v*" in p for p in rs.check("connector", cur))
     cur["environments"]["production"]["policies"] = ["dev"]
     assert any("dev" in p for p in rs.check("connector", cur))
+
+
+APP_BYPASS = {"actor_id": 42, "actor_type": "Integration", "bypass_mode": "always"}
+
+
+def test_ruleset_payload_adds_app_bypass_after_admin():
+    p = rs.ruleset_payload(["policy / policy"], bypass_app_ids=[42])
+    assert p["bypass_actors"] == [
+        {"actor_id": 1, "actor_type": "OrganizationAdmin", "bypass_mode": "always"}, APP_BYPASS]
+    assert rs.ruleset_payload(["policy / policy"])["bypass_actors"] == rs.ADMIN_BYPASS
+    assert rs.tag_ruleset_payload(["refs/tags/seal-v*"])["bypass_actors"] == rs.ADMIN_BYPASS
+
+
+def test_store_reviews_needs_the_ci_app_bypass():
+    c = cfg("store-reviews")
+    assert c["requires_bypass_app"] is True and c["bypass_apps"] == []
+    for r in ("actions", "connector", "infra-actions", "product-actions"):
+        assert not cfg(r).get("requires_bypass_app") and cfg(r).get("bypass_apps", []) == []
+    assert any("needs the CI App slug" in p for p in rs.bypass_problems("store-reviews", []))
+    assert any("needs the CI App slug" in p for p in rs.check("store-reviews", current_matching("store-reviews")))
+    assert rs.bypass_problems("connector", []) == []
+
+
+def test_bypass_apps_resolved_into_plan_and_check(monkeypatch):
+    real = rs.load_config()
+    real["store-reviews"]["bypass_apps"] = ["lascade-ci"]
+    monkeypatch.setattr(rs, "load_config", lambda: real)
+    assert rs.bypass_problems("store-reviews", [42]) == []
+    assert any("resolve" in p for p in rs.bypass_problems("store-reviews", []))
+    cur = current_matching("store-reviews")      # ruleset without the app actor
+    assert any("Reviewed main" in p for p in rs.check("store-reviews", cur, bypass_app_ids=[42]))
+    calls = rs.plan("store-reviews", cur, bypass_app_ids=[42])
+    assert [(m, p) for m, p, _ in calls] == [("PUT", "/repos/Lascade-Co/store-reviews/rulesets/1")]
+    assert APP_BYPASS in calls[0][2]["bypass_actors"]
+    cur["rulesets"]["Reviewed main"] = {**calls[0][2], "id": 1}
+    assert rs.plan("store-reviews", cur, bypass_app_ids=[42]) == []
+    assert rs.check("store-reviews", cur, bypass_app_ids=[42]) == []
+
+
+def test_resolve_bypass_app_ids_reads_public_app_endpoint(monkeypatch):
+    seen = []
+    monkeypatch.setattr(rs, "gh_api", lambda m, p, *a, **k: seen.append((m, p)) or {"id": 42, "slug": "lascade-ci"})
+    assert rs.resolve_bypass_app_ids({"bypass_apps": ["lascade-ci"]}) == [42]
+    assert seen == [("GET", "/apps/lascade-ci")]
+    assert rs.resolve_bypass_app_ids({}) == []
+
+
+@pytest.mark.parametrize("dry", [True, False])
+def test_cli_apply_refuses_store_reviews_without_app_slug(monkeypatch, capsys, dry):
+    calls = []
+    monkeypatch.setattr(rs, "gh_api", lambda *a, **k: calls.append(a))
+    monkeypatch.setattr(rs, "fetch_current", lambda repo: {**current_matching(repo), "fork_approval": None})
+    argv = ["apply", "store-reviews"] + (["--dry-run"] if dry else [])
+    assert rs.main(argv) == 1
+    out = capsys.readouterr().out
+    assert calls == [] and "needs the CI App slug" in out and "PUT " not in out
+
+
+def test_cli_check_flags_store_reviews_without_app_slug(monkeypatch, capsys):
+    monkeypatch.setattr(rs, "gh_api", lambda *a, **k: pytest.fail("no API call expected"))
+    monkeypatch.setattr(rs, "fetch_current", lambda repo: current_matching(repo))
+    assert rs.main(["check", "store-reviews"]) == 1
+    assert "needs the CI App slug" in capsys.readouterr().out

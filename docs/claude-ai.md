@@ -9,6 +9,12 @@ Content generation uses the official `anthropic` Python SDK, pinned in
 the helper alongside their domain scripts at the runner's commit. The API receives
 only the assembled prompt; it has no local tools or access to the process environment.
 
+`Lascade-Co/product-actions` fetches `scripts/ai/claude_api.py` and
+`scripts/ai/requirements.txt` from this repo's `main` at runtime (its `fetch-ai` action and
+`scripts/fetch-ai.sh`), not at a pinned commit. Keep changes to both files backward compatible:
+a breaking change to the helper's functions, defaults or environment variables breaks the product
+reports on their next run.
+
 | Workflow | Claude use | Failure behavior |
 | --- | --- | --- |
 | Daily Catchup | Commit classification, developer summaries, executive prose | Deterministic statuses, counts and source bullets remain available. |

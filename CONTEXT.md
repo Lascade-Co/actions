@@ -376,7 +376,9 @@ _Avoid_: prod secrets, protected secrets.
 **Reviewed main**:
 The ruleset every **sealed repository** puts on `main`: changes arrive only through a pull
 request approved by a `@Lascade-Co/backend` code owner (re-approved after any new push), with
-the seal policy and tests passing, and no force-push or deletion. Org admins may bypass it.
+the seal policy and tests passing, and no force-push or deletion. Org admins may bypass it, and so
+may the CI App on a repository whose workflows commit to `main` (`bypass_apps` in
+`scripts/seal/sealed_repos.json`; store-reviews' review-state commits).
 _Avoid_: branch protection (the legacy GitHub feature this does not use).
 
 **Product report**:

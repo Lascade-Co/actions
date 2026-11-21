@@ -19,7 +19,9 @@
   "store-reviews": {
     "required_checks": ["policy / policy"],
     "teams": {"backend": "push"},
-    "secret_exempt": ["CI_APP_CLIENT_ID", "CI_APP_PRIVATE_KEY"]
+    "secret_exempt": ["CI_APP_CLIENT_ID", "CI_APP_PRIVATE_KEY"],
+    "requires_bypass_app": true,
+    "bypass_apps": []
   },
   "product-actions": {
     "required_checks": ["policy / policy", "test"],

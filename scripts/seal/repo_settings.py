@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Repo settings for sealed repositories: Reviewed main ruleset, production environment, fork approval, teams.
 
-Payload builders, `plan` and `check` are pure. Only the CLI layer shells out to `gh api`.
+Payload builders, `plan` and `check` are pure; they take bypass App ids already resolved from the
+`bypass_apps` slugs in sealed_repos.json. Only the CLI layer shells out to `gh api`.
 Usage: repo_settings.py {check|apply} <repo>... [--dry-run]
        repo_settings.py check <repo> --offline <checkout path>
 """
@@ -27,13 +28,17 @@ def load_config():
     return json.loads((HERE / "sealed_repos.json").read_text())
 
 
-def ruleset_payload(required_checks):
+def _app_bypass(app_ids):
+    return [{"actor_id": int(i), "actor_type": "Integration", "bypass_mode": "always"} for i in app_ids]
+
+
+def ruleset_payload(required_checks, bypass_app_ids=()):
     return {
         "name": RULESET,
         "target": "branch",
         "enforcement": "active",
         "conditions": {"ref_name": {"include": ["~DEFAULT_BRANCH"], "exclude": []}},
-        "bypass_actors": [dict(a) for a in ADMIN_BYPASS],
+        "bypass_actors": [dict(a) for a in ADMIN_BYPASS] + _app_bypass(bypass_app_ids),
         "rules": [
             {"type": "deletion"},
             {"type": "non_fast_forward"},
@@ -89,8 +94,8 @@ def _ruleset_ok(want, have):
     return have is not None and _subset(want, have)
 
 
-def _desired_rulesets(cfg):
-    out = [ruleset_payload(cfg["required_checks"])]
+def _desired_rulesets(cfg, bypass_app_ids=()):
+    out = [ruleset_payload(cfg["required_checks"], bypass_app_ids)]
     if cfg.get("protect_tags"):
         out.append(tag_ruleset_payload(cfg["protect_tags"]))
     return out
@@ -116,11 +121,23 @@ def manual_problems(repo, current):
             for e in _secret_envs(cfg, current) if extra_policies(current, e)]
 
 
-def plan(repo, current):
+def bypass_problems(repo, bypass_app_ids):
+    """Reasons `Reviewed main` cannot be applied yet: a repo whose workflows push to main needs its App bypass."""
+    cfg = load_config()[repo]
+    slugs = cfg.get("bypass_apps", [])
+    if cfg.get("requires_bypass_app") and not slugs:
+        return ["Reviewed main needs the CI App slug in sealed_repos.json bypass_apps "
+                "(this repo's workflows push to main); refusing until it is set"]
+    if len(bypass_app_ids) != len(slugs):
+        return [f"could not resolve bypass_apps {slugs} to App ids"]
+    return []
+
+
+def plan(repo, current, bypass_app_ids=()):
     cfg = load_config()[repo]
     base = f"/repos/{ORG}/{repo}"
     calls = []
-    for want in _desired_rulesets(cfg):
+    for want in _desired_rulesets(cfg, bypass_app_ids):
         have = current.get("rulesets", {}).get(want["name"])
         if have is None:
             calls.append(("POST", f"{base}/rulesets", want))
@@ -143,10 +160,10 @@ def plan(repo, current):
     return calls
 
 
-def check(repo, current):
+def check(repo, current, bypass_app_ids=()):
     cfg = load_config()[repo]
-    problems = []
-    for want in _desired_rulesets(cfg):
+    problems = bypass_problems(repo, bypass_app_ids)
+    for want in _desired_rulesets(cfg, bypass_app_ids):
         have = current.get("rulesets", {}).get(want["name"])
         if have is None:
             problems.append(f"ruleset '{want['name']}' is missing")
@@ -223,6 +240,11 @@ def gh_api(method, path, body=None, raw=False, allow_404=False, accept=None):
     return json.loads(r.stdout) if r.stdout.strip() else {}
 
 
+def resolve_bypass_app_ids(cfg):
+    """App ids for the configured `bypass_apps` slugs (GET /apps/{slug} is public)."""
+    return [gh_api("GET", f"/apps/{slug}")["id"] for slug in cfg.get("bypass_apps", [])]
+
+
 ROLE_TO_PERMISSION = {"write": "push", "read": "pull"}
 
 
@@ -289,21 +311,29 @@ def main(argv=None):
         try:
             if a.offline:
                 problems = check_offline(repo, a.offline)
-            elif a.command == "check":
-                problems = check(repo, fetch_current(repo))
             else:
-                problems = None
+                app_ids = resolve_bypass_app_ids(cfg[repo])
+                if a.command == "check":
+                    problems = check(repo, fetch_current(repo), app_ids)
+                else:
+                    problems = None
         except RuntimeError as e:
             print(f"{repo}: ERROR {e}")
             rc = 1
             continue
         if problems is None:
+            refused = bypass_problems(repo, app_ids)
+            for msg in refused:
+                print(f"{repo}: REFUSED {msg}")
+            if refused:
+                rc = 1
+                continue
             try:
                 cur = fetch_current(repo)
                 for msg in manual_problems(repo, cur):
                     print(f"{repo}: MANUAL {msg}")
                     rc = 1
-                for method, path, body in plan(repo, cur):
+                for method, path, body in plan(repo, cur, app_ids):
                     print(f"{repo}: {method} {path} {json.dumps(body) if body is not None else ''}".rstrip())
                     if not a.dry_run:
                         gh_api(method, path, body)
