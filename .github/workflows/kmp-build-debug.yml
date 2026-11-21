@@ -18,6 +18,7 @@ defaults:
 jobs:
   prepare:
     runs-on: ubuntu-latest
+    environment: production
     timeout-minutes: 10
     outputs:
       repo: ${{ steps.source.outputs.repo }}
@@ -122,6 +123,7 @@ jobs:
           if-no-files-found: ignore
   check:
     runs-on: ubuntu-latest
+    environment: production
     timeout-minutes: 30
     defaults: &id001
       run:
@@ -348,6 +350,7 @@ jobs:
           if-no-files-found: ignore
   unit-tests:
     runs-on: ubuntu-latest
+    environment: production
     timeout-minutes: 30
     defaults: *id001
     env: *id002
@@ -488,6 +491,7 @@ jobs:
           if-no-files-found: ignore
   android:
     runs-on: ubuntu-latest
+    environment: production
     timeout-minutes: 30
     defaults: *id001
     env: *id002
@@ -665,6 +669,7 @@ jobs:
     # Free 7-GB arm64 image with Xcode 26.6. The source repo links with Kotlin/Native release caches; the
     # Intel image timed out (>41 min link) and the uncached optimized link ran out of heap here (run 39952223435).
     runs-on: macos-26
+    environment: production
     timeout-minutes: 90
     defaults: *id001
     env: *id002
@@ -948,6 +953,7 @@ jobs:
           if-no-files-found: ignore
   publish-android:
     runs-on: ubuntu-latest
+    environment: production
     timeout-minutes: 10
     needs:
       - prepare
@@ -1016,6 +1022,7 @@ jobs:
           if-no-files-found: ignore
   ios-publish:
     runs-on: macos-26
+    environment: production
     timeout-minutes: 15
     needs:
       - prepare
@@ -1117,6 +1124,7 @@ jobs:
   # A separate job so a notes failure never marks the upload failed; notify does not wait for it.
   testflight-notes:
     runs-on: ubuntu-latest
+    environment: production
     timeout-minutes: 40
     permissions:
       contents: read
@@ -1207,6 +1215,7 @@ jobs:
           if-no-files-found: ignore
   notify:
     runs-on: ubuntu-latest
+    environment: production
     # actions/checks read let the notifier point at the failing job, step and first error.
     permissions:
       contents: read

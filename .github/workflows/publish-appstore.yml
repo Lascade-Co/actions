@@ -26,6 +26,7 @@ defaults:
 jobs:
   publish:
     runs-on: macos-26
+    environment: production
     timeout-minutes: 120
     steps:
       - name: Seal job output

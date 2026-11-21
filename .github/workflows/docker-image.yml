@@ -59,6 +59,7 @@ jobs:
   build-and-push:
     needs: prepare
     runs-on: ubuntu-latest
+    environment: production
     steps:
       - name: Seal job output
         shell: bash

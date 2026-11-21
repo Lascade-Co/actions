@@ -2,24 +2,7 @@ name: Test AI workflows
 
 on:
   push:
-    paths: &ai_paths
-      - scripts/ai/**
-      - scripts/android/release_notes.py
-      - scripts/android/test_release_notes.py
-      - scripts/adspend/**
-      - scripts/catchup/**
-      - scripts/seo/**
-      - data/CATCHUP_*.md
-      - data/RELEASE_*.md
-      - data/LINT.md
-      - .github/workflows/test-ai.yml
-      - .github/workflows/android-build-debug.yml
-      - .github/workflows/android-build-release.yml
-      - .github/workflows/daily-ad-spend.yml
-      - .github/workflows/daily-catchup.yml
-      - .github/workflows/release-blog.yml
   pull_request:
-    paths: *ai_paths
 
 permissions:
   contents: read

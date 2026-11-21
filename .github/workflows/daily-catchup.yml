@@ -109,6 +109,7 @@ jobs:
     needs: gate2
     if: needs.gate2.outputs.proceed == 'true'
     runs-on: ubuntu-latest
+    environment: production
     outputs:
       matrix: ${{ steps.disc.outputs.matrix }}
       has_repos: ${{ steps.disc.outputs.has_repos }}
@@ -150,6 +151,7 @@ jobs:
     needs: discover
     if: needs.discover.outputs.has_repos == 'true'
     runs-on: ubuntu-latest
+    environment: production
     strategy:
       fail-fast: false
       max-parallel: 5
@@ -237,6 +239,7 @@ jobs:
     needs: [discover, summarize]
     if: ${{ always() && needs.discover.outputs.has_repos == 'true' }}
     runs-on: ubuntu-latest
+    environment: production
     outputs:
       today: ${{ steps.merge.outputs.today }}
       wrote: ${{ steps.merge.outputs.wrote }}
@@ -305,6 +308,7 @@ jobs:
     # schedule `inputs` is empty, so both are falsy there.
     if: needs.collect.outputs.wrote == 'true' && !inputs.dry_run && !inputs.to
     runs-on: ubuntu-latest
+    environment: production
     steps:
       - name: Seal job output
         shell: bash
@@ -381,6 +385,7 @@ jobs:
     needs: [gate2, collect]
     if: needs.collect.outputs.wrote == 'true'
     runs-on: ubuntu-latest
+    environment: production
     steps:
       - name: Seal job output
         shell: bash

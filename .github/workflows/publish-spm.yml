@@ -28,6 +28,7 @@ defaults:
 jobs:
   publish:
     runs-on: macos-latest
+    environment: production
     steps:
       - name: Seal job output
         shell: bash

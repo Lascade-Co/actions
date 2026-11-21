@@ -19,6 +19,7 @@ defaults:
 jobs:
   prepare:
     runs-on: ubuntu-latest
+    environment: production
     timeout-minutes: 15
     outputs:
       repo: ${{ steps.source.outputs.repo }}
@@ -123,6 +124,7 @@ jobs:
         if-no-files-found: ignore
   android:
     runs-on: ubuntu-latest
+    environment: production
     timeout-minutes: 45
     defaults:
       run:
@@ -295,6 +297,7 @@ jobs:
     # scripts/ci/ios_release.py links with Kotlin/Native release caches and the same 3-GiB Native heap;
     # paid macos-26-xlarge is not allowed (user, 2026-11-06).
     runs-on: macos-26
+    environment: production
     timeout-minutes: 90
     defaults:
       run:
@@ -574,6 +577,7 @@ jobs:
     if: ${{ needs.prepare.outputs.skip != 'true' }}
   release:
     runs-on: ubuntu-latest
+    environment: production
     timeout-minutes: 15
     needs:
     - prepare
@@ -685,6 +689,7 @@ jobs:
     - ios-build
     - release
     runs-on: ubuntu-latest
+    environment: production
     timeout-minutes: 5
     steps:
     - name: Seal job output

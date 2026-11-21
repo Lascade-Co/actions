@@ -19,6 +19,7 @@ defaults:
 jobs:
   prepare:
     runs-on: ubuntu-latest
+    environment: production
     outputs:
       version: ${{ steps.increment_version.outputs.new_version }}
       owner: ${{ steps.repo.outputs.owner }}
@@ -144,6 +145,7 @@ jobs:
   build-android:
     needs: prepare
     runs-on: ubuntu-latest
+    environment: production
     steps:
       - name: Seal job output
         shell: bash
@@ -347,6 +349,7 @@ jobs:
   build-ios:
     needs: prepare
     runs-on: macos-26
+    environment: production
     env:
       COCOAPODS_DISABLE_STATS: "true"
     steps:
@@ -622,6 +625,7 @@ jobs:
     if: needs.prepare.outputs.is_travel_app != 'true'
     needs: [prepare, build-android]
     runs-on: ubuntu-latest
+    environment: production
     timeout-minutes: 25
 
     env:
@@ -759,6 +763,7 @@ jobs:
     if: needs.prepare.outputs.is_travel_app == 'true'
     needs: [prepare, build-android]
     runs-on: ubuntu-latest
+    environment: production
     timeout-minutes: 15
     steps:
       - name: Seal job output
@@ -844,6 +849,7 @@ jobs:
   publish-ios:
     needs: [prepare, build-ios]
     runs-on: macos-latest
+    environment: production
     timeout-minutes: 25
     steps:
       - name: Seal job output

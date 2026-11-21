@@ -21,6 +21,7 @@ defaults:
 jobs:
   prepare:
     runs-on: ubuntu-latest
+    environment: production
     timeout-minutes: 15
     outputs:
       repo: ${{ steps.payload.outputs.repo }}
@@ -135,6 +136,7 @@ jobs:
           if-no-files-found: ignore
   android:
     runs-on: ubuntu-latest
+    environment: production
     timeout-minutes: 60
     # packages: write only for the GHCR dependency bundles.
     permissions:
@@ -373,6 +375,7 @@ jobs:
     # Free 7-GB arm64 image. ADR 0004: K/N's fixed 3 GB heap needs compact object headers here; expect 25-35 min cold.
     # Xcode 27 lives only on GitHub's xcode-27 image (macOS 27, preview); Apple requires the iOS 27 SDK from April 2027.
     runs-on: xcode-27
+    environment: production
     timeout-minutes: 90
     # packages: write only for the GHCR dependency bundles.
     permissions:
@@ -724,6 +727,7 @@ jobs:
           if-no-files-found: ignore
   release:
     runs-on: ubuntu-latest
+    environment: production
     timeout-minutes: 20
     permissions:
       contents: read
@@ -839,6 +843,7 @@ jobs:
           if-no-files-found: ignore
   notify:
     runs-on: ubuntu-latest
+    environment: production
     timeout-minutes: 5
     # actions/checks read let the notifier point at the failing job, step and first error.
     permissions:

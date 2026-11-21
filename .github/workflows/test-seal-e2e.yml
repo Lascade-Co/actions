@@ -4,6 +4,7 @@ name: Test sealing end to end
 # The verify job prints nothing but sealed PASS/FAIL lines; its result is its exit code.
 on:
   push:
+    branches: [main]
     paths:
       - "scripts/seal/**"
       - "viewer/**"
@@ -57,6 +58,7 @@ jobs:
   e2e-verify:
     needs: e2e-produce
     runs-on: ubuntu-latest
+    environment: production
     permissions:
       actions: read
       contents: read

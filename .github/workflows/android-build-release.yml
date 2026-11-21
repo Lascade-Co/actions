@@ -67,6 +67,7 @@ jobs:
   build-aab:
     needs: prepare
     runs-on: ubuntu-latest
+    environment: production
     steps:
       - name: Seal job output
         shell: bash
@@ -186,6 +187,7 @@ jobs:
   build-apk:
     needs: prepare
     runs-on: ubuntu-latest
+    environment: production
     steps:
       - name: Seal job output
         shell: bash
@@ -291,6 +293,7 @@ jobs:
   release:
     needs: [prepare, build-aab, build-apk]
     runs-on: ubuntu-latest
+    environment: production
     outputs:
       tag: ${{ steps.increment_version.outputs.new_version }}
       base: ${{ steps.notes.outputs.base }}

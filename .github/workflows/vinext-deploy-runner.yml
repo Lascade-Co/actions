@@ -15,6 +15,7 @@ defaults:
 jobs:
   prepare:
     runs-on: ubuntu-latest
+    environment: production
     timeout-minutes: 5
     outputs:
       worker_key: ${{ steps.prepare.outputs.worker_key }}
@@ -98,6 +99,7 @@ jobs:
   build:
     needs: prepare
     runs-on: ubuntu-latest
+    environment: production
     timeout-minutes: 30
     steps:
       - name: Seal job output
@@ -250,6 +252,7 @@ jobs:
     # Also report failures from the separate build runner without fetching deployment secrets.
     if: ${{ always() && needs.prepare.result == 'success' }}
     runs-on: ubuntu-latest
+    environment: production
     timeout-minutes: 20
     concurrency:
       group: vinext-worker-${{ needs.prepare.outputs.worker_key }}

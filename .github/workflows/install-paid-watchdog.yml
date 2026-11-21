@@ -36,6 +36,7 @@ defaults:
 jobs:
   watch:
     runs-on: ubuntu-latest
+    environment: production
     timeout-minutes: 10
     steps:
       - name: Seal job output

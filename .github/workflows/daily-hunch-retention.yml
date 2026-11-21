@@ -137,6 +137,7 @@ jobs:
     needs: gate2
     if: needs.gate2.outputs.proceed == 'true'
     runs-on: ubuntu-latest
+    environment: production
     timeout-minutes: 75
     outputs:
       report_date: ${{ steps.dates.outputs.report_date }}
@@ -232,6 +233,7 @@ jobs:
     needs: [gate, gate2, email]
     if: ${{ failure() }}
     runs-on: ubuntu-latest
+    environment: production
     timeout-minutes: 5
     steps:
       - name: Seal job output

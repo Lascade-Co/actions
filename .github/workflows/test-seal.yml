@@ -2,17 +2,7 @@ name: Test sealing
 
 on:
   push:
-    paths:
-      - "scripts/seal/**"
-      - "viewer/**"
-      - ".github/workflows/**"
-      - "actions/**"
   pull_request:
-    paths:
-      - "scripts/seal/**"
-      - "viewer/**"
-      - ".github/workflows/**"
-      - "actions/**"
 
 permissions:
   contents: read

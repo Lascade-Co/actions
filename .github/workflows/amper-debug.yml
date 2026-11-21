@@ -22,6 +22,7 @@ defaults:
 jobs:
   prepare:
     runs-on: ubuntu-latest
+    environment: production
     timeout-minutes: 10
     outputs:
       repo: ${{ steps.source.outputs.repo }}
@@ -142,6 +143,7 @@ jobs:
           if-no-files-found: ignore
   android:
     runs-on: ubuntu-latest
+    environment: production
     timeout-minutes: 45
     # Runs PR code: packages: read restores amper-release's bundles; this workflow never publishes one.
     permissions:
@@ -298,6 +300,7 @@ jobs:
     # Free 7-GB arm64 image. ADR 0004: K/N's fixed 3 GB heap needs compact object headers here; expect 25-35 min cold.
     # Xcode 27 lives only on GitHub's xcode-27 image (macOS 27, preview); Apple requires the iOS 27 SDK from April 2027.
     runs-on: xcode-27
+    environment: production
     timeout-minutes: 90
     # Runs PR code (./kotlin and Xcode's Build Kotlin phase): packages: read restores amper-release's bundles, and no
     # App Store Connect key. It parks the IPA in a draft in the source repo for ios-publish.
@@ -609,6 +612,7 @@ jobs:
   ios-publish:
     # Xcode 27 lives only on GitHub's xcode-27 image (macOS 27, preview); Apple requires the iOS 27 SDK from April 2027.
     runs-on: xcode-27
+    environment: production
     timeout-minutes: 20
     permissions:
       contents: read
@@ -703,6 +707,7 @@ jobs:
   # A separate job so a notes failure never marks the upload failed; notify does not wait for it.
   testflight-notes:
     runs-on: ubuntu-latest
+    environment: production
     timeout-minutes: 40
     permissions:
       contents: read
@@ -793,6 +798,7 @@ jobs:
           if-no-files-found: ignore
   notify:
     runs-on: ubuntu-latest
+    environment: production
     # actions/checks read let the notifier point at the failing job, step and first error.
     permissions:
       contents: read

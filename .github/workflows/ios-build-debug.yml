@@ -29,6 +29,7 @@ defaults:
 jobs:
   prepare:
     runs-on: ubuntu-latest
+    environment: production
     timeout-minutes: 10
     outputs:
       repo: ${{ steps.source.outputs.repo }}
@@ -144,6 +145,7 @@ jobs:
 
   ios-build:
     runs-on: macos-26
+    environment: production
     # A cold SwiftPM resolve can be large; the GHCR bundle makes warm runs fast.
     timeout-minutes: 120
     needs: prepare
@@ -384,6 +386,7 @@ jobs:
 
   ios-publish:
     runs-on: macos-26
+    environment: production
     timeout-minutes: 25
     needs: [prepare, ios-build]
     steps:
@@ -456,6 +459,7 @@ jobs:
 
   notify:
     runs-on: ubuntu-latest
+    environment: production
     timeout-minutes: 10
     # actions/checks read let the notifier point at the failing job, step and first error.
     permissions:
