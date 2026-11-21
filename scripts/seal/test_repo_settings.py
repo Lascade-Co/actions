@@ -14,9 +14,11 @@ def current_matching(repo):
     rulesets = {"Reviewed main": {**rs.ruleset_payload(c["required_checks"]), "id": 1, "source": repo}}
     if c.get("protect_tags"):
         rulesets["Protected seal tags"] = {**rs.tag_ruleset_payload(c["protect_tags"]), "id": 2}
+    envs = {n: {"has_secrets": True, "deployment_branch_policy": {"protected_branches": False, "custom_branch_policies": True}, "policies": ["main"]}
+            for n in ["production", *c.get("extra_environments", [])]}
     return {
         "rulesets": rulesets,
-        "environments": {"production": {"has_secrets": True, "deployment_branch_policy": {"protected_branches": False, "custom_branch_policies": True}, "policies": ["main"]}},
+        "environments": envs,
         "repo_secrets": [],
         "fork_approval": "all_external_contributors",
         "teams": dict(c["teams"]),
@@ -168,3 +170,56 @@ def test_cli_dry_run_makes_no_writes(monkeypatch, capsys):
     monkeypatch.setattr(rs, "fetch_current", lambda repo: {**current_matching(repo), "fork_approval": None})
     assert rs.main(["apply", "connector", "--dry-run"]) == 0
     assert calls == [] and "PUT /repos/Lascade-Co/connector/actions/permissions" in capsys.readouterr().out
+
+
+def test_team_readback_maps_realistic_response():
+    resp = {"name": "actions", "role_name": "write", "permissions": {"admin": False, "maintain": False, "push": True, "triage": True, "pull": True}}
+    assert rs.team_permission(resp) == "push"
+    assert rs.team_permission({"role_name": "read"}) == "pull"
+    assert rs.team_permission({"role_name": "maintain"}) == "maintain"
+    assert rs.team_permission({"permissions": {"push": True, "pull": True}}) == "push"
+    cur = current_matching("product-actions")
+    cur["teams"] = {t: rs.team_permission(resp) for t in ("backend", "product")}
+    assert not any("/teams/" in p for _, p, _ in rs.plan("product-actions", cur))
+
+
+def test_gh_api_sends_header_and_matches_exact_404(monkeypatch):
+    seen = []
+
+    class R:
+        def __init__(self, rc, out="", err=""):
+            self.returncode, self.stdout, self.stderr = rc, out, err
+
+    def fake_run(cmd, **k):
+        seen.append(cmd)
+        return R(1, err="gh: Not Found (HTTP 404)") if cmd[4] == "/a" else R(1, err="boom id 4040")
+    monkeypatch.setattr(rs.subprocess, "run", fake_run)
+    assert rs.gh_api("GET", "/a", allow_404=True, accept="application/vnd.github.v3.repository+json") is None
+    assert "Accept: application/vnd.github.v3.repository+json" in seen[0]
+    with pytest.raises(RuntimeError):
+        rs.gh_api("GET", "/z", allow_404=True)
+
+
+def test_extra_environments_are_enforced():
+    cur = current_matching("actions")
+    cur["environments"] = {"production": cur["environments"]["production"]}
+    calls = rs.plan("actions", cur)
+    for env in ("cloudflare-prod", "cloudflare-staging"):
+        assert ("PUT", f"/repos/Lascade-Co/actions/environments/{env}", {"deployment_branch_policy": rs.BRANCH_POLICY}) in calls
+        assert any(f"environments/{env}'" in p or f"environment '{env}'" in p for p in rs.check("actions", cur))
+    for env in ("cloudflare-prod", "cloudflare-staging"):
+        cur["environments"][env] = {"has_secrets": False, "deployment_branch_policy": dict(rs.BRANCH_POLICY), "policies": ["main"]}
+    assert rs.plan("actions", cur) == []
+    assert rs.check("actions", cur) == []
+
+
+def test_extra_policies_flagged_not_deleted():
+    cur = current_matching("connector")
+    cur["environments"]["production"]["policies"] = ["main", "*"]
+    assert rs.plan("connector", cur) == []
+    probs = rs.check("connector", cur)
+    assert any("production" in p and "'*'" in p for p in probs)
+    cur["environments"]["production"]["policies"] = ["main", "tag:v*"]
+    assert any("tag:v*" in p for p in rs.check("connector", cur))
+    cur["environments"]["production"]["policies"] = ["dev"]
+    assert any("dev" in p for p in rs.check("connector", cur))

@@ -97,11 +97,23 @@ def _desired_rulesets(cfg):
 
 
 def _secret_envs(cfg, current):
-    names = ["production"]
+    names = ["production", *cfg.get("extra_environments", [])]
     for name, env in current.get("environments", {}).items():
         if env.get("has_secrets") and name not in names:
             names.append(name)
     return names
+
+
+def extra_policies(current, env):
+    """Deployment branch policies other than the single `main` branch policy (reported, never deleted)."""
+    have = current.get("environments", {}).get(env) or {}
+    return [p for p in have.get("policies", []) if p != "main"]
+
+
+def manual_problems(repo, current):
+    cfg = load_config()[repo]
+    return [f"environment '{e}' has extra deployment policies {extra_policies(current, e)}; remove them manually (only 'main' is allowed)"
+            for e in _secret_envs(cfg, current) if extra_policies(current, e)]
 
 
 def plan(repo, current):
@@ -146,6 +158,7 @@ def check(repo, current):
             problems.append(f"environment '{env}' does not exist")
         elif have.get("deployment_branch_policy") != BRANCH_POLICY or "main" not in have.get("policies", []):
             problems.append(f"environment '{env}' does not restrict deployments to the main branch")
+    problems += manual_problems(repo, current)
     if current.get("fork_approval") != FORK_POLICY:
         problems.append(f"fork PR approval is {current.get('fork_approval')!r}, want {FORK_POLICY!r}")
     for team, perm in cfg["teams"].items():
@@ -191,21 +204,38 @@ def check_offline(repo, root):
 
 # ---- CLI layer: the only code that calls gh ----
 
-def gh_api(method, path, body=None, raw=False, allow_404=False):
+def gh_api(method, path, body=None, raw=False, allow_404=False, accept=None):
     cmd = ["gh", "api", "-X", method, path]
     if raw:
-        cmd += ["-H", "Accept: application/vnd.github.raw+json"]
+        accept = "application/vnd.github.raw+json"
+    if accept:
+        cmd += ["-H", f"Accept: {accept}"]
     if body is not None:
         cmd += ["--input", "-"]
     r = subprocess.run(cmd, input=json.dumps(body) if body is not None else None,
                        capture_output=True, text=True)
     if r.returncode != 0:
-        if allow_404 and "404" in r.stderr + r.stdout:
+        if allow_404 and "HTTP 404" in r.stderr + r.stdout:
             return None
         raise RuntimeError(f"gh api {method} {path} failed: {(r.stderr or r.stdout).strip()}")
     if raw:
         return r.stdout
     return json.loads(r.stdout) if r.stdout.strip() else {}
+
+
+ROLE_TO_PERMISSION = {"write": "push", "read": "pull"}
+
+
+def team_permission(resp):
+    """Map a team-repo response to the permission names the PUT uses (push/pull/maintain/triage/admin)."""
+    role = resp.get("role_name")
+    if isinstance(role, str):
+        return ROLE_TO_PERMISSION.get(role, role)
+    perms = resp.get("permissions") or {}
+    for key, name in (("admin", "admin"), ("maintain", "maintain"), ("push", "push"), ("triage", "triage"), ("pull", "pull")):
+        if perms.get(key):
+            return name
+    return None
 
 
 def fetch_current(repo):
@@ -221,15 +251,16 @@ def fetch_current(repo):
         envs[n] = {
             "has_secrets": bool(secrets),
             "deployment_branch_policy": e.get("deployment_branch_policy"),
-            "policies": [p["name"] for p in pols.get("branch_policies", []) if p.get("type", "branch") == "branch"],
+            "policies": [p["name"] if p.get("type", "branch") == "branch" else f"{p['type']}:{p['name']}"
+                         for p in pols.get("branch_policies", [])],
         }
     fork = gh_api("GET", f"{base}/actions/permissions/fork-pr-contributor-approval", allow_404=True)
     teams = {}
     for team in load_config()[repo]["teams"]:
-        t = gh_api("GET", f"/orgs/{ORG}/teams/{team}/repos/{ORG}/{repo}", allow_404=True)
+        t = gh_api("GET", f"/orgs/{ORG}/teams/{team}/repos/{ORG}/{repo}", allow_404=True,
+                   accept="application/vnd.github.v3.repository+json")
         if t:
-            p = t.get("role_name") or t.get("permissions")
-            teams[team] = p if isinstance(p, str) else None
+            teams[team] = team_permission(t)
     return {
         "rulesets": rulesets,
         "environments": envs,
@@ -268,7 +299,11 @@ def main(argv=None):
             continue
         if problems is None:
             try:
-                for method, path, body in plan(repo, fetch_current(repo)):
+                cur = fetch_current(repo)
+                for msg in manual_problems(repo, cur):
+                    print(f"{repo}: MANUAL {msg}")
+                    rc = 1
+                for method, path, body in plan(repo, cur):
                     print(f"{repo}: {method} {path} {json.dumps(body) if body is not None else ''}".rstrip())
                     if not a.dry_run:
                         gh_api(method, path, body)
