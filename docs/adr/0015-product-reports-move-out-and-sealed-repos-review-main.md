@@ -39,7 +39,9 @@ Org admins bypass it fully, so urgent fixes are never blocked when no second rev
 access from pushing a branch that edits a workflow and running it. That run gets every repository
 secret. So each sealed repository keeps its secrets in a **production environment** that only
 `main` can deploy to, and every secret-using job declares it. Only reviewed code ever sees a
-secret. Branch runs and pull requests test with fixtures. Previews of a change come after merge,
+secret. The policy test enforces it, and the moving `seal-v1` tag that every secret job runs first
+gets its own admin-only tag ruleset in `Lascade-Co/actions`. Branch runs and pull requests test
+with fixtures. Previews of a change come after merge,
 through a manual dry run or test send. Jobs that already need another environment (such as the
 Cloudflare deploy environments) get the same main-only branch policy and their own copy of the
 secrets they use.

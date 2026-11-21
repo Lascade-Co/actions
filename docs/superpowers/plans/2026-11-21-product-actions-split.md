@@ -44,9 +44,12 @@ Source trees for the two frozen repos are in the scratchpad at `.../scratchpad/s
   - artifacts go through `seal-pack`, with retention ≤ 7 days
   - `.github/seal/repo-key.pub` holds the user-supplied `age1…` key
   - the private half is `REPO_AGE_KEY`, kept in Infisical only and never written to disk or chat
+- **GitHub Free plan.** Rulesets and environment secrets work only on public repos. Apply settings and environment syncs to product-actions only after it is public, and before Actions is enabled.
 - **Production environment.**
-  - Every job that references `secrets.<NAME>` (other than `secrets.GITHUB_TOKEN`) declares `environment: production`.
-  - `production` has a deployment branch policy allowing only the `main` branch.
+  - Every job that references `secrets.<NAME>` (other than `secrets.GITHUB_TOKEN`) declares `environment: production`, or a name listed in the repo's `.github/seal/environments`, one name per line.
+  - Today only actions lists extra names: `cloudflare-prod` and `cloudflare-staging`, which deploy-runner keeps.
+  - An `environment:` expression passes only if every string literal in it is an allowed name.
+  - Every environment that holds secrets has a deployment branch policy allowing only the `main` branch.
   - Jobs that call a local reusable workflow carry no `environment:`; the called jobs do.
   - Cross-repo reusable calls that pass secrets are listed in `.github/seal/env-exempt`, one line each: `<workflow file>:<job id>  # reason`.
 - **Reviewed main ruleset**, named exactly `Reviewed main`, on `~DEFAULT_BRANCH`:
@@ -54,6 +57,12 @@ Source trees for the two frozen repos are in the scratchpad at `.../scratchpad/s
   - rule `pull_request` with `required_approving_review_count: 1`, `require_code_owner_review: true`, `dismiss_stale_reviews_on_push: true`, `require_last_push_approval: true`
   - rule `required_status_checks` with the repo's list below, `strict_required_status_checks_policy: false`
   - bypass actor `OrganizationAdmin` (`actor_id: 1`), `bypass_mode: always`
+- **Seal tag ruleset, actions only.** A second ruleset, named exactly `Protected seal tags`:
+  - target `tag`, include `refs/tags/seal-v*`
+  - rules `update`, `deletion` and `creation`
+  - bypass actor `OrganizationAdmin` (`actor_id: 1`), `bypass_mode: always`
+
+  Every secret job in every sealed repo runs `@seal-v1` first, so moving that tag must be as guarded as `main`.
 - **Code owners.** `.github/CODEOWNERS` contains exactly `* @Lascade-Co/backend`. The backend team has `push` permission on all five repos; the product team has `push` on product-actions only.
 - **Required checks.**
 
@@ -147,7 +156,7 @@ Source trees for the two frozen repos are in the scratchpad at `.../scratchpad/s
 
 **Interfaces:**
 - Produces:
-  - Rule `secret_jobs_use_production`: a job with `steps:` whose YAML text matches `secrets\.(?!GITHUB_TOKEN\b)[A-Za-z_]` must have `environment: production`, or `environment:` with a `name: production` mapping.
+  - Rule `secret_jobs_use_production`: a job with `steps:` whose YAML text matches `secrets\.(?!GITHUB_TOKEN\b)[A-Za-z_]` must have `environment:` set to an allowed name. That is `production` or a line of `.github/seal/environments`, given as a string, as `name:` of a mapping, or as an expression whose string literals are all allowed.
   - Exempt from the rule:
     - jobs with `uses: ./.github/workflows/…` (the called workflow is checked instead)
     - jobs listed in `.github/seal/env-exempt`
@@ -162,7 +171,8 @@ Source trees for the two frozen repos are in the scratchpad at `.../scratchpad/s
   - `test_local_reusable_caller_is_exempt_and_callee_checked`: the caller has `secrets: inherit`, the callee job lacks an environment, and the violation is on the callee.
   - `test_cross_repo_call_with_secrets_needs_exempt_entry`.
   - `test_env_exempt_line_without_reason_fails`.
-  - `test_other_environment_name_fails`: `environment: cloudflare-prod` on a secret job is a violation.
+  - `test_other_environment_name_fails`: `environment: cloudflare-prod` on a secret job is a violation unless `.github/seal/environments` lists it.
+  - `test_listed_environment_expression_passes`: `${{ inputs.env_slug == 'prod' && 'cloudflare-prod' || 'cloudflare-staging' }}` with both names listed passes; listing only one fails.
 - [ ] **Step 2: Run** `python -m pytest -q scripts/seal/test_workflow_policy.py -k environment`. Expected: FAIL.
 - [ ] **Step 3: Implement** the rule next to `SEALED_RULES` and run it for every non-exempt workflow and for `.github/actions` composites. Composites never reference secrets, so they are skipped. Read `.github/seal/env-exempt` from `SEAL_POLICY_ROOT`.
 - [ ] **Step 4: Run** the full policy test. Expected: the new rule FAILS on this repo's real workflows. That is expected and Task 3 fixes it. The fixture tests PASS.
@@ -180,6 +190,7 @@ Source trees for the two frozen repos are in the scratchpad at `.../scratchpad/s
   - `teams.product` applies only to product-actions.
   - store-reviews has `secret_exempt: ["CI_APP_CLIENT_ID", "CI_APP_PRIVATE_KEY"]`.
 - `ruleset_payload(required_checks: list[str]) -> dict` returns exactly the Global Constraints ruleset.
+- `tag_ruleset_payload(patterns: list[str]) -> dict` returns the `Protected seal tags` ruleset. `sealed_repos.json` gives actions `"protect_tags": ["refs/tags/seal-v*"]`.
 - `environment_calls(repo) -> list[tuple[str, str, dict|None]]` returns the method, path and body for:
   - `PUT /repos/Lascade-Co/{repo}/environments/production` with `{"deployment_branch_policy": {"protected_branches": false, "custom_branch_policies": true}}`
   - `POST .../environments/production/deployment-branch-policies` with `{"name": "main", "type": "branch"}`
@@ -192,6 +203,7 @@ Source trees for the two frozen repos are in the scratchpad at `.../scratchpad/s
 
 - [ ] **Step 1: Failing tests:**
   - `test_ruleset_payload_exact`: compares against a literal dict built from the Global Constraints values.
+  - `test_tag_ruleset_only_for_actions`.
   - `test_plan_is_empty_when_current_matches`.
   - `test_plan_updates_ruleset_by_name`.
   - `test_check_flags_repo_secret_not_exempt`.
@@ -209,9 +221,11 @@ Source trees for the two frozen repos are in the scratchpad at `.../scratchpad/s
 - Modify: `test-seal.yml`, `test-ai.yml`, `test-seal-e2e.yml`, `deploy-runner.yml`
 - Create: `.github/CODEOWNERS`
 
-- [ ] **Step 1:** Add `environment: production` to every job listed as using secrets, across the repository_dispatch workflows and asc-build-status.
-- [ ] **Step 2: deploy-runner.** Replace the `cloudflare-prod`/`cloudflare-staging` expression with `environment: production`. `CF_ACCESS_CLIENT_ID` and `CF_ACCESS_CLIENT_SECRET` move into `production` (user step in Task 13).
-  - Ruling: one environment per repo. Deployment labels by stage are lost, which is cheap to redo with an `environment: {name: production, url: …}` if wanted.
+- [ ] **Step 1:** Add `environment: production` to every job listed as using secrets, across the repository_dispatch workflows and asc-build-status. Also cover the report workflows that are still here until Task 14 (daily-*, install-paid-watchdog, ship-accuracy-report, seo-blog-audit), so the policy passes on this branch.
+- [ ] **Step 2: deploy-runner.**
+  - deploy-runner keeps its `cloudflare-prod`/`cloudflare-staging` expression.
+  - Create `.github/seal/environments` listing `cloudflare-prod` and `cloudflare-staging`.
+  - Its repo-level secrets (`CI_APP_*`, `DIGITAL_OCEAN_SSH_KEY`, `INFISICAL_*`) get synced into both of those environments as well (user step in Task 15).
 - [ ] **Step 3: test-seal-e2e.yml.** Set `on: push: branches: [main]` and keep `paths:`. Add `environment: production` on `e2e-verify`.
 - [ ] **Step 4:** Remove the `paths:` filters from `test-seal.yml` and `test-ai.yml`, so they can be required checks.
 - [ ] **Step 5:** Create `.github/CODEOWNERS` with `* @Lascade-Co/backend`.
@@ -256,7 +270,11 @@ Source trees for the two frozen repos are in the scratchpad at `.../scratchpad/s
 - [ ] **Step 4: `CONTEXT.md`** gets the moved sections from actions: Daily Catchup, Blog SEO Audit, Marketing Net, Settled decisions — Install → paid, and their example dialogues and flagged ambiguities. Add sections written from the two frozen READMEs: **Digest**, **Edition**, **Report date**, **Hold**, **Delivery marker**, **Chat summary**.
 - [ ] **Step 5:** Copy ADRs 0001 and 0003–0007 into `docs/adr/` under their original numbers, plus a copy of ADR 0015 for context.
 - [ ] **Step 6: `repo-key.pub`.** Ask the user for the `age1…` public key; that is their key step. Until then commit a placeholder only in the local repo, and replace it before Task 12.
-- [ ] **Step 7: Commit** `chore: scaffold product-actions`.
+- [ ] **Step 7: Shared files for the parallel tasks.** Tasks 7–11 run in parallel and must not edit `pytest.ini`, `requirements.txt`, `test.yml` or `CONTEXT.md`. Declare them complete here:
+  - `pythonpath` lists every report dir: `scripts/common`, `scripts/ai`, `scripts/{catchup,adspend,pnl,hunch,installpaid,accuracy,seo,container_credits,conversion,incomplete_checkout,revenue,reviews,survey,ta_trigger,chat_summary}`.
+  - `requirements.txt` is the union of the actions reports' installs, the digest's requirements and google-auth, all pinned.
+  - Each of Tasks 7–11 works in its own worktree off this commit. The controller merges them in order and resolves any conflict.
+- [ ] **Step 8: Commit** `chore: scaffold product-actions`.
 
 ### Task 6: `scripts/common`
 
@@ -521,13 +539,20 @@ Steps marked **(user)** are the user's own. All others are the controller's, and
   - `REPO_AGE_KEY`
 
   The final list comes from `grep -ho 'secrets\.[A-Z_0-9]*' .github/workflows/*.yml | sort -u` in product-actions, minus `GITHUB_TOKEN`. Sync it to the GitHub **environment** `production` of Lascade-Co/product-actions.
-- [ ] Create `Lascade-Co/product-actions`: private, disable Actions (`gh api -X PUT repos/Lascade-Co/product-actions/actions/permissions -F enabled=false`), add topic `sealed-ci`, push `main`, run `repo_settings.py apply product-actions`.
-- [ ] **(user)** Make product-actions public.
+- [ ] Create `Lascade-Co/product-actions`: private, disable Actions (`gh api -X PUT repos/Lascade-Co/product-actions/actions/permissions -F enabled=false`), add topic `sealed-ci`, push `main`.
+- [ ] **(user)** Make product-actions public, which keeps Actions disabled.
+- [ ] Run `repo_settings.py apply product-actions`. Because of the Free plan, it only works once the repo is public.
+- [ ] **(user)** Sync the product-actions Infisical project to the `production` environment. Then run `repo_settings.py check product-actions` and confirm the secret names exist in the environment (`gh api repos/Lascade-Co/product-actions/environments/production/secrets`).
 - [ ] Enable Actions. Check that `policy / policy` and `test` pass on `main`.
-- [ ] **(user)** Point the Infisical syncs of actions, connector, infra-actions and store-reviews at each repo's `production` environment. Add `CF_ACCESS_CLIENT_ID`/`CF_ACCESS_CLIENT_SECRET` to the actions project. Store-reviews keeps the CI_APP pair repo-level.
-- [ ] Merge the actions branch (Tasks 1–4 and 14). The org admin bypasses review. Run `repo_settings.py apply actions`.
-- [ ] After `unit` and `test` pass on main, move the tag: `git tag -f seal-v1 <main sha> && git push -f origin seal-v1`. The env rule now applies everywhere, and Task 13 already complies.
-- [ ] Dispatch `dry_run=true` once per product-actions report from `main`, and open every preview at `https://ci.lascade.com/?repo=product-actions`.
+- [ ] Merge the actions branch (Tasks 1–4). The org admin bypasses review. Merge order for the other repos:
+  1. Jobs now declare environments while the secrets are still repo-level; repo-level secrets stay visible to those jobs.
+  2. **(user)** Add a second Infisical sync for each repo, alongside the repo-level one: actions → `production`, `cloudflare-prod` and `cloudflare-staging` (with `CF_ACCESS_*`), and connector, infra-actions, store-reviews → `production`.
+  3. Confirm one scheduled or dispatched run per repo succeeds.
+  4. Only then remove the repo-level syncs and secrets. Store-reviews keeps the CI_APP pair repo-level.
+- [ ] Run `repo_settings.py apply actions`, which includes the `Protected seal tags` ruleset.
+- [ ] After `unit` and `test` pass on main, move the tag: `git tag -f seal-v1 <main sha> && git push -f origin seal-v1` (admin bypass). The env rule now applies everywhere, and Task 13 already complies.
+- [ ] At the cutover, merge the Task 14 branch (report removal).
+- [ ] Dispatch `dry_run=true` once per product-actions report from `main`, and open every preview at `https://ci.lascade.com/?repo=product-actions`. On these runs, confirm that a called job with `environment: production` under `secrets: inherit` receives the environment secrets. Do the same for connector `etl` on its next run. If it does not, stop and revise before deleting the repo-level secrets.
 - [ ] **(user)** Repoint the cron-job.org chat-summary PT job to `Lascade-Co/product-actions`, workflow `chat-summary.yml`, with a new fine-grained token limited to product-actions (Actions: read and write).
 - [ ] Run `repo_settings.py check` on all five repos. It reports only the expected store-reviews exemption. Repo-level secrets: delete those the check flags, after the user confirms the env syncs have landed. Then watch the first scheduled day and report each report's run.
 
