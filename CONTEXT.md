@@ -422,6 +422,25 @@ workflows are sealed like this repo's. Frozen on 2026-11-20: `daily-email-digest
 `connector`, `chat-summary`, `store-reviews`, `infra-actions`, `scratch`, `motwr`.
 _Avoid_: disabled repo, locked repo.
 
+**Production environment**:
+The GitHub environment named `production`, deployable only from `main`, that holds a
+**sealed repository's** secrets. Every job that needs a secret declares it, so only reviewed
+code merged to `main` ever sees a secret; branch runs get none.
+_Avoid_: prod secrets, protected secrets.
+
+**Reviewed main**:
+The ruleset every **sealed repository** puts on `main`: changes arrive only through a pull
+request approved by a `@Lascade-Co/backend` code owner (re-approved after any new push), with
+the seal policy and tests passing, and no force-push or deletion. Org admins may bypass it.
+_Avoid_: branch protection (the legacy GitHub feature this does not use).
+
+**Product report**:
+A scheduled email for the product team (ad spend, catchup, install → paid, marketing net,
+digests, chat summaries and the like). Product reports live in the public, sealed
+`Lascade-Co/product-actions`, not here; this repo keeps the build, release and deploy
+pipelines other repos dispatch to, plus the sealing toolkit.
+_Avoid_: daily action, digest (when meaning all of them).
+
 **Masked**:
 Registered with the runner (an Actions secret, or `::add-mask::`) so every later line in the
 job prints `***` in its place, including step headers and third-party action output.
