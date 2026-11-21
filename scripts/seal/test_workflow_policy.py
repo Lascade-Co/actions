@@ -348,7 +348,17 @@ def check_composite_no_seal_env(action):
 # ---------------------------------------------------------------- production environment rule
 
 SEAL_DIR = Path(".github") / "seal"
-SECRET_USE = re.compile(r"secrets\.(?!GITHUB_TOKEN\b)[A-Za-z_]")
+SECRET_DOT = re.compile(r"\bsecrets\s*\.\s*(?!GITHUB_TOKEN\b)[A-Za-z_]")
+SECRET_INDEX = re.compile(r"\bsecrets\s*\[")  # secrets['X'], secrets[format(...)]
+SECRET_BARE = re.compile(r"(?<![\w.])secrets\b(?!\s*[.\[])")  # toJSON(secrets), whole-context use
+EXPRESSION = re.compile(r"\$\{\{(.*?)\}\}", re.DOTALL)
+
+
+def references_secret(obj):
+    """Any use of a secret other than secrets.GITHUB_TOKEN: dotted, indexed, or the whole `secrets` context."""
+    text = yaml.safe_dump(obj)
+    return bool(SECRET_DOT.search(text) or SECRET_INDEX.search(text)
+                or any(SECRET_BARE.search(e) for e in EXPRESSION.findall(text)))
 STRING_LITERAL = re.compile(r"'([^']*)'")
 
 
@@ -418,7 +428,10 @@ def check_environments(root, this_repo=None):
     for p in wfs:
         if p.name in exempt_files:
             continue
-        for n, j in (load(p).get("jobs") or {}).items():
+        wf = load(p)
+        # a secret in workflow-level env/defaults/etc. is inherited by every job with steps
+        inherited = references_secret({k: v for k, v in wf.items() if k != "jobs"})
+        for n, j in (wf.get("jobs") or {}).items():
             if not isinstance(j, dict) or (p.name, n) in listed:
                 continue
             uses = str(j.get("uses", ""))
@@ -426,7 +439,7 @@ def check_environments(root, this_repo=None):
                 if not uses.startswith("./.github/workflows/") and "secrets" in j:
                     bad.append(f"{p.name}: job {n}: cross-repo call passes secrets; list it in .github/seal/env-exempt")
                 continue
-            if "steps" not in j or not SECRET_USE.search(yaml.safe_dump(j)):
+            if "steps" not in j or not (inherited or references_secret(j)):
                 continue
             name = environment_name(j)
             if not environment_allowed(name, allowed):
@@ -776,7 +789,7 @@ def env_found(name):
 
 @pytest.mark.parametrize("name", ["good-production", "good-mapping", "good-token-only", "good-listed-env",
                                   "good-expr-both", "good-local-callee", "good-cross-repo-exempt",
-                                  "good-same-job-exempt"])
+                                  "good-same-job-exempt", "good-wf-env-production"])
 def test_environment_fixture_good(name):
     assert env_found(name) == []
 
@@ -784,6 +797,12 @@ def test_environment_fixture_good(name):
 def test_secret_job_without_environment_fails():
     found = env_found("bad-no-env")
     assert len(found) == 1 and "ci.yml" in found[0] and "deploy" in found[0], found
+
+
+@pytest.mark.parametrize("name", ["bad-index", "bad-index-format", "bad-tojson", "bad-wf-env"])
+def test_environment_rule_catches_indexed_whole_and_workflow_level_secrets(name):
+    found = env_found(name)
+    assert len(found) == 1 and "ci.yml" in found[0], found
 
 
 def test_github_token_only_needs_no_environment():
