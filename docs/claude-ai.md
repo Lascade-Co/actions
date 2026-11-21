@@ -17,8 +17,6 @@ reports on their next run.
 
 | Workflow | Claude use | Failure behavior |
 | --- | --- | --- |
-| Daily Catchup | Commit classification, developer summaries, executive prose | Deterministic statuses, counts and source bullets remain available. |
-| Daily Ad Spend | Optional commentary from computed facts | Commentary is omitted; the report still sends. |
 | Android release | Release notes from the supplied diff | Generation remains best-effort and does not replace existing notes on an API failure. |
 | Android debug | Source edits for failing lint through `anthropics/claude-code-action@v1` | The workflow pushes only after a successful action and `Status: SUCCESS` report; otherwise the lint job fails. |
 
@@ -42,7 +40,7 @@ no replacement refresh workflow or OAuth credential is needed.
 Run the offline checks with the test dependencies from `.github/workflows/test-ai.yml`:
 
 ```sh
-python -m pytest -q scripts/ai scripts/android/test_release_notes.py scripts/adspend scripts/catchup scripts/seo
+python -m pytest -q scripts/ai scripts/android/test_release_notes.py
 ```
 
 These tests exercise the real SDK against a mocked HTTP transport and verify the

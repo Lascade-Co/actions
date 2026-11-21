@@ -28,13 +28,9 @@ jobs:
         with:
           python-version: '3.13'
       - name: Install test dependencies
-        run: >-
-          pip install -r scripts/ai/requirements.txt pytest==9.1.1 requests==2.34.2
-          beautifulsoup4==4.15.0 lxml==6.1.1 pyjwt==2.13.0 cryptography==50.0.0
-      - name: Test API integration and existing report behavior without network or secrets
-        run: >-
-          python -m pytest -q scripts/ai scripts/android/test_release_notes.py
-          scripts/adspend scripts/catchup scripts/seo
+        run: pip install -r scripts/ai/requirements.txt pytest==9.1.1 requests==2.34.2
+      - name: Test API integration and release notes without network or secrets
+        run: python -m pytest -q scripts/ai scripts/android/test_release_notes.py
 
       - name: Upload sealed log
         if: always()

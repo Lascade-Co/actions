@@ -11,10 +11,4 @@ secrets/
 *-sa.json
 message.html
 message.png
-*-marketing-benchmark.json
 .appstore-cache/
-
-# install-paid email: real data never committed
-out/
-scripts/installpaid/.cache/
-*.local.json
