@@ -1,0 +1,29 @@
+{
+  "actions": {
+    "required_checks": ["unit", "test"],
+    "teams": {"backend": "push"},
+    "secret_exempt": [],
+    "protect_tags": ["refs/tags/seal-v*"],
+    "extra_environments": ["cloudflare-prod", "cloudflare-staging"]
+  },
+  "connector": {
+    "required_checks": ["policy / policy", "unittest"],
+    "teams": {"backend": "push"},
+    "secret_exempt": []
+  },
+  "infra-actions": {
+    "required_checks": ["policy / policy", "test"],
+    "teams": {"backend": "push"},
+    "secret_exempt": []
+  },
+  "store-reviews": {
+    "required_checks": ["policy / policy"],
+    "teams": {"backend": "push"},
+    "secret_exempt": ["CI_APP_CLIENT_ID", "CI_APP_PRIVATE_KEY"]
+  },
+  "product-actions": {
+    "required_checks": ["policy / policy", "test"],
+    "teams": {"backend": "push", "product": "push"},
+    "secret_exempt": []
+  }
+}
