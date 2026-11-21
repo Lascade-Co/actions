@@ -83,6 +83,9 @@ def environment_calls(repo, envs=("production",)):
 def _subset(want, have):
     """True if `want` is contained in `have` (dicts recursively, lists as unordered sets of matches)."""
     if isinstance(want, dict):
+        if want.get("actor_type") == "OrganizationAdmin":
+            # GitHub returns the org-admin bypass actor with actor_id null, though 1 is sent on write.
+            want = {k: v for k, v in want.items() if k != "actor_id"}
         return isinstance(have, dict) and all(k in have and _subset(v, have[k]) for k, v in want.items())
     if isinstance(want, list):
         return (isinstance(have, list) and len(want) == len(have)

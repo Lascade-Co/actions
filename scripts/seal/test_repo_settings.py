@@ -304,3 +304,20 @@ def test_cli_check_flags_store_reviews_without_app_slug(no_app_slug, monkeypatch
     monkeypatch.setattr(rs, "fetch_current", lambda repo: current_matching(repo))
     assert rs.main(["check", "store-reviews"]) == 1
     assert "needs the CI App slug" in capsys.readouterr().out
+
+
+def test_real_fetched_ruleset_matches_for_product_actions():
+    """GitHub returns the org-admin bypass actor with actor_id null and extra server-added rule parameters."""
+    import pathlib
+    fetched = json.loads((pathlib.Path(__file__).parent / "testdata" / "ruleset-reviewed-main-product-actions.json").read_text())
+    assert fetched["bypass_actors"][0]["actor_id"] is None
+    current = current_matching("product-actions")
+    current["rulesets"] = {"Reviewed main": fetched}
+    assert not [c for c in rs.plan("product-actions", current) if "rulesets" in c[1]]
+    assert not [p for p in rs.check("product-actions", current) if "ruleset" in p]
+
+
+def test_integration_bypass_actor_still_compared_by_id():
+    want = {"bypass_actors": [{"actor_id": 5, "actor_type": "Integration", "bypass_mode": "always"}]}
+    have = {"bypass_actors": [{"actor_id": None, "actor_type": "Integration", "bypass_mode": "always"}]}
+    assert not rs._subset(want, have)
