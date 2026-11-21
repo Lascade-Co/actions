@@ -9,6 +9,14 @@ def cfg(repo):
     return rs.load_config()[repo]
 
 
+@pytest.fixture
+def no_app_slug(monkeypatch):
+    """Real config, but store-reviews has no CI App slug yet (exercises the refusal path)."""
+    real = rs.load_config()
+    real["store-reviews"]["bypass_apps"] = []
+    monkeypatch.setattr(rs, "load_config", lambda: real)
+
+
 def current_matching(repo):
     c = cfg(repo)
     rulesets = {"Reviewed main": {**rs.ruleset_payload(c["required_checks"]), "id": 1, "source": repo}}
@@ -110,7 +118,7 @@ def test_plan_fork_and_teams():
     assert not any("/teams/backend/" in p for _, p, _ in calls)
 
 
-def test_check_flags_repo_secret_not_exempt():
+def test_check_flags_repo_secret_not_exempt(no_app_slug):
     cur = current_matching("connector")
     cur["repo_secrets"] = ["OTHER"]
     probs = rs.check("connector", cur)
@@ -240,7 +248,13 @@ def test_ruleset_payload_adds_app_bypass_after_admin():
     assert rs.tag_ruleset_payload(["refs/tags/seal-v*"])["bypass_actors"] == rs.ADMIN_BYPASS
 
 
-def test_store_reviews_needs_the_ci_app_bypass():
+def test_store_reviews_real_config_names_the_ci_app():
+    c = cfg("store-reviews")
+    assert c["requires_bypass_app"] is True and c["bypass_apps"] == ["octo-poocha"]
+    assert rs.bypass_problems("store-reviews", [42]) == []
+
+
+def test_store_reviews_needs_the_ci_app_bypass(no_app_slug):
     c = cfg("store-reviews")
     assert c["requires_bypass_app"] is True and c["bypass_apps"] == []
     for r in ("actions", "connector", "infra-actions", "product-actions"):
@@ -275,7 +289,7 @@ def test_resolve_bypass_app_ids_reads_public_app_endpoint(monkeypatch):
 
 
 @pytest.mark.parametrize("dry", [True, False])
-def test_cli_apply_refuses_store_reviews_without_app_slug(monkeypatch, capsys, dry):
+def test_cli_apply_refuses_store_reviews_without_app_slug(no_app_slug, monkeypatch, capsys, dry):
     calls = []
     monkeypatch.setattr(rs, "gh_api", lambda *a, **k: calls.append(a))
     monkeypatch.setattr(rs, "fetch_current", lambda repo: {**current_matching(repo), "fork_approval": None})
@@ -285,7 +299,7 @@ def test_cli_apply_refuses_store_reviews_without_app_slug(monkeypatch, capsys, d
     assert calls == [] and "needs the CI App slug" in out and "PUT " not in out
 
 
-def test_cli_check_flags_store_reviews_without_app_slug(monkeypatch, capsys):
+def test_cli_check_flags_store_reviews_without_app_slug(no_app_slug, monkeypatch, capsys):
     monkeypatch.setattr(rs, "gh_api", lambda *a, **k: pytest.fail("no API call expected"))
     monkeypatch.setattr(rs, "fetch_current", lambda repo: current_matching(repo))
     assert rs.main(["check", "store-reviews"]) == 1

@@ -21,7 +21,7 @@
     "teams": {"backend": "push"},
     "secret_exempt": ["CI_APP_CLIENT_ID", "CI_APP_PRIVATE_KEY"],
     "requires_bypass_app": true,
-    "bypass_apps": []
+    "bypass_apps": ["octo-poocha"]
   },
   "product-actions": {
     "required_checks": ["policy / policy", "test"],
