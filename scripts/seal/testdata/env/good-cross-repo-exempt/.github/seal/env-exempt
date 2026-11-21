@@ -1,0 +1,2 @@
+# cross-repo calls
+cross.yml:call  # the callee job declares production

@@ -64,6 +64,24 @@ branch, PR number and title, commit SHA, step names, and lines starting `::add-m
 8. Never set `SEAL_*` or `seal_*` variables in `env:` (workflow, job or step level); the setup step and composites set
    what they need, and the policy fails any workflow or composite that does.
 
+## Production environment
+
+Every job that references `secrets.<NAME>` (anything other than `secrets.GITHUB_TOKEN`) must declare
+`environment: production` (a string, or `name:` of a mapping), so the secret is only released to a run on a branch the
+environment allows (`main`). The policy test fails the job otherwise.
+
+- `.github/seal/environments` (optional): extra allowed environment names, one per line; `#` comment lines and blanks
+  are ignored. Absent means only `production`. An `environment:` expression passes only if every value it can yield is
+  an allowed string literal (condition operands such as `'prod'` in `inputs.env == 'prod' && 'a' || 'b'` are not values).
+- Jobs that call a local reusable workflow (`uses: ./.github/workflows/...`) carry no `environment:`; the called
+  workflow's jobs do.
+- `.github/seal/env-exempt` (optional): one line per job that is exempt, `<workflow file>:<job id>  # <reason>`, for
+  example `release.yml:call  # the callee job declares production`. A line without a reason fails. A cross-repo
+  `uses:` job that passes `secrets:` must be listed here.
+- Workflows exempt from sealing (`workflow_call`-only files nothing here calls, in this repo) are skipped; composite
+  actions never reference secrets.
+- Every environment that holds secrets should have a deployment branch policy allowing only `main`.
+
 ## Exemption
 
 A workflow is exempt when its only trigger is `workflow_call` and no workflow here calls it via

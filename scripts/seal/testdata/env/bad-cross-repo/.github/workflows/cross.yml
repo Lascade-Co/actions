@@ -1,0 +1,11 @@
+name: cross
+on:
+  workflow_dispatch:
+defaults:
+  run:
+    shell: "seal-bash-e {0}"
+jobs:
+  call:
+    uses: Lascade-Co/other/.github/workflows/x.yml@main
+    secrets:
+      TOKEN: ${{ secrets.TOKEN }}

@@ -345,6 +345,96 @@ def check_composite_no_seal_env(action):
     return [f"step {i + 1}: step env sets {k}" for i, s in enumerate(steps) for k in _seal_keys((s or {}).get("env"))]
 
 
+# ---------------------------------------------------------------- production environment rule
+
+SEAL_DIR = Path(".github") / "seal"
+SECRET_USE = re.compile(r"secrets\.(?!GITHUB_TOKEN\b)[A-Za-z_]")
+STRING_LITERAL = re.compile(r"'([^']*)'")
+
+
+def seal_lines(root, name):
+    """Meaningful lines of an optional `.github/seal/<name>` file: blanks and whole-line `#` comments dropped."""
+    f = Path(root) / SEAL_DIR / name
+    if not f.is_file():
+        return []
+    return [l.strip() for l in f.read_text().splitlines() if l.strip() and not l.strip().startswith("#")]
+
+
+def allowed_environments(root):
+    return {"production", *seal_lines(root, "environments")}
+
+
+def parse_env_exempt(root):
+    """`<file>:<job>  # <reason>` lines. Returns (set of (file, job), violations); a line without a reason fails."""
+    entries, bad = set(), []
+    for line in seal_lines(root, "env-exempt"):
+        target, _, reason = line.partition("#")
+        target = target.strip()
+        if not reason.strip():
+            bad.append(f"env-exempt: {line!r} has no reason (use '<file>:<job>  # <reason>')")
+        elif target.count(":") != 1 or not all(x.strip() for x in target.split(":")):
+            bad.append(f"env-exempt: {line!r} is not '<file>:<job>  # <reason>'")
+        else:
+            entries.add(tuple(x.strip() for x in target.split(":")))
+    return entries, bad
+
+
+def environment_name(job):
+    env = job.get("environment")
+    return env.get("name") if isinstance(env, dict) else env
+
+
+def environment_allowed(name, allowed):
+    """A plain string must be allowed. An expression passes only if every value it can yield is an allowed
+    string literal: each `||` alternative ends (after its last `&&`) in a quoted literal. Condition operands,
+    such as 'prod' in `inputs.env == 'prod' && 'cloudflare-prod' || ...`, are not values and are not checked."""
+    if not isinstance(name, str) or not name.strip():
+        return False
+    if "${{" not in name:
+        return name.strip() in allowed
+    m = re.fullmatch(r"\s*\$\{\{(.*)\}\}\s*", name, re.DOTALL)
+    if not m:
+        return False
+    for alt in m.group(1).split("||"):
+        lit = STRING_LITERAL.fullmatch(alt.split("&&")[-1].strip())
+        if not lit or lit.group(1) not in allowed:
+            return False
+    return True
+
+
+def check_environments(root, this_repo=None):
+    """Every job that references a secret other than GITHUB_TOKEN runs in an allowed environment.
+
+    Exempt: jobs calling a local reusable workflow (the callee is checked), jobs listed in
+    `.github/seal/env-exempt`, and (in this repo) workflow_call-only files nothing here calls.
+    A cross-repo `uses:` job that passes `secrets:` must be listed. Composites never reference secrets.
+    """
+    root = Path(root)
+    this_repo = is_this_repo(root) if this_repo is None else this_repo
+    wfs = workflows_of(root)
+    exempt_files = exempt_names(wfs) if this_repo else set()
+    allowed = allowed_environments(root)
+    listed, bad = parse_env_exempt(root)
+    for p in wfs:
+        if p.name in exempt_files:
+            continue
+        for n, j in (load(p).get("jobs") or {}).items():
+            if not isinstance(j, dict) or (p.name, n) in listed:
+                continue
+            uses = str(j.get("uses", ""))
+            if uses:
+                if not uses.startswith("./.github/workflows/") and "secrets" in j:
+                    bad.append(f"{p.name}: job {n}: cross-repo call passes secrets; list it in .github/seal/env-exempt")
+                continue
+            if "steps" not in j or not SECRET_USE.search(yaml.safe_dump(j)):
+                continue
+            name = environment_name(j)
+            if not environment_allowed(name, allowed):
+                bad.append(f"{p.name}: job {n}: references secrets but environment is {name!r}; "
+                           f"must be production or one of {sorted(allowed - {'production'})} from .github/seal/environments")
+    return bad
+
+
 def violations(path):
     wf = load(path)
     return [f"{rule.__name__}: {m}" for rule in SEALED_RULES for m in rule(wf)]
@@ -367,6 +457,7 @@ def policy_violations(root, this_repo=None):
         bad += [f"{p.name}: {m}" for m in check_no_seal_env(wf, POLICY_ENV_ALLOWED.get(p.name, ()) if this_repo else ())]
         bad += [f"{p.name}: {m}" for m in check_no_pull_request_target(wf)]
         bad += [f"{p.name}: {m}" for m in check_pull_request_no_secrets(wf, p.read_text())]
+    bad += [f"environments: {m}" for m in check_environments(root, this_repo)]
     for p in composites_of(root):
         if this_repo and is_toolkit_composite(root, p):
             continue
@@ -672,3 +763,66 @@ def test_this_repo_env_flag_and_control_root(tmp_path, monkeypatch):
     monkeypatch.setenv("SEAL_POLICY_THIS_REPO", "false")
     assert not is_this_repo(root)
     assert is_this_repo(CONTROL)
+
+
+# ---------------------------------------------------------------- production environment rule
+
+ENV_ROOTS = TESTDATA / "env"
+
+
+def env_found(name):
+    return check_environments(ENV_ROOTS / name, this_repo=False)
+
+
+@pytest.mark.parametrize("name", ["good-production", "good-mapping", "good-token-only", "good-listed-env",
+                                  "good-expr-both", "good-local-callee", "good-cross-repo-exempt",
+                                  "good-same-job-exempt"])
+def test_environment_fixture_good(name):
+    assert env_found(name) == []
+
+
+def test_secret_job_without_environment_fails():
+    found = env_found("bad-no-env")
+    assert len(found) == 1 and "ci.yml" in found[0] and "deploy" in found[0], found
+
+
+def test_github_token_only_needs_no_environment():
+    assert env_found("good-token-only") == []
+
+
+def test_environment_mapping_name_production_passes():
+    assert env_found("good-mapping") == []
+
+
+def test_local_reusable_caller_is_exempt_and_callee_checked():
+    found = env_found("bad-local-callee")
+    assert len(found) == 1 and "callee.yml" in found[0] and "inner" in found[0], found
+
+
+def test_cross_repo_call_with_secrets_needs_exempt_entry():
+    found = env_found("bad-cross-repo")
+    assert len(found) == 1 and "cross.yml" in found[0] and "call" in found[0], found
+
+
+def test_env_exempt_line_without_reason_fails():
+    assert any("env-exempt" in v and "reason" in v for v in env_found("bad-exempt-no-reason"))
+
+
+def test_other_environment_name_fails():
+    found = env_found("bad-other-env")
+    assert len(found) == 1 and "cloudflare-prod" in found[0], found
+
+
+def test_listed_environment_expression_passes():
+    assert env_found("good-expr-both") == []
+    found = env_found("bad-expr-one")
+    assert len(found) == 1 and "cloudflare-staging" in found[0], found
+
+
+def test_environment_rule_is_part_of_the_policy():
+    assert any("deploy" in v for v in policy_violations(ENV_ROOTS / "bad-no-env", this_repo=False))
+
+
+def test_secret_jobs_use_production():
+    """Real workflows: every secret job declares an allowed environment (Task 3 converts the rest)."""
+    assert check_environments(ROOT, THIS_REPO) == []

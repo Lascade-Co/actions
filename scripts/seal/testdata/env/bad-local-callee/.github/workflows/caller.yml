@@ -1,0 +1,10 @@
+name: caller
+on:
+  workflow_dispatch:
+defaults:
+  run:
+    shell: "seal-bash-e {0}"
+jobs:
+  call:
+    uses: ./.github/workflows/callee.yml
+    secrets: inherit

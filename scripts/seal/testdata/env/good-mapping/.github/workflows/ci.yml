@@ -1,0 +1,20 @@
+name: ci
+on:
+  workflow_dispatch:
+defaults:
+  run:
+    shell: "seal-bash-e {0}"
+jobs:
+  a:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    environment:
+      name: production
+      url: https://x.example
+    steps:
+      - name: Seal job output
+        uses: Lascade-Co/actions/actions/seal@seal-v1
+      - run: echo "${{ secrets.FOO }}"
+      - if: always()
+        uses: Lascade-Co/actions/actions/seal-upload@seal-v1
