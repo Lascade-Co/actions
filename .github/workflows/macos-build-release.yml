@@ -101,8 +101,8 @@ jobs:
           secret-path: /Build
           export-type: env
 
-      # Secrets are written under RUNNER_TEMP (outside the checkout) and only their paths reach
-      # release.sh. Nothing is echoed; values are masked by the Infisical action.
+      # Writes signing files under RUNNER_TEMP (outside the checkout) and exports their paths for
+      # release.sh; also trusts Apple's Developer ID G2 intermediate. Nothing is echoed.
       - name: Write signing material
         shell: bash
         env:
@@ -110,39 +110,8 @@ jobs:
           FALLBACK_PRIVATE_KEY: ${{ secrets.APPSTORE_API_PRIVATE_KEY }}
           FALLBACK_ISSUER_ID: ${{ secrets.APPSTORE_ISSUER_ID }}
         run: |
-          set -euo pipefail
-          umask 077
-          dir="$RUNNER_TEMP/signing"
-          mkdir -p "$dir"
-          for v in MACOS_TEAM_ID MACOS_DEVELOPER_ID_CERT_BASE64 MACOS_DEVELOPER_ID_KEY_BASE64; do
-            [ -n "${!v:-}" ] || { echo "::error::$v missing in Infisical /Build"; exit 1; }
-          done
-          printf '%s' "$MACOS_DEVELOPER_ID_CERT_BASE64" | base64 --decode > "$dir/developer_id.cer"
-          printf '%s' "$MACOS_DEVELOPER_ID_KEY_BASE64"  | base64 --decode > "$dir/developer_id.key"
-          if [ -n "${APPSTORE_API_KEY_ID:-}" ] && [ -n "${APPSTORE_API_PRIVATE_KEY:-}" ] && [ -n "${APPSTORE_ISSUER_ID:-}" ]; then
-            KEY_ID="$APPSTORE_API_KEY_ID"; KEY="$APPSTORE_API_PRIVATE_KEY"; ISSUER="$APPSTORE_ISSUER_ID"
-          else
-            KEY_ID="$FALLBACK_KEY_ID"; KEY="$FALLBACK_PRIVATE_KEY"; ISSUER="$FALLBACK_ISSUER_ID"
-          fi
-          printf '%s\n' "$KEY" > "$dir/notary.p8"
-          {
-            echo "RELEASE_TEAM_ID=$MACOS_TEAM_ID"
-            echo "RELEASE_CERT=$dir/developer_id.cer"
-            echo "RELEASE_CERT_KEY=$dir/developer_id.key"
-            echo "NOTARY_KEY=$dir/notary.p8"
-            echo "NOTARY_KEY_ID=$KEY_ID"
-            echo "NOTARY_ISSUER=$ISSUER"
-          } >> "$GITHUB_ENV"
-          if [ -n "${SERVICE_PLIST_BASE64:-}" ]; then
-            printf '%s' "$SERVICE_PLIST_BASE64" | base64 --decode > src/App/GoogleService-Info.plist
-          fi
-
-      # release.sh validates the identity chain; make sure Apple's Developer ID G2 intermediate is trusted.
-      - name: Install Developer ID G2 intermediate
-        shell: bash
-        run: |
-          curl -fsSL --retry 3 https://www.apple.com/certificateauthority/DeveloperIDG2CA.cer -o "$RUNNER_TEMP/DeveloperIDG2CA.cer"
-          sudo security add-certificates -k /Library/Keychains/System.keychain "$RUNNER_TEMP/DeveloperIDG2CA.cer" || true
+          curl -fsSL --retry 3 https://raw.githubusercontent.com/Lascade-Co/actions/main/scripts/macos/write_signing.sh \
+            | bash -s -- src/App/GoogleService-Info.plist
 
       - name: Build, sign, notarize and staple DMG
         id: build
@@ -155,22 +124,19 @@ jobs:
           [ -f "$DMG" ] || { echo "::error::release.sh did not produce $DMG"; exit 1; }
           echo "dmg=$PWD/$DMG" >> "$GITHUB_OUTPUT"
           echo "sha256=$(shasum -a 256 "$DMG" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
-      - name: Create release in source repo
-        shell: bash
-        working-directory: src
-        env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          REPO: ${{ github.event.client_payload.repo }}
-          VERSION: ${{ steps.version.outputs.version }}
-          DMG: ${{ steps.build.outputs.dmg }}
-          SHA256: ${{ steps.build.outputs.sha256 }}
-        run: |
-          set -euo pipefail
-          gh release create "v$VERSION" "$DMG" -R "$REPO" \
-            --target "$(git rev-parse HEAD)" \
-            --title "v$VERSION" \
-            --notes "Developer ID signed, notarized and stapled DMG. SHA-256: \`$SHA256\`"
+      - name: Create GitHub Release in source repo
+        uses: softprops/action-gh-release@v2
+        with:
+          repository: ${{ github.event.client_payload.repo }}
+          token: ${{ steps.app-token.outputs.token }}
+          tag_name: v${{ steps.version.outputs.version }}
+          target_commitish: ${{ steps.build.outputs.sha }}
+          name: v${{ steps.version.outputs.version }}
+          body: "Developer ID signed, notarized and stapled DMG. SHA-256: `${{ steps.build.outputs.sha256 }}`"
+          files: ${{ steps.build.outputs.dmg }}
+          fail_on_unmatched_files: true
 
       - name: Remove signing material
         if: always()
