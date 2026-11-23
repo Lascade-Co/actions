@@ -1,0 +1,27 @@
+# Copy into a macOS app repo as .github/workflows/release.yml and set secrets.CENTRAL_DISPATCH_TOKEN
+# (a token that can dispatch to Lascade-Co/actions). Fill in project_slug (Infisical).
+# Runner: .github/workflows/macos-build-release.yml, event type release-macos.
+# The signed DMG is attached to a GitHub Release in THIS repo, never to the public actions repo.
+
+name: Request central macOS release
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ release ]
+
+jobs:
+  dispatch:
+    if: ${{ github.repository == github.event.repository.full_name }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Dispatch to central repo
+        uses: peter-evans/repository-dispatch@v3
+        with:
+          token: ${{ secrets.CENTRAL_DISPATCH_TOKEN }}
+          repository: Lascade-Co/actions
+          event-type: release-macos
+          client-payload: >-
+            {"repo":${{ toJSON(github.repository) }},
+             "branch":${{ toJSON(github.ref_name) }},
+             "project_slug": "your-infisical-project-slug"}
