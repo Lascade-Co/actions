@@ -1,6 +1,6 @@
 {
   "actions": {
-    "required_checks": ["unit", "test"],
+    "required_checks": ["unit (ubuntu-latest)", "unit (macos-latest)", "test"],
     "teams": {"backend": "push"},
     "secret_exempt": [],
     "protect_tags": ["refs/tags/seal-v*"],

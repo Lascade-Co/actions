@@ -200,9 +200,52 @@ def _codeowners_problems(text):
     return []
 
 
+def _pr_check_names(workflows_dir):
+    """Check names that pull_request runs of these workflows report: (exact names, name prefixes).
+
+    A matrix job reports as `job (v1, v2)`, never as plain `job`; a reusable-workflow call reports
+    as `job / <callee job>`. Matrices with include/exclude or expressions yield only a prefix.
+    """
+    import itertools
+    import yaml
+
+    names, prefixes = set(), set()
+    for wf in sorted(Path(workflows_dir).glob("*.y*ml")):
+        doc = yaml.safe_load(wf.read_text()) or {}
+        on = doc.get(True, doc.get("on"))
+        if not (on == "pull_request" or (isinstance(on, (list, dict)) and "pull_request" in on)):
+            continue
+        for job_id, job in (doc.get("jobs") or {}).items():
+            base = job.get("name") or job_id
+            if "${{" in str(base):
+                continue
+            if job.get("uses"):
+                prefixes.add(f"{base} / ")
+                continue
+            matrix = (job.get("strategy") or {}).get("matrix")
+            if not matrix:
+                names.add(base)
+            elif isinstance(matrix, dict) and all(isinstance(v, list) for v in matrix.values()):
+                for combo in itertools.product(*matrix.values()):
+                    names.add(f"{base} ({', '.join(str(v) for v in combo)})")
+            else:
+                prefixes.add(f"{base} (")
+    return names, prefixes
+
+
+def required_check_problems(required, root):
+    names, prefixes = _pr_check_names(Path(root) / ".github" / "workflows")
+    return [
+        f"required check '{c}' is not reported by any pull_request job"
+        + (" (matrix jobs report as 'job (value)')" if any(n.startswith(f"{c} (") for n in names) else "")
+        for c in required
+        if c not in names and not any(c.startswith(p) for p in prefixes)
+    ]
+
+
 def check_offline(repo, root):
     root = Path(root)
-    problems = []
+    problems = required_check_problems(load_config()[repo]["required_checks"], root)
     co = root / ".github" / "CODEOWNERS"
     problems += _codeowners_problems(co.read_text() if co.is_file() else None)
     ex = root / ".github" / "seal" / "env-exempt"

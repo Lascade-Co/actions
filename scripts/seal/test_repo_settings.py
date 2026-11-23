@@ -164,7 +164,31 @@ def write(root, rel, text):
     f.write_text(text)
 
 
+CONNECTOR_PR_WORKFLOWS = {
+    ".github/workflows/seal-policy.yml": "on: [push, pull_request]\njobs:\n  policy:\n    uses: o/r/.github/workflows/p.yml@v1\n",
+    ".github/workflows/tests.yml": "on:\n  pull_request:\njobs:\n  unittest:\n    runs-on: x\n",
+}
+
+
+def test_required_checks_match_pull_request_jobs(tmp_path):
+    write(tmp_path, ".github/workflows/t.yml",
+          "on:\n  pull_request:\njobs:\n  unit:\n    strategy:\n      matrix:\n        os: [a, b]\n"
+          "  test:\n    runs-on: x\n  call:\n    uses: o/r/.github/workflows/p.yml@v1\n")
+    write(tmp_path, ".github/workflows/push.yml", "on: push\njobs:\n  only_push:\n    runs-on: x\n")
+    assert rs.required_check_problems(["unit (a)", "unit (b)", "test", "call / anything"], tmp_path) == []
+    probs = rs.required_check_problems(["unit", "only_push"], tmp_path)
+    assert len(probs) == 2 and "matrix jobs report as" in probs[0] and "'only_push'" in probs[1]
+
+
+def test_every_sealed_repo_required_check_exists_in_this_repo():
+    # Only this repository's workflows are on disk; other repos are checked with `check --offline`.
+    root = rs.HERE.parent.parent
+    assert rs.required_check_problems(rs.load_config()["actions"]["required_checks"], root) == []
+
+
 def test_offline_ok_and_bad(tmp_path):
+    for rel, text in CONNECTOR_PR_WORKFLOWS.items():
+        write(tmp_path, rel, text)
     write(tmp_path, ".github/CODEOWNERS", CODEOWNERS)
     write(tmp_path, ".github/seal/env-exempt", "# c\n\nci.yml:call  # cross-repo\n")
     write(tmp_path, ".github/seal/repo-key.pub", KEY + "\n")
