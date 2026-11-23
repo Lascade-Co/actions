@@ -41,6 +41,12 @@ fi
 [ -n "$key_id" ] && [ -n "$key" ] && [ -n "$issuer" ] || { echo "::error::no notary API key available"; exit 1; }
 printf '%s\n' "$key" > "$dir/notary.p8"
 
+# These go into GITHUB_ENV, and the runner shows a step's environment in its public header, so mask
+# them first (in this sealed step, before any later step can show them).
+for value in "$MACOS_TEAM_ID" "$key_id" "$issuer"; do
+  echo "::add-mask::$value"
+done
+
 {
   echo "RELEASE_TEAM_ID=$MACOS_TEAM_ID"
   echo "RELEASE_CERT=$dir/developer_id.cer"

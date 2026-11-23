@@ -4,9 +4,10 @@ run-name: "${{ github.event.client_payload.repo }} · ${{ github.event.client_pa
 # Builds a Developer ID signed, notarized and stapled DMG for a macOS app and attaches it to a
 # GitHub Release in the (private) SOURCE repo. Trigger: triggers/macos-build-release.yml.
 #
-# This repo is public, so its run logs and workflow artifacts are visible to anyone. The DMG
-# therefore never touches actions/upload-artifact: build, sign, notarize and release happen in
-# one job, and the only copy that leaves the runner goes to the source repo's release.
+# This repo is public, so its run logs and workflow artifacts are visible to anyone. Step output is
+# sealed (docs/sealed-output.md), and the DMG never touches actions/upload-artifact: build, sign,
+# notarize and release happen in one job, and the only copy that leaves the runner goes to the
+# source repo's release.
 #
 # The source repo must provide scripts/release.sh, which reads RELEASE_TEAM_ID, RELEASE_CERT
 # (DER .cer), RELEASE_CERT_KEY, NOTARY_KEY (.p8), NOTARY_KEY_ID and NOTARY_ISSUER, and writes
@@ -31,17 +32,30 @@ permissions:
 
 concurrency:
   group: release-macos-${{ github.event.client_payload.repo }}
-  # Never cancel a run mid-notarization; queue the next one instead.
+  # Never cancel a run mid-notarization or between the release and the version bump; queue instead.
   cancel-in-progress: false
+
+defaults:
+  run:
+    shell: "seal-bash-e {0}"
 
 jobs:
   release:
     runs-on: macos-latest
+    environment: production
     timeout-minutes: 60
     steps:
+      - name: Seal job output
+        shell: bash
+        run: |
+          u="https://raw.githubusercontent.com/Lascade-Co/actions/${{ github.workflow_sha }}/scripts/seal/install.sh"
+          curl -fsSL --retry 3 --retry-delay 2 --retry-all-errors --connect-timeout 10 --max-time 60 -o "$RUNNER_TEMP/seal-install.tmp" "$u"
+          test -s "$RUNNER_TEMP/seal-install.tmp" && mv "$RUNNER_TEMP/seal-install.tmp" "$RUNNER_TEMP/seal-install.sh"
+          SEAL_REF="${{ github.workflow_sha }}" bash "$RUNNER_TEMP/seal-install.sh"
+
       - name: Extract owner/repo
         id: repo
-        shell: bash
+        shell: "seal-bash {0}"
         env:
           FULL: ${{ github.event.client_payload.repo }}
         run: |
@@ -49,6 +63,7 @@ jobs:
           echo "name=${FULL#*/}"   >> "$GITHUB_OUTPUT"
 
       # Scoped to the source repo only: it checks out the code and creates the release there.
+      # The action masks the token it mints.
       - name: Mint GitHub App token
         id: app-token
         uses: actions/create-github-app-token@v3
@@ -68,7 +83,7 @@ jobs:
 
       - name: Read version and check the tag is free
         id: version
-        shell: bash
+        shell: "seal-bash {0}"
         working-directory: src
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
@@ -90,6 +105,7 @@ jobs:
         with:
           xcode-version: latest-stable
 
+      # The action masks every value it exports (core.setSecret before exportVariable).
       - name: Fetch build secrets from Infisical
         uses: Infisical/secrets-action@v1.0.15
         with:
@@ -102,10 +118,23 @@ jobs:
           secret-path: /Build
           export-type: env
 
-      # Writes signing files under RUNNER_TEMP (outside the checkout) and exports their paths for
-      # release.sh; also trusts Apple's Developer ID G2 intermediate. Nothing is echoed.
+      # Belt and braces on top of the Infisical masks, before any third-party step runs. The
+      # multi-line notary key is masked line by line.
+      - name: Mask build secrets
+        shell: "seal-bash {0}"
+        run: |
+          for v in MACOS_TEAM_ID MACOS_DEVELOPER_ID_CERT_BASE64 MACOS_DEVELOPER_ID_KEY_BASE64 \
+                   SERVICE_PLIST_BASE64 APPSTORE_API_KEY_ID APPSTORE_ISSUER_ID; do
+            if [ -n "${!v:-}" ]; then echo "::add-mask::${!v}"; fi
+          done
+          printf '%s\n' "${APPSTORE_API_PRIVATE_KEY:-}" | while IFS= read -r line; do
+            case "$line" in ""|-----*) ;; *) echo "::add-mask::$line" ;; esac
+          done
+
+      # Writes signing files under RUNNER_TEMP (outside the checkout), masks and exports the values
+      # release.sh reads, and trusts Apple's Developer ID G2 intermediate. Nothing is echoed.
       - name: Write signing material
-        shell: bash
+        shell: "seal-bash {0}"
         env:
           FALLBACK_KEY_ID: ${{ secrets.APPSTORE_API_KEY_ID }}
           FALLBACK_PRIVATE_KEY: ${{ secrets.APPSTORE_API_PRIVATE_KEY }}
@@ -116,16 +145,19 @@ jobs:
 
       - name: Build, sign, notarize and staple DMG
         id: build
-        shell: bash
+        shell: "seal-bash {0}"
         working-directory: src
+        env:
+          DMG: .build/release/${{ steps.version.outputs.app_name }}-${{ steps.version.outputs.version }}.dmg
         run: |
           set -euo pipefail
           scripts/release.sh
-          DMG=".build/release/${{ steps.version.outputs.app_name }}-${{ steps.version.outputs.version }}.dmg"
           [ -f "$DMG" ] || { echo "::error::release.sh did not produce $DMG"; exit 1; }
-          echo "dmg=$PWD/$DMG" >> "$GITHUB_OUTPUT"
-          echo "sha256=$(shasum -a 256 "$DMG" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
-          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          {
+            echo "dmg=$PWD/$DMG"
+            echo "sha256=$(shasum -a 256 "$DMG" | cut -d' ' -f1)"
+            echo "sha=$(git rev-parse HEAD)"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Create GitHub Release in source repo
         uses: softprops/action-gh-release@v2
@@ -151,17 +183,29 @@ jobs:
           path: bump
 
       - name: Bump version and push
-        shell: bash
+        shell: "seal-bash {0}"
         working-directory: bump
+        env:
+          BRANCH: ${{ github.event.client_payload.branch }}
         run: |
+          set -euo pipefail
           bash increment_version.sh
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add Config/Product.xcconfig
           git commit -m "[skip ci] Increment version to $(sed -n 's/^MARKETING_VERSION *= *//p' Config/Product.xcconfig)"
-          git push origin HEAD:${{ github.event.client_payload.branch }}
+          git push origin "HEAD:$BRANCH"
 
       - name: Remove signing material
         if: always()
-        shell: bash
+        shell: "seal-bash {0}"
         run: rm -rf "$RUNNER_TEMP/signing" src/App/GoogleService-Info.plist src/.build/release
+
+      - name: Upload sealed log
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ env.SEAL_LOG_ARTIFACT }}
+          path: ${{ runner.temp }}/seal/out/
+          retention-days: 7
+          if-no-files-found: ignore
