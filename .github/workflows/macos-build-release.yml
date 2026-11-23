@@ -10,8 +10,9 @@ run-name: "${{ github.event.client_payload.repo }} · ${{ github.event.client_pa
 #
 # The source repo must provide scripts/release.sh, which reads RELEASE_TEAM_ID, RELEASE_CERT
 # (DER .cer), RELEASE_CERT_KEY, NOTARY_KEY (.p8), NOTARY_KEY_ID and NOTARY_ISSUER, and writes
-# .build/release/<name>-<version>.dmg. Version comes from MARKETING_VERSION in
-# Config/Product.xcconfig; the release tag is v<version>, so bump it before each release.
+# .build/release/<name>-<version>.dmg, and an increment_version.sh at its root (as for iOS/Android)
+# that bumps MARKETING_VERSION and CURRENT_PROJECT_VERSION in Config/Product.xcconfig. The release
+# is tagged v<MARKETING_VERSION>; after it succeeds the bump is committed ([skip ci]) to the branch.
 #
 # Infisical (project = client_payload.project_slug, env prod, path /Build):
 #   MACOS_TEAM_ID                       Apple Developer Team ID
@@ -137,6 +138,28 @@ jobs:
           body: "Developer ID signed, notarized and stapled DMG. SHA-256: `${{ steps.build.outputs.sha256 }}`"
           files: ${{ steps.build.outputs.dmg }}
           fail_on_unmatched_files: true
+
+      # Like the iOS release: after a successful release, bump the version on the branch with the
+      # source repo's increment_version.sh. A fresh checkout picks up commits pushed during the build.
+      - name: Checkout source repo for version bump
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ github.event.client_payload.repo }}
+          ref: refs/heads/${{ github.event.client_payload.branch }}
+          token: ${{ steps.app-token.outputs.token }}
+          fetch-depth: 1
+          path: bump
+
+      - name: Bump version and push
+        shell: bash
+        working-directory: bump
+        run: |
+          bash increment_version.sh
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Config/Product.xcconfig
+          git commit -m "[skip ci] Increment version to $(sed -n 's/^MARKETING_VERSION *= *//p' Config/Product.xcconfig)"
+          git push origin HEAD:${{ github.event.client_payload.branch }}
 
       - name: Remove signing material
         if: always()
