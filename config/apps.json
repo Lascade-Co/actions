@@ -13,5 +13,13 @@
     "rollout": {"country": "IN", "fraction": 0.2},
     "project_slug": "treasurehunch",
     "native_symbols": false
+  },
+  "Lascade-Co/youme": {
+    "bundle_id": "com.lascade.youme",
+    "package_name": "com.lascade.youme",
+    "metadata_repo": null,
+    "rollout": {"country": "IN", "fraction": 0.2},
+    "project_slug": "youme",
+    "native_symbols": false
   }
 }
