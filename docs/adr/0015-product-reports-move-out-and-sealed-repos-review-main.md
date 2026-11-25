@@ -62,3 +62,5 @@ one repository, where the ruleset applies.
   the same reason.
 - Copying `claude_api.py` would let the two copies drift.
 - Keeping chat-summary in Node would leave a second implementation of the plumbing.
+
+2026-11-26: the **log viewer** moved to `Lascade-Co/ci`, a Worker behind Cloudflare Access (see that repo's ADR 0001); this repo no longer serves it.
