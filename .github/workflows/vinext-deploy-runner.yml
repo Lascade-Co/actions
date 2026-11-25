@@ -499,6 +499,7 @@ jobs:
           owner: ${{ steps.preflight.outputs.owner }}
           repositories: ${{ steps.preflight.outputs.repo_name }}
           permission-contents: read
+          permission-pull-requests: read
 
       - name: Resolve the closed PR's Worker
         id: resolve
