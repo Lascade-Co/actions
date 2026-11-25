@@ -103,6 +103,8 @@ function validPullRequestBranch(branch) {
     branch.split('/').every(part => part.length > 0 && !part.startsWith('.') && !part.endsWith('.lock'));
 }
 
+const pullRequestActions = ['opened', 'synchronize', 'reopened', 'ready_for_review', 'closed', 'workflow_dispatch'];
+
 export function validateDispatch(payload) {
   assert(payload && /^Lascade-Co\/[A-Za-z0-9_.-]+$/.test(payload.repo), 'Only Lascade-Co repositories are supported');
   // A present pr_number always means a PR Preview. It never falls back to a
@@ -114,6 +116,8 @@ export function validateDispatch(payload) {
   } else {
     assert(['dev', 'main'].includes(payload.branch), 'Only dev and main can deploy');
   }
+  // pr_action exists only on PR dispatches; `closed` routes to Preview cleanup.
+  if (Object.hasOwn(payload, 'pr_action')) assert(pullRequest && pullRequestActions.includes(payload.pr_action), 'Invalid pr_action');
   assert(/^[a-f0-9]{40}$/.test(payload.sha), 'An exact 40-character commit SHA is required');
   assert(typeof payload.source_run_url === 'string' && payload.source_run_url.startsWith(`https://github.com/${payload.repo}/actions/runs/`) && /^\d+$/.test(payload.source_run_url.split('/').at(-1)), 'Invalid source run URL');
   const project_slug = normalizeProjectSlug(payload.project_slug);
@@ -124,6 +128,12 @@ export function validateDispatch(payload) {
 export function dispatchTarget(payload) {
   const { pr_number } = validateDispatch(payload);
   return pr_number !== undefined ? 'pr' : payload.branch === 'main' ? 'production' : 'staging';
+}
+
+// A closed PR only deletes its Preview; every other dispatch builds and deploys.
+export function dispatchRoute(payload) {
+  const { pr_number } = validateDispatch(payload);
+  return pr_number !== undefined && payload.pr_action === 'closed' ? 'cleanup' : 'deploy';
 }
 
 // The Wrangler/Infisical environment a target is built from. A PR Preview is
@@ -139,6 +149,7 @@ export function statusPlan(payload) {
 export function prepare(payload, project) {
   const { owner, repo_name, project_slug: slug, pr_number } = validateDispatch(payload);
   const target = dispatchTarget(payload);
+  assert(dispatchRoute(payload) === 'deploy', 'A closed pull request only deletes its Preview');
   assert(project && /^[a-f0-9]{32}$/.test(project.account_id) && /^[a-z0-9][a-z0-9-]{0,62}$/.test(project.worker_name), 'Project must register a valid account and Worker');
   assert(/^[0-9]+(?:\.[0-9]+){0,2}$/.test(project.node_version) && Number(project.node_version.split('.')[0]) >= 22, 'Vinext requires Node 22 or newer');
   assert(/^[0-9]+\.[0-9]+\.[0-9]+$/.test(project.wrangler_version), 'Pin an exact Wrangler version');

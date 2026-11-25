@@ -101,12 +101,34 @@ export async function listVersions(cloudflare, workerPath) {
   throw new Error('Version history exceeded the pagination limit');
 }
 
+// A PR Preview plan is always a native Preview named exactly pr-<number>.
+export function assertPullRequestPlan(plan) {
+  assert(plan?.target === 'pr' && Number.isInteger(plan.pr_number) && plan.pr_number >= 1 && plan.pr_number <= 9999999 &&
+    plan.project?.preview_mode === 'native' && plan.project.preview_name === `pr-${plan.pr_number}`, 'Invalid PR Preview plan');
+}
+
+// Explicit per target: only `production` ever runs `wrangler deploy`.
 export function deploymentArgs(plan, configPath, secretsPath, tag) {
+  let command, label = plan.branch, nativePreview = false;
+  if (plan.target === 'production') {
+    command = ['deploy'];
+  } else if (plan.target === 'staging') {
+    nativePreview = plan.project.preview_mode === 'native';
+    command = nativePreview ? ['preview', '--name', plan.project.preview_name] : ['versions', 'upload', '--preview-alias', 'dev'];
+  } else if (plan.target === 'pr') {
+    assertPullRequestPlan(plan);
+    nativePreview = true;
+    command = ['preview', '--name', plan.project.preview_name];
+    // The head branch is caller-chosen text; the PR number identifies it.
+    label = `pr #${plan.pr_number}`;
+  } else {
+    throw new Error('Unsupported deployment target');
+  }
   return [
-    ...(plan.target === 'staging' ? plan.project.preview_mode === 'native' ? ['preview', '--name', plan.project.preview_name] : ['versions', 'upload', '--preview-alias', 'dev'] : ['deploy']),
+    ...command,
     '--config', configPath, '--secrets-file', secretsPath, '--tag', tag,
-    '--message', `${plan.repo}@${plan.sha} (${plan.branch})`,
-    ...(plan.target === 'staging' && plan.project.preview_mode === 'native' ? ['--json', '--ignore-base-config'] : []),
+    '--message', `${plan.repo}@${plan.sha} (${label})`,
+    ...(nativePreview ? ['--json', '--ignore-base-config'] : []),
   ];
 }
 
@@ -122,6 +144,8 @@ async function activeOrUndefined(cloudflare, workerPath) {
 }
 
 async function deployNative(plan, { configPath, secrets, wranglerBin, env, execute, github, cloudflare, pause }) {
+  // Staging (stg) and PR Previews never change the active production deployment.
+  const nativePreview = plan.target === 'staging' || plan.target === 'pr';
   const workerPath = `/accounts/${plan.project.account_id}/workers/scripts/${plan.project.worker_name}`;
   const before = await activeOrUndefined(cloudflare, workerPath);
   if (plan.target === 'production' && before) {
@@ -137,15 +161,16 @@ async function deployNative(plan, { configPath, secrets, wranglerBin, env, execu
   try {
     const secretsPath = join(directory, 'secrets.json');
     writeFileSync(secretsPath, JSON.stringify(secrets), { mode: 0o600, flag: 'wx' });
-    const tag = `${plan.branch}-${randomUUID()}`;
+    // A PR head branch may be long or contain `/`; the PR number is a safe tag.
+    const tag = `${plan.target === 'pr' ? `pr-${plan.pr_number}` : plan.branch}-${randomUUID()}`;
     const childEnv = cloudflareEnvironment(plan, env);
     if (!await isCurrent(plan, github)) return { state: 'superseded' };
     execute(process.execPath, [wranglerBin, ...deploymentArgs(plan, configPath, secretsPath, tag)], {
       cwd: dirname(configPath), env: childEnv,
-      ...(plan.target === 'staging' ? { stdio: ['ignore', 'ignore', 'inherit'] } : {}),
+      ...(nativePreview ? { stdio: ['ignore', 'ignore', 'inherit'] } : {}),
     });
     const after = await activeOrUndefined(cloudflare, workerPath);
-    if (plan.target === 'staging') {
+    if (nativePreview) {
       const previewPath = `/accounts/${plan.project.account_id}/workers/workers/${plan.project.worker_name}/previews/${encodeURIComponent(plan.project.preview_name)}`;
       let preview, deployment;
       for (let attempt = 0; attempt < 6; attempt++) {
@@ -167,8 +192,11 @@ async function deployNative(plan, { configPath, secrets, wranglerBin, env, execu
       assert(secrets.every(([name, binding]) => binding.type === 'secret_text' && plan.project.runtime_secrets.includes(name)), 'Preview deployment contains an unexpected secret binding');
       assert(plan.project.runtime_secrets.every(name => bindings[name]?.type === 'secret_text'), 'Preview deployment is missing a required secret binding');
       assert(isDeepStrictEqual(after, before), 'Native Preview deployment unexpectedly changed active production');
-      return { state: 'deployed', preview_name: preview.name, preview_id: preview.id, deployment_id: deployment.id };
+      if (plan.target !== 'pr') return { state: 'deployed', preview_name: preview.name, preview_id: preview.id, deployment_id: deployment.id };
+      // Display only: an unexpected URL shape is dropped, never a failed deploy.
+      return { state: 'deployed', preview_name: preview.name, preview_id: preview.id, deployment_id: deployment.id, preview_url: displayPreviewUrl(preview.urls[0]) };
     }
+    assert(plan.target === 'production', 'Unsupported deployment target');
     assert(after?.versions?.length === 1 && after.versions[0].percentage === 100, 'Production version is not receiving 100% traffic');
     let uploaded;
     for (let attempt = 0; attempt < 6; attempt++) {
@@ -184,6 +212,7 @@ async function deployNative(plan, { configPath, secrets, wranglerBin, env, execu
 }
 
 export async function deploy(plan, { bundleRoot, envFile, wranglerBin, env = process.env, execute = run, github, cloudflare, pause = ms => new Promise(r => setTimeout(r, ms)) }) {
+  if (plan.target === 'pr') assertPullRequestPlan(plan);
   const values = readSecrets(envFile);
   const secrets = selectValues(values, plan.project.runtime_secrets);
   const release = JSON.parse(readFileSync(join(bundleRoot, 'vinext-release.json'), 'utf8'));
@@ -193,7 +222,8 @@ export async function deploy(plan, { bundleRoot, envFile, wranglerBin, env = pro
   // Re-sanitize on the clean runner, not just in the application build job.
   writeFileSync(configPath, JSON.stringify(config));
   if (!await isCurrent(plan, github)) return { state: 'superseded' };
-  const migrated = applyD1Migrations(plan, { bundleRoot, wranglerBin, env, execute });
+  // An unmerged PR's SQL never runs; prepare already refuses PR plans with migrations.
+  const migrated = plan.target === 'pr' ? false : applyD1Migrations(plan, { bundleRoot, wranglerBin, env, execute });
   if (migrated && !await isCurrent(plan, github)) return { state: 'superseded' };
   if (plan.project.preview_mode === 'native') return deployNative(plan, { configPath, secrets, wranglerBin, env, execute, github, cloudflare, pause });
   const workerPath = `/accounts/${plan.project.account_id}/workers/scripts/${plan.project.worker_name}`;
@@ -241,4 +271,107 @@ export async function deploy(plan, { bundleRoot, envFile, wranglerBin, env = pro
     }
     return { state: 'deployed', version_id: uploaded.id };
   } finally { rmSync(directory, { recursive: true, force: true }); }
+}
+
+// A plain https origin (optionally with a path) that is safe to print in Markdown.
+function safePreviewUrl(value) {
+  return typeof value === 'string' && value.length <= 300 && /^https:\/\/[a-z0-9.-]+(?:\/[A-Za-z0-9._~\/-]*)?$/.test(value);
+}
+
+// Cloudflare's first Preview URL as a plain https URL, or '' if it is unusable.
+function displayPreviewUrl(value) {
+  if (typeof value !== 'string') return '';
+  const url = /^[a-z][a-z0-9+.-]*:/i.test(value) ? value : `https://${value}`;
+  return safePreviewUrl(url) ? url : '';
+}
+
+const notFound = error => /^API request failed \(404\)/.test(error.message);
+
+// Deletes a closed PR's Preview. A Preview that does not exist (the PR was
+// always a draft, or it was already deleted) is a successful no-op. Cloudflare's
+// API decides existence: wrangler's failure output is not machine-readable.
+export async function deletePreview(plan, { wranglerBin, env = process.env, execute = run, cloudflare, pause = ms => new Promise(r => setTimeout(r, ms)) }) {
+  assertPullRequestPlan(plan);
+  const name = plan.project.preview_name;
+  const previewPath = `/accounts/${plan.project.account_id}/workers/workers/${plan.project.worker_name}/previews/${encodeURIComponent(name)}`;
+  const exists = async () => {
+    try { await cloudflare(previewPath); return true; }
+    catch (error) { if (notFound(error)) return false; throw error; }
+  };
+  if (!await exists()) return { state: 'absent', preview_name: name };
+  // No bundle on this route: run from an empty directory so no stray Wrangler
+  // configuration applies, and name the Worker explicitly.
+  const directory = mkdtempSync(join(tmpdir(), 'vinext-preview-delete-'));
+  try {
+    const childEnv = cloudflareEnvironment(plan, env);
+    delete childEnv.WRANGLER_CI_OVERRIDE_NAME;
+    try {
+      execute(process.execPath, [wranglerBin, 'preview', 'delete', '--name', name, '--worker-name', plan.project.worker_name, '--skip-confirmation'], { cwd: directory, env: childEnv });
+    } catch (error) {
+      if (await exists()) throw error;
+      return { state: 'absent', preview_name: name };
+    }
+    for (let attempt = 0; attempt < 6; attempt++) {
+      if (!await exists()) return { state: 'deleted', preview_name: name };
+      if (attempt < 5) await pause(2000);
+    }
+    throw new Error('Cloudflare still lists the deleted Preview');
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+}
+
+export const previewCommentMarker = '<!-- vinext-preview -->';
+
+const commentResults = {
+  deployed: 'Deployed',
+  failed: 'Failed',
+  superseded: 'Superseded',
+  removed: 'Removed',
+  absent: 'Closed',
+};
+
+// The single PR comment. Every interpolated value is validated first, so the
+// body cannot carry Markdown or HTML from the payload.
+export function previewCommentBody(plan, { result, previewUrl, runUrl }) {
+  assert(plan?.target === 'pr' && Number.isInteger(plan.pr_number) && plan.pr_number >= 1 && plan.pr_number <= 9999999, 'Invalid PR Preview comment plan');
+  assert(/^[a-f0-9]{40}$/.test(plan.sha), 'Invalid commit SHA');
+  assert(Object.hasOwn(commentResults, result), 'Invalid comment result');
+  assert(typeof runUrl === 'string' && /^https:\/\/github\.com\/Lascade-Co\/[A-Za-z0-9_.-]+\/actions\/runs\/\d+(?:\/attempts\/\d+)?$/.test(runUrl), 'Invalid run URL');
+  const name = `pr-${plan.pr_number}`;
+  const commit = `\`${plan.sha.slice(0, 7)}\` (${plan.sha})`;
+  const detail = {
+    deployed: `${safePreviewUrl(previewUrl) ? `**Preview:** ${previewUrl}` : `Cloudflare did not report a usable Preview URL; see the [run log](${runUrl}).`}\n\nStaff only (Cloudflare Access). Built from commit ${commit} with staging values.`,
+    failed: `Commit ${commit} did not deploy. See the [run log](${runUrl}).`,
+    superseded: `Commit ${commit} was superseded by a newer commit before it deployed.`,
+    removed: `The pull request closed, so the \`${name}\` Preview was deleted. Last commit: ${commit}.`,
+    absent: `The pull request closed and no Preview \`${name}\` was left to delete. Last commit: ${commit}.`,
+  }[result];
+  return `${previewCommentMarker}\n### PR preview \`${name}\`: ${commentResults[result]}\n\n${detail}\n\n[Run](${runUrl})\n`;
+}
+
+async function findPreviewComment(plan, github) {
+  for (let page = 1; page <= 100; page++) {
+    const comments = await github(`/repos/${plan.repo}/issues/${plan.pr_number}/comments?per_page=100&page=${page}`);
+    assert(Array.isArray(comments), 'Invalid comment list');
+    // Only a bot (this app) owns the comment; people may quote the marker.
+    const found = comments.find(comment => comment?.user?.type === 'Bot' && typeof comment.body === 'string' && comment.body.startsWith(previewCommentMarker));
+    if (found) return found;
+    if (!comments.length) return undefined;
+  }
+  throw new Error('Comment history exceeded the pagination limit');
+}
+
+// Creates or edits the single marked PR comment. `overwrite: false` leaves an
+// existing comment alone (a newer run owns it); `create: false` never adds one.
+export async function upsertPreviewComment(plan, body, github, { overwrite = true, create = true } = {}) {
+  assert(plan?.target === 'pr' && Number.isInteger(plan.pr_number) && /^Lascade-Co\/[A-Za-z0-9_.-]+$/.test(plan.repo), 'Invalid PR Preview comment plan');
+  const existing = await findPreviewComment(plan, github);
+  if (existing) {
+    if (!overwrite) return 'skipped';
+    assert(Number.isSafeInteger(existing.id), 'Invalid comment id');
+    await github(`/repos/${plan.repo}/issues/comments/${existing.id}`, { method: 'PATCH', body: JSON.stringify({ body }) });
+    return 'updated';
+  }
+  if (!create) return 'skipped';
+  await github(`/repos/${plan.repo}/issues/${plan.pr_number}/comments`, { method: 'POST', body: JSON.stringify({ body }) });
+  return 'created';
 }

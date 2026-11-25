@@ -8,6 +8,15 @@ on:
         required: false
         default: ''
         type: string
+      pr_previews:
+        description: >-
+          Opt in to PR Previews. The caller adds pull_request types
+          [opened, synchronize, reopened, ready_for_review, closed] and an optional
+          workflow_dispatch input `pr`. Same-repository, non-draft PRs deploy a native
+          Worker Preview named pr-<number>; closing the PR deletes it.
+        required: false
+        default: false
+        type: boolean
     secrets:
       central_dispatch_token:
         required: true
@@ -17,14 +26,22 @@ permissions:
 
 jobs:
   dispatch:
+    # Three explicit routes. The first is the unchanged dev/main deploy; a
+    # manual run that names a PR never takes it.
     if: >-
-      ((github.event_name == 'push' && !github.event.deleted) ||
-       github.event_name == 'workflow_dispatch') &&
-      (github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/main')
+      (((github.event_name == 'push' && !github.event.deleted) ||
+        (github.event_name == 'workflow_dispatch' && !github.event.inputs.pr)) &&
+       (github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/main')) ||
+      (inputs.pr_previews && github.event_name == 'pull_request' &&
+       github.event.pull_request.head.repo.full_name == github.repository &&
+       contains(fromJSON('["opened","synchronize","reopened","ready_for_review","closed"]'), github.event.action) &&
+       (!github.event.pull_request.draft || github.event.action == 'closed')) ||
+      (inputs.pr_previews && github.event_name == 'workflow_dispatch' && github.event.inputs.pr)
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - name: Request deployment of this exact commit
+        if: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && !github.event.inputs.pr) }}
         uses: peter-evans/repository-dispatch@v4
         with:
           token: ${{ secrets.central_dispatch_token }}
@@ -37,4 +54,58 @@ jobs:
               "branch": ${{ toJSON(github.ref_name) }},
               "sha": ${{ toJSON(github.sha) }},
               "source_run_url": ${{ toJSON(format('{0}/{1}/actions/runs/{2}', github.server_url, github.repository, github.run_id)) }}
+            }
+
+      # On pull_request, github.sha is the test merge commit: dispatch the PR head.
+      - name: Request a Preview of this pull request head
+        if: ${{ github.event_name == 'pull_request' }}
+        uses: peter-evans/repository-dispatch@v4
+        with:
+          token: ${{ secrets.central_dispatch_token }}
+          repository: Lascade-Co/actions
+          event-type: vinext-deploy
+          client-payload: >-
+            {
+              "repo": ${{ toJSON(github.repository) }},
+              "project_slug": ${{ toJSON(inputs.project_slug) }},
+              "branch": ${{ toJSON(github.event.pull_request.head.ref) }},
+              "sha": ${{ toJSON(github.event.pull_request.head.sha) }},
+              "source_run_url": ${{ toJSON(format('{0}/{1}/actions/runs/{2}', github.server_url, github.repository, github.run_id)) }},
+              "pr_number": ${{ toJSON(github.event.pull_request.number) }},
+              "pr_action": ${{ toJSON(github.event.action) }}
+            }
+
+      # A manual run for one PR looks up its current head. GET /pulls/{n} accepts
+      # a contents: read token. The runner re-checks open, non-draft and same-repo.
+      - name: Resolve the requested pull request head
+        id: pr
+        if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.pr }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.inputs.pr }}
+        run: |
+          set -euo pipefail
+          [[ "$PR" =~ ^[1-9][0-9]{0,6}$ ]] || { echo "pr must be a pull request number" >&2; exit 1; }
+          pull="$(gh api "repos/$REPO/pulls/$PR")"
+          jq -e --arg repo "$REPO" '.state == "open" and .draft == false and .head.repo.full_name == $repo' <<< "$pull" > /dev/null ||
+            { echo "PR #$PR is not an open, non-draft pull request from this repository" >&2; exit 1; }
+          echo "head=$(jq -c --argjson number "$PR" '{number: $number, ref: .head.ref, sha: .head.sha}' <<< "$pull")" >> "$GITHUB_OUTPUT"
+
+      - name: Request a Preview of the requested pull request head
+        if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.pr }}
+        uses: peter-evans/repository-dispatch@v4
+        with:
+          token: ${{ secrets.central_dispatch_token }}
+          repository: Lascade-Co/actions
+          event-type: vinext-deploy
+          client-payload: >-
+            {
+              "repo": ${{ toJSON(github.repository) }},
+              "project_slug": ${{ toJSON(inputs.project_slug) }},
+              "branch": ${{ toJSON(fromJSON(steps.pr.outputs.head).ref) }},
+              "sha": ${{ toJSON(fromJSON(steps.pr.outputs.head).sha) }},
+              "source_run_url": ${{ toJSON(format('{0}/{1}/actions/runs/{2}', github.server_url, github.repository, github.run_id)) }},
+              "pr_number": ${{ toJSON(fromJSON(steps.pr.outputs.head).number) }},
+              "pr_action": "workflow_dispatch"
             }

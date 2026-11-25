@@ -1,4 +1,4 @@
-import { assert, behaviorKeys, bindingKeys, dispatchTarget, nonemptyValues, sameBehaviorValue, sourceEnvironment, validateDispatch, validateRateLimits, validateWorkerBehavior } from './config.mjs';
+import { assert, behaviorKeys, bindingKeys, dispatchRoute, dispatchTarget, nonemptyValues, sameBehaviorValue, sourceEnvironment, validateDispatch, validateRateLimits, validateWorkerBehavior } from './config.mjs';
 
 const noPlainVars = source => source.vars === undefined || (source.vars && typeof source.vars === 'object' && !Array.isArray(source.vars) && Object.keys(source.vars).length === 0);
 const behavior = source => Object.fromEntries(behaviorKeys.filter(key => source[key] !== undefined).map(key => [key, source[key]]));
@@ -146,5 +146,20 @@ export function projectFromSource(payload, { pkg, wrangler, submodule_repos }, v
     preview_mode: nativePreview ? 'native' : 'alias', preview_name: nativePreview ? target === 'pr' ? `pr-${payload.pr_number}` : 'stg' : undefined,
     preview_config: nativePreview ? wrangler.previews : undefined,
     environments,
+  };
+}
+
+// Deleting a closed PR's Preview needs only its Worker, account and Wrangler
+// pin from the PR's last head. It does not require a previews block there: an
+// earlier head may have deployed one, and a missing Preview is a no-op.
+export function cleanupPlan(payload, { pkg, wrangler }) {
+  const { owner, repo_name, pr_number } = validateDispatch(payload);
+  assert(dispatchRoute(payload) === 'cleanup', 'Preview cleanup runs only for closed pull requests');
+  assert(wrangler && /^[a-f0-9]{32}$/.test(wrangler.account_id) && /^[a-z0-9][a-z0-9-]{0,62}$/.test(wrangler.name), 'Project must register a valid account and Worker');
+  const wrangler_version = pkg?.devDependencies?.wrangler ?? pkg?.dependencies?.wrangler;
+  assert(typeof wrangler_version === 'string' && /^[0-9]+\.[0-9]+\.[0-9]+$/.test(wrangler_version), 'Pin an exact Wrangler version in package.json');
+  return {
+    repo: payload.repo, branch: payload.branch, sha: payload.sha, owner, repo_name, target: 'pr', pr_number,
+    project: { account_id: wrangler.account_id, worker_name: wrangler.name, wrangler_version, preview_mode: 'native', preview_name: `pr-${pr_number}`, runtime_secrets: [] },
   };
 }

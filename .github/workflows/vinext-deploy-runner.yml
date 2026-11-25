@@ -1,5 +1,5 @@
 name: Vinext Deploy
-run-name: "${{ github.event.client_payload.repo }} · ${{ github.event.client_payload.branch == 'main' && 'production' || github.event.client_payload.branch == 'dev' && 'staging' || 'invalid branch' }} · Vinext"
+run-name: "${{ github.event.client_payload.repo }} · ${{ github.event.client_payload.pr_number && format('pr #{0}{1}', github.event.client_payload.pr_number, github.event.client_payload.pr_action == 'closed' && ' cleanup' || '') || github.event.client_payload.branch == 'main' && 'production' || github.event.client_payload.branch == 'dev' && 'staging' || 'invalid branch' }} · Vinext"
 
 on:
   repository_dispatch:
@@ -12,8 +12,16 @@ defaults:
   run:
     shell: seal-bash {0}
 
+# Routes, by client_payload:
+# - no pr_number: the dev/main deploy (prepare -> build -> deploy), unchanged.
+# - pr_number, pr_action != closed: a PR Preview through the same jobs. The plan
+#   target is `pr`, which deploys only `wrangler preview --name pr-<N>`.
+# - pr_number, pr_action == closed: cleanup-source -> cleanup only (no build).
+# All jobs use the `production` environment: it is where this repository keeps the
+# central deployment secrets (seal policy), not a statement about the target.
 jobs:
   prepare:
+    if: ${{ github.event.client_payload.pr_action != 'closed' }}
     runs-on: ubuntu-latest
     environment: production
     timeout-minutes: 5
@@ -62,6 +70,8 @@ jobs:
           repositories: ${{ steps.preflight.outputs.repo_name }}
           permission-contents: read
           permission-statuses: write
+          # PRs only: read the PR head (isCurrent) and report a failure comment.
+          permission-pull-requests: ${{ github.event.client_payload.pr_number && 'write' || '' }}
 
       - name: Resolve source Worker and Infisical deployment settings
         id: prepare
@@ -73,7 +83,7 @@ jobs:
           INFISICAL_DOMAIN: ${{ secrets.INFISICAL_DOMAIN }}
         run: node control/scripts/vinext/cli.mjs prepare
 
-      - name: Verify requested commit is the branch head
+      - name: Verify requested commit is the branch or PR head
         env:
           PLAN_JSON: ${{ steps.prepare.outputs.plan }}
           GH_TOKEN: ${{ steps.status-token.outputs.token }}
@@ -87,6 +97,23 @@ jobs:
           STATUS_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: node control/scripts/vinext/cli.mjs status
 
+      # vinext/preview is a required check, so a PR that fails before the deploy
+      # job still gets a failed status. The comment is update-only here: this job
+      # is outside the deploy queue, where comments are created. dev/main unchanged.
+      - name: Report a PR Preview preparation failure
+        if: ${{ failure() && github.event.client_payload.pr_number && steps.status-token.outcome == 'success' }}
+        env:
+          PLAN_JSON: ${{ steps.prepare.outputs.plan }}
+          PAYLOAD_JSON: ${{ toJSON(github.event.client_payload) }}
+          GH_TOKEN: ${{ steps.status-token.outputs.token }}
+          STATUS_STATE: failure
+          STATUS_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          COMMENT_MODE: update-only
+        run: |
+          node control/scripts/vinext/cli.mjs status
+          node control/scripts/vinext/cli.mjs comment
+
       - name: Upload sealed log
         if: always()
         uses: actions/upload-artifact@v7
@@ -98,6 +125,7 @@ jobs:
 
   build:
     needs: prepare
+    if: ${{ github.event.client_payload.pr_action != 'closed' }}
     runs-on: ubuntu-latest
     environment: production
     timeout-minutes: 30
@@ -170,6 +198,8 @@ jobs:
           owner: ${{ steps.preflight.outputs.owner }}
           repositories: ${{ steps.prepare.outputs.repositories }}
           permission-contents: read
+          # PRs only: the build re-checks the PR head (isCurrent) with this token.
+          permission-pull-requests: ${{ github.event.client_payload.pr_number && 'read' || '' }}
 
       - name: Checkout requested source and recorded submodule revisions
         uses: actions/checkout@v7
@@ -250,7 +280,7 @@ jobs:
   deploy:
     needs: [prepare, build]
     # Also report failures from the separate build runner without fetching deployment secrets.
-    if: ${{ always() && needs.prepare.result == 'success' }}
+    if: ${{ always() && needs.prepare.result == 'success' && github.event.client_payload.pr_action != 'closed' }}
     runs-on: ubuntu-latest
     environment: production
     timeout-minutes: 20
@@ -301,6 +331,8 @@ jobs:
           repositories: ${{ steps.preflight.outputs.repo_name }}
           permission-contents: read
           permission-statuses: write
+          # PRs only: read the PR head (isCurrent) and edit the PR comment.
+          permission-pull-requests: ${{ github.event.client_payload.pr_number && 'write' || '' }}
 
       - name: Resolve source Worker and Infisical deployment settings
         id: prepare
@@ -342,11 +374,27 @@ jobs:
           SECRET_KIND: runtime
         run: node control/scripts/vinext/cli.mjs secrets
 
+      # dev/main only. cli.mjs refuses any plan target outside DEPLOY_TARGETS.
       - name: Deploy the preview or production version and verify it
-        if: ${{ needs.build.result == 'success' && steps.prepare.outcome == 'success' }}
+        if: ${{ needs.build.result == 'success' && steps.prepare.outcome == 'success' && fromJSON(steps.prepare.outputs.plan).target != 'pr' }}
         id: deploy
         env:
           PLAN_JSON: ${{ steps.prepare.outputs.plan }}
+          DEPLOY_TARGETS: production,staging
+          BUNDLE_ROOT: ${{ github.workspace }}/bundle
+          INFISICAL_ENV_FILE: ${{ github.workspace }}/vinext-runtime.json
+          WRANGLER_BIN: ${{ runner.temp }}/vinext-tools/node_modules/wrangler/bin/wrangler.js
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          GH_TOKEN: ${{ steps.source-token.outputs.token }}
+        run: node control/scripts/vinext/cli.mjs deploy
+
+      # PRs only: `wrangler preview --name pr-<N>`; production must stay unchanged.
+      - name: Deploy the PR Preview and verify production is unchanged
+        if: ${{ needs.build.result == 'success' && steps.prepare.outcome == 'success' && fromJSON(steps.prepare.outputs.plan).target == 'pr' }}
+        id: deploy_pr
+        env:
+          PLAN_JSON: ${{ steps.prepare.outputs.plan }}
+          DEPLOY_TARGETS: pr
           BUNDLE_ROOT: ${{ github.workspace }}/bundle
           INFISICAL_ENV_FILE: ${{ github.workspace }}/vinext-runtime.json
           WRANGLER_BIN: ${{ runner.temp }}/vinext-tools/node_modules/wrangler/bin/wrangler.js
@@ -360,16 +408,182 @@ jobs:
           PLAN_JSON: ${{ steps.prepare.outputs.plan }}
           PAYLOAD_JSON: ${{ toJSON(github.event.client_payload) }}
           GH_TOKEN: ${{ steps.source-token.outputs.token }}
-          STATUS_STATE: ${{ needs.build.result == 'success' && steps.deploy.outcome == 'success' && 'success' || 'failure' }}
+          STATUS_STATE: ${{ needs.build.result == 'success' && (steps.deploy.outcome == 'success' || steps.deploy_pr.outcome == 'success') && 'success' || 'failure' }}
           STATUS_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          DEPLOY_STATE: ${{ steps.deploy.outputs.state }}
+          DEPLOY_STATE: ${{ steps.deploy.outputs.state || steps.deploy_pr.outputs.state }}
         run: node control/scripts/vinext/cli.mjs status
+
+      - name: Report the PR Preview in its pull request comment
+        if: ${{ always() && github.event.client_payload.pr_number && steps.source-token.outcome == 'success' }}
+        env:
+          PLAN_JSON: ${{ steps.prepare.outputs.plan }}
+          PAYLOAD_JSON: ${{ toJSON(github.event.client_payload) }}
+          GH_TOKEN: ${{ steps.source-token.outputs.token }}
+          STATUS_STATE: ${{ needs.build.result == 'success' && steps.deploy_pr.outcome == 'success' && 'success' || 'failure' }}
+          DEPLOY_STATE: ${{ steps.deploy_pr.outputs.state }}
+          PREVIEW_URL: ${{ steps.deploy_pr.outputs.preview_url }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: node control/scripts/vinext/cli.mjs comment
 
       - name: Remove temporary runtime secrets and deployment bundle
         if: ${{ always() }}
         run: |
           rm -f "$GITHUB_WORKSPACE/vinext-runtime.json"
           rm -rf "$GITHUB_WORKSPACE/bundle"
+
+      - name: Upload sealed log
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ env.SEAL_LOG_ARTIFACT }}
+          path: ${{ runner.temp }}/seal/out/
+          retention-days: 7
+          if-no-files-found: ignore
+
+  # Closed PR: resolve the Worker from the PR's last head so the delete can join
+  # that Worker's deploy queue. No build, no Infisical, no prepare.
+  cleanup-source:
+    if: ${{ github.event.client_payload.pr_action == 'closed' && github.event.client_payload.pr_number }}
+    runs-on: ubuntu-latest
+    environment: production
+    timeout-minutes: 5
+    outputs:
+      worker_key: ${{ steps.resolve.outputs.worker_key }}
+    steps:
+      - name: Seal job output
+        shell: bash
+        run: |
+          u="https://raw.githubusercontent.com/Lascade-Co/actions/${{ github.workflow_sha }}/scripts/seal/install.sh"
+          curl -fsSL --retry 3 --retry-delay 2 --retry-all-errors --connect-timeout 10 --max-time 60 -o "$RUNNER_TEMP/seal-install.tmp" "$u"
+          test -s "$RUNNER_TEMP/seal-install.tmp" && mv "$RUNNER_TEMP/seal-install.tmp" "$RUNNER_TEMP/seal-install.sh"
+          SEAL_REF="${{ github.workflow_sha }}" bash "$RUNNER_TEMP/seal-install.sh"
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          package-manager-cache: false
+
+      - name: Download central deployment controls at the runner commit
+        env:
+          CONTROL_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          mkdir -p control/scripts/vinext
+          for file in scripts/vinext/{cli,config,build,deploy,secrets,source}.mjs; do
+            rm -f "control/$file.tmp"
+            curl --fail --silent --show-error --retry 5 --retry-all-errors --retry-delay 2 --retry-max-time 60 --connect-timeout 10 --max-time 20 "https://raw.githubusercontent.com/Lascade-Co/actions/$CONTROL_SHA/$file" -o "control/$file.tmp"
+            test -s "control/$file.tmp"
+            mv "control/$file.tmp" "control/$file"
+          done
+
+      - name: Validate dispatch before minting a source token
+        id: preflight
+        env:
+          PAYLOAD_JSON: ${{ toJSON(github.event.client_payload) }}
+        run: node control/scripts/vinext/cli.mjs preflight
+
+      - name: Mint read-only source configuration token
+        id: config-token
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ secrets.CI_APP_CLIENT_ID }}
+          private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
+          owner: ${{ steps.preflight.outputs.owner }}
+          repositories: ${{ steps.preflight.outputs.repo_name }}
+          permission-contents: read
+
+      - name: Resolve the closed PR's Worker
+        id: resolve
+        env:
+          PAYLOAD_JSON: ${{ toJSON(github.event.client_payload) }}
+          GH_TOKEN: ${{ steps.config-token.outputs.token }}
+        run: node control/scripts/vinext/cli.mjs cleanup-resolve
+
+      - name: Upload sealed log
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ env.SEAL_LOG_ARTIFACT }}
+          path: ${{ runner.temp }}/seal/out/
+          retention-days: 7
+          if-no-files-found: ignore
+
+  # Deletes Preview pr-<N>. A Preview that never existed (a draft PR) is a
+  # successful no-op. Shares the deploy queue, so it cannot race a PR deploy.
+  cleanup:
+    needs: cleanup-source
+    if: ${{ github.event.client_payload.pr_action == 'closed' && github.event.client_payload.pr_number && needs.cleanup-source.result == 'success' }}
+    runs-on: ubuntu-latest
+    environment: production
+    timeout-minutes: 10
+    concurrency:
+      group: vinext-worker-${{ needs.cleanup-source.outputs.worker_key }}
+      queue: max
+      cancel-in-progress: false
+    steps:
+      - name: Seal job output
+        shell: bash
+        run: |
+          u="https://raw.githubusercontent.com/Lascade-Co/actions/${{ github.workflow_sha }}/scripts/seal/install.sh"
+          curl -fsSL --retry 3 --retry-delay 2 --retry-all-errors --connect-timeout 10 --max-time 60 -o "$RUNNER_TEMP/seal-install.tmp" "$u"
+          test -s "$RUNNER_TEMP/seal-install.tmp" && mv "$RUNNER_TEMP/seal-install.tmp" "$RUNNER_TEMP/seal-install.sh"
+          SEAL_REF="${{ github.workflow_sha }}" bash "$RUNNER_TEMP/seal-install.sh"
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          package-manager-cache: false
+
+      - name: Download central deployment controls at the runner commit
+        env:
+          CONTROL_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          mkdir -p control/scripts/vinext
+          for file in scripts/vinext/{cli,config,build,deploy,secrets,source}.mjs; do
+            rm -f "control/$file.tmp"
+            curl --fail --silent --show-error --retry 5 --retry-all-errors --retry-delay 2 --retry-max-time 60 --connect-timeout 10 --max-time 20 "https://raw.githubusercontent.com/Lascade-Co/actions/$CONTROL_SHA/$file" -o "control/$file.tmp"
+            test -s "control/$file.tmp"
+            mv "control/$file.tmp" "control/$file"
+          done
+
+      - name: Validate dispatch before minting a source token
+        id: preflight
+        env:
+          PAYLOAD_JSON: ${{ toJSON(github.event.client_payload) }}
+        run: node control/scripts/vinext/cli.mjs preflight
+
+      - name: Mint source configuration and PR comment token
+        id: source-token
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ secrets.CI_APP_CLIENT_ID }}
+          private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
+          owner: ${{ steps.preflight.outputs.owner }}
+          repositories: ${{ steps.preflight.outputs.repo_name }}
+          permission-contents: read
+          permission-pull-requests: write
+
+      - name: Resolve the closed PR's Worker and Wrangler version
+        id: resolve
+        env:
+          PAYLOAD_JSON: ${{ toJSON(github.event.client_payload) }}
+          GH_TOKEN: ${{ steps.source-token.outputs.token }}
+        run: node control/scripts/vinext/cli.mjs cleanup-resolve
+
+      - name: Install pinned standalone Wrangler
+        env:
+          WRANGLER_VERSION: ${{ steps.resolve.outputs.wrangler_version }}
+        run: npm install --prefix "$RUNNER_TEMP/vinext-tools" --no-audit --no-fund "wrangler@$WRANGLER_VERSION"
+
+      - name: Delete the PR Preview and update the PR comment
+        env:
+          PAYLOAD_JSON: ${{ toJSON(github.event.client_payload) }}
+          GH_TOKEN: ${{ steps.source-token.outputs.token }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          WRANGLER_BIN: ${{ runner.temp }}/vinext-tools/node_modules/wrangler/bin/wrangler.js
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: node control/scripts/vinext/cli.mjs cleanup
 
       - name: Upload sealed log
         if: always()
