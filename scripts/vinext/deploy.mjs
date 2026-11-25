@@ -367,9 +367,13 @@ async function findPreviewComment(plan, github, appSlug) {
 
 // Creates or edits the single marked PR comment. `overwrite: false` leaves an
 // existing comment alone (a newer run owns it); `create: false` never adds one.
+export function assertAppSlug(appSlug) {
+  assert(typeof appSlug === 'string' && /^[a-z0-9][a-z0-9-]{0,99}$/.test(appSlug), 'Invalid GitHub app slug');
+}
+
 export async function upsertPreviewComment(plan, body, github, { appSlug, overwrite = true, create = true } = {}) {
   assert(plan?.target === 'pr' && Number.isInteger(plan.pr_number) && /^Lascade-Co\/[A-Za-z0-9_.-]+$/.test(plan.repo), 'Invalid PR Preview comment plan');
-  assert(typeof appSlug === 'string' && /^[a-z0-9][a-z0-9-]{0,99}$/.test(appSlug), 'Invalid GitHub app slug');
+  assertAppSlug(appSlug);
   const existing = await findPreviewComment(plan, github, appSlug);
   if (existing) {
     if (!overwrite) return 'skipped';

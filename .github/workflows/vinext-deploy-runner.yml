@@ -444,8 +444,9 @@ jobs:
           retention-days: 7
           if-no-files-found: ignore
 
-  # Closed PR: check the dispatch is the PR's own last head, and resolve the Worker
-  # from the PR's base commit so the delete can join that Worker's deploy queue.
+  # Closed PR: check the dispatch is the PR's own last head into main or dev, and
+  # resolve the Worker from the PR's base commit so the delete can join that
+  # Worker's deploy queue. A reopened PR is a no-op (state=reopened).
   # No build, no Infisical, no prepare. GET /pulls/{n} accepts contents: read.
   cleanup-source:
     if: ${{ github.event.client_payload.pr_action == 'closed' && github.event.client_payload.pr_number }}
@@ -454,6 +455,8 @@ jobs:
     timeout-minutes: 5
     outputs:
       worker_key: ${{ steps.resolve.outputs.worker_key }}
+      # `reopened` when the PR is open again: nothing to clean up.
+      state: ${{ steps.resolve.outputs.state }}
     steps:
       - name: Seal job output
         shell: bash
@@ -517,7 +520,7 @@ jobs:
   # successful no-op. Shares the deploy queue, so it cannot race a PR deploy.
   cleanup:
     needs: cleanup-source
-    if: ${{ github.event.client_payload.pr_action == 'closed' && github.event.client_payload.pr_number && needs.cleanup-source.result == 'success' }}
+    if: ${{ github.event.client_payload.pr_action == 'closed' && github.event.client_payload.pr_number && needs.cleanup-source.result == 'success' && needs.cleanup-source.outputs.state != 'reopened' }}
     runs-on: ubuntu-latest
     environment: production
     timeout-minutes: 10
@@ -577,11 +580,13 @@ jobs:
         run: node control/scripts/vinext/cli.mjs cleanup-resolve
 
       - name: Install pinned standalone Wrangler
+        if: ${{ steps.resolve.outputs.state != 'reopened' }}
         env:
           WRANGLER_VERSION: ${{ steps.resolve.outputs.wrangler_version }}
         run: npm install --prefix "$RUNNER_TEMP/vinext-tools" --no-audit --no-fund "wrangler@$WRANGLER_VERSION"
 
       - name: Delete the PR Preview and update the PR comment
+        if: ${{ steps.resolve.outputs.state != 'reopened' }}
         env:
           PAYLOAD_JSON: ${{ toJSON(github.event.client_payload) }}
           GH_TOKEN: ${{ steps.source-token.outputs.token }}

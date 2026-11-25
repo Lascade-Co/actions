@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto';
 import { dispatchRoute, dispatchTarget, prepare, statusPlan, validateDispatch, assert } from './config.mjs';
 import { assertBaseWorker, fetchSourceFiles, projectFromSource, resolveCleanup } from './source.mjs';
 import { build } from './build.mjs';
-import { deletePreview, deploy, request, isCurrent, previewCommentBody, upsertPreviewComment } from './deploy.mjs';
+import { assertAppSlug, deletePreview, deploy, request, isCurrent, previewCommentBody, upsertPreviewComment } from './deploy.mjs';
 import { exportSecrets, loadSecrets } from './secrets.mjs';
 
 function output(name, value) {
@@ -46,29 +46,30 @@ try {
     output('repositories', [plan.repo_name, ...plan.project.submodule_repos].join(','));
     output('worker_key', workerKey(plan.project));
   } else if (command === 'cleanup-resolve' || command === 'cleanup') {
-    // A closed PR: no build. The Worker comes from the PR's last head commit.
+    // A closed PR: no build. The Worker comes from the PR's base commit.
     const payload = JSON.parse(env.PAYLOAD_JSON);
     assert(dispatchRoute(payload) === 'cleanup', 'Preview cleanup runs only for closed pull requests');
+    // Checked before anything is deleted, so the comment update cannot fail afterwards.
+    if (command === 'cleanup') assertAppSlug(env.APP_SLUG);
     const { plan, reopened } = await resolveCleanup(payload, github);
-    logTarget(plan);
-    if (command === 'cleanup-resolve') {
+    if (reopened) {
+      // Reopened since this event: the reopen dispatch owns the Preview now.
+      output('state', 'reopened');
+      console.log('The pull request was reopened; its Preview is kept.');
+    } else if (command === 'cleanup-resolve') {
+      logTarget(plan);
       output('wrangler_version', plan.project.wrangler_version);
       output('worker_key', workerKey(plan.project));
     } else {
-      // Reopened since this event: the reopen dispatch owns the Preview now.
-      if (reopened) {
-        output('state', 'reopened');
-        console.log('The pull request was reopened; its Preview is kept.');
-      } else {
-        assert(env.CLOUDFLARE_API_TOKEN && env.GH_TOKEN, 'Missing deployment credentials');
-        const cloudflare = async path => (await request(`https://api.cloudflare.com/client/v4${path}`, env.CLOUDFLARE_API_TOKEN)).result;
-        const result = await deletePreview(plan, { wranglerBin: env.WRANGLER_BIN, cloudflare });
-        output('state', result.state);
-        const body = previewCommentBody(plan, { result: result.state === 'deleted' ? 'removed' : 'absent', runUrl: env.RUN_URL });
-        // Update the existing comment only; a PR that never had a Preview gets none.
-        await upsertPreviewComment(plan, body, github, { appSlug: env.APP_SLUG, create: false });
-        if (env.GITHUB_STEP_SUMMARY) appendFileSync(env.GITHUB_STEP_SUMMARY, `### Vinext Preview ${result.state}\n\n${plan.repo} · pr #${plan.pr_number}\n`);
-      }
+      logTarget(plan);
+      assert(env.CLOUDFLARE_API_TOKEN && env.GH_TOKEN, 'Missing deployment credentials');
+      const cloudflare = async path => (await request(`https://api.cloudflare.com/client/v4${path}`, env.CLOUDFLARE_API_TOKEN)).result;
+      const result = await deletePreview(plan, { wranglerBin: env.WRANGLER_BIN, cloudflare });
+      output('state', result.state);
+      const body = previewCommentBody(plan, { result: result.state === 'deleted' ? 'removed' : 'absent', runUrl: env.RUN_URL });
+      // Update the existing comment only; a PR that never had a Preview gets none.
+      await upsertPreviewComment(plan, body, github, { appSlug: env.APP_SLUG, create: false });
+      if (env.GITHUB_STEP_SUMMARY) appendFileSync(env.GITHUB_STEP_SUMMARY, `### Vinext Preview ${result.state}\n\n${plan.repo} · pr #${plan.pr_number}\n`);
     }
   } else {
     const plan = env.PLAN_JSON ? JSON.parse(env.PLAN_JSON) : ['status', 'comment'].includes(command) ? statusPlan(JSON.parse(env.PAYLOAD_JSON)) : (() => { throw new Error('Missing deployment plan'); })();

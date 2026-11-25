@@ -28,7 +28,8 @@ jobs:
   dispatch:
     # Three explicit routes. The first is the unchanged dev/main deploy; a
     # manual run that names a PR never takes it. Dependabot-triggered PR events
-    # get no secrets (no dispatch token), so they are skipped.
+    # get no secrets (no dispatch token), so they are skipped. PRs must target
+    # main or dev; the runner enforces this too, this only saves runs.
     if: >-
       (((github.event_name == 'push' && !github.event.deleted) ||
         (github.event_name == 'workflow_dispatch' && !github.event.inputs.pr)) &&
@@ -36,6 +37,7 @@ jobs:
       (inputs.pr_previews && github.event_name == 'pull_request' &&
        github.actor != 'dependabot[bot]' &&
        github.event.pull_request.head.repo.full_name == github.repository &&
+       contains(fromJSON('["main","dev"]'), github.event.pull_request.base.ref) &&
        contains(fromJSON('["opened","synchronize","reopened","ready_for_review","closed"]'), github.event.action) &&
        (!github.event.pull_request.draft || github.event.action == 'closed')) ||
       (inputs.pr_previews && github.event_name == 'workflow_dispatch' && github.event.inputs.pr)
@@ -90,8 +92,8 @@ jobs:
           set -euo pipefail
           [[ "$PR" =~ ^[1-9][0-9]{0,6}$ ]] || { echo "pr must be a pull request number" >&2; exit 1; }
           pull="$(gh api "repos/$REPO/pulls/$PR")"
-          jq -e --arg repo "$REPO" '.state == "open" and .draft == false and .head.repo.full_name == $repo' <<< "$pull" > /dev/null ||
-            { echo "PR #$PR is not an open, non-draft pull request from this repository" >&2; exit 1; }
+          jq -e --arg repo "$REPO" '.state == "open" and .draft == false and .head.repo.full_name == $repo and (.base.ref == "main" or .base.ref == "dev")' <<< "$pull" > /dev/null ||
+            { echo "PR #$PR is not an open, non-draft pull request from this repository into main or dev" >&2; exit 1; }
           echo "head=$(jq -c --argjson number "$PR" '{number: $number, ref: .head.ref, sha: .head.sha}' <<< "$pull")" >> "$GITHUB_OUTPUT"
 
       - name: Request a Preview of the requested pull request head

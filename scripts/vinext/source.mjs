@@ -166,10 +166,17 @@ export function cleanupPlan(payload, { pkg, wrangler }) {
   };
 }
 
-// The PR as GitHub reports it, with a base commit in the same repository.
+// Trust a PR's base only on a branch the runner deploys from. Any other base
+// (a stacked PR, or a branch pushed with another Worker) is refused, so a PR
+// cannot choose the wrangler.jsonc its Preview is checked against.
+function assertTrustedBase(pull, repo) {
+  assert(pull && /^[a-f0-9]{40}$/.test(pull.base?.sha ?? '') && pull.base.repo?.full_name === repo, 'Invalid pull request base');
+  assert(['main', 'dev'].includes(pull.base.ref), 'PR previews require a base branch of main or dev');
+}
+
 async function pullWithBase(repo, pr_number, github) {
   const pull = await github(`/repos/${repo}/pulls/${pr_number}`);
-  assert(pull && /^[a-f0-9]{40}$/.test(pull.base?.sha ?? '') && pull.base.repo?.full_name === repo, 'Invalid pull request base');
+  assertTrustedBase(pull, repo);
   return pull;
 }
 
@@ -184,15 +191,17 @@ export async function assertBaseWorker(plan, github) {
   assert(wrangler?.name === plan.project.worker_name && wrangler.account_id === plan.project.account_id, 'A PR Preview must use the Worker and account its base branch deploys to');
 }
 
-// A closed-PR cleanup. The dispatch must be the closed PR's own last head from
-// this repository; the Worker comes from the base commit. A reopened PR is left
-// alone (its reopen dispatch owns the Preview).
+// A closed-PR cleanup. A reopened PR is a quiet no-op before anything else is
+// read or checked: its reopen dispatch owns the Preview. Otherwise the dispatch
+// must be the closed PR's own last head from this repository, the base must be
+// main or dev, and the Worker comes from the base commit.
 export async function resolveCleanup(payload, github) {
   const { pr_number } = validateDispatch(payload);
   assert(dispatchRoute(payload) === 'cleanup', 'Preview cleanup runs only for closed pull requests');
-  const pull = await pullWithBase(payload.repo, pr_number, github);
-  const reopened = pull.state === 'open';
-  if (!reopened) assert(pull.head?.sha === payload.sha && pull.head?.repo?.full_name === payload.repo, 'Cleanup dispatch is not the closed pull request head');
+  const pull = await github(`/repos/${payload.repo}/pulls/${pr_number}`);
+  if (pull?.state === 'open') return { reopened: true };
+  assertTrustedBase(pull, payload.repo);
+  assert(pull.head?.sha === payload.sha && pull.head?.repo?.full_name === payload.repo, 'Cleanup dispatch is not the closed pull request head');
   const source = await fetchSourceFiles({ ...payload, sha: pull.base.sha }, github);
-  return { reopened, plan: cleanupPlan(payload, source) };
+  return { reopened: false, plan: cleanupPlan(payload, source) };
 }

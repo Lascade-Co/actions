@@ -47,7 +47,8 @@ function nativeBundle(root, plan) {
 }
 
 const baseSha = 'd'.repeat(40);
-const openPull = { state: 'open', draft: false, head: { sha: base.sha, repo: { full_name: base.repo } }, base: { sha: baseSha, repo: { full_name: base.repo } } };
+const openPull = { state: 'open', draft: false, head: { sha: base.sha, repo: { full_name: base.repo } }, base: { ref: 'main', sha: baseSha, repo: { full_name: base.repo } } };
+const onBase = (pull, ref) => ({ ...pull, base: { ...pull.base, ref } });
 const APP = 'lascade-ci';
 const ourBot = { type: 'Bot', login: `${APP}[bot]` };
 const githubFile = value => { const text = JSON.stringify(value); return { type: 'file', encoding: 'base64', content: Buffer.from(text).toString('base64'), size: Buffer.byteLength(text) }; };
@@ -219,7 +220,10 @@ test('a pr deploy whose head targets a different Worker or account than its base
       ['renamed Worker', prGithub({ baseWrangler: { ...nativeSource().wrangler, name: 'base-web' } })],
       ['other account', prGithub({ baseWrangler: { ...nativeSource().wrangler, account_id: 'e'.repeat(32) } })],
       ['base in another repo', prGithub({ pull: { ...openPull, base: { ...openPull.base, repo: { full_name: 'someone/example-web' } } } })],
-      ['no base sha', prGithub({ pull: { ...openPull, base: { repo: openPull.base.repo } } })],
+      ['no base sha', prGithub({ pull: { ...openPull, base: { ref: 'main', repo: openPull.base.repo } } })],
+      // A writer could push a branch with another Worker and retarget the PR to it.
+      ['feature base', prGithub({ pull: onBase(openPull, 'feature/x') })],
+      ['no base ref', prGithub({ pull: onBase(openPull, undefined) })],
     ]) {
       mkdirSync(join(root, name));
       await assert.rejects(() => deploy(plan, {
@@ -228,6 +232,24 @@ test('a pr deploy whose head targets a different Worker or account than its base
       }), /base/, name);
     }
     assert.equal(executed, false);
+    const featureDir = join(root, 'feature-message');
+    mkdirSync(featureDir);
+    await assert.rejects(() => deploy(plan, {
+      ...nativeBundle(featureDir, plan), wranglerBin: '/wrangler.js', env: {}, pause: async () => {}, github: prGithub({ pull: onBase(openPull, 'feature/x') }),
+      cloudflare: async () => { throw new Error('Cloudflare must not be called'); }, execute: () => { executed = true; },
+    }), /^Error: PR previews require a base branch of main or dev$/);
+
+    // main and dev bases deploy.
+    for (const ref of ['main', 'dev']) {
+      const dir = join(root, `ok-${ref}`);
+      mkdirSync(dir);
+      const state = {};
+      const result = await deploy(plan, {
+        ...nativeBundle(dir, plan), wranglerBin: '/wrangler.js', env: {}, pause: async () => {}, github: prGithub({ pull: onBase(openPull, ref) }),
+        cloudflare: previewCloudflare('pr-42', state), execute: (_command, args) => { state.tag = args[args.indexOf('--tag') + 1]; },
+      });
+      assert.equal(result.state, 'deployed', ref);
+    }
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
@@ -613,6 +635,19 @@ test('CLI cleanup is bound to the closed PR head and deletes from the base Worke
     }
   }
 
+  // Only main and dev bases: a feature base is refused before any file or Cloudflare request.
+  for (const command of ['cleanup-resolve', 'cleanup']) {
+    const feature = await runCli(command, cleanupEnv, cleanupResponder({ pull: onBase(closedPull, 'feature/x') }));
+    assert.equal(feature.exitCode, 1, command);
+    assert.match(feature.errors.join('\n'), /PR previews require a base branch of main or dev/, command);
+    assert.equal(feature.requests.some(request => request.url.includes('/contents/') || request.url.startsWith('https://api.cloudflare.com')), false, command);
+  }
+  for (const ref of ['main', 'dev']) {
+    const accepted = await runCli('cleanup', cleanupEnv, cleanupResponder({ pull: onBase(closedPull, ref) }));
+    assert.equal(accepted.exitCode, undefined, `${ref}: ${accepted.errors.join('\n')}`);
+    assert.match(accepted.outputs, /^state=absent$/m);
+  }
+
   // The head renamed the Worker: cleanup still targets the base branch's Worker.
   const renamed = await runCli('cleanup', cleanupEnv, async (url, options) => {
     const head = sourceFiles(url, base.sha, { ...nativeSource().wrangler, name: 'renamed-web' });
@@ -627,12 +662,35 @@ test('CLI cleanup is bound to the closed PR head and deletes from the base Worke
 });
 
 test('CLI cleanup skips a reopened PR and refuses non-closed payloads', async () => {
-  // Reopened (even after new pushes): the reopen dispatch owns the Preview.
-  const reopened = await runCli('cleanup', cleanupEnv, cleanupResponder({ pull: { ...openPull, head: { ...openPull.head, sha: 'c'.repeat(40) } } }));
-  assert.equal(reopened.exitCode, undefined, reopened.errors.join('\n'));
-  assert.match(reopened.outputs, /^state=reopened$/m);
-  assert.equal(reopened.requests.some(request => request.url.startsWith('https://api.cloudflare.com')), false);
-  assert.equal(reopened.requests.some(request => request.method !== 'GET'), false);
+  // Reopened (even after new pushes, onto any base, with a broken base): a quiet
+  // no-op before any base file is read. The reopen dispatch owns the Preview.
+  for (const pull of [
+    { ...openPull, head: { ...openPull.head, sha: 'c'.repeat(40) } },
+    { ...onBase(openPull, 'feature/x'), base: { ref: 'feature/x' } },
+  ]) {
+    for (const command of ['cleanup-resolve', 'cleanup']) {
+      const reopened = await runCli(command, cleanupEnv, async url => {
+        if (url.pathname === '/repos/Lascade-Co/example-web/pulls/42') return pull;
+        throw new Error(`Unexpected request ${url}`);
+      });
+      assert.equal(reopened.exitCode, undefined, `${command}: ${reopened.errors.join('\n')}`);
+      assert.match(reopened.outputs, /^state=reopened$/m, command);
+      assert.doesNotMatch(reopened.outputs, /worker_key|wrangler_version/, command);
+      assert.equal(reopened.requests.length, 1, command);
+    }
+  }
+
+  // An invalid APP_SLUG fails cleanup before any request, so nothing is deleted.
+  for (const APP_SLUG of ['', 'Bad Slug']) {
+    const badSlug = await runCli('cleanup', { ...cleanupEnv, APP_SLUG }, async () => { throw new Error('no requests'); });
+    assert.equal(badSlug.exitCode, 1, APP_SLUG);
+    assert.match(badSlug.errors.join('\n'), /app slug/, APP_SLUG);
+    assert.equal(badSlug.requests.length, 0, APP_SLUG);
+  }
+  const { APP_SLUG: _slug, ...noSlug } = cleanupEnv;
+  const missingSlug = await runCli('cleanup', noSlug, async () => { throw new Error('no requests'); });
+  assert.equal(missingSlug.exitCode, 1);
+  assert.equal(missingSlug.requests.length, 0);
 
   // Closed and never deployed: absent is success. Our existing comment is
   // updated; none is created, and another app's marked comment is not touched.
@@ -669,6 +727,21 @@ test('CLI verify-source refuses a PR head that targets a different Worker than b
     assert.equal(other.exitCode, 1);
     assert.match(other.errors.join('\n'), /base branch/);
   }
+  // Only main and dev bases.
+  const featureBase = await runCli('verify-source', { PLAN_JSON: JSON.stringify(plan), GH_TOKEN: 't' }, async url => {
+    if (url.pathname === '/repos/Lascade-Co/example-web/pulls/42') return onBase(openPull, 'feature/x');
+    throw new Error(`Unexpected request ${url}`);
+  });
+  assert.equal(featureBase.exitCode, 1);
+  assert.match(featureBase.errors.join('\n'), /PR previews require a base branch of main or dev/);
+  for (const ref of ['main', 'dev']) {
+    const accepted = await runCli('verify-source', { PLAN_JSON: JSON.stringify(plan), GH_TOKEN: 't' }, async url => {
+      if (url.pathname === '/repos/Lascade-Co/example-web/pulls/42') return onBase(openPull, ref);
+      return respond(nativeSource().wrangler)(url);
+    });
+    assert.equal(accepted.exitCode, undefined, `${ref}: ${accepted.errors.join('\n')}`);
+  }
+
   // dev and main are unchanged: no PR or base lookup.
   const dev = await runCli('verify-source', { PLAN_JSON: JSON.stringify(planFor({ ...base, branch: 'dev' })), GH_TOKEN: 't' }, async url => {
     assert.equal(url.pathname, '/repos/Lascade-Co/example-web/commits/dev');
