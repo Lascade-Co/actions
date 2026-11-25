@@ -1,4 +1,4 @@
-import { assert, behaviorKeys, bindingKeys, nonemptyValues, sameBehaviorValue, validateDispatch, validateRateLimits, validateWorkerBehavior } from './config.mjs';
+import { assert, behaviorKeys, bindingKeys, dispatchTarget, nonemptyValues, sameBehaviorValue, sourceEnvironment, validateDispatch, validateRateLimits, validateWorkerBehavior } from './config.mjs';
 
 const noPlainVars = source => source.vars === undefined || (source.vars && typeof source.vars === 'object' && !Array.isArray(source.vars) && Object.keys(source.vars).length === 0);
 const behavior = source => Object.fromEntries(behaviorKeys.filter(key => source[key] !== undefined).map(key => [key, source[key]]));
@@ -94,6 +94,9 @@ export function projectFromSource(payload, { pkg, wrangler, submodule_repos }, v
   const topName = wrangler.name, topAccount = wrangler.account_id;
   assert(typeof topName === 'string' && typeof topAccount === 'string', 'Source Wrangler must declare Worker and account');
   const nativePreview = wrangler.previews !== undefined;
+  const target = dispatchTarget(payload);
+  // The previews block is each repository's runner-side opt-in to PR Previews.
+  assert(target !== 'pr' || nativePreview, 'PR Previews require a native previews block in the source Wrangler configuration');
   const productionBehavior = behavior(wrangler);
   validateRateLimits(wrangler.ratelimits);
   validateWorkerBehavior(productionBehavior);
@@ -117,8 +120,7 @@ export function projectFromSource(payload, { pkg, wrangler, submodule_repos }, v
     const deployment_behavior = { ...productionBehavior, ...behavior(source) };
     environments[target] = { infisical_env, infisical_path: '/', bindings, deployment_behavior };
   }
-  const target = payload.branch === 'main' ? 'production' : 'staging';
-  assert(environments[target], `Source Wrangler has no ${target} environment`);
+  assert(environments[sourceEnvironment(target)], `Source Wrangler has no ${sourceEnvironment(target)} environment`);
   if ([productionBehavior, ...Object.values(environments).map(environment => environment.deployment_behavior), behavior(wrangler.previews ?? {})].some(settings => Object.keys(settings).length > 0)) {
     const [major, minor] = wranglerVersion.split('.').map(Number);
     assert(major > 4 || (major === 4 && minor >= 107), 'Worker cache and entrypoint configuration requires Wrangler 4.107.0 or later');
@@ -141,7 +143,7 @@ export function projectFromSource(payload, { pkg, wrangler, submodule_repos }, v
     working_directory: '.', bundle_directory: 'dist', generated_config: 'dist/server/wrangler.json',
     build_script: 'build:vinext', check_scripts: ['check:deploy'], submodule_repos,
     build_variables: build, runtime_secrets: runtime,
-    preview_mode: nativePreview ? 'native' : 'alias', preview_name: nativePreview ? 'stg' : undefined,
+    preview_mode: nativePreview ? 'native' : 'alias', preview_name: nativePreview ? target === 'pr' ? `pr-${payload.pr_number}` : 'stg' : undefined,
     preview_config: nativePreview ? wrangler.previews : undefined,
     environments,
   };

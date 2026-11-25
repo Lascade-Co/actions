@@ -19,6 +19,13 @@ export async function request(url, token, options = {}) {
 }
 
 export async function isCurrent(plan, github) {
+  if (plan.target === 'pr') {
+    // A newer push to the PR, closing it, or converting it to a draft all
+    // supersede this request. A head outside this repository is never current.
+    assert(Number.isInteger(plan.pr_number) && plan.pr_number >= 1 && plan.pr_number <= 9999999, 'Invalid pull request number');
+    const pull = await github(`/repos/${plan.repo}/pulls/${plan.pr_number}`);
+    return pull?.state === 'open' && pull.draft === false && pull.head?.sha === plan.sha && pull.head?.repo?.full_name === plan.repo;
+  }
   const branch = await github(`/repos/${plan.repo}/commits/${plan.branch}`);
   return branch.sha === plan.sha;
 }

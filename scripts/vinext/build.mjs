@@ -2,7 +2,7 @@ import { cpSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, re
 import { createHash } from 'node:crypto';
 import { basename, dirname, join, relative, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { assert, inside, sanitizeConfig } from './config.mjs';
+import { assert, inside, sanitizeConfig, sourceEnvironment } from './config.mjs';
 
 export function readSecrets(file) {
   try {
@@ -35,7 +35,7 @@ const migrationManifestName = 'vinext-d1-migrations.json';
 const migrationFileName = /^[A-Za-z0-9][A-Za-z0-9_.-]*\.sql$/;
 
 function targetMigrationDatabases(plan) {
-  const databases = plan.project.environments[plan.target].bindings.d1_databases ?? [];
+  const databases = plan.project.environments[sourceEnvironment(plan.target)].bindings.d1_databases ?? [];
   assert(Array.isArray(databases), 'D1 bindings must be an array');
   const configured = databases.filter(database => database.migrations_dir !== undefined);
   if (!configured.length) return [];
@@ -171,7 +171,7 @@ export function build(plan, { appRoot, envFile, bundleRoot, execute = run, env =
   // This is a fresh CI checkout. Do not let committed dotenv files select a
   // different backend or override the explicitly selected Infisical target.
   for (const name of readdirSync(cwd)) if (/^(?:\.env(?:\.|$)|\.dev\.vars(?:\.|$))/.test(name)) rmSync(join(cwd, name), { force: true });
-  const childEnv = { ...env, ...buildValues, CI: 'true', CLOUDFLARE_ENV: plan.target };
+  const childEnv = { ...env, ...buildValues, CI: 'true', CLOUDFLARE_ENV: sourceEnvironment(plan.target) };
   for (const key of Object.keys(childEnv)) {
     if (/^(?:CLOUDFLARE_API_|INFISICAL_|GH_TOKEN$|GITHUB_TOKEN$)/.test(key) || p.runtime_secrets.includes(key)) delete childEnv[key];
   }

@@ -1,6 +1,6 @@
 import { appendFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
-import { prepare, statusPlan, validateDispatch, assert } from './config.mjs';
+import { dispatchTarget, prepare, statusPlan, validateDispatch, assert } from './config.mjs';
 import { fetchSourceFiles, projectFromSource } from './source.mjs';
 import { build } from './build.mjs';
 import { deploy, request, isCurrent } from './deploy.mjs';
@@ -12,8 +12,9 @@ function output(name, value) {
 }
 
 function logTarget(plan) {
-  assert(/^Lascade-Co\/[A-Za-z0-9_.-]+$/.test(plan.repo) && ['staging', 'production'].includes(plan.target), 'Invalid deployment label');
-  console.log(`Vinext deployment: ${plan.repo} · ${plan.target}`);
+  assert(/^Lascade-Co\/[A-Za-z0-9_.-]+$/.test(plan.repo) && ['staging', 'production', 'pr'].includes(plan.target), 'Invalid deployment label');
+  assert(plan.target !== 'pr' || (Number.isInteger(plan.pr_number) && plan.pr_number >= 1 && plan.pr_number <= 9999999), 'Invalid deployment label');
+  console.log(`Vinext deployment: ${plan.repo} · ${plan.target === 'pr' ? `pr #${plan.pr_number}` : plan.target}`);
 }
 
 const env = process.env;
@@ -28,7 +29,8 @@ try {
     const { project_slug } = validateDispatch(payload);
     const github = path => request(`https://api.github.com${path}`, env.GH_TOKEN);
     const source = await fetchSourceFiles(payload, github);
-    const infisical_env = payload.branch === 'main' ? 'prod' : 'staging';
+    // Keyed on the target, not the branch: a PR whose head is main is still a PR Preview.
+    const infisical_env = dispatchTarget(payload) === 'production' ? 'prod' : 'staging';
     // Public build values are embedded in browser assets; do not mask them before
     // GitHub records the plan output, where matching masks suppress job outputs.
     const values = await loadSecrets({ infisical_project_slug: project_slug, infisical_env, infisical_path: '/' }, { maskPublic: false });

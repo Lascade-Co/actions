@@ -95,31 +95,60 @@ export function assertNoInfisicalValues(project, slug) {
   'Omitting project_slug requires no build variables or runtime secrets');
 }
 
+// A PR head branch: the brief's character set, plus Git's ref rules for
+// `..`, empty or dot-leading components, `.lock`, and a leading `-`.
+function validPullRequestBranch(branch) {
+  return typeof branch === 'string' && /^[A-Za-z0-9._/-]{1,200}$/.test(branch) && !branch.includes('..') &&
+    !branch.startsWith('-') && !branch.endsWith('.') &&
+    branch.split('/').every(part => part.length > 0 && !part.startsWith('.') && !part.endsWith('.lock'));
+}
+
 export function validateDispatch(payload) {
   assert(payload && /^Lascade-Co\/[A-Za-z0-9_.-]+$/.test(payload.repo), 'Only Lascade-Co repositories are supported');
-  assert(['dev', 'main'].includes(payload.branch), 'Only dev and main can deploy');
+  // A present pr_number always means a PR Preview. It never falls back to a
+  // dev or main deploy, even when the PR head branch is dev or main.
+  const pullRequest = Object.hasOwn(payload, 'pr_number');
+  if (pullRequest) {
+    assert(Number.isInteger(payload.pr_number) && payload.pr_number >= 1 && payload.pr_number <= 9999999, 'pr_number must be an integer from 1 to 9999999');
+    assert(validPullRequestBranch(payload.branch), 'Invalid pull request head branch');
+  } else {
+    assert(['dev', 'main'].includes(payload.branch), 'Only dev and main can deploy');
+  }
   assert(/^[a-f0-9]{40}$/.test(payload.sha), 'An exact 40-character commit SHA is required');
   assert(typeof payload.source_run_url === 'string' && payload.source_run_url.startsWith(`https://github.com/${payload.repo}/actions/runs/`) && /^\d+$/.test(payload.source_run_url.split('/').at(-1)), 'Invalid source run URL');
   const project_slug = normalizeProjectSlug(payload.project_slug);
   const [owner, repo_name] = payload.repo.split('/');
-  return { owner, repo_name, project_slug };
+  return { owner, repo_name, project_slug, ...(pullRequest ? { pr_number: payload.pr_number } : {}) };
 }
 
+export function dispatchTarget(payload) {
+  const { pr_number } = validateDispatch(payload);
+  return pr_number !== undefined ? 'pr' : payload.branch === 'main' ? 'production' : 'staging';
+}
+
+// The Wrangler/Infisical environment a target is built from. A PR Preview is
+// built exactly like staging; only its Preview name and freshness check differ.
+export const sourceEnvironment = target => target === 'pr' ? 'staging' : target;
+
 export function statusPlan(payload) {
-  validateDispatch(payload);
-  return { repo: payload.repo, sha: payload.sha, target: payload.branch === 'main' ? 'production' : 'staging' };
+  const { pr_number } = validateDispatch(payload);
+  const target = dispatchTarget(payload);
+  return { repo: payload.repo, sha: payload.sha, target, ...(target === 'pr' ? { pr_number } : {}) };
 }
 
 export function prepare(payload, project) {
-  const { owner, repo_name, project_slug: slug } = validateDispatch(payload);
+  const { owner, repo_name, project_slug: slug, pr_number } = validateDispatch(payload);
+  const target = dispatchTarget(payload);
   assert(project && /^[a-f0-9]{32}$/.test(project.account_id) && /^[a-z0-9][a-z0-9-]{0,62}$/.test(project.worker_name), 'Project must register a valid account and Worker');
   assert(/^[0-9]+(?:\.[0-9]+){0,2}$/.test(project.node_version) && Number(project.node_version.split('.')[0]) >= 22, 'Vinext requires Node 22 or newer');
   assert(/^[0-9]+\.[0-9]+\.[0-9]+$/.test(project.wrangler_version), 'Pin an exact Wrangler version');
   assert(['alias', 'native'].includes(project.preview_mode ?? 'alias'), 'Unsupported Preview mode');
+  assert(target !== 'pr' || project.preview_mode === 'native', 'PR Previews require a native previews block in the source Wrangler configuration');
   if (project.preview_mode === 'native') {
     const [major, minor] = project.wrangler_version.split('.').map(Number);
     assert(major > 4 || (major === 4 && minor >= 135), 'Native Previews require Wrangler 4.135.0 or later');
-    assert(project.preview_name === 'stg', 'Dev Preview must use the stg name');
+    if (target === 'pr') assert(project.preview_name === `pr-${pr_number}`, 'PR Preview must use the pr-<number> name');
+    else assert(project.preview_name === 'stg', 'Dev Preview must use the stg name');
     assert(project.preview_config && typeof project.preview_config === 'object' && !Array.isArray(project.preview_config), 'Missing source Preview configuration');
   }
   assert(['pnpm', 'npm', 'yarn'].includes(project.package_manager), 'Unsupported package manager');
@@ -133,9 +162,9 @@ export function prepare(payload, project) {
   assert(project.runtime_secrets.every(v => !project.build_variables.includes(v) && !v.startsWith('NEXT_PUBLIC_')), 'Runtime secrets must not overlap public/build variables');
   const assetBinding = project.asset_binding ?? 'ASSETS';
   assert(typeof assetBinding === 'string' && variable.test(assetBinding), 'Source must declare a valid asset binding');
-  const target = payload.branch === 'dev' ? 'staging' : 'production';
+  const environmentName = sourceEnvironment(target);
   assert(project.environments?.production, 'Missing production environment');
-  assert(project.environments[target], `No ${target} environment is configured`);
+  assert(project.environments[environmentName], `No ${environmentName} environment is configured`);
   for (const name of ['staging', 'production']) {
     const env = project.environments[name];
     if (!env) continue;
@@ -152,8 +181,8 @@ export function prepare(payload, project) {
   for (const environment of Object.values(project.environments)) for (const name of resourceBindingNames(environment.bindings)) resourceNames.add(name);
   assert(project.runtime_secrets.every(name => !resourceNames.has(name)), 'Runtime secret name collides with a Worker resource binding');
   assertNoInfisicalValues(project, slug);
-  const environment = project.environments[target];
-  return { repo: payload.repo, branch: payload.branch, sha: payload.sha, source_run_url: payload.source_run_url, owner, repo_name, project, target, infisical_project_slug: slug, infisical_env: environment.infisical_env, infisical_path: environment.infisical_path };
+  const environment = project.environments[environmentName];
+  return { repo: payload.repo, branch: payload.branch, sha: payload.sha, source_run_url: payload.source_run_url, owner, repo_name, project, target, ...(target === 'pr' ? { pr_number } : {}), infisical_project_slug: slug, infisical_env: environment.infisical_env, infisical_path: environment.infisical_path };
 }
 
 const empty = value => value == null || (Array.isArray(value) ? value.length === 0 : typeof value === 'object' && Object.values(value).every(empty));
@@ -174,7 +203,7 @@ function deploymentBindings(bindings) {
 export function sanitizeConfig(config, plan) {
   const p = plan.project;
   assert(config.name === p.worker_name && config.account_id === p.account_id, 'Built account or Worker differs from registered destination');
-  assert(config.targetEnvironment === undefined || config.targetEnvironment === plan.target, 'Wrong build target');
+  assert(config.targetEnvironment === undefined || config.targetEnvironment === sourceEnvironment(plan.target), 'Wrong build target');
   for (const key of ['build', 'alias', 'env', 'migrations', 'unsafe', 'containers']) assert(empty(config[key]), `Unsupported generated config: ${key}`);
   assert(config.no_bundle === true, 'Vinext must emit a prebuilt no_bundle Worker');
   assert(config.workers_dev === true && config.preview_urls === true, 'Enable workers_dev and preview_urls');
@@ -185,7 +214,7 @@ export function sanitizeConfig(config, plan) {
   // Native Preview bundles are validated again after sanitization. Their
   // top-level bindings have intentionally been restored to production while
   // the staging bindings remain under `previews`.
-  const bindingTarget = p.preview_mode === 'native' && config.targetEnvironment === undefined ? 'production' : plan.target;
+  const bindingTarget = p.preview_mode === 'native' && config.targetEnvironment === undefined ? 'production' : sourceEnvironment(plan.target);
   const expected = deploymentBindings(p.environments[bindingTarget].bindings);
   const generated = deploymentBindings(config);
   for (const key of bindingKeys) {
