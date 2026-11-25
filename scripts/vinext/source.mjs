@@ -109,8 +109,8 @@ export function projectFromSource(payload, { pkg, wrangler, submodule_repos }, v
     assert(major > 4 || (major === 4 && minor >= 135), 'Native Previews require Wrangler 4.135.0 or later');
   }
   const environments = {};
-  for (const [target, infisical_env] of [['staging', 'staging'], ['production', 'prod']]) {
-    const source = wrangler.env?.[target];
+  for (const [envName, infisical_env] of [['staging', 'staging'], ['production', 'prod']]) {
+    const source = wrangler.env?.[envName];
     if (!source) continue;
     if (nativePreview) assert(noPlainVars(source), 'Native Preview source environments must not declare plaintext vars; use Infisical');
     validateRateLimits(source.ratelimits);
@@ -118,7 +118,7 @@ export function projectFromSource(payload, { pkg, wrangler, submodule_repos }, v
     assert(source.name === topName && (source.account_id ?? topAccount) === topAccount, 'All source environments must target the same Worker and account');
     const bindings = Object.fromEntries(bindingKeys.filter(key => source[key] !== undefined).map(key => [key, source[key]]));
     const deployment_behavior = { ...productionBehavior, ...behavior(source) };
-    environments[target] = { infisical_env, infisical_path: '/', bindings, deployment_behavior };
+    environments[envName] = { infisical_env, infisical_path: '/', bindings, deployment_behavior };
   }
   assert(environments[sourceEnvironment(target)], `Source Wrangler has no ${sourceEnvironment(target)} environment`);
   if ([productionBehavior, ...Object.values(environments).map(environment => environment.deployment_behavior), behavior(wrangler.previews ?? {})].some(settings => Object.keys(settings).length > 0)) {

@@ -182,6 +182,11 @@ export function prepare(payload, project) {
   assert(project.runtime_secrets.every(name => !resourceNames.has(name)), 'Runtime secret name collides with a Worker resource binding');
   assertNoInfisicalValues(project, slug);
   const environment = project.environments[environmentName];
+  // An unmerged PR's SQL must never run against a shared (or production) D1 database.
+  if (target === 'pr') {
+    const databases = environment.bindings.d1_databases;
+    assert(databases === undefined || (Array.isArray(databases) && databases.every(database => database?.migrations_dir === undefined)), 'PR Previews cannot apply D1 migrations');
+  }
   return { repo: payload.repo, branch: payload.branch, sha: payload.sha, source_run_url: payload.source_run_url, owner, repo_name, project, target, ...(target === 'pr' ? { pr_number } : {}), infisical_project_slug: slug, infisical_env: environment.infisical_env, infisical_path: environment.infisical_path };
 }
 

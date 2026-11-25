@@ -5,8 +5,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { prepare, sanitizeConfig, statusPlan, validateDispatch } from './config.mjs';
 import { projectFromSource } from './source.mjs';
-import { isCurrent } from './deploy.mjs';
-import { build, validateBundle } from './build.mjs';
+import { applyD1Migrations, isCurrent } from './deploy.mjs';
+import { build, stageD1Migrations, validateBundle } from './build.mjs';
 
 const base = {
   repo: 'Lascade-Co/example-web', sha: 'a'.repeat(40),
@@ -41,7 +41,6 @@ function aliasSource() {
   };
 }
 const planFor = (payload, source = nativeSource()) => prepare(payload, projectFromSource(payload, source, values));
-const json = value => JSON.parse(JSON.stringify(value));
 
 test('pr dispatch requires a valid pr_number and branch', () => {
   const accepted = validateDispatch(prPayload);
@@ -155,6 +154,53 @@ test('pr target refuses a source without a previews block', () => {
   assert.equal(planFor({ ...base, branch: 'main' }, aliasSource()).target, 'production');
 });
 
+const migratedDatabase = { binding: 'CORE_DB', database_name: 'example-web-preview', database_id: '22222222-2222-4222-8222-222222222222', migrations_dir: 'migrations' };
+function d1Source(previewDatabase) {
+  const source = nativeSource();
+  source.wrangler.previews.d1_databases = [previewDatabase];
+  source.wrangler.env.staging.d1_databases = [previewDatabase];
+  return source;
+}
+
+test('pr target refuses D1 migrations at plan time', () => {
+  assert.throws(() => planFor(prPayload, d1Source(migratedDatabase)), /^Error: PR Previews cannot apply D1 migrations$/);
+  // A forged project that skips projectFromSource is refused by prepare too.
+  const project = projectFromSource(prPayload, d1Source(migratedDatabase), values);
+  assert.throws(() => prepare(prPayload, project), /PR Previews cannot apply D1 migrations/);
+  // D1 bindings without migrations are fine for a PR Preview.
+  const { migrations_dir: _directory, ...unmigrated } = migratedDatabase;
+  assert.equal(planFor(prPayload, d1Source(unmigrated)).target, 'pr');
+  // dev keeps applying staging migrations as before.
+  assert.equal(planFor({ ...base, branch: 'dev' }, d1Source(migratedDatabase)).target, 'staging');
+});
+
+test('applyD1Migrations never runs for a pr plan', () => {
+  const devPlan = planFor({ ...base, branch: 'dev' }, d1Source(migratedDatabase));
+  const root = mkdtempSync(join(tmpdir(), 'vinext-pr-d1-test-'));
+  try {
+    const appRoot = join(root, 'app'), bundleRoot = join(root, 'bundle');
+    mkdirSync(join(appRoot, 'migrations'), { recursive: true });
+    mkdirSync(bundleRoot);
+    writeFileSync(join(appRoot, 'migrations', '0001_init.sql'), 'CREATE TABLE example (id INTEGER);');
+    stageD1Migrations(appRoot, bundleRoot, devPlan);
+    const executed = [];
+    const deps = { bundleRoot, wranglerBin: '/mock-wrangler.js', env: {}, execute: (...args) => executed.push(args) };
+    // A pr plan that somehow carries configured migrations is refused before wrangler runs.
+    const forged = { ...devPlan, target: 'pr', pr_number: 42, project: { ...devPlan.project, preview_name: 'pr-42' } };
+    assert.throws(() => applyD1Migrations(forged, deps), /PR Previews cannot apply D1 migrations/);
+    assert.equal(executed.length, 0);
+    // The same bundle still migrates for dev, so the refusal is pr-specific.
+    assert.equal(applyD1Migrations(devPlan, deps), true);
+    assert.equal(executed.length, 1);
+    // A pr plan without migrations is a no-op.
+    const prPlan = planFor(prPayload);
+    const emptyBundle = join(root, 'empty');
+    mkdirSync(emptyBundle);
+    assert.equal(applyD1Migrations(prPlan, { ...deps, bundleRoot: emptyBundle }), false);
+    assert.equal(executed.length, 1);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
 test('isCurrent for pr compares the PR head sha and requires open non-draft', async () => {
   const plan = planFor(prPayload);
   const open = { state: 'open', draft: false, head: { sha: plan.sha, ref: plan.branch, repo: { full_name: plan.repo } } };
@@ -179,13 +225,14 @@ test('isCurrent for pr compares the PR head sha and requires open non-draft', as
   assert.deepEqual(branchPaths, ['/repos/Lascade-Co/example-web/commits/dev', '/repos/Lascade-Co/example-web/commits/main']);
 });
 
-test('CLI prepare loads Infisical staging for a PR whose head is main', async () => {
+// Runs `cli.mjs prepare` in-process with mocked GitHub and Infisical. Returns
+// the Infisical environments requested, the plan output and the log lines.
+async function cliPrepare(payload) {
   const root = mkdtempSync(join(tmpdir(), 'vinext-pr-cli-'));
   const keys = ['PAYLOAD_JSON', 'GITHUB_OUTPUT', 'GH_TOKEN', 'INFISICAL_DOMAIN', 'INFISICAL_CLIENT_ID', 'INFISICAL_CLIENT_SECRET', 'GITHUB_ACTIONS'];
   const saved = Object.fromEntries(keys.map(key => [key, process.env[key]]));
   const originalFetch = globalThis.fetch, originalCommand = process.argv[2], originalExitCode = process.exitCode, originalLog = console.log;
   const fixture = nativeSource(), environments = [], logs = [];
-  const payload = { ...prPayload, branch: 'main', pr_number: 7 };
   const githubFile = value => { const text = JSON.stringify(value); return { type: 'file', encoding: 'base64', content: Buffer.from(text).toString('base64'), size: Buffer.byteLength(text) }; };
   try {
     process.env.PAYLOAD_JSON = JSON.stringify(payload);
@@ -210,16 +257,10 @@ test('CLI prepare loads Infisical staging for a PR whose head is main', async ()
       else assert.fail(`Unexpected URL: ${url}`);
       return new Response(JSON.stringify(value), { headers: { 'Content-Type': 'application/json' } });
     };
-    await import(`./cli.mjs?pr-preview=${Date.now()}`);
+    await import(`./cli.mjs?pr-preview=${Date.now()}-${Math.random()}`);
     assert.equal(process.exitCode, originalExitCode);
-    assert.deepEqual(environments, ['staging']);
     const output = readFileSync(process.env.GITHUB_OUTPUT, 'utf8').split('\n').find(line => line.startsWith('plan='));
-    const plan = JSON.parse(output.slice(5));
-    assert.equal(plan.target, 'pr');
-    assert.equal(plan.pr_number, 7);
-    assert.equal(plan.project.preview_name, 'pr-7');
-    assert.equal(plan.infisical_env, 'staging');
-    assert.ok(logs.includes('Vinext deployment: Lascade-Co/example-web · pr #7'), logs.join('\n'));
+    return { environments, plan: JSON.parse(output.slice(5)), logs };
   } finally {
     globalThis.fetch = originalFetch;
     console.log = originalLog;
@@ -228,6 +269,29 @@ test('CLI prepare loads Infisical staging for a PR whose head is main', async ()
     for (const key of keys) if (saved[key] === undefined) delete process.env[key]; else process.env[key] = saved[key];
     rmSync(root, { recursive: true, force: true });
   }
+}
+
+test('CLI prepare loads Infisical staging for a PR whose head is main', async () => {
+  const { environments, plan, logs } = await cliPrepare({ ...prPayload, branch: 'main', pr_number: 7 });
+  assert.deepEqual(environments, ['staging']);
+  assert.equal(plan.target, 'pr');
+  assert.equal(plan.pr_number, 7);
+  assert.equal(plan.project.preview_name, 'pr-7');
+  assert.equal(plan.infisical_env, 'staging');
+  assert.ok(logs.includes('Vinext deployment: Lascade-Co/example-web · pr #7'), logs.join('\n'));
+});
+
+test('CLI prepare loads Infisical prod for main and staging for dev', async () => {
+  const main = await cliPrepare({ ...base, branch: 'main' });
+  assert.deepEqual(main.environments, ['prod']);
+  assert.equal(main.plan.target, 'production');
+  assert.equal(main.plan.infisical_env, 'prod');
+  assert.ok(main.logs.includes('Vinext deployment: Lascade-Co/example-web · production'), main.logs.join('\n'));
+  const dev = await cliPrepare({ ...base, branch: 'dev' });
+  assert.deepEqual(dev.environments, ['staging']);
+  assert.equal(dev.plan.target, 'staging');
+  assert.equal(dev.plan.infisical_env, 'staging');
+  assert.ok(dev.logs.includes('Vinext deployment: Lascade-Co/example-web · staging'), dev.logs.join('\n'));
 });
 
 // Captured from origin/main e0e63be before the pr target existed.
@@ -540,9 +604,10 @@ test('existing dev/main dispatches are unchanged', () => {
       const payload = { ...base, branch };
       const expected = baseline[`${kind}-${branch}`];
       const plan = prepare(payload, projectFromSource(payload, source(), values));
-      assert.deepEqual(json(validateDispatch(payload)), expected.dispatch, `${kind}-${branch} dispatch`);
-      assert.deepEqual(json(statusPlan(payload)), expected.status, `${kind}-${branch} status`);
-      assert.deepEqual(json(plan), expected.plan, `${kind}-${branch} plan`);
+      // Byte-for-byte, including key order: plans cross job boundaries as JSON.
+      assert.equal(JSON.stringify(validateDispatch(payload)), JSON.stringify(expected.dispatch), `${kind}-${branch} dispatch`);
+      assert.equal(JSON.stringify(statusPlan(payload)), JSON.stringify(expected.status), `${kind}-${branch} status`);
+      assert.equal(JSON.stringify(plan), JSON.stringify(expected.plan), `${kind}-${branch} plan`);
       assert.equal(Object.hasOwn(plan, 'pr_number'), false);
       assert.equal(Object.hasOwn(validateDispatch(payload), 'pr_number'), false);
     }

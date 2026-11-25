@@ -38,6 +38,8 @@ function cloudflareEnvironment(plan, env) {
 
 export function applyD1Migrations(plan, { bundleRoot, wranglerBin, env, execute }) {
   const databases = validateD1Migrations(bundleRoot, plan);
+  // Defence in depth: prepare already refuses PR plans with configured migrations.
+  assert(plan.target !== 'pr' || databases.length === 0, 'PR Previews cannot apply D1 migrations');
   if (!databases.length) return false;
   const directory = mkdtempSync(join(tmpdir(), 'vinext-d1-migrations-'));
   try {
