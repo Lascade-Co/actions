@@ -1,7 +1,7 @@
 import { appendFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { dispatchRoute, dispatchTarget, prepare, statusPlan, validateDispatch, assert } from './config.mjs';
-import { cleanupPlan, fetchSourceFiles, projectFromSource } from './source.mjs';
+import { assertBaseWorker, fetchSourceFiles, projectFromSource, resolveCleanup } from './source.mjs';
 import { build } from './build.mjs';
 import { deletePreview, deploy, request, isCurrent, previewCommentBody, upsertPreviewComment } from './deploy.mjs';
 import { exportSecrets, loadSecrets } from './secrets.mjs';
@@ -49,15 +49,14 @@ try {
     // A closed PR: no build. The Worker comes from the PR's last head commit.
     const payload = JSON.parse(env.PAYLOAD_JSON);
     assert(dispatchRoute(payload) === 'cleanup', 'Preview cleanup runs only for closed pull requests');
-    const plan = cleanupPlan(payload, await fetchSourceFiles(payload, github));
+    const { plan, reopened } = await resolveCleanup(payload, github);
     logTarget(plan);
     if (command === 'cleanup-resolve') {
       output('wrangler_version', plan.project.wrangler_version);
       output('worker_key', workerKey(plan.project));
     } else {
       // Reopened since this event: the reopen dispatch owns the Preview now.
-      const pull = await github(`/repos/${plan.repo}/pulls/${plan.pr_number}`);
-      if (pull?.state === 'open') {
+      if (reopened) {
         output('state', 'reopened');
         console.log('The pull request was reopened; its Preview is kept.');
       } else {
@@ -67,7 +66,7 @@ try {
         output('state', result.state);
         const body = previewCommentBody(plan, { result: result.state === 'deleted' ? 'removed' : 'absent', runUrl: env.RUN_URL });
         // Update the existing comment only; a PR that never had a Preview gets none.
-        await upsertPreviewComment(plan, body, github, { create: false });
+        await upsertPreviewComment(plan, body, github, { appSlug: env.APP_SLUG, create: false });
         if (env.GITHUB_STEP_SUMMARY) appendFileSync(env.GITHUB_STEP_SUMMARY, `### Vinext Preview ${result.state}\n\n${plan.repo} · pr #${plan.pr_number}\n`);
       }
     }
@@ -75,6 +74,8 @@ try {
     const plan = env.PLAN_JSON ? JSON.parse(env.PLAN_JSON) : ['status', 'comment'].includes(command) ? statusPlan(JSON.parse(env.PAYLOAD_JSON)) : (() => { throw new Error('Missing deployment plan'); })();
     if (command === 'verify-source') {
       assert(await isCurrent(plan, github), plan.target === 'pr' ? 'Requested source commit is not the current PR head' : 'Requested source commit is not the current branch HEAD');
+      // Fail before the build; deploy() checks again just before uploading.
+      if (plan.target === 'pr') await assertBaseWorker(plan, github);
     } else if (command === 'secrets') {
       await exportSecrets(plan, { file: env.INFISICAL_ENV_FILE, kind: env.SECRET_KIND });
     } else if (command === 'build') {
@@ -104,7 +105,7 @@ try {
       // COMMENT_MODE=update-only: callers outside the per-Worker deploy queue
       // (the prepare job) never create the comment, so two runs cannot both POST.
       assert(env.COMMENT_MODE === undefined || env.COMMENT_MODE === '' || env.COMMENT_MODE === 'update-only', 'Invalid COMMENT_MODE');
-      const outcome = await upsertPreviewComment(plan, body, github, { overwrite: await isCurrent(plan, github), create: env.COMMENT_MODE !== 'update-only' });
+      const outcome = await upsertPreviewComment(plan, body, github, { appSlug: env.APP_SLUG, overwrite: await isCurrent(plan, github), create: env.COMMENT_MODE !== 'update-only' });
       console.log(`PR comment ${outcome}: ${result}`);
     } else throw new Error('Expected preflight, prepare, verify-source, secrets, build, deploy, status, comment, cleanup-resolve, or cleanup');
   }

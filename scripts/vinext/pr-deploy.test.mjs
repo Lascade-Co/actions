@@ -6,6 +6,8 @@ import { join } from 'node:path';
 import { prepare, validateDispatch, dispatchRoute } from './config.mjs';
 import { projectFromSource, cleanupPlan } from './source.mjs';
 import { deploy, deploymentArgs, deletePreview, previewCommentBody, upsertPreviewComment, previewCommentMarker } from './deploy.mjs';
+import { stageD1Migrations } from './build.mjs';
+import { createHash } from 'node:crypto';
 
 const base = {
   repo: 'Lascade-Co/example-web', sha: 'a'.repeat(40),
@@ -44,7 +46,24 @@ function nativeBundle(root, plan) {
   return { bundleRoot, envFile };
 }
 
-const openPull = { state: 'open', draft: false, head: { sha: base.sha, repo: { full_name: base.repo } } };
+const baseSha = 'd'.repeat(40);
+const openPull = { state: 'open', draft: false, head: { sha: base.sha, repo: { full_name: base.repo } }, base: { sha: baseSha, repo: { full_name: base.repo } } };
+const APP = 'lascade-ci';
+const ourBot = { type: 'Bot', login: `${APP}[bot]` };
+const githubFile = value => { const text = JSON.stringify(value); return { type: 'file', encoding: 'base64', content: Buffer.from(text).toString('base64'), size: Buffer.byteLength(text) }; };
+
+// GitHub for a pr deploy: the PR (head and base) and the base branch's wrangler.jsonc.
+function prGithub({ pull = openPull, baseWrangler = nativeSource().wrangler } = {}) {
+  const paths = [];
+  const github = async path => {
+    paths.push(path);
+    if (path === '/repos/Lascade-Co/example-web/pulls/42') return pull;
+    if (path === `/repos/Lascade-Co/example-web/contents/wrangler.jsonc?ref=${baseSha}`) return githubFile(baseWrangler);
+    throw new Error(`Unexpected GitHub path: ${path}`);
+  };
+  github.paths = paths;
+  return github;
+}
 
 // Mocks Cloudflare for a native Preview named `name`. `changeProduction` makes
 // the active production deployment differ after wrangler runs.
@@ -111,7 +130,7 @@ test('pr deploy runs wrangler preview with name pr-<N> and keeps production unch
       assert.equal(options.env.CLOUDFLARE_ENV, undefined);
       assert.deepEqual(options.stdio, ['ignore', 'ignore', 'inherit']);
     };
-    const github = async path => { assert.equal(path, '/repos/Lascade-Co/example-web/pulls/42'); return openPull; };
+    const github = prGithub();
     const result = await deploy(plan, { bundleRoot, envFile, wranglerBin: '/wrangler.js', env: { CLOUDFLARE_ENV: 'production' }, github, cloudflare: previewCloudflare('pr-42', state), execute, pause: async () => {} });
     assert.equal(result.state, 'deployed');
     // Exactly one wrangler call: the Preview upload. No D1 migration, no deploy.
@@ -132,7 +151,7 @@ test('pr deploy runs wrangler preview with name pr-<N> and keeps production unch
     let executed = false;
     const superseded = await deploy(plan, {
       ...fresh('superseded'), wranglerBin: '/wrangler.js', env: {}, pause: async () => {},
-      github: async () => ({ ...openPull, head: { ...openPull.head, sha: 'c'.repeat(40) } }),
+      github: prGithub({ pull: { ...openPull, head: { ...openPull.head, sha: 'c'.repeat(40) } } }),
       cloudflare: previewCloudflare('pr-42', {}), execute: () => { executed = true; },
     });
     assert.deepEqual(superseded, { state: 'superseded' });
@@ -148,7 +167,7 @@ test('pr deploy returns the preview url', async () => {
     const state = {};
     const result = await deploy(plan, {
       bundleRoot, envFile, wranglerBin: '/wrangler.js', env: {}, pause: async () => {},
-      github: async () => openPull, cloudflare: previewCloudflare('pr-42', state),
+      github: prGithub(), cloudflare: previewCloudflare('pr-42', state),
       execute: (_command, args) => { state.tag = args[args.indexOf('--tag') + 1]; },
     });
     assert.deepEqual(result, { state: 'deployed', preview_name: 'pr-42', preview_id: 'preview-id', deployment_id: 'deployment-id', preview_url: 'https://pr-42-example-web.example.workers.dev' });
@@ -166,7 +185,7 @@ test('pr deploy returns the preview url', async () => {
       const shaped = {};
       const shapedResult = await deploy(plan, {
         ...nativeBundle(dir, plan), wranglerBin: '/wrangler.js', env: {}, pause: async () => {},
-        github: async () => openPull, cloudflare: previewCloudflare('pr-42', shaped, { urls }),
+        github: prGithub(), cloudflare: previewCloudflare('pr-42', shaped, { urls }),
         execute: (_command, args) => { shaped.tag = args[args.indexOf('--tag') + 1]; },
       });
       assert.equal(shapedResult.state, 'deployed', String(urls[0]));
@@ -188,6 +207,59 @@ test('a forged pr plan in alias mode never runs wrangler', async () => {
       execute: () => { executed = true; },
     }), /PR Preview/);
     assert.equal(executed, false);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('a pr deploy whose head targets a different Worker or account than its base is refused', async () => {
+  const plan = planFor(prPayload);
+  const root = mkdtempSync(join(tmpdir(), 'vinext-pr-base-test-'));
+  try {
+    let executed = false;
+    for (const [name, github] of [
+      ['renamed Worker', prGithub({ baseWrangler: { ...nativeSource().wrangler, name: 'base-web' } })],
+      ['other account', prGithub({ baseWrangler: { ...nativeSource().wrangler, account_id: 'e'.repeat(32) } })],
+      ['base in another repo', prGithub({ pull: { ...openPull, base: { ...openPull.base, repo: { full_name: 'someone/example-web' } } } })],
+      ['no base sha', prGithub({ pull: { ...openPull, base: { repo: openPull.base.repo } } })],
+    ]) {
+      mkdirSync(join(root, name));
+      await assert.rejects(() => deploy(plan, {
+        ...nativeBundle(join(root, name), plan), wranglerBin: '/wrangler.js', env: {}, pause: async () => {}, github,
+        cloudflare: async () => { throw new Error('Cloudflare must not be called'); }, execute: () => { executed = true; },
+      }), /base/, name);
+    }
+    assert.equal(executed, false);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+const migratedDatabase = { binding: 'CORE_DB', database_name: 'example-web-preview', database_id: '22222222-2222-4222-8222-222222222222', migrations_dir: 'migrations' };
+
+test('a pr deploy with a D1 migration bundle runs only the Preview upload', async () => {
+  // A forged pr plan that carries staging migrations, over a bundle that holds them.
+  const source = nativeSource();
+  source.wrangler.previews.d1_databases = [migratedDatabase];
+  source.wrangler.env.staging.d1_databases = [migratedDatabase];
+  const devPlan = prepare({ ...base, branch: 'dev' }, projectFromSource({ ...base, branch: 'dev' }, source, runtimeValues));
+  const plan = { ...devPlan, branch: prPayload.branch, target: 'pr', pr_number: 42, project: { ...devPlan.project, preview_name: 'pr-42' } };
+  const root = mkdtempSync(join(tmpdir(), 'vinext-pr-d1-deploy-test-'));
+  try {
+    const { bundleRoot, envFile } = nativeBundle(root, plan);
+    const { migrations_dir: _directory, ...unmigrated } = migratedDatabase;
+    const configPath = join(bundleRoot, 'server', 'wrangler.json');
+    writeFileSync(configPath, JSON.stringify({ ...JSON.parse(readFileSync(configPath, 'utf8')), d1_databases: [unmigrated], previews: { images: { binding: 'IMAGES' }, d1_databases: [unmigrated] } }));
+    const appRoot = join(root, 'app');
+    mkdirSync(join(appRoot, 'migrations'), { recursive: true });
+    writeFileSync(join(appRoot, 'migrations', '0001_init.sql'), 'CREATE TABLE example (id INTEGER);');
+    stageD1Migrations(appRoot, bundleRoot, devPlan);
+    const state = {}, calls = [];
+    const result = await deploy(plan, {
+      bundleRoot, envFile, wranglerBin: '/wrangler.js', env: {}, pause: async () => {}, github: prGithub({ baseWrangler: source.wrangler }),
+      cloudflare: previewCloudflare('pr-42', state),
+      execute: (_command, args) => { calls.push(args.slice(1)); state.tag = args[args.indexOf('--tag') + 1]; },
+    });
+    assert.equal(result.state, 'deployed');
+    assert.equal(calls.length, 1);
+    assert.deepEqual(calls[0].slice(0, 3), ['preview', '--name', 'pr-42']);
+    assert.equal(calls.flat().includes('d1'), false);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
@@ -229,6 +301,15 @@ test('cleanup plan resolves the Worker from source and only for closed PRs', () 
   assert.throws(() => cleanupPlan(closedPayload, badWorker), /account and Worker/);
   const unpinned = nativeSource(); unpinned.pkg.devDependencies.wrangler = '^4.164.0';
   assert.throws(() => cleanupPlan(closedPayload, unpinned), /Wrangler/);
+  // `wrangler preview delete` needs the same floor as native Previews.
+  for (const version of ['4.134.9', '3.200.0']) {
+    const old = nativeSource(); old.pkg.devDependencies.wrangler = version;
+    assert.throws(() => cleanupPlan(closedPayload, old), /4\.135\.0/, version);
+  }
+  for (const version of ['4.135.0', '5.0.0']) {
+    const recent = nativeSource(); recent.pkg.devDependencies.wrangler = version;
+    assert.equal(cleanupPlan(closedPayload, recent).project.wrangler_version, version);
+  }
 });
 
 test('deletePreview treats a missing preview as absent', async () => {
@@ -311,7 +392,7 @@ function commentApi(initial = [], perPage = 2) {
       return comments.slice((page - 1) * perPage, page * perPage);
     }
     if (method === 'POST' && list) {
-      const comment = { id: comments.length + 1, user: { type: 'Bot' }, body: JSON.parse(options.body).body };
+      const comment = { id: comments.length + 1, user: ourBot, body: JSON.parse(options.body).body };
       comments.push(comment);
       return comment;
     }
@@ -339,12 +420,12 @@ test('comment upserts a single marked comment', async () => {
   assert.match(deployed, /https:\/\/pr-42-example-web\.example\.workers\.dev/);
   assert.match(deployed, new RegExp(base.sha));
   assert.match(deployed, /deployed/i);
-  assert.equal(await upsertPreviewComment(plan, deployed, api.github), 'created');
+  assert.equal(await upsertPreviewComment(plan, deployed, api.github, { appSlug: APP }), 'created');
   const failed = previewCommentBody(plan, { result: 'failed', runUrl });
-  assert.equal(await upsertPreviewComment(plan, failed, api.github), 'updated');
+  assert.equal(await upsertPreviewComment(plan, failed, api.github, { appSlug: APP }), 'updated');
   // A third comment from others pushes ours to page 2 of the listing; still found.
   api.comments.splice(1, 0, { id: 99, user: { type: 'User' }, body: 'another' });
-  assert.equal(await upsertPreviewComment(plan, deployed, api.github), 'updated');
+  assert.equal(await upsertPreviewComment(plan, deployed, api.github, { appSlug: APP }), 'updated');
   assert.equal(api.requests.filter(request => request.startsWith('POST')).length, 1);
   assert.equal(api.requests.filter(request => request.startsWith('PATCH')).length, 2);
   const ours = api.comments.filter(comment => comment.user.type === 'Bot');
@@ -353,10 +434,21 @@ test('comment upserts a single marked comment', async () => {
   assert.equal(api.comments[2].body, `${previewCommentMarker}\nquoted`);
 
   // A stale run never overwrites a newer run's comment, but may create the first one.
-  assert.equal(await upsertPreviewComment(plan, failed, api.github, { overwrite: false }), 'skipped');
+  assert.equal(await upsertPreviewComment(plan, failed, api.github, { appSlug: APP, overwrite: false }), 'skipped');
   assert.equal(ours[0].body, deployed);
   const fresh = commentApi();
-  assert.equal(await upsertPreviewComment(plan, previewCommentBody(plan, { result: 'superseded', runUrl }), fresh.github, { overwrite: false }), 'created');
+  assert.equal(await upsertPreviewComment(plan, previewCommentBody(plan, { result: 'superseded', runUrl }), fresh.github, { appSlug: APP, overwrite: false }), 'created');
+
+  // Another app's comment carrying the marker is not ours: a new one is created.
+  const otherBot = commentApi([{ user: { type: 'Bot', login: 'other-app[bot]' }, performed_via_github_app: { slug: 'other-app' }, body: `${previewCommentMarker}\nnot ours` }]);
+  assert.equal(await upsertPreviewComment(plan, deployed, otherBot.github, { appSlug: APP }), 'created');
+  assert.equal(otherBot.comments[0].body, `${previewCommentMarker}\nnot ours`);
+  assert.equal(otherBot.comments.length, 2);
+  // Without a valid app identity nothing is matched or written.
+  for (const appSlug of [undefined, '', 'Bad Slug', 'x[bot]']) {
+    await assert.rejects(() => upsertPreviewComment(plan, deployed, otherBot.github, { appSlug }), /app slug/, String(appSlug));
+  }
+  assert.equal(otherBot.comments.length, 2);
 
   for (const result of ['superseded', 'removed', 'absent']) assert.match(previewCommentBody(plan, { result, runUrl }), new RegExp(base.sha.slice(0, 7)));
   assert.throws(() => previewCommentBody(plan, { result: 'unknown', runUrl }), /comment result/);
@@ -374,7 +466,7 @@ test('comment upserts a single marked comment', async () => {
 // exit code, error lines, outputs and the fetch requests.
 async function runCli(command, env, respond) {
   const root = mkdtempSync(join(tmpdir(), 'vinext-pr-cli-'));
-  const keys = ['PAYLOAD_JSON', 'PLAN_JSON', 'GITHUB_OUTPUT', 'GITHUB_STEP_SUMMARY', 'GH_TOKEN', 'STATUS_STATE', 'STATUS_URL', 'DEPLOY_STATE', 'DEPLOY_TARGETS', 'CLOUDFLARE_API_TOKEN', 'COMMENT_RESULT', 'COMMENT_MODE', 'PREVIEW_URL', 'RUN_URL', 'WRANGLER_BIN'];
+  const keys = ['PAYLOAD_JSON', 'PLAN_JSON', 'GITHUB_OUTPUT', 'GITHUB_STEP_SUMMARY', 'GH_TOKEN', 'STATUS_STATE', 'STATUS_URL', 'DEPLOY_STATE', 'DEPLOY_TARGETS', 'CLOUDFLARE_API_TOKEN', 'COMMENT_RESULT', 'COMMENT_MODE', 'APP_SLUG', 'PREVIEW_URL', 'RUN_URL', 'WRANGLER_BIN'];
   const saved = Object.fromEntries(keys.map(key => [key, process.env[key]]));
   const originalFetch = globalThis.fetch, originalCommand = process.argv[2], originalExitCode = process.exitCode, originalError = console.error, originalLog = console.log;
   const errors = [], requests = [];
@@ -431,11 +523,11 @@ test('CLI comment reports the deploy result and skips when superseded by a newer
   const runUrl = 'https://github.com/Lascade-Co/actions/actions/runs/9';
   const respond = pull => async (url, options = {}) => {
     if (url.pathname === '/repos/Lascade-Co/example-web/pulls/42') return pull;
-    if (url.pathname === '/repos/Lascade-Co/example-web/issues/42/comments' && (options.method ?? 'GET') === 'GET') return url.searchParams.get('page') === '1' ? [{ id: 5, user: { type: 'Bot' }, body: `${previewCommentMarker}\nold` }] : [];
+    if (url.pathname === '/repos/Lascade-Co/example-web/issues/42/comments' && (options.method ?? 'GET') === 'GET') return url.searchParams.get('page') === '1' ? [{ id: 5, user: ourBot, body: `${previewCommentMarker}\nold` }] : [];
     if (url.pathname === '/repos/Lascade-Co/example-web/issues/comments/5' && options.method === 'PATCH') return {};
     throw new Error(`Unexpected request ${options.method} ${url}`);
   };
-  const env = { PLAN_JSON: JSON.stringify(plan), GH_TOKEN: 't', STATUS_STATE: 'success', DEPLOY_STATE: 'deployed', PREVIEW_URL: 'https://pr-42-example-web.example.workers.dev', RUN_URL: runUrl };
+  const env = { APP_SLUG: APP, PLAN_JSON: JSON.stringify(plan), GH_TOKEN: 't', STATUS_STATE: 'success', DEPLOY_STATE: 'deployed', PREVIEW_URL: 'https://pr-42-example-web.example.workers.dev', RUN_URL: runUrl };
   const current = await runCli('comment', env, respond(openPull));
   assert.equal(current.exitCode, undefined, current.errors.join('\n'));
   const patch = current.requests.find(request => request.method === 'PATCH');
@@ -447,20 +539,20 @@ test('CLI comment reports the deploy result and skips when superseded by a newer
   assert.equal(stale.requests.filter(request => request.method !== 'GET').length, 0);
 
   // Without a plan (prepare failed) the payload still identifies the PR.
-  const early = await runCli('comment', { PAYLOAD_JSON: JSON.stringify(prPayload), GH_TOKEN: 't', STATUS_STATE: 'failure', RUN_URL: runUrl }, respond(openPull));
+  const early = await runCli('comment', { APP_SLUG: APP, PAYLOAD_JSON: JSON.stringify(prPayload), GH_TOKEN: 't', STATUS_STATE: 'failure', RUN_URL: runUrl }, respond(openPull));
   assert.equal(early.exitCode, undefined, early.errors.join('\n'));
   assert.match(early.requests.find(request => request.method === 'PATCH').body.body, /failed/i);
 
   // The prepare job's failure comment is update-only: it is outside the deploy
   // queue, so only queued runs may create the comment.
-  const updateOnly = await runCli('comment', { PAYLOAD_JSON: JSON.stringify(prPayload), GH_TOKEN: 't', STATUS_STATE: 'failure', RUN_URL: runUrl, COMMENT_MODE: 'update-only' }, async (url, options = {}) => {
+  const updateOnly = await runCli('comment', { APP_SLUG: APP, PAYLOAD_JSON: JSON.stringify(prPayload), GH_TOKEN: 't', STATUS_STATE: 'failure', RUN_URL: runUrl, COMMENT_MODE: 'update-only' }, async (url, options = {}) => {
     if (url.pathname === '/repos/Lascade-Co/example-web/pulls/42') return openPull;
     if (url.pathname === '/repos/Lascade-Co/example-web/issues/42/comments' && (options.method ?? 'GET') === 'GET') return [];
     throw new Error(`Unexpected request ${options.method} ${url}`);
   });
   assert.equal(updateOnly.exitCode, undefined, updateOnly.errors.join('\n'));
   assert.equal(updateOnly.requests.filter(request => request.method !== 'GET').length, 0);
-  const badMode = await runCli('comment', { PAYLOAD_JSON: JSON.stringify(prPayload), GH_TOKEN: 't', STATUS_STATE: 'failure', RUN_URL: runUrl, COMMENT_MODE: 'create' }, async () => { throw new Error('no requests'); });
+  const badMode = await runCli('comment', { APP_SLUG: APP, PAYLOAD_JSON: JSON.stringify(prPayload), GH_TOKEN: 't', STATUS_STATE: 'failure', RUN_URL: runUrl, COMMENT_MODE: 'create' }, async () => { throw new Error('no requests'); });
   assert.equal(badMode.exitCode, 1);
 
   // Never for dev or main.
@@ -469,61 +561,119 @@ test('CLI comment reports the deploy result and skips when superseded by a newer
   assert.equal(push.requests.length, 0);
 });
 
-// Answers the GitHub source-file requests that fetchSourceFiles makes.
-function sourceFiles(url, sha = base.sha) {
-  const file = value => { const text = JSON.stringify(value); return { type: 'file', encoding: 'base64', content: Buffer.from(text).toString('base64'), size: Buffer.byteLength(text) }; };
+// Answers the GitHub source-file requests that fetchSourceFiles makes at `sha`.
+function sourceFiles(url, sha = baseSha, wrangler = nativeSource().wrangler) {
   const fixture = nativeSource();
-  if (url.pathname.endsWith('/contents/package.json') && url.searchParams.get('ref') === sha) return file(fixture.pkg);
-  if (url.pathname.endsWith('/contents/wrangler.jsonc') && url.searchParams.get('ref') === sha) return file(fixture.wrangler);
+  if (url.pathname.endsWith('/contents/package.json') && url.searchParams.get('ref') === sha) return githubFile(fixture.pkg);
+  if (url.pathname.endsWith('/contents/wrangler.jsonc') && url.searchParams.get('ref') === sha) return githubFile(wrangler);
   if (url.pathname.endsWith(`/git/commits/${sha}`)) return { tree: { sha: 'c'.repeat(40) } };
   if (url.pathname.endsWith(`/git/trees/${'c'.repeat(40)}`)) return { tree: [], truncated: false };
   return undefined;
 }
 
-test('CLI cleanup-resolve outputs the Worker key only for closed PRs', async () => {
-  const resolved = await runCli('cleanup-resolve', { PAYLOAD_JSON: JSON.stringify(closedPayload), GH_TOKEN: 't' }, async url => sourceFiles(url) ?? assert.fail(`Unexpected request ${url}`));
+const closedPull = { ...openPull, state: 'closed' };
+// A closed PR whose base deploys `baseWrangler`. Cloudflare reports no Preview.
+const cleanupResponder = ({ pull = closedPull, baseWrangler, comments = [] } = {}) => async (url, options = {}) => {
+  const file = sourceFiles(url, baseSha, baseWrangler);
+  if (file) return file;
+  if (url.pathname === '/repos/Lascade-Co/example-web/pulls/42') return pull;
+  if (url.hostname === 'api.cloudflare.com' && /\/workers\/workers\/[a-z0-9-]+\/previews\/pr-42$/.test(url.pathname)) return new Response(JSON.stringify({ success: false }), { status: 404 });
+  if (url.pathname === '/repos/Lascade-Co/example-web/issues/42/comments' && (options.method ?? 'GET') === 'GET') return url.searchParams.get('page') === '1' ? comments : [];
+  if (url.pathname === '/repos/Lascade-Co/example-web/issues/comments/5' && options.method === 'PATCH') return {};
+  throw new Error(`Unexpected request ${options.method} ${url}`);
+};
+const runUrl = 'https://github.com/Lascade-Co/actions/actions/runs/9';
+const cleanupEnv = { PAYLOAD_JSON: JSON.stringify(closedPayload), GH_TOKEN: 't', CLOUDFLARE_API_TOKEN: 'c', RUN_URL: runUrl, WRANGLER_BIN: '/wrangler.js', APP_SLUG: APP };
+const workerKey = (account, worker) => createHash('sha256').update(`${account}/${worker}`).digest('hex');
+
+test('CLI cleanup-resolve outputs the base Worker key only for closed PRs', async () => {
+  const resolved = await runCli('cleanup-resolve', { PAYLOAD_JSON: JSON.stringify(closedPayload), GH_TOKEN: 't' }, cleanupResponder());
   assert.equal(resolved.exitCode, undefined, resolved.errors.join('\n'));
-  assert.match(resolved.outputs, /^worker_key=[0-9a-f]{64}$/m);
+  assert.match(resolved.outputs, new RegExp(`^worker_key=${workerKey('b'.repeat(32), 'example-web')}$`, 'm'));
   assert.match(resolved.outputs, /^wrangler_version=4\.164\.0$/m);
-  const open = await runCli('cleanup-resolve', { PAYLOAD_JSON: JSON.stringify(prPayload), GH_TOKEN: 't' }, async url => sourceFiles(url) ?? assert.fail(`Unexpected request ${url}`));
+  // Files are read at the base commit only, never at the PR head.
+  assert.equal(resolved.requests.some(request => request.url.includes(`ref=${base.sha}`)), false);
+  const open = await runCli('cleanup-resolve', { PAYLOAD_JSON: JSON.stringify(prPayload), GH_TOKEN: 't' }, cleanupResponder());
   assert.equal(open.exitCode, 1);
+  assert.equal(open.requests.length, 0);
+});
+
+test('CLI cleanup is bound to the closed PR head and deletes from the base Worker', async () => {
+  // A dispatch whose sha is not the closed PR's head, or whose head is a fork, is refused.
+  for (const [name, pull] of [
+    ['other sha', { ...closedPull, head: { ...closedPull.head, sha: 'c'.repeat(40) } }],
+    ['fork head', { ...closedPull, head: { ...closedPull.head, repo: { full_name: 'someone/example-web' } } }],
+    ['deleted fork', { ...closedPull, head: { ...closedPull.head, repo: null } }],
+  ]) {
+    for (const command of ['cleanup-resolve', 'cleanup']) {
+      const refused = await runCli(command, cleanupEnv, cleanupResponder({ pull }));
+      assert.equal(refused.exitCode, 1, `${name} ${command}`);
+      assert.match(refused.errors.join('\n'), /closed pull request head/, `${name} ${command}`);
+      assert.equal(refused.requests.some(request => request.url.startsWith('https://api.cloudflare.com') || request.method !== 'GET'), false, `${name} ${command}`);
+    }
+  }
+
+  // The head renamed the Worker: cleanup still targets the base branch's Worker.
+  const renamed = await runCli('cleanup', cleanupEnv, async (url, options) => {
+    const head = sourceFiles(url, base.sha, { ...nativeSource().wrangler, name: 'renamed-web' });
+    if (head) return head;
+    return cleanupResponder()(url, options);
+  });
+  assert.equal(renamed.exitCode, undefined, renamed.errors.join('\n'));
+  assert.match(renamed.outputs, /^state=absent$/m);
+  const probes = renamed.requests.filter(request => request.url.startsWith('https://api.cloudflare.com'));
+  assert.equal(probes.length, 1);
+  assert.match(probes[0].url, new RegExp(`/accounts/${'b'.repeat(32)}/workers/workers/example-web/previews/pr-42$`));
 });
 
 test('CLI cleanup skips a reopened PR and refuses non-closed payloads', async () => {
-  const runUrl = 'https://github.com/Lascade-Co/actions/actions/runs/9';
-  const reopened = await runCli('cleanup', { PAYLOAD_JSON: JSON.stringify(closedPayload), GH_TOKEN: 't', CLOUDFLARE_API_TOKEN: 'c', RUN_URL: runUrl }, async url => {
-    const file = sourceFiles(url);
-    if (file) return file;
-    if (url.pathname === '/repos/Lascade-Co/example-web/pulls/42') return { ...openPull, state: 'open' };
-    throw new Error(`Unexpected request ${url}`);
-  });
+  // Reopened (even after new pushes): the reopen dispatch owns the Preview.
+  const reopened = await runCli('cleanup', cleanupEnv, cleanupResponder({ pull: { ...openPull, head: { ...openPull.head, sha: 'c'.repeat(40) } } }));
   assert.equal(reopened.exitCode, undefined, reopened.errors.join('\n'));
   assert.match(reopened.outputs, /^state=reopened$/m);
   assert.equal(reopened.requests.some(request => request.url.startsWith('https://api.cloudflare.com')), false);
   assert.equal(reopened.requests.some(request => request.method !== 'GET'), false);
 
-  // Closed and never deployed: absent is success. An existing comment is updated, none is created.
-  // (Deletion through wrangler is covered by the deletePreview test.)
-  for (const [existing, expectedState, expectedComment] of [[true, 'absent', /no Preview/i], [false, 'absent', undefined]]) {
-    const closed = await runCli('cleanup', { PAYLOAD_JSON: JSON.stringify(closedPayload), GH_TOKEN: 't', CLOUDFLARE_API_TOKEN: 'c', RUN_URL: runUrl, WRANGLER_BIN: '/wrangler.js' }, async (url, options = {}) => {
-      const file = sourceFiles(url);
-      if (file) return file;
-      if (url.pathname === '/repos/Lascade-Co/example-web/pulls/42') return { ...openPull, state: 'closed' };
-      if (url.hostname === 'api.cloudflare.com' && url.pathname.endsWith('/workers/workers/example-web/previews/pr-42')) {
-        return new Response(JSON.stringify({ success: false }), { status: 404 });
-      }
-      if (url.pathname === '/repos/Lascade-Co/example-web/issues/42/comments' && (options.method ?? 'GET') === 'GET') return existing && url.searchParams.get('page') === '1' ? [{ id: 5, user: { type: 'Bot' }, body: `${previewCommentMarker}\nold` }] : [];
-      if (url.pathname === '/repos/Lascade-Co/example-web/issues/comments/5' && options.method === 'PATCH') return {};
-      throw new Error(`Unexpected request ${options.method} ${url}`);
-    });
+  // Closed and never deployed: absent is success. Our existing comment is
+  // updated; none is created, and another app's marked comment is not touched.
+  for (const [comments, expectedComment] of [
+    [[{ id: 5, user: ourBot, body: `${previewCommentMarker}\nold` }], /no Preview/i],
+    [[], undefined],
+    [[{ id: 6, user: { type: 'Bot', login: 'other-app[bot]' }, body: `${previewCommentMarker}\nold` }], undefined],
+  ]) {
+    const closed = await runCli('cleanup', cleanupEnv, cleanupResponder({ comments }));
     assert.equal(closed.exitCode, undefined, closed.errors.join('\n'));
-    assert.match(closed.outputs, new RegExp(`^state=${expectedState}$`, 'm'));
+    assert.match(closed.outputs, /^state=absent$/m);
     const writes = closed.requests.filter(request => request.method !== 'GET');
     if (expectedComment) assert.match(writes.find(request => request.method === 'PATCH').body.body, expectedComment);
     else assert.equal(writes.length, 0);
   }
 
-  const forged = await runCli('cleanup', { PAYLOAD_JSON: JSON.stringify(prPayload), GH_TOKEN: 't', CLOUDFLARE_API_TOKEN: 'c' }, async () => { throw new Error('no requests'); });
+  const forged = await runCli('cleanup', { ...cleanupEnv, PAYLOAD_JSON: JSON.stringify(prPayload) }, async () => { throw new Error('no requests'); });
   assert.equal(forged.exitCode, 1);
   assert.equal(forged.requests.length, 0);
+});
+
+test('CLI verify-source refuses a PR head that targets a different Worker than base', async () => {
+  const plan = planFor(prPayload);
+  const respond = baseWrangler => async url => {
+    const file = sourceFiles(url, baseSha, baseWrangler);
+    if (file) return file;
+    if (url.pathname === '/repos/Lascade-Co/example-web/pulls/42') return openPull;
+    throw new Error(`Unexpected request ${url}`);
+  };
+  const same = await runCli('verify-source', { PLAN_JSON: JSON.stringify(plan), GH_TOKEN: 't' }, respond(nativeSource().wrangler));
+  assert.equal(same.exitCode, undefined, same.errors.join('\n'));
+  for (const baseWrangler of [{ ...nativeSource().wrangler, name: 'base-web' }, { ...nativeSource().wrangler, account_id: 'e'.repeat(32) }]) {
+    const other = await runCli('verify-source', { PLAN_JSON: JSON.stringify(plan), GH_TOKEN: 't' }, respond(baseWrangler));
+    assert.equal(other.exitCode, 1);
+    assert.match(other.errors.join('\n'), /base branch/);
+  }
+  // dev and main are unchanged: no PR or base lookup.
+  const dev = await runCli('verify-source', { PLAN_JSON: JSON.stringify(planFor({ ...base, branch: 'dev' })), GH_TOKEN: 't' }, async url => {
+    assert.equal(url.pathname, '/repos/Lascade-Co/example-web/commits/dev');
+    return { sha: base.sha };
+  });
+  assert.equal(dev.exitCode, undefined, dev.errors.join('\n'));
+  assert.equal(dev.requests.length, 1);
 });

@@ -27,12 +27,14 @@ permissions:
 jobs:
   dispatch:
     # Three explicit routes. The first is the unchanged dev/main deploy; a
-    # manual run that names a PR never takes it.
+    # manual run that names a PR never takes it. Dependabot-triggered PR events
+    # get no secrets (no dispatch token), so they are skipped.
     if: >-
       (((github.event_name == 'push' && !github.event.deleted) ||
         (github.event_name == 'workflow_dispatch' && !github.event.inputs.pr)) &&
        (github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/main')) ||
       (inputs.pr_previews && github.event_name == 'pull_request' &&
+       github.actor != 'dependabot[bot]' &&
        github.event.pull_request.head.repo.full_name == github.repository &&
        contains(fromJSON('["opened","synchronize","reopened","ready_for_review","closed"]'), github.event.action) &&
        (!github.event.pull_request.draft || github.event.action == 'closed')) ||

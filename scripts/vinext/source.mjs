@@ -150,16 +150,49 @@ export function projectFromSource(payload, { pkg, wrangler, submodule_repos }, v
 }
 
 // Deleting a closed PR's Preview needs only its Worker, account and Wrangler
-// pin from the PR's last head. It does not require a previews block there: an
-// earlier head may have deployed one, and a missing Preview is a no-op.
+// pin, read from the PR's base commit (a PR Preview always uses its base's
+// Worker). It does not require a previews block: a missing Preview is a no-op.
 export function cleanupPlan(payload, { pkg, wrangler }) {
   const { owner, repo_name, pr_number } = validateDispatch(payload);
   assert(dispatchRoute(payload) === 'cleanup', 'Preview cleanup runs only for closed pull requests');
   assert(wrangler && /^[a-f0-9]{32}$/.test(wrangler.account_id) && /^[a-z0-9][a-z0-9-]{0,62}$/.test(wrangler.name), 'Project must register a valid account and Worker');
   const wrangler_version = pkg?.devDependencies?.wrangler ?? pkg?.dependencies?.wrangler;
   assert(typeof wrangler_version === 'string' && /^[0-9]+\.[0-9]+\.[0-9]+$/.test(wrangler_version), 'Pin an exact Wrangler version in package.json');
+  const [major, minor] = wrangler_version.split('.').map(Number);
+  assert(major > 4 || (major === 4 && minor >= 135), 'Deleting a native Preview requires Wrangler 4.135.0 or later');
   return {
     repo: payload.repo, branch: payload.branch, sha: payload.sha, owner, repo_name, target: 'pr', pr_number,
     project: { account_id: wrangler.account_id, worker_name: wrangler.name, wrangler_version, preview_mode: 'native', preview_name: `pr-${pr_number}`, runtime_secrets: [] },
   };
+}
+
+// The PR as GitHub reports it, with a base commit in the same repository.
+async function pullWithBase(repo, pr_number, github) {
+  const pull = await github(`/repos/${repo}/pulls/${pr_number}`);
+  assert(pull && /^[a-f0-9]{40}$/.test(pull.base?.sha ?? '') && pull.base.repo?.full_name === repo, 'Invalid pull request base');
+  return pull;
+}
+
+// A PR Preview may only publish onto the Worker and account its base branch
+// deploys to; a PR cannot redirect its upload by editing wrangler.jsonc.
+export async function assertBaseWorker(plan, github) {
+  assert(plan?.target === 'pr' && Number.isInteger(plan.pr_number), 'Base Worker check is only for PR Previews');
+  const pull = await pullWithBase(plan.repo, plan.pr_number, github);
+  let wrangler;
+  try { wrangler = JSON.parse(await fileAtCommit({ repo: plan.repo, sha: pull.base.sha }, github, 'wrangler.jsonc')); }
+  catch (error) { throw error instanceof SyntaxError ? new Error('Base branch wrangler.jsonc is not valid JSON') : error; }
+  assert(wrangler?.name === plan.project.worker_name && wrangler.account_id === plan.project.account_id, 'A PR Preview must use the Worker and account its base branch deploys to');
+}
+
+// A closed-PR cleanup. The dispatch must be the closed PR's own last head from
+// this repository; the Worker comes from the base commit. A reopened PR is left
+// alone (its reopen dispatch owns the Preview).
+export async function resolveCleanup(payload, github) {
+  const { pr_number } = validateDispatch(payload);
+  assert(dispatchRoute(payload) === 'cleanup', 'Preview cleanup runs only for closed pull requests');
+  const pull = await pullWithBase(payload.repo, pr_number, github);
+  const reopened = pull.state === 'open';
+  if (!reopened) assert(pull.head?.sha === payload.sha && pull.head?.repo?.full_name === payload.repo, 'Cleanup dispatch is not the closed pull request head');
+  const source = await fetchSourceFiles({ ...payload, sha: pull.base.sha }, github);
+  return { reopened, plan: cleanupPlan(payload, source) };
 }

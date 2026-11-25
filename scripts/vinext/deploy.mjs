@@ -5,6 +5,7 @@ import { randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import { assert } from './config.mjs';
 import { readSecrets, selectValues, validateBundle, validateD1Migrations, run } from './build.mjs';
+import { assertBaseWorker } from './source.mjs';
 
 export async function request(url, token, options = {}) {
   const response = await fetch(url, {
@@ -212,7 +213,10 @@ async function deployNative(plan, { configPath, secrets, wranglerBin, env, execu
 }
 
 export async function deploy(plan, { bundleRoot, envFile, wranglerBin, env = process.env, execute = run, github, cloudflare, pause = ms => new Promise(r => setTimeout(r, ms)) }) {
-  if (plan.target === 'pr') assertPullRequestPlan(plan);
+  if (plan.target === 'pr') {
+    assertPullRequestPlan(plan);
+    await assertBaseWorker(plan, github);
+  }
   const values = readSecrets(envFile);
   const secrets = selectValues(values, plan.project.runtime_secrets);
   const release = JSON.parse(readFileSync(join(bundleRoot, 'vinext-release.json'), 'utf8'));
@@ -348,12 +352,13 @@ export function previewCommentBody(plan, { result, previewUrl, runUrl }) {
   return `${previewCommentMarker}\n### PR preview \`${name}\`: ${commentResults[result]}\n\n${detail}\n\n[Run](${runUrl})\n`;
 }
 
-async function findPreviewComment(plan, github) {
+async function findPreviewComment(plan, github, appSlug) {
   for (let page = 1; page <= 100; page++) {
     const comments = await github(`/repos/${plan.repo}/issues/${plan.pr_number}/comments?per_page=100&page=${page}`);
     assert(Array.isArray(comments), 'Invalid comment list');
-    // Only a bot (this app) owns the comment; people may quote the marker.
-    const found = comments.find(comment => comment?.user?.type === 'Bot' && typeof comment.body === 'string' && comment.body.startsWith(previewCommentMarker));
+    // Only this app's bot account owns the comment; people and other apps may
+    // quote the marker. `[` cannot appear in a user login, so this is exact.
+    const found = comments.find(comment => comment?.user?.type === 'Bot' && comment.user.login === `${appSlug}[bot]` && typeof comment.body === 'string' && comment.body.startsWith(previewCommentMarker));
     if (found) return found;
     if (!comments.length) return undefined;
   }
@@ -362,9 +367,10 @@ async function findPreviewComment(plan, github) {
 
 // Creates or edits the single marked PR comment. `overwrite: false` leaves an
 // existing comment alone (a newer run owns it); `create: false` never adds one.
-export async function upsertPreviewComment(plan, body, github, { overwrite = true, create = true } = {}) {
+export async function upsertPreviewComment(plan, body, github, { appSlug, overwrite = true, create = true } = {}) {
   assert(plan?.target === 'pr' && Number.isInteger(plan.pr_number) && /^Lascade-Co\/[A-Za-z0-9_.-]+$/.test(plan.repo), 'Invalid PR Preview comment plan');
-  const existing = await findPreviewComment(plan, github);
+  assert(typeof appSlug === 'string' && /^[a-z0-9][a-z0-9-]{0,99}$/.test(appSlug), 'Invalid GitHub app slug');
+  const existing = await findPreviewComment(plan, github, appSlug);
   if (existing) {
     if (!overwrite) return 'skipped';
     assert(Number.isSafeInteger(existing.id), 'Invalid comment id');
