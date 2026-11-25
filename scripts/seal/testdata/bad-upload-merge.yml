@@ -27,10 +27,6 @@ jobs:
       - run: seal-unpack "$RUNNER_TEMP/dl"
         env:
           REPO_AGE_KEY: ${{ secrets.REPO_AGE_KEY }}
-      - uses: actions/upload-pages-artifact@v4
-        with:
-          path: site
-          retention-days: 1
       - name: Upload sealed log
         if: always()
         uses: actions/upload-artifact@v7

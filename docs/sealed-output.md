@@ -44,7 +44,7 @@ branch, PR number and title, commit SHA, step names, and lines starting `::add-m
 4. Artifacts: `seal-pack [--allow-empty] [--include-hidden] <name> <path>...` writes
    `$RUNNER_TEMP/seal/art/<name>/<name>.tgz.age`; upload that directory with `retention-days` of at most 7 days (the ceiling; shorter is fine). After a
    `download-artifact`, the next step runs `seal-unpack <dir> [<dest>]` with `REPO_AGE_KEY: ${{ secrets.REPO_AGE_KEY }}`.
-   `actions/upload-pages-artifact` (public site) is the only unsealed upload. An `upload-artifact` path is either
+   No upload is unsealed: `actions/upload-pages-artifact` is rejected. An `upload-artifact` path is either
    `${{ runner.temp }}/seal/out/` (rule 2) or `${{ runner.temp }}/seal/art/<name>/`, and `seal-pack` refuses any
    file under `$RUNNER_TEMP/seal`.
 5. Masks. Use `echo "::add-mask::$VALUE"` for a private value a later unsealed step (third-party actions,
@@ -92,15 +92,15 @@ are sealed. `pull_request` workflows must not use secrets; `pull_request_target`
 ## Reading a run
 
 Open the marker link in the log, `https://ci.lascade.com/?repo=<repo>&run=<run id>&attempt=<n>` (older markers
-without `repo=` open as `actions` runs). In Settings, paste a GitHub fine-grained token with Repository access "Public
-repositories (read-only)" and no other permissions (shared by all repos), and the private key (`REPO_AGE_KEY`) of each
-repo you read; keys stay only in your browser, one per repo. A key is checked against the repo's committed
-`.github/seal/repo-key.pub` (`scripts/seal/repo-key.pub` for `actions`) before it is saved or used, so a key for another
-repo or a rotated key is rejected. "Forget all" clears the token, every key and everything decrypted.
+without `repo=` open as `actions` runs), and sign in through Cloudflare Access (`staff` policy). There is no token or
+key to paste: the viewer is a Cloudflare Worker in `Lascade-Co/ci` that reads GitHub with the CI App and unseals on the
+server with the repo keys it holds as secrets, so keys never reach the browser. If it has no current key for a repo
+(never loaded, or rotated since), it says so; load the key as in the next section.
 
 `https://ci.lascade.com/` lists public Lascade-Co repos with the `sealed-ci` topic ("Show all public repos" adds the
 rest, marked "not sealed"); `?repo=<repo>` lists that repo's recent runs. "Export logs" in a run downloads the job's or
-every job's log as plain text with sealed output merged in (needs the repo's key).
+every job's log as plain text with sealed output merged in. Sealed artifacts unseal in the viewer and download as
+`.tgz`.
 
 ## Generating or rotating a repo key
 
@@ -113,14 +113,19 @@ k=$(age-keygen 2>/dev/null); printf '%s' "$k" | grep '^AGE-SECRET-KEY-' | tr -d 
 1. Paste the clipboard into Infisical as `REPO_AGE_KEY`, `AGE-SECRET-KEY-1` prefix intact (it syncs to the repo's
    Actions secrets). The command prints the public `age1...` line.
 2. Commit only that line: `scripts/seal/repo-key.pub` here, `.github/seal/repo-key.pub` in other repos.
-3. After a rotation, artifacts sealed to the old key become unreadable; they expire within 7 days.
+3. After committing the public key, load the private key into the log viewer from a `Lascade-Co/ci`
+   checkout: `scripts/sync-keys.sh <repo> <infisical-project-id> <env> [<path>]`. It copies `REPO_AGE_KEY` from
+   Infisical into the Worker secret `REPO_AGE_KEY__<REPO>` (repo name uppercased, non-alphanumerics as `_`) and refuses
+   a key that does not match the committed public key.
+4. After a rotation, runners and the viewer cannot open output sealed to the old key; it expires within 7 days.
 
 ## Sealing another repository
 
 Other Lascade-Co repos use the same toolkit through two composite actions. Checklist for a frozen repository (see
 `CONTEXT.md`). Actions stays disabled while the repo is private, including while you commit these changes.
 
-1. Generate the key pair as above and commit `.github/seal/repo-key.pub`.
+1. Generate the key pair as above, commit `.github/seal/repo-key.pub`, and load the private key into the log viewer
+   with `scripts/sync-keys.sh` in `Lascade-Co/ci` (step 3 above).
 2. First step of every job, no `with:`:
 
    ```yaml

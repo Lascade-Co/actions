@@ -36,3 +36,5 @@ in Infisical, which syncs it to Actions secrets.
 **Why the log viewer has its own subdomain.** It keeps the repo key in browser storage. Four other
 org Pages sites share the `lascade-co.github.io` origin, and any script on them could read that
 storage, so the viewer is served from `ci.lascade.com`.
+
+2026-11-26: the viewer moved to `Lascade-Co/ci` as a Worker behind Access; see that repo's ADR 0001.

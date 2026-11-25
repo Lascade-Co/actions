@@ -32,9 +32,6 @@ jobs:
           python3 -m venv "$RUNNER_TEMP/venv"
           "$RUNNER_TEMP/venv/bin/pip" install --quiet pytest==9.1.1 pyyaml
           "$RUNNER_TEMP/venv/bin/python" -m pytest scripts/seal/ -q
-      - name: Run viewer unit tests
-        if: runner.os == 'Linux'
-        run: node --test viewer/lib/*.test.mjs
       - name: Upload sealed log
         if: always()
         uses: actions/upload-artifact@v7
