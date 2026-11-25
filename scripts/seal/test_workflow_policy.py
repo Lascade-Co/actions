@@ -202,6 +202,7 @@ def check_no_unsealed_shell(wf):
 
 SEAL_PREFIX = "${{ runner.temp }}/seal/"
 UPLOADS = ("actions/upload-artifact", "actions/upload-artifact/merge")
+PAGES_UPLOAD = "actions/upload-pages-artifact"  # publishes its path unsealed, so it is never allowed
 
 
 def runs_seal_pack(step):
@@ -224,6 +225,9 @@ def check_uploads_sealed(wf):
     for n, j in jobs_with_steps(wf).items():
         steps = j["steps"]
         for i, s in enumerate(steps):
+            if uses_of(s) == PAGES_UPLOAD:
+                bad.append(f"job {n} step {i + 1}: upload-pages-artifact would publish its path unsealed")
+                continue
             if uses_of(s) not in UPLOADS or s == UPLOAD_STEP:
                 continue
             paths = [p.strip() for p in str((s.get("with") or {}).get("path", "")).splitlines() if p.strip()]
@@ -257,7 +261,7 @@ def check_retention_at_most_7(wf):
     bad = []
     for n, j in jobs_with_steps(wf).items():
         for i, s in enumerate(j["steps"]):
-            if uses_of(s) not in (*UPLOADS, "actions/upload-pages-artifact"):
+            if uses_of(s) not in UPLOADS:
                 continue
             days = (s.get("with") or {}).get("retention-days")
             if not isinstance(days, int) or not 1 <= days <= 7:
@@ -580,6 +584,7 @@ BAD_CASES = [
     ("bad-upload-not-last.yml", check_upload_step_last),
     ("bad-step-shell.yml", check_no_unsealed_shell),
     ("bad-upload-unsealed.yml", check_uploads_sealed),
+    ("bad-upload-pages.yml", check_uploads_sealed),
     ("bad-download-unsealed.yml", check_downloads_unsealed),
     ("bad-retention.yml", check_retention_at_most_7),
 ]

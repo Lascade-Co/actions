@@ -10,4 +10,4 @@ This repo is public and its CI output is sealed. Rules, enforced by `.github/wor
 - No secrets in `pull_request` workflows; no `pull_request_target`.
 - Jobs with a `permissions:` block need `contents: read`.
 - Full rules: https://github.com/Lascade-Co/actions/blob/main/docs/sealed-output.md
-- Open runs at https://ci.lascade.com/?repo=<repo>
+- Open runs at https://ci.lascade.com/?repo=<repo> (staff sign-in through Cloudflare Access; no token or key to paste).

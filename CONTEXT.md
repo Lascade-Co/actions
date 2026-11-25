@@ -80,8 +80,8 @@ private must be **sealed** before it reaches a log, an artifact or a commit.
 
 **Repo key**:
 The single age key pair that seals everything private in this repo. The public half is
-committed. The private half is held only in Infisical, which syncs it to this repo's Actions
-secrets; people use it through `infisical run` or by pasting it into the **log viewer**.
+committed. The private half lives in Infisical, which syncs it to this repo's Actions secrets;
+people use it through `infisical run`, and the **log viewer** Worker holds a copy as a secret.
 _Avoid_: encryption key, secret key (ambiguous with Actions secrets).
 
 **Sealed**:
@@ -108,15 +108,17 @@ _Avoid_: encrypted log, private log.
 Any artifact a job uploads, sealed before upload. A job that consumes one unseals it.
 
 **Log viewer**:
-The static page this repo serves on its own subdomain. Given a run ID, it fetches that run's
-**sealed logs** and **sealed artifacts** and opens them in the browser with the **repo key**
-the person stored there.
+The staff-only page at `ci.lascade.com`, served by a Cloudflare Worker from `Lascade-Co/ci` behind
+Cloudflare Access. Given a run ID, the Worker fetches that run's **sealed logs** and **sealed
+artifacts** and opens them with the **repo key** it holds; repo keys never reach the browser, so
+losing staff access ends someone's ability to read sealed output.
 _Avoid_: dashboard, decoder.
 
 **Sealed repository**:
 An org repository whose workflows all seal their output, with its own **repo key** (public half
-in `.github/seal/repo-key.pub`), a passing seal policy check, and the `sealed-ci` topic that
-lists it in the **log viewer**. This repo is the first; others reuse its **seal action**.
+in `.github/seal/repo-key.pub`, private half loaded into the **log viewer**), a passing seal policy
+check, and the `sealed-ci` topic that lists it in the **log viewer**. This repo is the first; others
+reuse its **seal action**.
 _Avoid_: secure repo, encrypted repo.
 
 **Seal action**:
