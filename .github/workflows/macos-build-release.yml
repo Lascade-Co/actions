@@ -41,7 +41,7 @@ defaults:
 
 jobs:
   release:
-    runs-on: macos-latest
+    runs-on: ${{ github.event.client_payload.runner || 'macos-latest' }}
     environment: production
     timeout-minutes: 60
     steps:
@@ -100,10 +100,10 @@ jobs:
           echo "version=$VERSION"   >> "$GITHUB_OUTPUT"
           echo "app_name=$APP_NAME" >> "$GITHUB_OUTPUT"
 
-      - name: Select latest stable Xcode
+      - name: Select Xcode
         uses: maxim-lobanov/setup-xcode@v1
         with:
-          xcode-version: latest-stable
+          xcode-version: ${{ github.event.client_payload.xcode_version || 'latest-stable' }}
 
       # The action masks every value it exports (core.setSecret before exportVariable).
       - name: Fetch build secrets from Infisical
