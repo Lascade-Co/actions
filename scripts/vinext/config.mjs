@@ -222,7 +222,9 @@ export function sanitizeConfig(config, plan) {
   assert(config.targetEnvironment === undefined || config.targetEnvironment === sourceEnvironment(plan.target), 'Wrong build target');
   for (const key of ['build', 'alias', 'env', 'migrations', 'unsafe', 'containers']) assert(empty(config[key]), `Unsupported generated config: ${key}`);
   assert(config.no_bundle === true, 'Vinext must emit a prebuilt no_bundle Worker');
-  assert(config.workers_dev === true && config.preview_urls === true, 'Enable workers_dev and preview_urls');
+  // workers_dev may be off once a Worker serves a real route (e.g. after a domain cutover);
+  // Previews only need preview_urls, which stays mandatory.
+  assert(typeof config.workers_dev === 'boolean' && config.preview_urls === true, 'Set workers_dev explicitly and enable preview_urls');
   assert(typeof config.main === 'string' && /\.(m?js)$/.test(config.main), 'Missing built Worker entry');
   assert(config.assets && typeof config.assets.directory === 'string', 'Missing built assets');
   if (p.preview_mode === 'native') assert(config.assets.binding === (p.asset_binding ?? 'ASSETS') && !p.runtime_secrets.includes(config.assets.binding), 'Built asset binding differs from source or collides with a runtime secret');

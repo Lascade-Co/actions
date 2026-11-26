@@ -75,6 +75,25 @@ test('native Preview derives every private runtime secret from Infisical', () =>
   assert.throws(() => projectFromSource(payload, { ...source, wrangler: { ...source.wrangler, previews: { ...source.wrangler.previews, secrets: { required: ['APP_SECRET'] } } } }, { APP_SECRET: 'selected' }), /Unsupported native Preview configuration/);
 });
 
+test('workers_dev may be disabled; preview_urls stays mandatory', () => {
+  const source = nativeSource();
+  const plan = prepare(payload, projectFromSource(payload, source, { APP_SECRET: 'selected' }));
+  const built = {
+    name: 'example-web', account_id: 'b'.repeat(32),
+    main: 'index.mjs', assets: { directory: '../client', binding: 'ASSETS' }, no_bundle: true,
+    workers_dev: false, preview_urls: true, images: { binding: 'IMAGES' },
+    previews: source.wrangler.previews,
+  };
+  const sanitized = sanitizeConfig(built, plan);
+  assert.equal(sanitized.workers_dev, false);
+  assert.equal(sanitized.preview_urls, true);
+  assert.deepEqual(sanitizeConfig(sanitized, plan), sanitized);
+  assert.equal(sanitizeConfig({ ...built, workers_dev: true }, plan).workers_dev, true);
+  assert.throws(() => sanitizeConfig({ ...built, workers_dev: undefined }, plan), /Set workers_dev explicitly and enable preview_urls/);
+  assert.throws(() => sanitizeConfig({ ...built, workers_dev: 'false' }, plan), /Set workers_dev explicitly and enable preview_urls/);
+  assert.throws(() => sanitizeConfig({ ...built, preview_urls: false }, plan), /Set workers_dev explicitly and enable preview_urls/);
+});
+
 test('sanitized native Preview bundle passes validation a second time', () => {
   const source = nativeSource();
   const plan = prepare(payload, projectFromSource(payload, source, { APP_SECRET: 'selected', VINEXT_METADATA: 'private-value' }));
