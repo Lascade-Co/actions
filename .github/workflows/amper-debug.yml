@@ -223,6 +223,9 @@ jobs:
         run: yq --version
       - name: Apply debug variant (IDs and App Check debug token)
         run: python3 "$RUNNER_TEMP/amper-control.py" set-variant --source "$GITHUB_WORKSPACE/source" --variant debug
+      - name: Write opted-in local properties
+        id: properties
+        run: python3 "$RUNNER_TEMP/amper-control.py" local-properties --source "$GITHUB_WORKSPACE/source" >> "$GITHUB_OUTPUT"
       - name: Write version and CI build number
         run: python3 "$RUNNER_TEMP/amper-control.py" set-version --source "$GITHUB_WORKSPACE/source" --version "$VERSION" --build "$BUILD_NUMBER"
         env:
@@ -283,6 +286,9 @@ jobs:
             Source commit: ${{ needs.prepare.outputs.sha }}
             [Workflow run](${{ format('{0}/{1}/actions/runs/{2}', github.server_url, github.repository, github.run_id) }})
         id: release
+      - name: Remove generated local properties
+        if: ${{ always() && steps.properties.outputs.created == 'true' }}
+        run: rm -f "$GITHUB_WORKSPACE/source/local.properties"
       - name: Delete APKs and signing inputs from the runner
         run: |-
           rm -rf "$RUNNER_TEMP/apk" build/tasks build/signed
@@ -411,14 +417,23 @@ jobs:
           print(f"Staging profile {values['name']} ({values['uuid']}), team {values['team']}")
           PY
         id: profile
+      - name: Resolve optional extension profile
+        id: extension
+        env:
+          TEAM_ID: ${{ steps.profile.outputs.team }}
+        run: python3 "$RUNNER_TEMP/amper-control.py" extension-profile --source "$GITHUB_WORKSPACE/source" --variant debug --team "$TEAM_ID" >> "$GITHUB_OUTPUT"
       - name: Apply debug variant and manual app-target signing
         run: |-
           python3 "$RUNNER_TEMP/amper-control.py" set-variant --source "$GITHUB_WORKSPACE/source" --variant debug \
-            --team "$TEAM_ID" --profile "$PROFILE_NAME" >> "$GITHUB_OUTPUT"
+            --team "$TEAM_ID" --profile "$PROFILE_NAME" --extension-profile "$EXT_PROFILE" >> "$GITHUB_OUTPUT"
         id: variant
         env:
           TEAM_ID: ${{ steps.profile.outputs.team }}
+          EXT_PROFILE: ${{ steps.extension.outputs.extension_profile }}
           PROFILE_NAME: ${{ steps.profile.outputs.name }}
+      - name: Write opted-in local properties
+        id: properties
+        run: python3 "$RUNNER_TEMP/amper-control.py" local-properties --source "$GITHUB_WORKSPACE/source" >> "$GITHUB_OUTPUT"
       - name: Write version and CI build number
         run: python3 "$RUNNER_TEMP/amper-control.py" set-version --source "$GITHUB_WORKSPACE/source" --version "$VERSION" --build "$BUILD_NUMBER"
         env:
@@ -427,7 +442,7 @@ jobs:
       - name: Install temporary Apple distribution signing
         uses: ./control/actions/apple-signing
         with:
-          profiles: IOS_STAGING_PROFILE_APP_BASE64
+          profiles: ${{ steps.extension.outputs.profiles }}
       # Read-only, from amper-release's bundles (built on main): trusted to untrusted only.
       - name: Restore Kotlin toolchain OCI bundle
         uses: ./control/actions/gh-bundle-cache
@@ -511,10 +526,12 @@ jobs:
       - name: Write export options
         run: |-
           python3 "$RUNNER_TEMP/amper-control.py" export-options --team "$TEAM_ID" --profile "$PROFILE_NAME" \
-            --bundle-id "$BUNDLE_ID" --out "$RUNNER_TEMP/ExportOptions.plist"
+            --extension-profile "$EXT_PROFILE" --extension-bundle "$EXT_BUNDLE" --bundle-id "$BUNDLE_ID" --out "$RUNNER_TEMP/ExportOptions.plist"
         env:
           TEAM_ID: ${{ steps.profile.outputs.team }}
+          EXT_PROFILE: ${{ steps.extension.outputs.extension_profile }}
           PROFILE_NAME: ${{ steps.profile.outputs.name }}
+          EXT_BUNDLE: ${{ steps.variant.outputs.extension_bundle }}
           BUNDLE_ID: ${{ steps.variant.outputs.bundle_id }}
       - name: Export staging IPA
         run: |-
@@ -561,6 +578,9 @@ jobs:
           SOURCE_REPO: ${{ needs.prepare.outputs.repo }}
           SOURCE_SHA: ${{ needs.prepare.outputs.sha }}
           PARK_TAG: ${{ format('ci-testflight-{0}', needs.prepare.outputs.tag) }}
+      - name: Remove generated local properties
+        if: ${{ always() && steps.properties.outputs.created == 'true' }}
+        run: rm -f "$GITHUB_WORKSPACE/source/local.properties"
       - name: Delete the IPA, archive and build products from the runner
         run: rm -rf "$RUNNER_TEMP/ipa" "$RUNNER_TEMP/export" "$RUNNER_TEMP/app.xcarchive" "$RUNNER_TEMP/dd/Build" "$RUNNER_TEMP/ExportOptions.plist" build
         if: ${{ always() }}

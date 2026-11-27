@@ -217,6 +217,9 @@ jobs:
         run: yq --version
       - name: Apply release variant (IDs, no App Check debug token)
         run: python3 "$GITHUB_WORKSPACE/control/scripts/amper/control.py" set-variant --source "$GITHUB_WORKSPACE/source" --variant release
+      - name: Write opted-in local properties
+        id: properties
+        run: python3 "$GITHUB_WORKSPACE/control/scripts/amper/control.py" local-properties --source "$GITHUB_WORKSPACE/source" >> "$GITHUB_OUTPUT"
       - name: Write release version and build number
         run: python3 "$GITHUB_WORKSPACE/control/scripts/amper/control.py" set-version --source "$GITHUB_WORKSPACE/source" --version "$VERSION" --build "$BUILD_NUMBER"
         env:
@@ -318,6 +321,9 @@ jobs:
           GH_TOKEN: ${{ steps.upload-token.outputs.token }}
           SOURCE_REPO: ${{ needs.prepare.outputs.repo }}
           RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+      - name: Remove generated local properties
+        if: ${{ always() && steps.properties.outputs.created == 'true' }}
+        run: rm -f "$GITHUB_WORKSPACE/source/local.properties"
       - name: Delete binaries, signing inputs and Firebase credentials from the runner
         run: |-
           rm -rf "$RUNNER_TEMP/android" "$RUNNER_TEMP/firebase-service-account.json" build/tasks build/signed
@@ -468,15 +474,24 @@ jobs:
           print(f"Production profile {values['name']} ({values['uuid']}), team {values['team']}")
           PY
         id: profile
+      - name: Resolve optional extension profile
+        id: extension
+        env:
+          TEAM_ID: ${{ steps.profile.outputs.team }}
+        run: python3 "$GITHUB_WORKSPACE/control/scripts/amper/control.py" extension-profile --source "$GITHUB_WORKSPACE/source" --variant release --team "$TEAM_ID" >> "$GITHUB_OUTPUT"
       # Release IDs, release Firebase plist, App Attest production, blank App Check debug token, manual signing.
       - name: Apply release variant and manual app-target signing
         run: |-
           python3 "$GITHUB_WORKSPACE/control/scripts/amper/control.py" set-variant --source "$GITHUB_WORKSPACE/source" \
-            --variant release --team "$TEAM_ID" --profile "$PROFILE_NAME" >> "$GITHUB_OUTPUT"
+            --variant release --team "$TEAM_ID" --profile "$PROFILE_NAME" --extension-profile "$EXT_PROFILE" >> "$GITHUB_OUTPUT"
         id: variant
         env:
           TEAM_ID: ${{ steps.profile.outputs.team }}
+          EXT_PROFILE: ${{ steps.extension.outputs.extension_profile }}
           PROFILE_NAME: ${{ steps.profile.outputs.name }}
+      - name: Write opted-in local properties
+        id: properties
+        run: python3 "$GITHUB_WORKSPACE/control/scripts/amper/control.py" local-properties --source "$GITHUB_WORKSPACE/source" >> "$GITHUB_OUTPUT"
       - name: Write release version and build number
         run: python3 "$GITHUB_WORKSPACE/control/scripts/amper/control.py" set-version --source "$GITHUB_WORKSPACE/source" --version "$VERSION" --build "$BUILD_NUMBER"
         env:
@@ -485,7 +500,7 @@ jobs:
       - name: Install temporary Apple distribution signing
         uses: ./control/actions/apple-signing
         with:
-          profiles: IOS_PROD_PROFILE_APP_BASE64
+          profiles: ${{ steps.extension.outputs.profiles }}
       # Release-only bundle names (and their own latest). Only this workflow, which runs on main, publishes bundles;
       # amper-debug (PR code) restores these read-only and publishes nothing. A miss cold-starts.
       - name: Restore Kotlin toolchain OCI bundle
@@ -570,10 +585,12 @@ jobs:
       - name: Write export options
         run: |-
           python3 "$GITHUB_WORKSPACE/control/scripts/amper/control.py" export-options --team "$TEAM_ID" --profile "$PROFILE_NAME" \
-            --bundle-id "$BUNDLE_ID" --out "$RUNNER_TEMP/ExportOptions.plist"
+            --extension-profile "$EXT_PROFILE" --extension-bundle "$EXT_BUNDLE" --bundle-id "$BUNDLE_ID" --out "$RUNNER_TEMP/ExportOptions.plist"
         env:
           TEAM_ID: ${{ steps.profile.outputs.team }}
+          EXT_PROFILE: ${{ steps.extension.outputs.extension_profile }}
           PROFILE_NAME: ${{ steps.profile.outputs.name }}
+          EXT_BUNDLE: ${{ steps.variant.outputs.extension_bundle }}
           BUNDLE_ID: ${{ steps.variant.outputs.bundle_id }}
       - name: Export the App Store IPA and zip the dSYMs
         run: |-
@@ -617,6 +634,9 @@ jobs:
           GH_TOKEN: ${{ steps.upload-token.outputs.token }}
           SOURCE_REPO: ${{ needs.prepare.outputs.repo }}
           RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+      - name: Remove generated local properties
+        if: ${{ always() && steps.properties.outputs.created == 'true' }}
+        run: rm -f "$GITHUB_WORKSPACE/source/local.properties"
       - name: Delete the IPA, archive and build products from the runner
         run: rm -rf "$RUNNER_TEMP/ios" "$RUNNER_TEMP/export" "$RUNNER_TEMP/app.xcarchive" "$RUNNER_TEMP/dd/Build" "$RUNNER_TEMP/ExportOptions.plist" build
         if: ${{ always() }}

@@ -593,6 +593,14 @@ class CacheSecrets(unittest.TestCase):
                 self.assertNotIn(secret, str(caught.exception))
                 self.assertFalse(self.secrets.exists())
 
+    def test_map_keys_from_both_environments_are_scanned(self):
+        for secret in ('fixture-prod', 'fixture-staging'):
+            self.secrets.write_text(f"APPCHECK_DEBUG_TOKEN='{self.TOKEN}'\nMAPTILER_KEY='fixture-staging'")
+            (self.cache / 'lib').write_bytes(secret.encode())
+            with patch.dict(os.environ, MAPTILER_KEY='fixture-prod'), self.assertRaises(ValueError) as err:
+                release.check_cache(self.secrets, [self.cache])
+            self.assertNotIn(secret, str(err.exception))
+
     def test_missing_or_short_secrets_fail_instead_of_passing_vacuously(self):
         self.secrets.write_text("APPCHECK_DEBUG_TOKEN='abc'")
         with self.assertRaisesRegex(ValueError, 'APPCHECK_DEBUG_TOKEN'):

@@ -201,3 +201,32 @@ the draft unpublished. If the build jobs failed, re-running them re-uploads to t
 the `vX.Y.Z` paths still accept only release tags). It loads `scripts/kmp/apps.py`, `scripts/kmp/control.py`,
 `scripts/kmp/release.py` and `scripts/amper/control.py` by path, so run it from the trusted `control/` checkout. Tests: `cd scripts/amper && python -m pytest` (run `scripts/amper` and `scripts/kmp` separately: both have
 `test_control.py`).
+
+### Optional app extension and local properties
+
+An app may add these fields to its existing `.ci/amper.json`:
+
+```json
+{
+  "ios_extension": {
+    "target": "DriverLiveActivity",
+    "ids": {
+      "debug": "com.lascade.driver.debug.LiveActivity",
+      "release": "com.lascade.driver.LiveActivity"
+    }
+  },
+  "local_properties_secrets": ["MAPTILER_KEY"]
+}
+```
+
+The Xcode project must embed the named app extension. Both targets use the release version/build number.
+For iOS debug and release, supply a matching App Store distribution profile under
+`IOS_STAGING_PROFILE_EXT_BASE64` (staging) or `IOS_PROD_PROFILE_EXT_BASE64` (prod) in Infisical
+`/Build`. The helper reads the profile name, requires the app's team and the exact extension bundle
+identifier, and supplies both profile names to IPA export. Existing app profile variables still apply.
+
+The optional local-properties list currently accepts only `MAPTILER_KEY`. For each selected environment,
+provision this public client key in `/Build`. On a fresh checkout the runner creates a mode-0600
+root `local.properties` for the Android and iOS builds. The checkout must ignore that path and it must
+be absent. The helper rejects empty values and characters outside the generator's `[A-Za-z0-9-]+`
+alphabet. A cleanup step removes the generated file. The compiled app intentionally contains the client key.

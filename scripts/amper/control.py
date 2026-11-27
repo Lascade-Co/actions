@@ -64,24 +64,39 @@ def pbxproj(src, m):
     return Path(src) / m['ios_project'] / 'project.pbxproj'
 
 
-def app_config_ids(text):
+def app_config_ids(text, extension=None):
     """Build configuration ids of the application target(s), via PBXNativeTarget -> XCConfigurationList."""
     ids = []
+    matches = 0
     for target in re.finditer(r'isa = PBXNativeTarget;.*?\n\t\t\};', text, re.S):
         body = target.group(0)
-        if not re.search(r'productType = "?com\.apple\.product-type\.application"?;', body):
+        kind = 'app-extension' if extension else 'application'
+        if not re.search(rf'productType = "?com\.apple\.product-type\.{kind}"?;', body):
             continue
+        if extension and not re.search(rf'^\s*name = "?{re.escape(extension)}"?;', body, re.M):
+            continue
+        matches += 1
         lst = re.search(r'buildConfigurationList = (\w+)', body).group(1)
         cfgs = re.search(rf'\n\t\t{lst}[^\n]*= \{{.*?buildConfigurations = \((.*?)\);', text, re.S)
-        ids += re.findall(r'(\w{12,})', cfgs.group(1))
+        entries = re.sub(r'/\*.*?\*/|//[^\n]*', '', cfgs.group(1), flags=re.S)
+        for entry in entries.split(','):
+            cid = entry.strip()
+            if cid:
+                if cid.startswith('"') and cid.endswith('"'):
+                    cid = cid[1:-1]
+                if not re.fullmatch(r'\w{12,}', cid):
+                    fail('invalid build configuration reference in ' + lst)
+                ids.append(cid)
+    if extension and matches != 1:
+        fail('expected exactly one extension target: ' + extension)
     if not ids:
         fail('no application target found in the pbxproj')
     return ids
 
 
-def set_app_settings(text, settings):
+def set_app_settings(text, settings, extension=None):
     """Set KEY = value; (replace or add) in the app target's build configurations only."""
-    for cid in app_config_ids(text):
+    for cid in app_config_ids(text, extension):
         match = re.search(rf'(\n\t\t{cid}[^\n]*= \{{\n\t\t\tisa = XCBuildConfiguration;\n\t\t\tbuildSettings = \{{)(.*?)(\n\t\t\t\}};)', text, re.S)
         if not match:
             fail('build configuration not found: ' + cid)
@@ -130,8 +145,79 @@ def cmd_set_version(a):
     for rel in m['version_files']:
         set_yaml_version(src / rel, a.version, a.build)
     pbx = pbxproj(src, m)
-    pbx.write_text(set_app_settings(pbx.read_text(), {'MARKETING_VERSION': a.version, 'CURRENT_PROJECT_VERSION': a.build}))
+    versions = {'MARKETING_VERSION': a.version, 'CURRENT_PROJECT_VERSION': a.build}
+    text = set_app_settings(pbx.read_text(), versions)
+    if 'ios_extension' in m:
+        text = set_app_settings(text, versions, extension_target(m))
+    pbx.write_text(text)
     emit(version=a.version, build_number=a.build)
+
+
+def extension_target(m):
+    name = m['ios_extension']['target']
+    if not isinstance(name, str) or not re.fullmatch(r'[A-Za-z0-9_-]+', name):
+        fail('invalid ios_extension target')
+    return name
+
+
+def extension_id(m, variant):
+    ident = m['ios_extension']['ids'][variant]
+    prefix = m['ids'][variant] + '.'
+    if not ident.startswith(prefix) or not re.fullmatch(r'[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*', ident[len(prefix):]):
+        fail('invalid child bundle identifier')
+    return ident
+
+
+def cmd_extension_profile(a):
+    m = manifest(a.source)
+    prefix = 'IOS_STAGING' if a.variant == 'debug' else 'IOS_PROD'
+    profiles = [prefix + '_PROFILE_APP_BASE64']
+    name = ''
+    if 'ios_extension' in m:
+        profiles.append(prefix + '_PROFILE_EXT_BASE64')
+        try:
+            encoded = os.environ[profiles[-1]]
+            with tempfile.NamedTemporaryFile() as raw:
+                raw.write(base64.b64decode(''.join(encoded.split()), validate=True))
+                raw.flush()
+                decoded = subprocess.run(['security', 'cms', '-D', '-i', raw.name],
+                                         check=True, capture_output=True).stdout
+            profile = plistlib.loads(decoded)
+            name = profile['Name']
+            team = profile['TeamIdentifier']
+            bundle = extension_id(m, a.variant)
+            identifiers = {p + '.' + bundle for p in profile['ApplicationIdentifierPrefix']}
+            if (team != [a.team] or profile['Entitlements']['application-identifier'] not in identifiers
+                    or not re.fullmatch(r'[A-Za-z0-9 ._()-]+', name)):
+                fail('extension profile identity mismatch or unsupported profile name')
+        except (KeyError, ValueError, plistlib.InvalidFileException, subprocess.CalledProcessError):
+            fail('missing or invalid extension provisioning profile')
+    emit(profiles=' '.join(profiles), extension_profile=name)
+
+
+def cmd_local_properties(a):
+    keys = manifest(a.source).get('local_properties_secrets', [])
+    if keys == []:
+        return
+    if keys != ['MAPTILER_KEY']:
+        fail('unsupported local_properties_secrets')
+    value = os.environ.get('MAPTILER_KEY', '')
+    if not re.fullmatch(r'[A-Za-z0-9-]+', value):
+        fail('MAPTILER_KEY missing or invalid')
+    if subprocess.run(['git', 'check-ignore', '-q', '--', 'local.properties'], cwd=a.source).returncode:
+        fail('local.properties must be untracked and gitignored')
+    path = Path(a.source) / 'local.properties'
+    try:
+        fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    except FileExistsError:
+        fail('local.properties already exists')
+    try:
+        with os.fdopen(fd, 'w') as stream:
+            stream.write('MAPTILER_KEY=' + value + '\n')
+    except OSError:
+        path.unlink(missing_ok=True)
+        raise
+    emit(created='true')
 
 
 def cmd_set_variant(a):
@@ -160,6 +246,16 @@ def cmd_set_variant(a):
         settings.update(CODE_SIGN_STYLE='Manual', CODE_SIGN_IDENTITY='"Apple Distribution"', DEVELOPMENT_TEAM=a.team,
                         PROVISIONING_PROFILE_SPECIFIER='"' + a.profile.replace('"', '').replace('\\', '') + '"')
     text = set_app_settings(pbx.read_text(), settings)
+    extension_bundle = ''
+    if 'ios_extension' in m:
+        extension_bundle = extension_id(m, a.variant)
+        ext = {'PRODUCT_BUNDLE_IDENTIFIER': extension_bundle}
+        if a.team:
+            if not re.fullmatch(r'[A-Za-z0-9 ._()-]+', a.extension_profile or ''):
+                fail('valid extension profile required for manual signing')
+            ext.update(CODE_SIGN_STYLE='Manual', CODE_SIGN_IDENTITY='"Apple Distribution"',
+                       DEVELOPMENT_TEAM=a.team, PROVISIONING_PROFILE_SPECIFIER=f'"{a.extension_profile}"')
+        text = set_app_settings(text, ext, extension_target(m))
     pbx.write_text(text)
 
     if release:
@@ -191,7 +287,7 @@ def cmd_set_variant(a):
     kt.write_text(TOKEN_LINE.sub(lambda mm: f'{mm.group(1)}"{token}"', body))
     set_meta(src, m)
     copy_variant_files(src, m, a.variant)
-    emit(variant=a.variant, bundle_id=ident)
+    emit(variant=a.variant, bundle_id=ident, **({'extension_bundle': extension_bundle} if extension_bundle else {}))
 
 
 def copy_variant_files(src, m, variant):
@@ -404,6 +500,12 @@ def cmd_export_options(a):
     data = {'method': 'app-store-connect', 'teamID': a.team, 'signingStyle': 'manual',
             'provisioningProfiles': {a.bundle_id: a.profile},
             'stripSwiftSymbols': True, 'compileBitcode': False}
+    if bool(a.extension_bundle) != bool(a.extension_profile):
+        fail('extension bundle and profile must be provided together')
+    if a.extension_bundle:
+        if not a.extension_bundle.startswith(a.bundle_id + '.'):
+            fail('extension bundle must be a child of the application bundle')
+        data['provisioningProfiles'][a.extension_bundle] = a.extension_profile
     Path(a.out).write_bytes(plistlib.dumps(data))
     emit(path=a.out)
 
@@ -422,7 +524,9 @@ def parser():
     variant = ('--variant', dict(required=True, choices=['debug', 'release']))
     add('metadata', cmd_metadata, src, ('--suffix', dict(type=int)))
     add('set-version', cmd_set_version, src, ('--version', dict(required=True)), ('--build', dict(required=True, type=int)))
-    add('set-variant', cmd_set_variant, src, variant, ('--team', {}), ('--profile', {}))
+    add('set-variant', cmd_set_variant, src, variant, ('--team', {}), ('--profile', {}), ('--extension-profile', {}))
+    add('extension-profile', cmd_extension_profile, src, variant, ('--team', dict(required=True)))
+    add('local-properties', cmd_local_properties, src)
     add('android-inputs', cmd_android_inputs, src)
     add('find-artifact', cmd_find_artifact, src, ('--kind', dict(required=True, choices=sorted(PATTERNS))))
     add('sign-apk', cmd_sign_apk, src, ('--build-tools', {}))
@@ -431,7 +535,7 @@ def parser():
         ('--max-full-gc', dict(type=int, default=20)))
     add('export-options', cmd_export_options, ('--team', dict(required=True)),
         ('--profile', dict(required=True)), ('--bundle-id', dict(required=True)),
-        ('--out', dict(default='ExportOptions.plist')))
+        ('--extension-bundle', {}), ('--extension-profile', {}), ('--out', dict(default='ExportOptions.plist')))
     return p
 
 
