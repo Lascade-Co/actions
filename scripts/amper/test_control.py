@@ -479,5 +479,101 @@ class ExportOptionsTests(Base):
         self.assertIs(d['compileBitcode'], False)
 
 
+
+
+class OptionalInputs(Base):
+    def configure(self, **fields):
+        p = self.src / '.ci/amper.json'
+        p.write_text(json.dumps({**json.loads(p.read_text()), **fields}))
+
+    def test_compact_configuration_list_skips_long_comments(self):
+        debug = 'E6AC934EB5F02CF5B6BAC70E'
+        release = '9D8DA8549C34AD9424ED57EB'
+        project = self.read('pbxproj-multitarget')
+        original = f'{debug} /* Debug */,\n\t\t\t\t{release} /* Release */,'
+        compact = f'"{debug}" /* LongConfigurationComment, debug */, {release} /* LongReleaseComment */,'
+        self.assertIn(original, project)
+        self.assertEqual(control.app_config_ids(project.replace(original, compact)), [debug, release])
+
+    @needs_yq
+    def test_named_extension_signing_version_and_export(self):
+        import plistlib
+        project = self.read('pbxproj-multitarget').replace('appTests', 'DriverLiveActivity').replace(
+            'com.apple.product-type.bundle.unit-test', 'com.apple.product-type.app-extension')
+        # Duplicate the extension target, its list and its two configurations with independent IDs.
+        other_blocks = []
+        for char in 'ABCD':
+            block = re.search(rf'^\t\t{char * 24} [^\n]*= \{{.*?^\t\t\}};', project, re.M | re.S)[0]
+            other = block.replace('DriverLiveActivity', 'UnrelatedWidget')
+            for old, new in zip('ABCD', '1234'):
+                other = other.replace(old * 24, new * 24)
+            project = project.replace(block, block + '\n' + other)
+            other_blocks.append(other)
+        (self.src / PBX).write_text(project)
+        self.configure(ios_extension={'target': 'DriverLiveActivity', 'ids': {
+            'release': 'com.lascade.hunch.LiveActivity', 'debug': 'com.lascade.hunch.debug.LiveActivity'}})
+        run('set-version', '--source', self.src, '--version', '2.0.0', '--build', 37)
+        self.assertEqual(self.read(PBX).count('CURRENT_PROJECT_VERSION = 37;'), 4)
+        for variant, bundle in [('release', 'com.lascade.hunch.LiveActivity'),
+                                ('debug', 'com.lascade.hunch.debug.LiveActivity')]:
+            with patch.dict(os.environ, APPCHECK_DEBUG_TOKEN='fixture-token'):
+                result = run('set-variant', '--source', self.src, '--variant', variant,
+                             '--team', 'TEAM', '--profile', 'App Profile', '--extension-profile', 'Widget Profile')
+            self.assertEqual(self.read(PBX).count('PROVISIONING_PROFILE_SPECIFIER = "Widget Profile";'), 2)
+            self.assertEqual(result['extension_bundle'], bundle)
+            self.assertEqual(self.read(PBX).count(f'PRODUCT_BUNDLE_IDENTIFIER = {bundle};'), 2)
+            for block in other_blocks:
+                self.assertIn(block, self.read(PBX))
+            output = self.src / 'ExportOptions.plist'
+            run('export-options', '--bundle-id', result['bundle_id'], '--profile', 'App Profile',
+                '--extension-bundle', result['extension_bundle'], '--extension-profile', 'Widget Profile',
+                '--team', 'TEAM', '--out', output)
+            self.assertEqual(plistlib.loads(output.read_bytes())['provisioningProfiles'],
+                             {result['bundle_id']: 'App Profile', result['extension_bundle']: 'Widget Profile'})
+
+    def test_only_ignored_new_file_and_valid_key(self):
+        import subprocess
+        subprocess.run(['git', 'init', '-q', str(self.src)], check=True)
+        self.configure(local_properties_secrets=['MAPTILER_KEY'])
+        path = self.src / 'local.properties'
+        with patch.dict(os.environ, MAPTILER_KEY='fixture-key'):
+            with self.assertRaises(SystemExit):
+                run('local-properties', '--source', self.src)
+            (self.src / '.gitignore').write_text('/local.properties\n')
+            with patch.dict(os.environ, MAPTILER_KEY='fixture\nunsafe'):
+                with self.assertRaises(SystemExit) as err:
+                    run('local-properties', '--source', self.src)
+                self.assertNotIn('fixture', str(err.exception))
+                self.assertFalse(path.exists())
+            path.symlink_to(self.src / '.gitignore')
+            with self.assertRaises(SystemExit):
+                run('local-properties', '--source', self.src)
+            self.assertEqual((self.src / '.gitignore').read_text(), '/local.properties\n')
+            path.unlink()
+            self.assertEqual(run('local-properties', '--source', self.src), {'created': 'true'})
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(path.read_text(), 'MAPTILER_KEY=fixture-key\n')
+
+    def test_profile_binds_to_team_and_exact_extension_id(self):
+        import plistlib
+        self.configure(ios_extension={'target': 'DriverLiveActivity', 'ids': {
+            'debug': 'com.lascade.hunch.debug.LiveActivity'}})
+        profile = {'Name': 'Driver Staging Widget', 'TeamIdentifier': ['TEAM'],
+                   'ApplicationIdentifierPrefix': ['PREFIX'],
+                   'Entitlements': {'application-identifier': 'PREFIX.com.lascade.hunch.debug.LiveActivity'}}
+        args = ('extension-profile', '--source', self.src, '--variant', 'debug', '--team', 'TEAM')
+        with patch.dict(os.environ, IOS_STAGING_PROFILE_EXT_BASE64='Zml4dHVyZQ=='):
+            with patch.object(control.subprocess, 'run') as cms:
+                cms.return_value.stdout = plistlib.dumps(profile)
+                self.assertEqual(run(*args), {'extension_profile': profile['Name'], 'profiles':
+                                 'IOS_STAGING_PROFILE_APP_BASE64 IOS_STAGING_PROFILE_EXT_BASE64'})
+                with self.assertRaises(SystemExit):
+                    run(*args[:-1], 'OTHERTEAM')
+                profile['Entitlements']['application-identifier'] = 'PREFIX.other'
+                cms.return_value.stdout = plistlib.dumps(profile)
+                with self.assertRaises(SystemExit):
+                    run(*args)
+
+
 if __name__ == '__main__':
     unittest.main()

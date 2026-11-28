@@ -161,7 +161,8 @@ def check_cache(secrets_file, paths):
     """Fail if the staging APPCHECK_DEBUG_TOKEN or the prod $KEYSTORE_PASSWORD is anywhere under the dependency cache
     paths about to become a public GHCR bundle (grep -rqF; the needles go through a 0600 file, never argv or output)."""
     try:
-        token = kmp_control.parse_secret_file(Path(secrets_file).read_text()).get('APPCHECK_DEBUG_TOKEN', '')
+        staging = kmp_control.parse_secret_file(Path(secrets_file).read_text())
+        token = staging.get('APPCHECK_DEBUG_TOKEN', '')
     finally:
         Path(secrets_file).unlink(missing_ok=True)
     password = os.environ.get('KEYSTORE_PASSWORD', '')
@@ -169,7 +170,9 @@ def check_cache(secrets_file, paths):
         raise ValueError('The staging APPCHECK_DEBUG_TOKEN is missing or too short to search for')
     if len(password) < MIN_PASSWORD:
         raise ValueError('The prod KEYSTORE_PASSWORD is missing or too short to search for')
-    if any(c in s for s in (token, password) for c in '\r\n'):
+    secrets = [token, password]
+    secrets.extend(key for key in (staging.get('MAPTILER_KEY'), os.environ.get('MAPTILER_KEY')) if key)
+    if any(c in s for s in secrets for c in '\r\n'):
         raise ValueError('A build secret spans lines; cannot search for it')
     present = [str(p) for p in map(Path, paths) if p.exists()]
     if not present:
@@ -178,11 +181,11 @@ def check_cache(secrets_file, paths):
     with tempfile.TemporaryDirectory() as work:
         needles = Path(work) / 'needles'
         with os.fdopen(os.open(needles, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), 'w') as stream:
-            stream.write(f'{token}\n{password}\n')
+            stream.writelines(secret + '\n' for secret in secrets)
         found = subprocess.run(['grep', '-rqsF', '-f', str(needles), '--', *present],
                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode
     if found == 0:
-        raise ValueError('A build secret (App Check debug token or keystore password) is inside the cache paths; '
+        raise ValueError('A build secret is inside the cache paths; '
                          'refusing to publish them')
     if found != 1:
         raise ValueError(f'grep could not scan the cache paths (exit {found}); refusing to publish them')
